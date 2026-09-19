@@ -1,0 +1,64 @@
+:root {
+  color-scheme: dark;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #080c11;
+  color: #f1f7fa;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  --accent: #8de6da;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  min-height: 100svh;
+  display: grid;
+  place-items: center;
+  padding: 2rem 1.5rem;
+  background: radial-gradient(ellipse at 50% 42%, #14272d 0, #0b141b 34%, #080c11 70%);
+}
+main { width: min(100%, 38rem); text-align: center; padding: 2rem 0 4rem; }
+.signal {
+  width: 5rem;
+  height: 5rem;
+  margin: 0 auto 2.75rem;
+  border: 1px solid #34575c;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 0 0 12px #8de6da04, 0 0 0 13px #8de6da0b;
+}
+.signal span {
+  width: 2.5rem;
+  height: 2.5rem;
+  border: 1px solid #8de6da70;
+  border-radius: 50%;
+  background: radial-gradient(circle, #c5fff3 0, #8de6da 5%, #38756f 13%, #8de6da08 55%);
+  box-shadow: 0 0 28px #8de6da15;
+}
+h1 {
+  font-size: clamp(2.5rem, 12vw, 4.5rem);
+  font-weight: 300;
+  letter-spacing: .18em;
+  padding-left: .18em;
+  line-height: 1.2;
+  margin: 0 0 1.75rem;
+}
+.status {
+  color: var(--accent);
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: .875rem;
+  letter-spacing: .12em;
+  line-height: 1.6;
+  margin: 0 0 1rem;
+}
+.status span {
+  display: inline-block;
+  width: .375rem;
+  height: .375rem;
+  margin: 0 .75rem .125rem 0;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 10px #8de6da66;
+}
+.message { color: #a4b6c2; font-size: 1rem; line-height: 1.7; max-width: 23rem; margin: auto; text-wrap: balance; }
