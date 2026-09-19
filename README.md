@@ -4,9 +4,10 @@ A minimal, mobile-first domain connectivity test. No JavaScript, packages, remot
 
 ## Deployment
 
+- Live site: https://gray-meadow-09216fd10.1.azurestaticapps.net/
 - Source: https://github.com/braydenparker999/jarvis, branch `main`.
 - Hosting: Azure Static Web Apps **Free**, app `jarvis`, resource group `jarvis_group`.
-- Azure's GitHub integration manages the deployment workflow and repository secret. The original bootstrap workflow was removed to avoid duplicate deployments.
+- Azure's GitHub integration created the deployment workflow and repository secret. The workflow now deploys the static files directly, without build, API, or preview jobs. The original bootstrap workflow was removed to avoid duplicate deployments.
 - Custom preset; app location `public`; empty API and output locations.
 - Push changes to `main` to deploy. Check GitHub Actions for the deployment result and Azure Overview for the generated HTTPS `*.azurestaticapps.net` URL.
 - Open the URL on the restricted Android device and confirm the three requested lines appear. Receiving this page tests static delivery; the status is static, not a backend health check.
