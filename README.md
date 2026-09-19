@@ -1,26 +1,24 @@
 # Jarvis
 
-First version: a minimal, mobile-first domain connectivity test. No JavaScript, packages, remote fonts, media, analytics, APIs, or build step. Only `public/` is deployed.
+A minimal, mobile-first domain connectivity test. No JavaScript, packages, remote fonts, media, analytics, APIs, or build step. Only `public/` is deployed (2,656 bytes).
 
 ## Deployment
 
-Target: GitHub source repository, `main` branch, Azure Static Web Apps **Free** plan. No Azure resources have been created by these files. A deployment token alone cannot choose or enforce an Azure resource's pricing plan: verify **Free** in Azure before connecting it.
-
-1. Create the GitHub repository and push this project to `main`.
-2. In an existing Azure subscription, create a Static Web App named `jarvis`, choosing **Free**, with deployment source **Other** (the workflow is already provided here). Stop if Azure requests billing details or a paid service.
-3. Add the app's deployment token as the GitHub Actions repository secret `AZURE_STATIC_WEB_APPS_API_TOKEN`. Never commit the token.
-4. Run **Deploy Jarvis** from GitHub Actions. Copy the generated HTTPS `*.azurestaticapps.net` URL from Azure Overview once deployment completes.
-5. Open that URL on the restricted Android device and confirm the three requested lines appear. Receiving this page tests static delivery; the status is intentionally static and is not a backend health check.
-
-For Azure's automatically generated GitHub workflow instead, use preset **Custom**, app location `public`, empty API and output locations. Keep only one deployment workflow to avoid duplicate builds.
+- Source: https://github.com/braydenparker999/jarvis, branch `main`.
+- Hosting: Azure Static Web Apps **Free**, app `jarvis`, resource group `jarvis_group`.
+- Azure's GitHub integration manages the deployment workflow and repository secret. The original bootstrap workflow was removed to avoid duplicate deployments.
+- Custom preset; app location `public`; empty API and output locations.
+- Push changes to `main` to deploy. Check GitHub Actions for the deployment result and Azure Overview for the generated HTTPS `*.azurestaticapps.net` URL.
+- Open the URL on the restricted Android device and confirm the three requested lines appear. Receiving this page tests static delivery; the status is static, not a backend health check.
 
 ## Cost boundary
 
 - Keep the Static Web App on **Free**. Never upgrade automatically.
-- Do not enable Front Door, Application Insights, paid databases, storage accounts, separate Functions resources, or other paid services without the owner's explicit approval.
-- This workflow uploads files to an existing app. It cannot create or upgrade Azure resources.
-- Free bandwidth overage is unavailable; see https://learn.microsoft.com/en-us/azure/static-web-apps/quotas . This does not protect unrelated resources elsewhere in an Azure subscription.
-- GitHub Actions has separate usage rules. Use standard hosted runners and ensure any private repository's Actions budget prevents paid overages before the first run.
+- Stop and ask the owner before creating or enabling any paid resource or entering billing information.
+- Do not enable Front Door, Application Insights, paid databases, storage accounts, or separate Functions resources without explicit approval.
+- The GitHub workflow deploys to an existing app; it does not create or upgrade Azure resources.
+- Free bandwidth overage is unavailable: https://learn.microsoft.com/en-us/azure/static-web-apps/quotas . This does not protect unrelated resources elsewhere in an Azure subscription.
+- The repository is public and uses a standard GitHub-hosted runner. Review GitHub's separate billing rules before changing visibility, runner type, or artifact storage.
 
 ## Future structure — not implemented yet
 
