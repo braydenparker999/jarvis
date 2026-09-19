@@ -1,6 +1,6 @@
 # Jarvis
 
-A minimal, mobile-first domain connectivity test. No JavaScript, packages, remote fonts, media, analytics, APIs, or build step. Only `public/` is deployed (2,656 bytes).
+A mobile-first personal hub with Home, Jarvis messaging, and Daily Board. Only `public/` is deployed to Azure. The UI uses small native JavaScript modules and system fonts, with no frontend dependencies or build step.
 
 ## Deployment
 
@@ -10,7 +10,7 @@ A minimal, mobile-first domain connectivity test. No JavaScript, packages, remot
 - Azure's GitHub integration created the deployment workflow and repository secret. The workflow now deploys the static files directly, without build, API, or preview jobs. The original bootstrap workflow was removed to avoid duplicate deployments.
 - Custom preset; app location `public`; empty API and output locations.
 - Push changes to `main` to deploy. Check GitHub Actions for the deployment result and Azure Overview for the generated HTTPS `*.azurestaticapps.net` URL.
-- Open the URL on the restricted Android device and confirm the three requested lines appear. Receiving this page tests static delivery; the status is static, not a backend health check.
+- The initial domain test succeeded on the restricted Android device. Version 0.2 provides local drafts; external cloud connectivity still needs activation and a device test.
 
 ## Cost boundary
 
@@ -21,9 +21,9 @@ A minimal, mobile-first domain connectivity test. No JavaScript, packages, remot
 - Free bandwidth overage is unavailable: https://learn.microsoft.com/en-us/azure/static-web-apps/quotas . This does not protect unrelated resources elsewhere in an Azure subscription.
 - The repository is public and uses a standard GitHub-hosted runner. Review GitHub's separate billing rules before changing visibility, runner type, or artifact storage.
 
-## Future structure — not implemented yet
+## Module structure
 
-Add independent directories with their own `index.html` and module assets beneath `public/`: `jarvis/`, `daily-board/`, `drawercast/`, `media/`, `chat/`, `notes/`, `tools/`, and `status/`. Shared shell styles live in `public/assets/`. Add navigation only after the domain test succeeds. No placeholder modules or routes are shipped in this version.
+Home, `jarvis/`, and `daily-board/` share the lightweight shell and native navigation in `public/assets/`. Later modules can use independent directories and assets beneath `public/`: `drawercast/`, `media/`, `chat/`, `notes/`, `tools/`, and `status/`. No placeholder routes for these future modules are shipped.
 
 Keep large media and data at external origins. Have future modules fetch directly from those services, subject to CORS and device access; do not proxy them through Azure. Never put API secrets in the frontend. Review each provider's free limits before connecting it. Expand the content security policy deliberately when adding module scripts or external connections.
 
