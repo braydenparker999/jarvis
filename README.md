@@ -28,3 +28,21 @@ Add independent directories with their own `index.html` and module assets beneat
 Keep large media and data at external origins. Have future modules fetch directly from those services, subject to CORS and device access; do not proxy them through Azure. Never put API secrets in the frontend. Review each provider's free limits before connecting it. Expand the content security policy deliberately when adding module scripts or external connections.
 
 Local preview: `python3 -m http.server 8000 --directory public`.
+
+## Version 0.2
+
+Home, Jarvis messaging, and Daily Board are implemented. Shared navigation uses real routes (`/`, `/jarvis/`, `/daily-board/`). The application has no third-party frontend requests or dependencies.
+
+**Current deployment mode: local drafts.** Cloudflare account access awaits explicit owner authorization. The UI labels cloud setup as pending; messages have not been sent and no AI reply is simulated. Board entries and message drafts persist in browser storage. Clearing that storage loses local drafts and the workspace key. Cross-device pairing, exports, AI responses, and scheduled posts are not implemented.
+
+The prepared `backend/worker.js` uses a Cloudflare Worker with a SQLite-backed Durable Object. It is not deployed. Verify the Cloudflare account is on **Workers Free** before deployment and stop at any billing or paid-plan prompt. Free limits fail requests rather than billing overages: https://developers.cloudflare.com/durable-objects/platform/pricing/ . Never switch to Paid automatically.
+
+Backend activation after authorization:
+1. Deploy `backend/wrangler.jsonc` under the verified Free account (Worker plus SQLite Durable Object only).
+2. Set `API_ORIGIN` in `public/assets/config.js` to the actual deployed origin and add that exact origin to CSP `connect-src` in `public/staticwebapp.config.json`.
+3. Verify preflight from the Azure origin, message write, fresh read, idempotent retry, and isolated workspaces.
+4. Confirm the Android device can make the same request. The initial response is clearly labeled as an automatic storage receipt, not an AI response.
+
+Workspace keys are random 256-bit bearer capabilities generated per browser and kept in local storage. Only a hash names the server workspace. Never log keys or commit them; possessing the key grants access to that workspace. The API restricts CORS to this hub, validates lengths, limits a workspace to 100 KB, and treats repeated event IDs idempotently. CORS is not authentication. No provider API key is exposed in frontend code.
+
+Run `npm test` (Node 24, no dependencies) for backend boundary, workspace isolation, idempotent receipt, and draft merge checks. These use an in-memory storage adapter; they do not prove Cloudflare deployment or Android connectivity. Frontend drafts remain queued until a successful server response.
