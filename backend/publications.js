@@ -6,10 +6,9 @@ const nonempty=(x,max)=>typeof x==='string'&&x.trim().length>0&&x.length<=max;
 export function decodePublication(comment) {
   if(comment.user?.id!==OWNER||!Number.isSafeInteger(comment.id)||typeof comment.body!=='string'||comment.body.length>30000)return null;
   let p;try{p=JSON.parse(comment.body);}catch{return null;}
-  if(!p||p.schema!=='jarvis-publication-v1'||!uuid(p.id)||!nonempty(p.body,6000)||!Number.isFinite(Date.parse(comment.created_at)))return null;
+  if(!p||p.schema!=='jarvis-publication-v1'||!uuid(p.id)||!['reply','briefing'].includes(p.type)||!nonempty(p.body,p.type==='briefing'?20000:6000)||!Number.isFinite(Date.parse(comment.created_at)))return null;
   if(p.type==='reply'&&!uuid(p.replyTo))return null;
   if(p.type==='briefing'&&(!nonempty(p.title,120)||typeof p.date!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(p.date)||!Number.isFinite(Date.parse(p.date))||new Date(p.date).toISOString().slice(0,10)!==p.date))return null;
-  if(!['reply','briefing'].includes(p.type))return null;
   return {id:p.id,body:p.body.trim(),createdAt:comment.created_at,type:p.type,
     ...(p.type==='reply'?{replyTo:p.replyTo}:{title:p.title.trim(),date:p.date})};
 }
