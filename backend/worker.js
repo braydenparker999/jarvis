@@ -1,7 +1,7 @@
 import {connector,oauthStore} from './connector.js';
 import {sharedStore,SHARED_OBJECT,PUBLIC_KEY} from './shared.js';
 import {syncPublications} from './publications.js';
-const ALLOWED_ORIGIN = 'https://gray-meadow-09216fd10.1.azurestaticapps.net';
+import {PRIMARY_SITE,FRONTEND_ORIGINS} from './origins.js';
 const paths = new Set(['/v1/state', '/v1/messages', '/v1/board', '/v1/responder/connect', '/v1/responder/revoke', '/v1/agent/inbox', '/v1/agent/replies', '/v1/agent/board']);
 const digest = async value => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))),b=>b.toString(16).padStart(2,'0')).join('');
 const randomKey = () => Array.from(crypto.getRandomValues(new Uint8Array(32)),b=>b.toString(16).padStart(2,'0')).join('');
@@ -12,8 +12,8 @@ export default {
   async fetch(request, env) {
     const connected=await connector(request,env,{syncShared,sharedInternal});if(connected)return connected;
     const origin=request.headers.get('Origin');
-    if(origin && origin!==ALLOWED_ORIGIN) return json({error:'Origin not allowed'},403);
-    const headers={'Access-Control-Allow-Origin':ALLOWED_ORIGIN,'Access-Control-Allow-Methods':'GET, POST, OPTIONS','Access-Control-Allow-Headers':'Authorization, Content-Type','Access-Control-Max-Age':'600','Vary':'Origin','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'};
+    if(origin && !FRONTEND_ORIGINS.has(origin)) return json({error:'Origin not allowed'},403);
+    const headers={'Access-Control-Allow-Origin':origin||PRIMARY_SITE,'Access-Control-Allow-Methods':'GET, POST, OPTIONS','Access-Control-Allow-Headers':'Authorization, Content-Type','Access-Control-Max-Age':'600','Vary':'Origin','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'};
     const reply=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{...headers,'Content-Type':'application/json'}});
     if(request.method==='OPTIONS') return new Response(null,{status:204,headers});
     const path=new URL(request.url).pathname;

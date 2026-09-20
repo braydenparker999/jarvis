@@ -1,5 +1,6 @@
 // OAuth credentials stay between the user's browser, this service, and ChatGPT.
-export const SITE='https://gray-meadow-09216fd10.1.azurestaticapps.net';
+import {PRIMARY_SITE,FRONTEND_ORIGINS} from './origins.js';
+export const SITE=PRIMARY_SITE;
 export const ISSUER='https://jarvis-hub-api.braydenparker999.workers.dev';
 export const RESOURCE=ISSUER+'/mcp';
 const CALLBACK='https://chatgpt.com/connector_platform_oauth_redirect';
@@ -27,9 +28,19 @@ const tools=[
  {name:'jarvis_publish_briefing',description:'Publish Brayden’s daily briefing to Daily Board. Use a stable UUID id for retries. Daily Board is for assistant briefings, not user journal entries.',inputSchema:{type:'object',properties:{id:{type:'string',format:'uuid'},title:{type:'string',minLength:1,maxLength:120},body:{type:'string',minLength:1,maxLength:20000}},required:['id','title','body'],additionalProperties:false},annotations:{readOnlyHint:false,destructiveHint:false,idempotentHint:true,openWorldHint:false}}
 ].map(t=>({...t,securitySchemes:[{type:'oauth2',scopes:SCOPES}]}));
 export async function connector(request,env,api){
+ const response=await connectorResponse(request,env,api);
+ if(!response)return null;
+ const origin=request.headers.get('Origin');
+ if(origin && (FRONTEND_ORIGINS.has(origin)||origin==='https://chatgpt.com'||origin===ISSUER)) {
+  const headers=new Headers(response.headers);headers.set('Access-Control-Allow-Origin',origin);headers.set('Vary','Origin');
+  return new Response(response.body,{status:response.status,headers});
+ }
+ return response;
+}
+async function connectorResponse(request,env,api){
  const url=new URL(request.url),path=url.pathname;
  if(!(path==='/mcp'||path.startsWith('/oauth/')||path.startsWith('/.well-known/oauth-')))return null;
- const origin=request.headers.get('Origin');if(origin&&origin!==SITE&&origin!=='https://chatgpt.com'&&origin!==ISSUER)return error('origin_not_allowed',403);
+ const origin=request.headers.get('Origin');if(origin&&!FRONTEND_ORIGINS.has(origin)&&origin!=='https://chatgpt.com'&&origin!==ISSUER)return error('origin_not_allowed',403);
  if(request.method==='OPTIONS')return new Response(null,{status:204,headers:{'Access-Control-Allow-Origin':origin||SITE,'Access-Control-Allow-Methods':'GET, POST, OPTIONS','Access-Control-Allow-Headers':'Authorization, Content-Type, MCP-Protocol-Version','Vary':'Origin'}});
  if(path.startsWith('/.well-known/')&&request.method==='GET'){
   if(path==='/.well-known/oauth-protected-resource'||path==='/.well-known/oauth-protected-resource/mcp')return json({resource:RESOURCE,authorization_servers:[ISSUER],scopes_supported:SCOPES});
@@ -52,7 +63,7 @@ export async function connector(request,env,api){
    return new Response(null,{status:302,headers:{Location:target.href,'Cache-Control':'no-store','Referrer-Policy':'no-referrer'}});
   }
   if(path==='/oauth/approve'&&request.method==='POST'){
-   if(origin!==SITE)return error('origin_not_allowed',403);
+   if(!FRONTEND_ORIGINS.has(origin))return error('origin_not_allowed',403);
    const owner=request.headers.get('Authorization')?.match(/^Bearer ([a-f0-9]{64})$/)?.[1];if(!owner)return error('owner_session_required',401);
    const b=JSON.parse(await bounded(request)),client=await registry(env,{op:'get',key:'client:'+b.client_id});
    const scope=b.scope||SCOPES.join(' ');
