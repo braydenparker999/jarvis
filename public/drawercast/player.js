@@ -1321,6 +1321,7 @@ function promptReconnect(){
 }
 
 async function getFileFor(t){
+  if(t?.source==='drive') return DriveSource.fileFor(t);
   if(t && t.remote) return DrawerCast.fileFor(t);
   if(FILES.has(t.id)) return FILES.get(t.id);
   /* a linked folder is always the freshest source, and costs no storage */
@@ -2005,7 +2006,7 @@ const DrawerCast = (function(){
       defaults.waveformVersion=data.waveformVersion===1?1:0;defaults.hasArt=!!raw.hasArt;defaults.artKey=old?old.artKey||null:null;defaults.rgTrack=null;defaults.rgAlbum=null;
       Object.assign(t,defaults);libAdd(t);fresh.push(t);
     }
-    const gone=allTracks().filter(t=>t.remote&&!seen.has(t.id)).map(t=>t.id);
+    const gone=allTracks().filter(t=>t.remote&&t.source!=='drive'&&!seen.has(t.id)).map(t=>t.id);
     if(gone.length){if(Engine.current&&gone.includes(Engine.current.id))Engine.stop();await removeTracks(gone);}
     await persistTracks(fresh);
     LIB.ids.sort((a,b)=>sortNat((LIB.map.get(a)||{}).title,(LIB.map.get(b)||{}).title));
@@ -2026,7 +2027,7 @@ const DrawerCast = (function(){
     let c;try{c=validateProfile(candidate);}catch(e){lastError=e.message;if(!quiet)show();return false;}
     if(!c.serverId&&cfg&&cfg.base===c.base)c.serverId=cfg.serverId;
     const changed=cfg&&(cfg.base!==c.base||cfg.key!==c.key||cfg.serverId!==c.serverId);
-    if(changed&&Engine.current&&Engine.current.remote){Engine.pause();Engine.els.forEach(a=>{a.removeAttribute('src');a.load();});Engine.preloadId=null;}
+    if(changed&&Engine.current&&Engine.current.remote&&Engine.current.source!=='drive'){Engine.pause();Engine.els.forEach(a=>{a.removeAttribute('src');a.load();});Engine.preloadId=null;}
     cfg=c;save();clearDefaultsBlock();connecting=true;connected=false;lastError='';retryable=false;clearTimeout(timer);clearTimeout(retryTimer);
     const version=++epoch;statusText='Connecting to A15…';banner();
     try{
@@ -2116,8 +2117,8 @@ const DrawerCast = (function(){
   async function forget(){
     epoch++;clearTimeout(timer);clearTimeout(retryTimer);if(activeRequest)activeRequest.abort();connecting=false;connected=false;cfg=null;save();
     try{localStorage.setItem(FORGOT,'1');}catch(e){}
-    if(Engine.current&&Engine.current.remote)Engine.stop();
-    await removeTracks(allTracks().filter(t=>t.remote).map(t=>t.id));statusText='Connect your A15';lastError='';banner();closeSheet();toast('Connection forgotten on this browser. Songs on the A15 are unchanged.');
+    if(Engine.current&&Engine.current.remote&&Engine.current.source!=='drive')Engine.stop();
+    await removeTracks(allTracks().filter(t=>t.remote&&t.source!=='drive').map(t=>t.id));statusText='Connect your A15';lastError='';banner();closeSheet();toast('Connection forgotten on this browser. Songs on the A15 are unchanged.');
   }
   function markError(message,retry=false){connected=false;lastError=message;statusText='Stream interrupted · reconnect A15';retryable=retry;banner();if(retry){automaticAttempts=0;scheduleRetry();}}
   function install(){
@@ -2156,6 +2157,83 @@ const DrawerCast = (function(){
 })();
 function audioSource(file){return file&&file.__remoteURL?file.__remoteURL:URL.createObjectURL(file);}
 
+/* Google Drive is a separate remote source. API credentials stay out of track
+   metadata and exports; the deployment injects the owner-approved shared key. */
+const DriveSource={
+  api:null,helper:null,folder:'',prepared:{},busy:false,status:'Not connected',error:'',controller:null,
+  async install(){
+    PAGES.root.items.unshift(S_act('Google Drive Music','Stream your shared music folder',()=>this.show(),'folder'));
+    try{
+      this.helper=await import('./drive-api.js');
+      const response=await fetch('/assets/drive-config.json',{cache:'no-store',signal:AbortSignal.timeout(15000)});
+      if(!response.ok)throw Error('Drive configuration could not be loaded.');
+      const config=await response.json();this.api=this.helper.createDriveApi(config.apiKey);
+      this.folder=this.helper.folderId(config.folderId);
+      let disabled=false;
+      try{this.folder=localStorage.getItem('drawercast.drive.folder')||this.folder;disabled=localStorage.getItem('drawercast.drive.disabled')==='1';}catch(e){}
+      try{const r=await fetch('/drawercast/drive-prepared.json',{signal:AbortSignal.timeout(10000)});if(r.ok){const p=await r.json();if(p.version===1)this.prepared=p.files||{};}}catch(e){}
+      if(disabled){this.status='Disconnected on this device';return;}
+      this.connect(this.folder,true);
+    }catch(e){this.error=e.message;this.status='Drive unavailable';}
+  },
+  fileFor(t){
+    if(!this.api)return null;
+    return {__remoteURL:this.api.mediaURL({id:t.remoteId}),name:baseName(t.path),size:t.size,type:t.mimeType};
+  },
+  waveformURL(t){return t.waveformVersion===1?t.waveformFile:null;},
+  async connect(value,quiet=false){
+    if(this.busy)return false;
+    if(!this.api){this.error='Drive configuration is unavailable. Reload the page and try again.';return false;}
+    this.busy=true;this.error='';this.status='Reading Drive…';
+    const controller=new AbortController();this.controller=controller;
+    const timeout=setTimeout(()=>controller.abort(),90000);
+    try{
+      const listing=await this.api.list(value,controller.signal);
+      const fresh=listing.files.map(f=>this.helper.driveTrack(f,listing.id,this.prepared[f.id],LIB.map.get('gd_'+f.id)));
+      // Commit only after every page succeeds. Failed reads keep the old library.
+      await IDB.bulk('tracks',fresh.map(t=>[t.id,t]));
+      const seen=new Set(fresh.map(t=>t.id));
+      const gone=allTracks().filter(t=>t.source==='drive'&&!seen.has(t.id)).map(t=>t.id);
+      if(gone.includes(Engine.current?.id))Engine.stop();
+      if(gone.length)await removeTracks(gone);
+      fresh.forEach(libAdd);this.folder=listing.id;
+      const currentId=Engine.current?.id;
+      Engine.queue=Engine.queue.map(t=>LIB.map.get(t.id)||t);
+      if(gone.length&&Engine.queue.length){Engine.buildOrder();const at=Engine.queue.findIndex(t=>t.id===currentId);if(at>=0)Engine.pos=Engine.order.indexOf(at);}
+      try{localStorage.setItem('drawercast.drive.folder',this.folder);localStorage.removeItem('drawercast.drive.disabled');}catch(e){}
+      this.status=listing.name+' · '+fresh.length+' songs';
+      Views.refreshAll();
+      if(!Engine.current&&fresh.length){Engine.queue=fresh;Engine.buildOrder();Engine.pos=0;Engine.current=fresh[Engine.order[0]];UI.renderNowPlaying(Engine.current);UI.renderPlayState();Engine.saveState();}
+      else if(Engine.current?.source==='drive'){Engine.current=LIB.map.get(Engine.current.id)||Engine.current;UI.renderNowPlaying(Engine.current);Waveform.load(Engine.current);}
+      if(!quiet)toast('Drive library ready · '+fresh.length+' songs');
+      return true;
+    }catch(e){this.error=e.name==='AbortError'?'Drive took too long. Refresh to retry; your saved library is unchanged.':e.message;this.status='Drive refresh failed';if(!quiet)toast(this.error,6500);return false;}
+    finally{clearTimeout(timeout);this.busy=false;this.controller=null;if($('#drive-status'))$('#drive-status').textContent=this.error||this.status;}
+  },
+  show(){
+    dialog('Google Drive Music',
+      '<p>Streams directly from your shared Drive folder. No A15 or Google login needed. Internet is required.</p>'+
+      '<p id="drive-status" role="status">'+esc(this.error||this.status)+'</p>'+
+      '<label for="drive-folder">Music folder link</label><input class="field" id="drive-folder" value="'+esc(this.folder?'https://drive.google.com/drive/folders/'+this.folder:'')+'" style="margin:8px 0 14px" autocomplete="off">'+
+      '<p class="note">Only folders shared as Anyone with the link → Viewer can be read. Prepared waveforms load separately from the audio.</p>'+
+      '<button class="btn" id="drive-disconnect">Remove Drive from this device</button>',
+      [{label:'Open songs',pri:true,fn:()=>Views.push({kind:'drive',title:'Google Drive Music'})},{label:'Refresh folder'},{label:'Close'}]);
+    const refresh=$$('#sheet .actions .btn')[1];
+    refresh.onclick=async()=>{refresh.disabled=true;$('#drive-status').textContent='Reading Drive…';await this.connect($('#drive-folder').value);refresh.disabled=false;};
+    $('#drive-disconnect').onclick=()=>{
+      if(this.busy){toast('Wait for the current refresh to finish.');return;}
+      dialog('Remove Drive music?','Removes Drive songs from this browser’s library. Your files on Drive and A15 connection stay unchanged.',[{label:'Remove',fn:async()=>{
+        try{localStorage.setItem('drawercast.drive.disabled','1');}catch(e){}
+        if(Engine.current?.source==='drive')Engine.stop();
+        await removeTracks(allTracks().filter(t=>t.source==='drive').map(t=>t.id));this.status='Disconnected on this device';Views.refreshAll();
+      }},{label:'Cancel'}]);
+    };
+  },
+  exportRemote(t){
+    const file=this.fileFor(t);if(!file)return this.show();
+    const a=document.createElement('a');a.href=file.__remoteURL;a.target='_blank';a.rel='noopener';a.download=baseName(t.path);a.click();
+  }
+};
 
 const Engine = {
   ctx:null, nodes:null, ready:false,
@@ -2171,6 +2249,7 @@ const Engine = {
       a.crossOrigin='anonymous';
       a.playsInline=true;
       a.setAttribute('playsinline','');
+      a.hidden=true;document.body.appendChild(a);
       this.els.push(a);
       a.addEventListener('ended', this.onEnded.bind(this,i));
       a.addEventListener('error', this.onError.bind(this,i));
@@ -2351,7 +2430,8 @@ const Engine = {
   async playIndex(qi, autoplay){
     const t=this.queue[qi];
     if(!t) return;
-    if(t.remote && !DrawerCast.canPlay(t)){ DrawerCast.show(); return; }
+    if(t.source==='drive'&&!DriveSource.api){DriveSource.show();return;}
+    if(t.remote && t.source!=='drive' && !DrawerCast.canPlay(t)){ DrawerCast.show(); return; }
     const request=++this._playRequest || (this._playRequest=1);
     const wasPlaying = autoplay!==false;
     this.current=t;
@@ -2497,6 +2577,10 @@ const Engine = {
   onError:function(i){
     if(i!==this.cur) return;
     const t=this.current;
+    if(t?.source==='drive'){
+      this.playing=false;UI.renderPlayState();
+      toast('Drive audio could not play. Check internet and folder sharing, then try Play again. Refresh Google Drive Music if the file changed.',7000);return;
+    }
     if(t && t.remote){
       this.playing=false;UI.renderPlayState();
       const msg='Unable to stream this song. Check the A15 and Wi-Fi connection, or try an MP3. Open A15 Music Server to reconnect.';
@@ -2806,7 +2890,7 @@ const UI = {
     const t=Engine.current;
     if(!t){ $('#outinfo-txt').textContent='NO OUTPUT'; return; }
     const bits=[];
-    bits.push(t.remote?'WI-FI STREAM':'BROWSER AUDIO');
+    bits.push(t.source==='drive'?'GOOGLE DRIVE':t.remote?'WI-FI STREAM':'BROWSER AUDIO');
     if(t.bits) bits.push(t.bits+' BIT');
     // Unknown source bit depth is not guessed.
     if(t.sr) bits.push(Math.round(t.sr/100)/10+' KHZ');
@@ -3198,6 +3282,7 @@ function dialog(title, bodyHTML, actions){
 const CATS=[
   {k:'all',      n:'All Songs',        ic:'note',       c:'#6d7de8'},
   {k:'server',   n:'A15 Music Server', ic:'cast',       c:'#c69c78'},
+  {k:'drive',    n:'Google Drive Music',ic:'folder',   c:'#c69c78'},
   {k:'folders',  n:'Folders',          ic:'folder',     c:'#2f7ff0'},
   {k:'tree',     n:'Folders Hierarchy',ic:'foldertree', c:'#4160ee'},
   {k:'albums',   n:'Albums',           ic:'album',      c:'#5b4fe0'},
@@ -3241,6 +3326,7 @@ const Views={
       r.onclick=function(){
         const k=r.dataset.k;
         if(k==='server'){ DrawerCast.show(); return; }
+        if(k==='drive'){ DriveSource.show(); return; }
         if(k==='add'){ MainMenu.addMusic(); return; }
         Views.push({kind:k});
       };
@@ -3294,6 +3380,7 @@ const Views={
   buildItems:function(spec){
     const T=allTracks();
     const k=spec.kind;
+    if(k==='drive') return {type:'tracks',items:T.filter(t=>t.source==='drive').sort(Views.trackSorter())};
     if(k==='all') return {type:'tracks', items:T.slice().sort(Views.trackSorter())};
     if(k==='queue') return {type:'tracks', items:Engine.queue.slice(), queue:true};
     if(k==='recent') return {type:'tracks', items:T.slice().sort(function(a,b){ return (b.added||0)-(a.added||0); })};
@@ -3750,6 +3837,7 @@ function trackAction(a,t,items,i){
   else if(a==='Export') exportTrack(t);
 }
 async function exportTrack(t){
+  if(t?.source==='drive') return DriveSource.exportRemote(t);
   if(t && t.remote) return DrawerCast.exportRemote(t);
   const f=await getFileFor(t);
   if(!f){ toast('File not available'); return; }
@@ -7018,7 +7106,7 @@ const Waveform={
       // Only ask capable servers for their compact prepared peaks. Never fetch audio.
       if(t.remote){
         if(t.waveformVersion!==1)return;
-        const url=DrawerCast.waveformURL(t);if(!url)return;
+        const url=t.source==='drive'?DriveSource.waveformURL(t):DrawerCast.waveformURL(t);if(!url)return;
         const controller=new AbortController();this.abort=controller;
         const timeout=setTimeout(()=>controller.abort(),3000);
         try{
@@ -7191,6 +7279,7 @@ async function boot(){
   try{ history.replaceState({screen:'player'},''); history.pushState({},''); }catch(e){}
   UI.drawViz();
   UI.startLoop();
+  DriveSource.install();
   if(serverConnection) DrawerCast.connect(serverConnection,true);
 }
 

@@ -1,0 +1,75 @@
+const ROOT = 'https://www.googleapis.com/drive/v3/files';
+const ID = /^[A-Za-z0-9_-]{10,200}$/;
+const AUDIO = /\.(mp3|m4a|m4b|aac|flac|wav|wave|ogg|oga|opus|weba|webm|mp4|aif|aiff|wma|mka)$/i;
+export function folderId(value) {
+  const input = String(value || '').trim();
+  if (ID.test(input)) return input;
+  let url; try { url = new URL(input); } catch { throw Error('Paste a Google Drive folder link.'); }
+  const id = url.hostname === 'drive.google.com' && url.pathname.match(/\/folders\/([A-Za-z0-9_-]+)/)?.[1];
+  if (!id || !ID.test(id)) throw Error('Paste a Google Drive folder link.');
+  return id;
+}
+export function createDriveApi(key, fetcher = fetch) {
+  if (!/^AIza[A-Za-z0-9_-]{30,}$/.test(key || '')) throw Error('The shared Drive API key is not configured.');
+  async function get(path, params, signal) {
+    const url = new URL(ROOT + path);
+    for (const [name, value] of Object.entries({...params, key})) url.searchParams.set(name, value);
+    const response = await fetcher(url.href, {signal, credentials:'omit', cache:'no-store'});
+    const data = await response.json();
+    if (!response.ok) {
+      const reason = data.error?.errors?.[0]?.reason || '';
+      if (response.status === 404) throw Error('Drive folder not found. Set it to Anyone with the link → Viewer.');
+      if (response.status === 429 || /rateLimit|quota/i.test(reason)) throw Error('Drive is limiting requests. Wait a moment, then refresh.');
+      if (response.status === 403) throw Error('Drive refused access. Check public sharing, Drive API enablement, and the API key restrictions.');
+      throw Error('Drive could not be read (HTTP ' + response.status + ').');
+    }
+    return data;
+  }
+  function mediaURL(file) {
+    if (!ID.test(file.id || '')) throw Error('Invalid Drive file ID.');
+    const url = new URL(ROOT + '/' + file.id);
+    url.searchParams.set('alt','media'); url.searchParams.set('key', key);
+    return url.href;
+  }
+  async function list(folder, signal) {
+    const root = folderId(folder);
+    const info = await get('/' + root, {fields:'id,name,mimeType'}, signal);
+    if (info.mimeType !== 'application/vnd.google-apps.folder') throw Error('Choose a folder, not an individual file.');
+    const queue = [{id:root,path:info.name}], visited = new Set(), files = new Map();
+    while (queue.length) {
+      if (visited.size >= 500) throw Error('This folder has too many subfolders. Choose a smaller music folder.');
+      const current = queue.shift(); if (visited.has(current.id)) continue; visited.add(current.id);
+      let token = '', seen = new Set();
+      do {
+        const page = await get('', {q:"'" + current.id + "' in parents and trashed = false", pageSize:'1000', fields:'nextPageToken,files(id,name,mimeType,size,modifiedTime,md5Checksum,capabilities(canDownload))', ...(token ? {pageToken:token} : {})}, signal);
+        if (!Array.isArray(page.files)) throw Error('Drive returned an incomplete folder listing. Your saved library is unchanged.');
+        for (const f of page.files) {
+          if (!ID.test(f.id || '') || typeof f.name !== 'string') continue;
+          if (f.mimeType === 'application/vnd.google-apps.folder') queue.push({id:f.id,path:current.path+'/'+f.name});
+          else if (AUDIO.test(f.name) && f.capabilities?.canDownload !== false) files.set(f.id,{...f,folder:current.path});
+        }
+        if (files.size > 50000) throw Error('Choose a folder with fewer than 50,000 songs.');
+        token = page.nextPageToken || '';
+        if (token && seen.has(token)) throw Error('Drive pagination repeated. Your saved library is unchanged.');
+        seen.add(token);
+      } while (token);
+    }
+    return {id:root,name:info.name,files:[...files.values()]};
+  }
+  return {list,mediaURL};
+}
+export function driveTrack(file, root, prepared, old = {}) {
+  const match = prepared && prepared.md5 === file.md5Checksum && prepared.size === Number(file.size);
+  const meta = match ? prepared : {};
+  const ext = file.name.split('.').at(-1).toLowerCase();
+  return {...old, id:'gd_'+file.id, remote:true, source:'drive', remoteId:file.id, driveFolder:root,
+    title:meta.title || file.name.replace(/\.[^.]+$/, '').replace(/^\d+\s*-\s*/, '').replace(/\s*\[[A-Za-z0-9_-]{11}\]$/, ''),
+    artist:meta.artist || '', album:meta.album || '', albumArtist:meta.albumArtist || '', genre:meta.genre || '',
+    folder:'Google Drive/'+file.folder, path:file.folder+'/'+file.name, ext, mimeType:file.mimeType,
+    size:Number(file.size)||0, mtime:Date.parse(file.modifiedTime)||0, md5:file.md5Checksum || '',
+    dur:meta.dur || (old.md5 === file.md5Checksum ? old.dur || 0 : 0), sr:meta.sr||0, ch:meta.ch||0,
+    codec:meta.codec||'', bits:0, rootId:null, rel:null, missing:false, needsPerm:false, errored:false,
+    waveformVersion:match && meta.waveform ? 1 : 0,
+    waveformFile:match && meta.waveform ? '/drawercast/drive-waveforms/'+file.id+'.dcw' : null,
+    rating:old.rating||0, plays:old.plays||0, lastPlayed:old.lastPlayed||0, added:old.added||Date.now()};
+}
