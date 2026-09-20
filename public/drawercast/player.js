@@ -1976,7 +1976,7 @@ const DrawerCast = (function(){
     }finally{clearTimeout(handle);if(activeRequest===ctrl)activeRequest=null;}
   }
   function diagnostics(){
-    return JSON.stringify({playerVersion:'0.5.0',website:location.origin,secureContext:!!window.isSecureContext,
+    return JSON.stringify({playerVersion:'0.5.1',website:location.origin,secureContext:!!window.isSecureContext,
       server:cfg?cfg.base:null,mode:cfg?(isLoopback(cfg.base)?'this phone':'another phone'):'unpaired',
       keyPresent:!!(cfg&&cfg.key),remembered:savedOnDevice,connected,connecting,permission:permissionState,
       error:lastError,browser:typeof navigator!=='undefined'?navigator.userAgent:'unknown'},null,2);
@@ -6964,15 +6964,15 @@ showReferenceLyrics=function(){
   $('#lyrics-find').onclick=()=>{let url=nativeValues().lyrics_custom_url||'https://www.google.com/search?q=%artist%+%title%+lyrics';url=url.replace(/%artist%|\{artist\}/g,encodeURIComponent(trackArtist(t))).replace(/%title%|\{title\}/g,encodeURIComponent(t.title));try{const u=new URL(url);if(!['https:','http:'].includes(u.protocol))throw Error();window.open(u.href,'_blank','noopener,noreferrer');}catch(e){toast('Enter an http or https lyrics search URL in settings');}};
   Nav.go('lyrics');SyncedLyrics.update();
 };
-/* Track-timed peaks, decoded once for the selected track and cached compactly.
-   Analysis has its own low-rate context; playback and the A15 protocol stay intact. */
+/* Local files can be decoded once and cached compactly. A15 streams use cached
+   peaks or the playback analyser: never download a second copy for a waveform. */
 const Waveform={
   id:null,token:0,peaks:new Float32Array(0),known:new Uint8Array(0),duration:0,ready:false,
-  pending:null,busy:false,timer:0,abort:null,cache:new Map(),lastSample:-1,
+  pending:null,busy:false,timer:0,cache:new Map(),lastSample:-1,
   span(duration){return Math.min(90,Math.max(10,duration||90));},
   load(t){
     if((t?.id||null)===this.id)return;
-    this.id=t?.id||null;this.token++;clearTimeout(this.timer);this.abort?.abort();this.pending=t||null;
+    this.id=t?.id||null;this.token++;clearTimeout(this.timer);this.pending=t||null;
     this.duration=Number(t?.dur)||0;this.ready=false;this.lastSample=-1;
     this.peaks=new Float32Array(Math.ceil(Math.max(this.duration,1)*16));this.known=new Uint8Array(this.peaks.length);
     UI.seekPreview=null;
@@ -6994,19 +6994,14 @@ const Waveform={
       let result;try{result=await IDB.get('kv',key);}catch(e){}
       if(stale())return;
       if(result?.peaks?.length&&result.duration>0){this.remember(t.id,result);this.accept(result);return;}
+      // Streaming gets all available server bandwidth. Live samples keep the
+      // seekbar useful without another full-song request or offline decode.
+      if(t.remote)return;
       const f=await getFileFor(t);if(stale()||!f)return;
+      if(f.__remoteURL)return;
       // Bound temporary decode memory on the A15; longer files retain timed live samples.
       const maxBytes=48*1024*1024;if(f.size>maxBytes||Number(t.dur)>1800)return;
-      let bytes;
-      if(f.__remoteURL){
-        this.abort=new AbortController();
-        const response=await fetch(f.__remoteURL,{signal:this.abort.signal,credentials:'omit',referrerPolicy:'no-referrer'});
-        if(!response.ok)throw Error('Waveform source unavailable');
-        if(Number(response.headers.get('content-length'))>maxBytes){this.abort.abort();return;}
-        const reader=response.body?.getReader();
-        if(reader){const chunks=[];let size=0;while(true){const part=await reader.read();if(part.done)break;size+=part.value.length;if(stale()||size>maxBytes){await reader.cancel();return;}chunks.push(part.value);}bytes=await new Blob(chunks).arrayBuffer();}
-        else bytes=await response.arrayBuffer();
-      }else bytes=await f.arrayBuffer();
+      let bytes=await f.arrayBuffer();
       if(stale()||bytes.byteLength>maxBytes)return;
       const AC=window.OfflineAudioContext||window.webkitOfflineAudioContext;if(!AC)return;
       const context=new AC(1,1,8000),decoded=await context.decodeAudioData(bytes);bytes=null;
@@ -7024,8 +7019,8 @@ const Waveform={
       result={duration:decoded.duration,peaks:Uint8Array.from(peaks,v=>Math.round(clamp(v/normal,0,1)*255))};
       if(stale())return;this.remember(t.id,result);this.accept(result);
       try{await IDB.set('kv',key,result);}catch(e){}
-    }catch(e){/* Seeking still works when the source cannot be decoded or fetched. */}
-    finally{this.busy=false;this.abort=null;if(this.pending)this.timer=setTimeout(()=>this.run(),0);}
+    }catch(e){/* Seeking still works when a local source cannot be decoded. */}
+    finally{this.busy=false;if(this.pending)this.timer=setTimeout(()=>this.run(),0);}
   },
   remember(id,result){this.cache.delete(id);this.cache.set(id,result);while(this.cache.size>8)this.cache.delete(this.cache.keys().next().value);},
   sample(data,time,duration){
