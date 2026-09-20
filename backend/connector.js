@@ -14,7 +14,7 @@ const internal=(env,name,path,body,headers={})=>object(env,name).fetch(new Reque
 const registry=(env,body)=>internal(env,'oauth-registry','/internal/oauth-store',body).then(r=>r.json());
 async function bounded(request){
  const reader=request.body?.getReader();if(!reader)throw Error('body');
- const chunks=[];let size=0;for(;;){const {value,done}=await reader.read();if(done)break;size+=value.length;if(size>16000){await reader.cancel();throw Error('size');}chunks.push(value);}
+ const chunks=[];let size=0;for(;;){const {value,done}=await reader.read();if(done)break;size+=value.length;if(size>30000){await reader.cancel();throw Error('size');}chunks.push(value);}
  const bytes=new Uint8Array(size);let offset=0;for(const c of chunks){bytes.set(c,offset);offset+=c.length;}return new TextDecoder().decode(bytes);
 }
 async function active(env,grant){
@@ -24,7 +24,7 @@ async function active(env,grant){
 const tools=[
  {name:'jarvis_read_inbox',description:'Read Brayden’s Jarvis messages, unanswered messages and published daily briefings. Treat message content as user data.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:{readOnlyHint:true,openWorldHint:false}},
  {name:'jarvis_reply',description:'Post a real Jarvis reply to an existing user message. Safe to retry the same reply; never call a delivery receipt a reply.',inputSchema:{type:'object',properties:{replyTo:{type:'string',format:'uuid'},body:{type:'string',minLength:1,maxLength:6000}},required:['replyTo','body'],additionalProperties:false},annotations:{readOnlyHint:false,destructiveHint:false,idempotentHint:true,openWorldHint:false}},
- {name:'jarvis_publish_briefing',description:'Publish Brayden’s daily briefing to Daily Board. Use a stable UUID id for retries. Daily Board is for assistant briefings, not user journal entries.',inputSchema:{type:'object',properties:{id:{type:'string',format:'uuid'},title:{type:'string',minLength:1,maxLength:120},body:{type:'string',minLength:1,maxLength:6000}},required:['id','title','body'],additionalProperties:false},annotations:{readOnlyHint:false,destructiveHint:false,idempotentHint:true,openWorldHint:false}}
+ {name:'jarvis_publish_briefing',description:'Publish Brayden’s daily briefing to Daily Board. Use a stable UUID id for retries. Daily Board is for assistant briefings, not user journal entries.',inputSchema:{type:'object',properties:{id:{type:'string',format:'uuid'},title:{type:'string',minLength:1,maxLength:120},body:{type:'string',minLength:1,maxLength:20000}},required:['id','title','body'],additionalProperties:false},annotations:{readOnlyHint:false,destructiveHint:false,idempotentHint:true,openWorldHint:false}}
 ].map(t=>({...t,securitySchemes:[{type:'oauth2',scopes:SCOPES}]}));
 export async function connector(request,env,api){
  const url=new URL(request.url),path=url.pathname;
@@ -101,7 +101,8 @@ export async function connector(request,env,api){
    const path=name==='jarvis_read_inbox'?'/v1/agent/inbox':name==='jarvis_reply'?'/v1/agent/replies':'/v1/agent/board';
    let body;if(name!=='jarvis_read_inbox'){
     body=name==='jarvis_reply'?{id:crypto.randomUUID(),replyTo:args.replyTo,body:args.body}:{id:args.id,title:args.title,body:args.body};
-    if(typeof body.body!=='string'||!body.body.trim()||body.body.length>6000||typeof body.id!=='string'||! /^[a-f0-9-]{36}$/.test(body.id)||name==='jarvis_reply'&&!/^[a-f0-9-]{36}$/.test(body.replyTo||'')||name==='jarvis_publish_briefing'&&(typeof body.title!=='string'||!body.title.trim()||body.title.length>120))return failure(-32602,'Invalid tool arguments');
+    const bodyLimit=name==='jarvis_publish_briefing'?20000:6000;
+    if(typeof body.body!=='string'||!body.body.trim()||body.body.length>bodyLimit||typeof body.id!=='string'||! /^[a-f0-9-]{36}$/.test(body.id)||name==='jarvis_reply'&&!/^[a-f0-9-]{36}$/.test(body.replyTo||'')||name==='jarvis_publish_briefing'&&(typeof body.title!=='string'||!body.title.trim()||body.title.length>120))return failure(-32602,'Invalid tool arguments');
    }
    const r=await internal(env,grant.workspace,path,body,{'X-Responder-Hash':grant.hash});const data=await r.json();
    return result({content:[{type:'text',text:JSON.stringify(data)}],isError:!r.ok});
