@@ -40,3 +40,32 @@ test('malformed saved data is not silently overwritten',()=>{
  const store={getItem:k=>k===STORAGE_KEY?'{"version":99}':null};
  assert.throws(()=>readState(store));
 });
+test('responder reads correct inbox, replies once, and removes answered message from pending',async()=>{
+ const e=env(),message={id:crypto.randomUUID(),body:'Can you hear me?'};
+ await call(e,'/v1/messages',message);
+ const access=await (await call(e,'/v1/responder/connect',{})).json();
+ assert.match(access.token,/^[a-f0-9]{64}$/);assert.notEqual(access.token,key);
+ let inbox=await (await call(e,'/v1/agent/inbox',null,access.token)).json();
+ assert.equal(inbox.unanswered.length,1);assert.equal(inbox.unanswered[0].id,message.id);
+ assert.equal((await call(e,'/v1/agent/inbox',null,key)).status,401);
+ const reply={id:crypto.randomUUID(),replyTo:message.id,body:'Yes, I can read your message.'};
+ assert.equal((await call(e,'/v1/agent/replies',reply,access.token)).status,201);
+ assert.equal((await call(e,'/v1/agent/replies',{...reply,id:crypto.randomUUID()},access.token)).status,200);
+ assert.equal((await call(e,'/v1/agent/replies',{...reply,body:'different'},access.token)).status,409);
+ inbox=await (await call(e,'/v1/agent/inbox',null,access.token)).json();
+ assert.equal(inbox.unanswered.length,0);assert.equal(inbox.messages.filter(m=>m.kind==='reply').length,1);
+ assert.equal((await (await call(e,'/v1/state')).json()).messages.at(-1).body,reply.body);
+});
+test('responder connections rotate, revoke, isolate workspaces and reject invalid reply targets',async()=>{
+ const e=env();
+ const first=await (await call(e,'/v1/responder/connect',{})).json();
+ const second=await (await call(e,'/v1/responder/connect',{})).json();
+ assert.equal((await call(e,'/v1/agent/inbox',null,first.token)).status,401);
+ assert.equal((await call(e,'/v1/agent/replies',{id:crypto.randomUUID(),replyTo:crypto.randomUUID(),body:'orphan'},second.token)).status,404);
+ const other=await (await call(e,'/v1/responder/connect',{},'b'.repeat(64))).json();
+ await call(e,'/v1/messages',{id:crypto.randomUUID(),body:'owner message'});
+ assert.equal((await (await call(e,'/v1/agent/inbox',null,other.token)).json()).messages.length,0);
+ await call(e,'/v1/responder/revoke',{});
+ assert.equal((await call(e,'/v1/agent/inbox',null,second.token)).status,401);
+ assert.equal((await call(e,'/v1/agent/inbox',null,other.token)).status,200);
+});

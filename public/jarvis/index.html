@@ -25,8 +25,13 @@
   <dialog id="connection-dialog" aria-labelledby="connection-heading">
     <div class="dialog-heading"><h2 id="connection-heading">Connection</h2><button type="button" class="close" data-close="connection-dialog" aria-label="Close connection details">×</button></div>
     <h3 id="connection-state"></h3><p id="connection-detail"></p>
-    <p class="muted">AI replies and scheduled Daily Board posts are not enabled in this version.</p>
+    <p class="muted">Hourly Jarvis replies and scheduled Daily Board posts are not enabled yet. Quick Chat will be a separate module.</p>
     <button class="primary" id="sync-now" hidden>Sync now</button>
+    <hr><h3>Jarvis responder</h3>
+    <p>Connect a responder to read this inbox and write replies. This does not start an hourly task.</p>
+    <button class="secondary" id="connect-responder">Create responder connection</button>
+    <button class="secondary" id="revoke-responder">Disconnect responder</button>
+    <div id="responder-access" hidden><p id="responder-info"></p><label for="responder-code">Responder connection code</label><input id="responder-code" readonly autocomplete="off"><button class="secondary" id="copy-responder">Copy code</button></div>
   </dialog>
   <div id="toast" class="toast" role="status" hidden></div>
 </body>

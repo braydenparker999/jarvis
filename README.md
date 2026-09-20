@@ -10,7 +10,7 @@ A mobile-first personal hub with Home, Jarvis messaging, and Daily Board. Only `
 - Azure's GitHub integration created the deployment workflow and repository secret. The workflow now deploys the static files directly, without build, API, or preview jobs. The original bootstrap workflow was removed to avoid duplicate deployments.
 - Custom preset; app location `public`; empty API and output locations.
 - Push changes to `main` to deploy. Check GitHub Actions for the deployment result and Azure Overview for the generated HTTPS `*.azurestaticapps.net` URL.
-- The initial domain test succeeded on the restricted Android device. Version 0.2 provides local drafts; external cloud connectivity still needs activation and a device test.
+- The initial domain test succeeded on the restricted Android device. Cloud message storage and automatic receipts are deployed and verified, including the Android device test.
 
 ## Cost boundary
 
@@ -29,20 +29,25 @@ Keep large media and data at external origins. Have future modules fetch directl
 
 Local preview: `python3 -m http.server 8000 --directory public`.
 
-## Version 0.2
+## Version 0.3 — responder connection
 
-Home, Jarvis messaging, and Daily Board are implemented. Shared navigation uses real routes (`/`, `/jarvis/`, `/daily-board/`). The application has no third-party frontend requests or dependencies.
+Cloud backend: https://jarvis-hub-api.braydenparker999.workers.dev
 
-**Current deployment mode: local drafts.** Cloudflare account access awaits explicit owner authorization. The UI labels cloud setup as pending; messages have not been sent and no AI reply is simulated. Board entries and message drafts persist in browser storage. Clearing that storage loses local drafts and the workspace key. Cross-device pairing, exports, AI responses, and scheduled posts are not implemented.
+Cloudflare Builds must use an empty Build command and Deploy command `npx wrangler deploy --config backend/wrangler.jsonc` from repository root. Azure deploys only `public/`. No AI API, cron trigger, or paid resource is configured.
 
-The prepared `backend/worker.js` uses a Cloudflare Worker with a SQLite-backed Durable Object. It is not deployed. Verify the Cloudflare account is on **Workers Free** before deployment and stop at any billing or paid-plan prompt. Free limits fail requests rather than billing overages: https://developers.cloudflare.com/durable-objects/platform/pricing/ . Never switch to Paid automatically.
+Jarvis and Quick Chat are separate products:
+- Jarvis is intended for ChatGPT to check the inbox hourly and write thoughtful replies. **No scheduled task is enabled yet.** The owner does not want Astra for routine replies. Model selection, usage accounting, and scheduled tool access must be verified before enabling it.
+- Quick Chat is planned as on-demand responses from a free AI API. It is not implemented.
+- Daily Board stores entries; scheduled posts are not enabled.
 
-Backend activation after authorization:
-1. Deploy `backend/wrangler.jsonc` under the verified Free account (Worker plus SQLite Durable Object only).
-2. Set `API_ORIGIN` in `public/assets/config.js` to the actual deployed origin and add that exact origin to CSP `connect-src` in `public/staticwebapp.config.json`.
-3. Verify preflight from the Azure origin, message write, fresh read, idempotent retry, and isolated workspaces.
-4. Confirm the Android device can make the same request. The initial response is clearly labeled as an automatic storage receipt, not an AI response.
+The responder console is `/respond/`. On the owner's phone, Connection → Create responder connection creates a separate 30-day bearer credential. Enter it in the responder console's connection form through secure credential entry, never paste it into a chat, repository, URL, or log. One responder connection is active per workspace. Creating another replaces the old connection. Disconnect responder revokes access immediately. The owner key is not disclosed to the responder. The responder may read messages and board entries and reply to existing messages, but cannot modify entries in the owner's workspace or send as the owner.
 
-Workspace keys are random 256-bit bearer capabilities generated per browser and kept in local storage. Only a hash names the server workspace. Never log keys or commit them; possessing the key grants access to that workspace. The API restricts CORS to this hub, validates lengths, limits a workspace to 100 KB, and treats repeated event IDs idempotently. CORS is not authentication. No provider API key is exposed in frontend code.
+API routes:
+- Owner: GET `/v1/state`, POST `/v1/messages`, POST `/v1/board`.
+- Owner: POST `/v1/responder/connect` or `/v1/responder/revoke` with `{}`.
+- Responder: GET `/v1/agent/inbox` returns history and `unanswered` messages. Delivery receipts do not count as answers.
+- Responder: POST `/v1/agent/replies` with `{id, replyTo, body}`. Repeating the same reply is idempotent even with a new request ID; a different second answer returns 409. Reply targets must exist in that workspace.
 
-Run `npm test` (Node 24, no dependencies) for backend boundary, workspace isolation, idempotent receipt, and draft merge checks. These use an in-memory storage adapter; they do not prove Cloudflare deployment or Android connectivity. Frontend drafts remain queued until a successful server response.
+All protected routes require `Authorization: Bearer <credential>`. Keys are stored in the corresponding browser's local storage; only hashes identify server records. CORS permits the Azure site. There is no global inbox. An agent must connect to the owner's workspace before it can read phone messages. Existing drafts and messages are preserved. Workspace message/board data is limited to 100 KB; export and archival are future work.
+
+Run `npm test` (Node 24, no dependencies). Tests cover persistence, isolation, validation, retry behavior, draft merging, unanswered filtering, responder rotation/revocation and reply target checks. Cloud deployments need a separate live test. Never claim a scheduled task exists unless its creation and required connector access have succeeded.
