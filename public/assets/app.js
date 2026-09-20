@@ -1,3 +1,4 @@
+import { apps, icon, loadPreferences, savePreferences, renderUtility } from './hub.js';
 import { API_ORIGIN } from './config.js';
 import { request } from './shared-api.js';
 import { STORAGE_KEY, LEGACY_KEY, readState, mergeState } from './shared-store.js';
@@ -16,9 +17,12 @@ const svg = name => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" 
 let state, storageError = '', syncError = '', busy = false, toastTimer;
 try { state = readState(localStorage); localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
 catch (e) { storageError = e.message || 'Device storage is unavailable.'; }
-let route = location.pathname.startsWith('/daily-board') ? 'board' : location.pathname.startsWith('/jarvis') ? 'chat' : 'home';
-const paths = { home: '/', chat: '/jarvis/', board: '/daily-board/' };
-const labels = { home: 'Home', chat: 'Jarvis', board: 'Daily Board' };
+let route = getRoute();
+const paths = { home: '/', chat: '/jarvis/', board: '/daily-board/', favorites: '/favorites/', settings: '/settings/', notes: '/notes/', tools: '/tools/', server: '/server/' };
+const labels = { home: 'Home', chat: 'Jarvis', board: 'Daily Board', favorites: 'Favorites', settings: 'Settings', notes: 'Notes', tools: 'Tools', server: 'Server' };
+function getRoute() { return ({jarvis:'chat','daily-board':'board',favorites:'favorites',settings:'settings',notes:'notes',tools:'tools',server:'server'})[location.pathname.split('/')[1]] || 'home'; }
+let preferences = loadPreferences();
+let searchQuery = '', searchOpen = false;
 const time = stamp => new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(stamp));
 const date = new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'long', day: 'numeric' }).format(new Date());
 const escape = text => String(text).replace(/[&<>"']/g, x => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x]));
@@ -42,24 +46,56 @@ function connection() {
   return state.syncedAt ? 'Connected' : 'Connecting';
 }
 function drawShell() {
-  $('app').innerHTML = `<aside class="sidebar"><a class="brand" href="/" data-route="home"><span class="brand-mark">J</span><span>JARVIS<small>PERSONAL HUB</small></span></a><nav aria-label="Main navigation">${Object.entries(labels).map(([key,label])=>`<a href="${paths[key]}" data-route="${key}" ${key===route?'aria-current="page"':''}>${svg(key==='chat'?'chat':key==='board'?'board':'home')}<span>${label}</span></a>`).join('')}</nav><div class="sidebar-foot"><span class="status-dot"></span> Your space. One place.<small>VERSION 1.0</small></div></aside><div class="workspace"><header class="topbar"><span class="breadcrumb">PERSONAL / <strong>${labels[route].toUpperCase()}</strong></span><button class="connection" id="connection-button" aria-label="Connection details"><span class="status-dot ${API_ORIGIN && state?.syncedAt && !syncError && state.publisher?.ok !== false?'':'pending'}"></span><span>${connection()}</span></button></header><main id="content"></main><footer class="footnote">JARVIS <span>Built one useful thing at a time.</span></footer></div>`;
+  const hub = ['home','favorites','settings'].includes(route);
+  document.title = `${labels[route]} · Jarvis`;
+  $('app').innerHTML = `<div class="workspace"><header class="topbar">${hub?`<button class="icon-button" id="menu-button" aria-label="Open navigation">${icon('menu')}</button>`:`<a class="icon-button" href="/" data-route="home" aria-label="Back to Home">${icon('back')}</a>`}<a class="brand" href="/" data-route="home">Jarvis</a><div class="toolbar-actions">${hub?`<button class="icon-button" id="search-button" aria-label="Search apps">${icon('search')}</button>`:''}<button class="icon-button" id="connection-button" aria-label="Connection details">${icon('more')}<span class="sr-only">${connection()}</span></button></div></header><main id="content" tabindex="-1"></main>${hub?`<nav class="bottom-nav" aria-label="Hub navigation">${['home','favorites','settings'].map(key=>`<a href="${paths[key]}" data-route="${key}" ${key===route?'aria-current="page"':''}>${icon(key)}<span>${labels[key]}</span></a>`).join('')}</nav>`:''}</div>`;
   $('connection-button').onclick = showConnection;
+  if ($('menu-button')) $('menu-button').onclick = showNavigation;
+  if ($('search-button')) $('search-button').onclick = () => { searchOpen=!searchOpen; route='home'; history.pushState({},'',paths.home); drawShell(); $('app-search')?.focus(); };
   drawPage();
 }
 function drawPage() {
+  if (route === 'home' || route === 'favorites') { drawHome(); return; }
+  if (route === 'settings') { drawSettings(); return; }
+  if (['notes','tools','server'].includes(route)) { renderUtility(route,$('content'),{notify,connection,showConnection,state,storageError,sync}); return; }
   if (storageError) { $('content').innerHTML = `<div class="empty"><h1>Unable to save on this device</h1><p>${escape(storageError)}</p><p>Existing data has not been changed. Allow browser storage, then reload.</p></div>`; return; }
-  if (route === 'home') drawHome();
   if (route === 'chat') drawChat();
   if (route === 'board') drawBoard();
 }
+function appRow(app) {
+  return `<a class="app-row" href="${app.href}">${icon(app.icon)}<span><strong>${app.name}</strong><small>${app.description}</small></span>${icon('chevron')}</a>`;
+}
 function drawHome() {
-  const hour = new Date().getHours();
-  const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
-  const latest = [...state.posts].reverse()[0];
-  $('content').innerHTML = `<section class="greeting"><p class="eyebrow">${escape(date)}</p><h1>${greeting}, Brayden<span class="mint">.</span></h1><p class="subheading">A space for your thoughts, updates, and everyday life.</p></section><div class="home-grid"><section class="card feature"><div class="card-top"><span class="eyebrow">JARVIS</span><span class="pill">${API_ORIGIN?'INBOX':'DRAFT MODE'}</span></div><div class="orb" aria-hidden="true"><span></span></div><h2>What's on your mind?</h2><p>Keep a thought. Start a conversation.</p><a class="primary" href="/jarvis/" data-route="chat">Open Jarvis ${svg('arrow')}</a><small>${API_ORIGIN?'The same messages and Daily Board on every device.':'Drafts save here while cloud messaging is being connected.'}</small></section><section class="card board-preview"><div class="card-top"><span class="eyebrow">DAILY BOARD</span>${svg('board')}</div><h2>${latest?escape(latest.title):'Your daily briefing.'}</h2><p class="preview-body">${latest?escape(latest.body):'Your daily briefing from Jarvis will appear here.'}</p>${latest?`<span class="entry-meta">${time(latest.createdAt)} · ${latest.saved?'Cloud saved':'On this device'}</span>`:''}<a class="text-link" href="/daily-board/" data-route="board">${latest?'Read your briefing':'Open Daily Board'} ${svg('arrow')}</a></section><section class="card activity"><div><span class="eyebrow">AT A GLANCE</span><h2>Your hub, so far.</h2></div><div class="stats"><div><strong>${state.posts.length}</strong><span>Board entries</span></div><div><strong>${state.messages.filter(m=>m.role==='user').length}</strong><span>Messages</span></div><div><strong>${state.outbox.length}</strong><span>Awaiting sync</span></div></div></section></div>`;
+  const favorites = route==='favorites';
+  const selected = apps.filter(a=>preferences.favorites.includes(a.id));
+  $('content').innerHTML = `<section class="page-heading"><h1>${favorites?'Favorites':'Home'}</h1><button class="text-button" id="edit-favorites">Edit</button></section>${searchOpen&&!favorites?`<div class="search-field"><label class="sr-only" for="app-search">Find an app</label><input id="app-search" type="search" placeholder="Find an app" value="${escape(searchQuery)}" autocomplete="off"></div>`:''}${!favorites&&selected.length?`<div class="shortcuts" aria-label="Favorite apps">${selected.slice(0,2).map(a=>`<a href="${a.href}">${icon(a.icon)}<span>${a.name}</span></a>`).join('')}</div>`:''}<div id="app-directory"></div>`;
+  const render=()=>{
+    const filtered=(favorites?selected:apps).filter(a=>(a.name+' '+a.description).toLowerCase().includes(searchQuery.toLowerCase()));
+    $('app-directory').innerHTML = filtered.length?['Conversation','Library','Utilities'].map(group=>{const rows=filtered.filter(a=>a.group===group);return rows.length?`<section class="app-group"><h2 class="eyebrow">${group}</h2>${rows.map(appRow).join('')}</section>`:'';}).join(''):`<p class="empty-note">${favorites?'Choose your favorite apps with Edit.':'No apps match your search.'}</p>`;
+  };
+  if(favorites)searchQuery='';
+  render();
+  if($('app-search'))$('app-search').oninput=e=>{searchQuery=e.target.value;render();};
+  $('edit-favorites').onclick=editFavorites;
+}
+function editFavorites() {
+  const dialog=$('hub-dialog');
+  dialog.innerHTML=`<div class="dialog-heading"><h2 id="hub-dialog-heading">Favorites</h2><button class="close" aria-label="Close favorites">×</button></div><p>Choose shortcuts for this browser. Your first two appear on Home.</p><form id="favorites-form">${apps.map(a=>`<label class="check-row"><input type="checkbox" name="favorite" value="${a.id}" ${preferences.favorites.includes(a.id)?'checked':''}>${a.name}</label>`).join('')}<button class="primary" type="submit">Save favorites</button></form>`;
+  dialog.querySelector('.close').onclick=()=>dialog.close();
+  $('favorites-form').onsubmit=e=>{e.preventDefault();try{const next={...preferences,favorites:new FormData(e.target).getAll('favorite')};savePreferences(next);preferences=next;dialog.close();drawShell();}catch{notify('Favorites could not be saved. Browser storage is unavailable.');}};
+  dialog.showModal();
+}
+function showNavigation() {
+  const dialog=$('hub-dialog');
+  dialog.innerHTML=`<div class="dialog-heading"><h2 id="hub-dialog-heading">Your apps</h2><button class="close" aria-label="Close navigation">×</button></div>${apps.map(appRow).join('')}`;
+  dialog.querySelector('.close').onclick=()=>dialog.close();dialog.showModal();
+}
+function drawSettings() {
+  $('content').innerHTML=`<section class="page-heading"><h1>Settings</h1></section><section class="app-group"><h2 class="eyebrow">Your hub</h2><button class="app-row" id="settings-favorites">${icon('favorites')}<span><strong>Favorites</strong><small>Choose your Home shortcuts</small></span>${icon('chevron')}</button><a class="app-row" href="/server/">${icon('server')}<span><strong>Connection & status</strong><small>Message sync and service details</small></span>${icon('chevron')}</a></section><section class="reading"><h2>One shared conversation</h2><p>Jarvis messages and Daily Board are shared across phones. Favorites and notes are saved in this browser.</p><h2>Your player</h2><p>DrawerCast has its own full player and settings. Music stays on your phone or server.</p><h2>About</h2><p>Jarvis · version 1.1<br>Dark interface inspired by your Poweramp player.</p></section>`;
+  $('settings-favorites').onclick=editFavorites;
 }
 function drawChat() {
-  $('content').innerHTML = `<section class="page-heading"><div><p class="eyebrow">YOUR CONVERSATION SPACE</p><h1>Jarvis<span class="mint">.</span></h1></div><span class="pill">${API_ORIGIN?'INBOX':'DRAFT MODE'}</span></section><section class="chat-panel"><div class="chat-notice">${API_ORIGIN?'One shared conversation, on every device.':'Cloud messaging is not connected yet. Your drafts stay on this device and have not been sent.'}</div><div class="messages" id="messages" aria-label="Conversation">${state.messages.length?state.messages.map(messageMarkup).join(''):`<div class="chat-empty"><div class="orb small" aria-hidden="true"><span></span></div><h2>A place to pick up your thoughts.</h2><p>Write a message below. ${API_ORIGIN?'Messages appear here when saved.':'It will wait here until cloud messaging is ready.'}</p></div>`}</div><form class="composer" id="message-form"><label class="sr-only" for="message-text">Message Jarvis</label><textarea id="message-text" rows="2" maxlength="4000" placeholder="Write something…" required>${escape(state.composer || '')}</textarea><div class="composer-bottom"><span>${API_ORIGIN?'Enter to send · Shift + Enter for a new line':'Saved on this device · not sent'}</span><button class="primary" type="submit" id="send-message">${API_ORIGIN?'Send':'Save draft'} ${svg('send')}</button></div></form></section>`;
+  $('content').innerHTML = `<section class="page-heading"><div><p class="eyebrow">MESSAGES</p><h1>Jarvis</h1></div><span class="pill">${API_ORIGIN?'INBOX':'DRAFT MODE'}</span></section><section class="chat-panel"><div class="chat-notice">${API_ORIGIN?'Messages and replies, shared across your phones. Replies are asynchronous.':'Cloud messaging is not connected yet. Your drafts stay on this device and have not been sent.'}</div><div class="messages" id="messages" aria-label="Conversation">${state.messages.length?state.messages.map(messageMarkup).join(''):`<div class="chat-empty"><h2>A place to pick up your thoughts.</h2><p>Write a message below. ${API_ORIGIN?'Messages appear here when saved.':'It will wait here until cloud messaging is ready.'}</p></div>`}</div><form class="composer" id="message-form"><label class="sr-only" for="message-text">Message Jarvis</label><textarea id="message-text" rows="2" maxlength="4000" placeholder="Write something…" required>${escape(state.composer || '')}</textarea><div class="composer-bottom"><span>${API_ORIGIN?'Enter to send · Shift + Enter for a new line':'Saved on this device · not sent'}</span><button class="primary" type="submit" id="send-message">${API_ORIGIN?'Send':'Save draft'} ${svg('send')}</button></div></form></section>`;
   $('message-text').oninput = e => { try { commit({ ...state, composer: e.target.value }); } catch { notify('Could not save your draft. Keep this page open and copy your text.'); } };
   $('message-text').onkeydown = e => { if (e.key==='Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); $('message-form').requestSubmit(); } };
   $('message-form').onsubmit = e => { e.preventDefault(); submitMessage(); };
@@ -78,12 +114,12 @@ function submitMessage() {
   } catch { notify('Could not save. Your text is still in the message box.'); }
 }
 function drawBoard() {
-  $('content').innerHTML = `<section class="page-heading"><div><p class="eyebrow">YOUR DAILY BRIEFING</p><h1>Daily Board<span class="mint">.</span></h1><p class="subheading">Your briefing from Jarvis.</p></div></section><div class="board-list">${state.posts.length?[...state.posts].reverse().map(p=>`<article class="card board-entry"><div class="card-top"><span class="eyebrow">${time(p.createdAt)}</span><span class="pill">${p.saved?'CLOUD SAVED':'ON THIS DEVICE'}</span></div><h2>${escape(p.title)}</h2><p>${escape(p.body)}</p></article>`).join(''):`<section class="card empty-board"><span class="empty-icon">${svg('board')}</span><h2>Your briefing will appear here.</h2><p>Briefings published by Jarvis appear here on all your devices.</p></section>`}</div><p class="board-note">${API_ORIGIN?'The same Daily Board on every device.':'Entries are saved on this device. Cloud sync and scheduled updates are not connected yet.'}</p>`;
+  $('content').innerHTML = `<section class="page-heading"><div><p class="eyebrow">YOUR DAILY BRIEFING</p><h1>Daily Board</h1><p class="subheading">Your briefing from Jarvis.</p></div></section><div class="board-list">${state.posts.length?[...state.posts].reverse().map(p=>`<article class="card board-entry"><div class="card-top"><span class="eyebrow">${time(p.createdAt)}</span><span class="pill">${p.saved?'CLOUD SAVED':'ON THIS DEVICE'}</span></div><h2>${escape(p.title)}</h2><p>${escape(p.body)}</p></article>`).join(''):`<section class="card empty-board"><span class="empty-icon">${svg('board')}</span><h2>Your briefing will appear here.</h2><p>Briefings published by Jarvis appear here on all your devices.</p></section>`}</div><p class="board-note">${API_ORIGIN?'The same Daily Board on every device.':'Entries are saved on this device. Cloud sync and scheduled updates are not connected yet.'}</p>`;
 
 }
 function showConnection() {
   $('connection-state').textContent = connection();
-  $('connection-detail').textContent = !API_ORIGIN ? 'Your hub is live. Cloud storage is awaiting connection. Messages and board entries currently save only in this browser; clearing browser data will remove them.' : syncError || (state.syncedAt ? `Last synced ${time(state.syncedAt)}. One shared inbox. Messages are stored in Cloudflare.${state.mode === 'github-publications' ? (state.publisher?.ok ? ' Replies and briefings are connected.' : ' Your messages remain saved. Reply delivery is temporarily delayed: ' + (state.publisher?.error || 'waiting for publication sync')) : ' Publication upgrade pending.'}` : 'Opening the shared inbox.');
+  $('connection-detail').textContent = storageError ? storageError : !API_ORIGIN ? 'Your hub is live. Cloud storage is awaiting connection. Messages and board entries currently save only in this browser; clearing browser data will remove them.' : syncError || (state.syncedAt ? `Last synced ${time(state.syncedAt)}. One shared inbox. Messages are stored in Cloudflare.${state.mode === 'github-publications' ? (state.publisher?.ok ? ' Replies and briefings are connected.' : ' Your messages remain saved. Reply delivery is temporarily delayed: ' + (state.publisher?.error || 'waiting for publication sync')) : ' Publication upgrade pending.'}` : 'Opening the shared inbox.');
   $('sync-now').hidden = !API_ORIGIN || !!storageError;
   $('sync-now').disabled = busy;
   $('connection-dialog').showModal();
@@ -109,18 +145,22 @@ async function sync() {
     busy = false;
     // Composer values persist on input, so redraws do not discard unsent text.
     const active = document.activeElement?.id;
+    const oldScroll=$('messages')?.scrollTop;
+    const wasAtBottom=$('messages') ? $('messages').scrollHeight-$('messages').clientHeight-oldScroll<40 : true;
     const start = document.activeElement?.selectionStart;
-    drawShell();
-    if (active && $(active)) { $(active).focus(); if (typeof start==='number') $(active).setSelectionRange(start,start); }
+    if (['chat','board'].includes(route)) drawShell();
+    else if ($('connection-button')) $('connection-button').lastElementChild.textContent=connection();
+    if ($('messages') && !wasAtBottom) $('messages').scrollTop=oldScroll;
+    if (active && $(active)) { $(active).focus(); if (typeof start==='number' && typeof $(active).setSelectionRange==='function') $(active).setSelectionRange(start,start); }
     if ($('connection-dialog').open) { $('connection-state').textContent = connection(); $('sync-now').disabled=false; }
   }
 }
 document.addEventListener('click', e => {
   const link = e.target.closest('[data-route]');
   if (!link || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
-  e.preventDefault(); route = link.dataset.route; history.pushState({},'',paths[route]); drawShell(); window.scrollTo(0,0);
+  e.preventDefault(); $('hub-dialog')?.close(); route = link.dataset.route; history.pushState({},'',paths[route]); drawShell(); window.scrollTo(0,0);
 });
-window.addEventListener('popstate',()=>{ route=location.pathname.startsWith('/daily-board')?'board':location.pathname.startsWith('/jarvis')?'chat':'home'; drawShell(); });
+window.addEventListener('popstate',()=>{ route=getRoute(); drawShell(); });
 window.addEventListener('online',sync);
 document.addEventListener('visibilitychange',()=>{ if(!document.hidden && API_ORIGIN && !busy && (!state.syncedAt || Date.now()-Date.parse(state.syncedAt)>60000)) sync(); });
 document.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>$(b.dataset.close).close());
@@ -130,4 +170,4 @@ if (API_ORIGIN) sync();
 
 
 setInterval(()=>{if(!document.hidden)sync();},30000);
-window.addEventListener('storage',e=>{if(e.key===STORAGE_KEY&&!busy){try{state=readState(localStorage);drawShell();}catch{}}});
+window.addEventListener('storage',e=>{if(e.key===STORAGE_KEY&&!busy){try{state=readState(localStorage);if(['chat','board'].includes(route))drawShell();}catch{}}});

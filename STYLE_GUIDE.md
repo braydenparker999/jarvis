@@ -1,6 +1,6 @@
 # Jarvis style guide
 
-Status: approved visual direction, September 20, 2026. This guide governs future UI work; it does not mean the redesign has shipped.
+Status: approved visual direction, September 20, 2026. This guide governs the version 1.1 implementation and future UI work.
 
 ## Design reference
 
@@ -161,3 +161,4 @@ Before accepting a screen, confirm:
 - Each module has its own usable page and a predictable way home.
 - DrawerCast retains its approved Poweramp interface and functionality.
 - Existing messages, drafts and storage behavior remain intact.
+

@@ -18,19 +18,8 @@ $('approve').onclick=async()=>{
 };
 
 if(!params.client_id){
- async function probe(path){
-  try{
-   const r=await fetch(API_ORIGIN+path,{cache:'no-store',signal:AbortSignal.timeout(15000)});
-   const type=r.headers.get('content-type')||'unknown';
-   let data=null;if(type.includes('application/json')){try{data=await r.json();}catch{}}
-   return {status:r.status,type,data};
-  }catch(e){return {failure:e.name==='TimeoutError'?'request timed out':'browser could not read the response (network, CORS, or browser restriction)'};}
- }
- $('status').textContent='Checking backend and connector…';
- Promise.all([probe('/health'),probe('/.well-known/oauth-protected-resource')]).then(([health,connector])=>{
-  const describe=r=>r.failure||('HTTP '+r.status+'; '+(r.data?'JSON':'content type '+r.type));
-  const healthInfo=describe(health)+(health.data?.version?'; backend version '+health.data.version:'');
-  const ready=connector.status===200&&connector.data?.resource===API_ORIGIN+'/mcp';
-  $('status').textContent=ready?'Connector backend is online. Add Jarvis in ChatGPT using the details below.':'Connection check failed. Health: '+healthInfo+'. Connector: '+describe(connector)+(connector.status===200&&connector.data?'; unexpected metadata':'')+'.';
- });
+ fetch(API_ORIGIN+'/.well-known/oauth-protected-resource',{signal:AbortSignal.timeout(15000)}).then(async r=>{
+  const data=await r.json();if(!r.ok||data.resource!==API_ORIGIN+'/mcp')throw Error('not ready');
+  $('status').textContent='Connector backend is online. Add Jarvis in ChatGPT using the details below.';
+ }).catch(()=>{$('status').textContent='Connector deployment is not reachable yet. Check the latest Cloudflare build before connecting.';});
 }

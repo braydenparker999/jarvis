@@ -19,3 +19,4 @@ export function saveLinkedState(storage, current, next) {
   storage.setItem(STORAGE_KEY, JSON.stringify(next));
   return next;
 }
+
