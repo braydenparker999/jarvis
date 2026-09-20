@@ -2165,7 +2165,7 @@ const DriveSource={
   async install(){
     PAGES.root.items.unshift(S_act('Google Drive Music','Stream your shared music folder',()=>this.show(),'folder'));
     try{
-      this.helper=await import('./drive-api.js?v=metadata-r13');
+      this.helper=await import('./drive-api.js?v=metadata-r14');
       const response=await fetch('/assets/drive-config.json',{cache:'no-store',signal:AbortSignal.timeout(15000)});
       if(!response.ok)throw Error('Drive configuration could not be loaded.');
       const config=await response.json();this.api=this.helper.createDriveApi(config.apiKey);
@@ -2183,7 +2183,7 @@ const DriveSource={
   },
   waveformURL(t){return t.waveformVersion===1?t.waveformFile:null;},
   tagJobs:new Map(),tagQueue:[],tagFailures:new Set(),tagActive:null,tagTimer:null,
-  prioritize(t){if(this.tagActive&&this.tagActive.t.id!==t?.id)this.tagActive.controller?.abort();},
+  prioritize(t){this.tagNotBefore=Date.now()+1000;if(this.tagActive&&this.tagActive.t.id!==t?.id)this.tagActive.controller?.abort();},
   ensureMetadata(t){
     if(!t||t.source!=='drive'||t.driveTagVersion===1||!this.api)return Promise.resolve();
     const key=t.id+'|'+t.md5+'|'+t.size;
@@ -2194,6 +2194,7 @@ const DriveSource={
   pumpTags(){
     if(this.tagActive||!this.tagQueue.length)return;
     clearTimeout(this.tagTimer);
+    const delay=(this.tagNotBefore||0)-Date.now();if(delay>0){this.tagTimer=setTimeout(()=>this.pumpTags(),delay);return;}
     // Let audio acquire its first playable buffer before starting cover requests.
     if(Engine.playing && Engine.el().readyState<3){this.tagTimer=setTimeout(()=>this.pumpTags(),500);return;}
     const current=this.tagQueue.findIndex(j=>j.t.id===Engine.current?.id);
@@ -7064,7 +7065,10 @@ function installPlaybackRework(){
     const t=this.queue[index];if(!t)return;
     const outgoing=this.current;if(outgoing&&!this._autoAdvance&&!this.el().ended&&nativeValues().restore_pos){outgoing.resumeAt=this.time();persistTrack(outgoing);}
     const mode=nativeValues().fade_manual_advance||0;
-    if(autoplay!==false&&this.playing&&outgoing?.id!==t.id&&mode&&!this._autoAdvance)return PlaybackTransitions.to(index,mode===1?nativeValues().fade_short_xfade_ms||400:SET.crossfadeLen*1000);
+    // Cloud media can take seconds to become playable. Manual Drive selection
+    // must update immediately, rather than leaving the old song on screen.
+    const driveSwitch=t.source==='drive'||outgoing?.source==='drive';
+    if(!driveSwitch&&autoplay!==false&&this.playing&&outgoing?.id!==t.id&&mode&&!this._autoAdvance)return PlaybackTransitions.to(index,mode===1?nativeValues().fade_short_xfade_ms||400:SET.crossfadeLen*1000);
     PlaybackTransitions.cancel(true,t.id);this.listened=0;this.listenedLast=0;this.counted=false;clearTimeout(this.silenceTimer);clearTimeout(this.fadeTimer);
     return playIndex.call(this,index,autoplay).then(()=>{if(this.current?.id===t.id&&nativeValues().restore_pos&&t.resumeAt>0&&t.resumeAt<(t.dur||0)-3&&(t.dur||0)>=(nativeValues().restore_pos_min_dur||45)*60){this.el().currentTime=t.resumeAt;}});
   };

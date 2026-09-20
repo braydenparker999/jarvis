@@ -34,3 +34,16 @@ test('late failure of an abandoned play attempt cannot pause the new track',()=>
   Engine._playRequest++;Engine.els[0].src='http://music.example.test/audio/new';reject({name:'NotSupportedError'});
   assert.equal(Engine.playing,true);assert.equal(renders(),before);
 });
+
+test('rapid manual Drive skips select immediately without awaiting cloud crossfade readiness',async()=>{
+  const calls=[],fades=[];
+  const Engine={queue:[{id:'one',source:'drive'},{id:'two',source:'drive'},{id:'three',source:'drive'}],current:{id:'one',source:'drive'},playing:true,
+    el:()=>({ended:false}),async playIndex(index){this.current=this.queue[index];calls.push(index);}};
+  const ctx=vm.createContext({Engine,PlaybackTransitions:{cancel(){},to(index){fades.push(index);return new Promise(()=>{});}},
+    nativeValues:()=>({fade_manual_advance:1}),clearTimeout,SET:{crossfadeLen:2}});
+  const wrapper=source.slice(source.indexOf('  const playIndex=Engine.playIndex;'),source.indexOf('  Engine.setGain=function(i,value,ms)'));
+  vm.runInContext(wrapper,ctx);
+  const second=Engine.playIndex(1,true),third=Engine.playIndex(2,true);
+  assert.equal(Engine.current.id,'three');assert.deepEqual(calls,[1,2]);assert.deepEqual(fades,[]);await Promise.all([second,third]);
+  Engine.current={id:'local-old'};Engine.queue=[{id:'local-new'}];Engine.playIndex(0,true);assert.deepEqual(fades,[0],'local manual fades are unchanged');
+});
