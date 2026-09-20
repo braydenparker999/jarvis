@@ -16,3 +16,10 @@ $('approve').onclick=async()=>{
   location.replace(target.href);
  }catch(e){$('status').textContent=e.message;$('approve').disabled=false;}
 };
+
+if(!params.client_id){
+ fetch(API_ORIGIN+'/.well-known/oauth-protected-resource',{signal:AbortSignal.timeout(15000)}).then(async r=>{
+  const data=await r.json();if(!r.ok||data.resource!==API_ORIGIN+'/mcp')throw Error('not ready');
+  $('status').textContent='Connector backend is online. Add Jarvis in ChatGPT using the details below.';
+ }).catch(()=>{$('status').textContent='Connector deployment is not reachable yet. Check the latest Cloudflare build before connecting.';});
+}

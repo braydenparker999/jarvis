@@ -15,7 +15,7 @@ export default {
     const reply=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{...headers,'Content-Type':'application/json'}});
     if(request.method==='OPTIONS') return new Response(null,{status:204,headers});
     const path=new URL(request.url).pathname;
-    if(path==='/health' && request.method==='GET') return reply({ok:true,mode:'responder-ready',version:3});
+    if(path==='/health' && request.method==='GET') return reply({ok:true,mode:'connector-ready',version:4});
     if(!paths.has(path)) return reply({error:'Not found'},404);
     const readPath=path==='/v1/state' || path==='/v1/agent/inbox';
     if((readPath && request.method!=='GET') || (!readPath && request.method!=='POST')) return reply({error:'Method not allowed'},405);
