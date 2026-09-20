@@ -17,7 +17,7 @@ export default {
     const reply=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{...headers,'Content-Type':'application/json'}});
     if(request.method==='OPTIONS') return new Response(null,{status:204,headers});
     const path=new URL(request.url).pathname;
-    if(path==='/health' && request.method==='GET') return reply({ok:true,mode:'github-publications',version:6,publicationIssue:2});
+    if(path==='/health' && request.method==='GET') return reply({ok:true,mode:'github-publications',version:7,publicationIssue:2});
     if(path==='/shared/state' || path==='/shared/messages') {
       if((path==='/shared/state'&&request.method!=='GET')||(path==='/shared/messages'&&request.method!=='POST'))return reply({error:'Method not allowed'},405);
       let data;
@@ -52,7 +52,8 @@ export default {
       const bytes=new Uint8Array(length);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.length;}
       try{body=JSON.parse(new TextDecoder().decode(bytes));}catch{return reply({error:'Invalid JSON'},400);}
       if(!path.startsWith('/v1/responder/')) {
-      if(!body || typeof body.id!=='string' || !/^[a-f0-9-]{36}$/.test(body.id) || typeof body.body!=='string' || !body.body.trim() || body.body.length>(path==='/v1/messages'?4000:6000)) return reply({error:'Invalid entry'},400);
+      const bodyLimit=path==='/v1/messages'?4000:(path==='/v1/board'||path==='/v1/agent/board'?20000:6000);
+      if(!body || typeof body.id!=='string' || !/^[a-f0-9-]{36}$/.test(body.id) || typeof body.body!=='string' || !body.body.trim() || body.body.length>bodyLimit) return reply({error:'Invalid entry'},400);
       if((path==='/v1/board' || path==='/v1/agent/board') && (typeof body.title!=='string' || !body.title.trim() || body.title.length>120)) return reply({error:'Invalid title'},400);
       if(path==='/v1/agent/replies' && (typeof body.replyTo!=='string' || !/^[a-f0-9-]{36}$/.test(body.replyTo))) return reply({error:'Reply target required'},400);
       }
