@@ -35,16 +35,19 @@ test('publication parser accepts only owner JSON with valid fields and real cale
  assert.equal(decodePublication(publication({...p,type:'admin'})),null);
  assert.equal(decodePublication(publication({...p,type:'briefing',title:'Today',date:'2026-02-30'})),null);
  assert.equal(decodePublication(publication({...p,body:'x'.repeat(6001)})),null);
+ const longBriefing={...p,type:'briefing',title:'Today',date:'2026-09-20',body:'x'.repeat(20000)};
+ assert.equal(decodePublication(publication(longBriefing)).body.length,20000);
+ assert.equal(decodePublication(publication({...longBriefing,body:'x'.repeat(20001)})),null);
 });
 test('actual shared API imports a reply and briefing and independent clients see them without deployment',async()=>{
  const s=setup(),m={id:crypto.randomUUID(),body:'Hello from phone one'};
  await s.req('/shared/messages',m);
  const reply={id:crypto.randomUUID(),type:'reply',replyTo:m.id,body:'Hello from Jarvis'};
- const briefing={id:crypto.randomUUID(),type:'briefing',title:'Daily briefing',date:'2026-09-20',body:'Today’s update.'};
+ const briefing={id:crypto.randomUUID(),type:'briefing',title:'Daily briefing',date:'2026-09-20',body:'Today’s update. '+ 'x'.repeat(12000)};
  let calls=0;
  await upstream(async url=>{assert.equal(new URL(url).origin+new URL(url).pathname,COMMENTS_URL);calls++;return Response.json([publication(reply),publication(briefing,2),publication(reply,3),publication({...briefing,id:crypto.randomUUID()},4)]);},async()=>{
    const data=await s.api('/shared/state');assert.equal(data.mode,'github-publications');assert.equal(data.messages.filter(x=>x.kind==='reply').length,1);assert.equal(data.unanswered.length,0);
-   assert.equal(data.posts.filter(x=>x.title==='Daily briefing').length,1);assert.equal(data.publisher.ok,true);
+   const importedBriefing=data.posts.find(x=>x.title==='Daily briefing');assert.ok(importedBriefing);assert.equal(importedBriefing.body.length,briefing.body.length);assert.equal(data.publisher.ok,true);
    const other=createDirectApi((url,opts)=>worker.fetch(new Request(url,opts),s.env),BASE);assert.equal((await other('/shared/state')).messages.find(x=>x.kind==='reply').body,reply.body);
    assert.equal(calls,1); // Whole-hub cooldown, not one GitHub request per phone.
  });
