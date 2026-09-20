@@ -2305,6 +2305,7 @@ const Engine = {
       a.addEventListener('ended', this.onEnded.bind(this,i));
       a.addEventListener('error', this.onError.bind(this,i));
       a.addEventListener('loadedmetadata', this.onMeta.bind(this,i));
+      a.addEventListener('durationchange', this.onMeta.bind(this,i));
       a.addEventListener('timeupdate', this.onTime.bind(this,i));
       a.addEventListener('progress', this.onTime.bind(this,i));
     }

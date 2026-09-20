@@ -47,3 +47,13 @@ test('rapid manual Drive skips select immediately without awaiting cloud crossfa
   assert.equal(Engine.current.id,'three');assert.deepEqual(calls,[1,2]);assert.deepEqual(fades,[]);await Promise.all([second,third]);
   Engine.current={id:'local-old'};Engine.queue=[{id:'local-new'}];Engine.playIndex(0,true);assert.deepEqual(fades,[0],'local manual fades are unchanged');
 });
+
+test('a streamed Ogg duration arriving after loadedmetadata updates the track and its saved duration',()=>{
+  const saved=[];
+  class Audio {constructor(){this.events={};this.duration=Infinity;}setAttribute(){}addEventListener(name,fn){this.events[name]=fn;}}
+  const ctx=vm.createContext({Audio,debounce:fn=>fn,document:{body:{appendChild(){}}},UI:{renderProgress(){},renderMeta(){}},persistTrack:t=>saved.push({...t})});
+  const Engine=vm.runInContext(block('const Engine = {','function SET_shuffleOn()')+'\nEngine',ctx);Engine.init();Engine.current={id:'stream',dur:0};
+  Engine.els[0].events.loadedmetadata();assert.equal(saved.length,0);
+  Engine.els[0].duration=210;Engine.els[0].events.durationchange();assert.equal(Engine.current.dur,210);assert.equal(saved[0].dur,210);
+  Engine.els[1].duration=999;Engine.els[1].events.durationchange();assert.equal(Engine.current.dur,210);
+});
