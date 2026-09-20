@@ -4,7 +4,7 @@ The user wants an hourly assistant inbox check and an assistant-written Daily Bo
 
 ## One-time readiness gate
 
-Open https://gray-meadow-09216fd10.1.azurestaticapps.net/reader/ and click **Refresh inbox**. Require `mode: github-publications`, `serviceVersion: 6`, healthy publisher metadata, and visible reply `ce8a3245-78f2-45a4-a7f8-ae462b60689c` plus briefing `4e39edb8-b91c-48af-91b4-6f4b3d1719d0`. Require `DIRECT_API_ENABLED=true` in `public/assets/config.js` on main before calling the new main-chat workflow active. If backend is old, deploy current main in the existing Cloudflare Worker: root `/backend`, no build command, deploy `npx wrangler deploy`.
+Open https://gray-meadow-09216fd10.1.azurestaticapps.net/reader/ and click **Refresh inbox**. Require `mode: github-publications`, `serviceVersion: 7`, healthy publisher metadata, and visible reply `ce8a3245-78f2-45a4-a7f8-ae462b60689c` plus briefing `4e39edb8-b91c-48af-91b4-6f4b3d1719d0`. Require `DIRECT_API_ENABLED=true` in `public/assets/config.js` on main before calling the new main-chat workflow active. If backend is old, deploy current main in the existing Cloudflare Worker: root `/backend`, no build command, deploy `npx wrangler deploy`.
 
 No new OAuth app, secret, connector, device pairing, or paid service is needed. Existing GitHub access can publish issue comments; this was successfully tested on issue #2 using `github_add_comment_to_issue` with `pr_number: 2` (the tool's misleading field name also accepts issue numbers).
 
@@ -41,7 +41,7 @@ Daily Board format:
 }
 ```
 
-Bodies must be nonempty and at most 6000 characters; briefing titles at most 120. Dates must be real calendar dates. One reply per target and one briefing per date. The server takes publication timestamps from GitHub, not submitted JSON. Comments are append-only; editing/deleting a comment does not revise already imported content.
+Reply bodies must be nonempty and at most 6000 characters. Daily Board briefing bodies may be up to 20000 characters; briefing titles remain limited to 120. Dates must be real calendar dates. One reply per target and one briefing per date. The server takes publication timestamps from GitHub, not submitted JSON. Comments are append-only; editing/deleting a comment does not revise already imported content.
 
 Use the user's confirmed briefing timezone and time; establish these in the scheduling chat if unavailable there. The Daily Board is an assistant briefing, not a user journal. Research factual current information before including it. Never invent calendar access, events, or completed actions.
 
