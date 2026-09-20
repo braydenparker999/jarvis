@@ -10,5 +10,5 @@ export function mergeState(state,remote){
  const pending=new Set(state.outbox.map(x=>x.id));
  const byId=new Map(state.messages.filter(x=>pending.has(x.id)).map(x=>[x.id,x]));
  for(const item of remote.messages)byId.set(item.id,{...item,saved:true});
- return {...state,messages:[...byId.values()].sort((a,b)=>a.createdAt.localeCompare(b.createdAt)),posts:remote.posts.map(x=>({...x,saved:true})),publisher:remote.publisher,syncedAt:new Date().toISOString()};
+ return {...state,messages:[...byId.values()].sort((a,b)=>a.createdAt.localeCompare(b.createdAt)),posts:remote.posts.map(x=>({...x,saved:true})),publisher:remote.publisher,mode:remote.mode,syncedAt:new Date().toISOString()};
 }

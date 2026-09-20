@@ -1,41 +1,42 @@
 # Jarvis 1.0
 
-Mobile-first personal hub: Home, Jarvis messages, and assistant-published Daily Board.
+Mobile-first personal hub: Jarvis messages and an assistant-published Daily Board.
 
 - Website: https://gray-meadow-09216fd10.1.azurestaticapps.net/
+- Inbox reader: https://gray-meadow-09216fd10.1.azurestaticapps.net/reader/
 - Backend: https://jarvis-hub-api.braydenparker999.workers.dev
-- GitHub: braydenparker999/jarvis, main.
+- Publications: https://github.com/braydenparker999/jarvis/issues/2
 
-## One shared inbox
+## Delivery
 
-Every phone opens the same website. No account, password, device linking, or plugin setup. The owner explicitly chose public access: anyone who discovers the website can read messages and post regular messages. Only changes to this GitHub repository can publish trusted Jarvis replies and briefings.
+Every phone opens the same public conversation. No password, device pairing, or plugin setup. The owner explicitly accepts public reading and ordinary message posting. Anyone finding the URL can do both.
 
-The frontend adapter uses the already deployed `/v1/state` and `/v1/messages` endpoints with one deliberately public inbox identifier. No Cloudflare redeployment is needed. Only user messages from that Worker are displayed; all Worker assistant and board rows are ignored. Trusted replies and briefings come exclusively from the GitHub-deployed `/content/jarvis.json` on Azure. Drafts and retry queues remain in browser storage when offline. Original private inboxes remain intact; opening the updated website on an original phone copies its user messages into the shared inbox once. Old delivery receipts and personal board drafts are not published into the shared space.
+Azure serves the lightweight application shell. Cloudflare stores messages, replies, and briefings in the existing SQLite Durable Object binding. The assistant publishes structured comments through the connected GitHub account in issue #2. Cloudflare accepts only comments authored by owner ID 183016859, validates their schema, and imports them into SQLite. Ordinary visitors cannot publish assistant replies or briefings.
 
-## Assistant publishing
+Replies and briefings are data: publishing a comment does not redeploy either website or Worker. The site polls every 30 seconds while visible. Cloudflare checks GitHub at most once per five minutes when the inbox is read, shared across all visitors. Imported entries remain available if GitHub is unavailable. The reply-delivery status is reported separately from message storage.
 
-1. Open `/reader/` on the Azure website. Its visible JSON contains messages, posts, unanswered messages, and publisher health.
-2. Read `public/content/jarvis.json` from GitHub main with its current file SHA.
-3. Append a reply `{id, replyTo, body, createdAt}` or briefing `{id, title, body, createdAt}`. IDs must be UUIDs; timestamps ISO 8601. Reply target must be an existing user message. Preserve existing entries and skip already answered targets.
-4. Update that file using the GitHub connector and current SHA. On conflict, reread and merge. The existing Azure workflow publishes the updated file, normally within a minute or two.
-5. Refresh `/reader/`. Wait for the Azure deployment to succeed. Website polling is every 30 seconds while visible.
+The importer is append-only. Do not edit or delete published comments to correct entries: these changes do not remove already imported data. Reply targets and dated briefings are deduplicated. Conflicting publications preserve the first accepted entry and appear in reader diagnostics. GitHub pagination resumes after outages or large backlogs.
 
-Public visitors cannot alter the GitHub-deployed publication file. The backend retains messages if Azure publishing is delayed. The existing Worker record has a 100 KB cap; reaching it returns an explicit error and preserves the unsent draft. Export/archival is future work.
+## Safe rollout
 
-Recurring assistant execution is separate from website hosting. Never claim an hourly check or daily briefing is scheduled without verifying the automation. Quick Chat and additional modules are not implemented yet.
+`public/assets/config.js` contains `DIRECT_API_ENABLED`. While false, the main chat uses the existing legacy shared inbox and checked-in publication file. The reader tries the new API first and reports if the backend upgrade is unavailable. Enable the flag only after the live reader confirms version 6, the actual GitHub reply, and the Daily Board test. This prevents a delayed Cloudflare deployment from breaking the existing site.
+
+The new Worker retains legacy APIs for recovery. Old user messages and trusted checked-in replies/briefings are copied into the shared SQLite store without deleting originals. Legacy assistant/board API rows cannot acquire trusted publication status. Offline drafts and retry queues stay on the phone; successful sends are identified by UUID for safe retries.
+
+## Assistant handoff
+
+See [JARVIS-HANDOFF.md](JARVIS-HANDOFF.md). Scheduling is configured in a separate chat after live delivery is verified. Do not claim an hourly task is active until an actual scheduled run succeeds. Quick Chat and other modules remain future work.
 
 ## Deployment and costs
 
-Azure Static Web Apps **Free**, app `jarvis`, resource group `jarvis_group`. Only `public/` deploys to Azure, with no build step, API deployment, or media storage. Keep large media and datasets outside Azure.
+GitHub main is the source. Azure Static Web Apps **Free**, app `jarvis`, resource group `jarvis_group`, deploys `public/` using the existing workflow, with no frontend build or Azure API deployment. Keep large media and data outside Azure.
 
-Cloudflare uses the existing `jarvis-hub-api` Worker and existing SQLite Durable Object binding. Build settings: root `/backend`, no build command, deploy `npx wrangler deploy`. Alternatively root `/` with deploy `npx wrangler deploy --config backend/wrangler.jsonc`.
+Cloudflare uses the existing `jarvis-hub-api` Worker and existing `HUBS` SQLite Durable Object binding. Build settings: root `/backend`, build command empty, deploy command `npx wrangler deploy`, production branch `main`. No new binding or paid resource is required.
 
-Do not create or upgrade paid resources, enable paid plans, or enter billing information without explicit owner approval. No new infrastructure is required by this version.
+No paid upgrade, billing entry, or paid service is authorized. Free-tier limits can interrupt service. Public messages have an application cap of 200 new messages per UTC day, but this does not replace provider limits or a verified Free plan.
 
 ## Development
 
-Native JavaScript modules and system fonts; no frontend dependencies. Future modules can be separate directories under `public/`. Keep provider secrets out of the frontend.
+Native JavaScript modules and system fonts; no frontend dependencies. Add future routes under `public/`. Never place provider secrets in browser code.
 
-`npm test` checks persistence, public role restrictions, trusted publication filtering, retry deduplication, migration, preserved drafts, and compatibility of legacy data routes. Cloud deployments also require a live round-trip test.
-
-Legacy private API code remains only for compatibility and recovery. The active website no longer depends on device credentials or the old OAuth connector.
+Run `npm test`. Tests exercise migration, preserved drafts, untrusted-role rejection, SQLite pagination, owner-only publication parsing, retries, outage recovery, backlog continuation, and duplicate prevention. Before deploying, run a Wrangler dry-run; before activating the new UI adapter, verify the live reply and briefing round trip.

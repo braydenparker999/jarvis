@@ -1,4 +1,5 @@
-import {API_ORIGIN} from './config.js';
+import {API_ORIGIN,DIRECT_API_ENABLED} from './config.js';
+import {createDirectApi} from './direct-api.js';
 // Public namespace identifier, deliberately shipped to every visitor.
 // It grants no trusted publishing authority: ALL Worker assistant/board rows
 // are ignored. Only the GitHub-deployed, same-origin publication file is trusted.
@@ -36,4 +37,4 @@ export function createSharedApi(fetcher=fetch,origin=API_ORIGIN){
   throw Error('Unsupported inbox action');
  };
 }
-export const request=createSharedApi();
+export const request=DIRECT_API_ENABLED?createDirectApi():createSharedApi();

@@ -1,4 +1,6 @@
 import {connector,oauthStore} from './connector.js';
+import {sharedStore,SHARED_OBJECT,PUBLIC_KEY} from './shared.js';
+import {syncPublications} from './publications.js';
 const ALLOWED_ORIGIN = 'https://gray-meadow-09216fd10.1.azurestaticapps.net';
 const paths = new Set(['/v1/state', '/v1/messages', '/v1/board', '/v1/responder/connect', '/v1/responder/revoke', '/v1/agent/inbox', '/v1/agent/replies', '/v1/agent/board']);
 const digest = async value => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))),b=>b.toString(16).padStart(2,'0')).join('');
@@ -8,14 +10,32 @@ const publicState = state => ({messages:state.messages, posts:state.posts});
 const unanswered = state => state.messages.filter(m=>m.role==='user' && !state.messages.some(r=>r.kind==='reply' && r.replyTo===m.id));
 export default {
   async fetch(request, env) {
-    const connected=await connector(request,env);if(connected)return connected;
+    const connected=await connector(request,env,{syncShared,sharedInternal});if(connected)return connected;
     const origin=request.headers.get('Origin');
     if(origin && origin!==ALLOWED_ORIGIN) return json({error:'Origin not allowed'},403);
     const headers={'Access-Control-Allow-Origin':ALLOWED_ORIGIN,'Access-Control-Allow-Methods':'GET, POST, OPTIONS','Access-Control-Allow-Headers':'Authorization, Content-Type','Access-Control-Max-Age':'600','Vary':'Origin','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'};
     const reply=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{...headers,'Content-Type':'application/json'}});
     if(request.method==='OPTIONS') return new Response(null,{status:204,headers});
     const path=new URL(request.url).pathname;
-    if(path==='/health' && request.method==='GET') return reply({ok:true,mode:'connector-ready',version:4});
+    if(path==='/health' && request.method==='GET') return reply({ok:true,mode:'github-publications',version:6,publicationIssue:2});
+    if(path==='/shared/state' || path==='/shared/messages') {
+      if((path==='/shared/state'&&request.method!=='GET')||(path==='/shared/messages'&&request.method!=='POST'))return reply({error:'Method not allowed'},405);
+      let data;
+      if(request.method==='POST'){
+        if(!request.headers.get('Content-Type')?.startsWith('application/json'))return reply({error:'Expected JSON'},415);
+        const reader=request.body?.getReader();if(!reader)return reply({error:'Body required'},400);
+        const chunks=[];let size=0;
+        for(;;){const {done,value}=await reader.read();if(done)break;size+=value.length;if(size>20000){await reader.cancel();return reply({error:'Body too large'},413);}chunks.push(value);}
+        const bytes=new Uint8Array(size);let offset=0;for(const part of chunks){bytes.set(part,offset);offset+=part.length;}
+        try{const b=JSON.parse(new TextDecoder().decode(bytes));data={id:b.id,body:b.body};}catch{return reply({error:'Invalid JSON'},400);}
+      }
+      try {
+        await syncShared(env);
+        const suffix=path==='/shared/state'?'/state'+new URL(request.url).search:'/message';
+        const response=await sharedInternal(env,suffix,data);
+        return new Response(response.body,{status:response.status,headers:{...headers,'Content-Type':'application/json'}});
+      }catch{return reply({error:'Storage unavailable; retry later'},503);}
+    }
     if(!paths.has(path)) return reply({error:'Not found'},404);
     const readPath=path==='/v1/state' || path==='/v1/agent/inbox';
     if((readPath && request.method!=='GET') || (!readPath && request.method!=='POST')) return reply({error:'Method not allowed'},405);
@@ -64,6 +84,14 @@ export class Hub {
   constructor(ctx){this.ctx=ctx;}
   async fetch(request){
     const path=new URL(request.url).pathname;
+    if(path.startsWith('/internal/shared/')) {
+      if(path==='/internal/shared/state') {
+        // A single in-flight importer for the shared object, across all phones.
+        if(!this.publicationSync)this.publicationSync=syncPublications(this.ctx).finally(()=>{this.publicationSync=null;});
+        await this.publicationSync;
+      }
+      return sharedStore(this.ctx,path,request.method==='POST'?await request.json():{},new URL(request.url).searchParams);
+    }
     if(path==='/internal/oauth-store')return oauthStore(this.ctx.storage,await request.json());
     if(path==='/internal/register'){await this.ctx.storage.put('access',await request.json());return json({ok:true});}
     if(path==='/internal/access')return json(await this.ctx.storage.get('access') || {});
@@ -105,4 +133,15 @@ export class Hub {
       return json(publicState(state),201);
     });
   }
+}
+export async function sharedInternal(env,path,body) {
+  return env.HUBS.get(env.HUBS.idFromName(SHARED_OBJECT)).fetch(new Request('https://internal/internal/shared'+path,{method:body?'POST':'GET',body:body?JSON.stringify(body):undefined}));
+}
+export async function syncShared(env) {
+  // Keep importing old user messages during the transition. Old assistant rows
+  // are untrusted and never imported. No old inbox data is deleted.
+  const old=await env.HUBS.get(env.HUBS.idFromName(await digest(PUBLIC_KEY))).fetch(new Request('https://internal/v1/state'));
+  if(!old.ok)throw Error('Legacy inbox unavailable');
+  const imported=await sharedInternal(env,'/import',await old.json());
+  if(!imported.ok)throw Error('Inbox migration failed');
 }

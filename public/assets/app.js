@@ -38,10 +38,11 @@ function connection() {
   if (!API_ORIGIN) return 'Cloud setup pending';
   if (busy) return 'Syncing';
   if (!navigator.onLine || syncError) return navigator.onLine ? 'Sync unavailable' : 'Offline · drafts saved';
+  if (state.mode === 'github-publications' && state.publisher?.ok === false) return 'Replies delayed';
   return state.syncedAt ? 'Connected' : 'Connecting';
 }
 function drawShell() {
-  $('app').innerHTML = `<aside class="sidebar"><a class="brand" href="/" data-route="home"><span class="brand-mark">J</span><span>JARVIS<small>PERSONAL HUB</small></span></a><nav aria-label="Main navigation">${Object.entries(labels).map(([key,label])=>`<a href="${paths[key]}" data-route="${key}" ${key===route?'aria-current="page"':''}>${svg(key==='chat'?'chat':key==='board'?'board':'home')}<span>${label}</span></a>`).join('')}</nav><div class="sidebar-foot"><span class="status-dot"></span> Your space. One place.<small>VERSION 1.0</small></div></aside><div class="workspace"><header class="topbar"><span class="breadcrumb">PERSONAL / <strong>${labels[route].toUpperCase()}</strong></span><button class="connection" id="connection-button" aria-label="Connection details"><span class="status-dot ${API_ORIGIN && state?.syncedAt && !syncError?'':'pending'}"></span><span>${connection()}</span></button></header><main id="content"></main><footer class="footnote">JARVIS <span>Built one useful thing at a time.</span></footer></div>`;
+  $('app').innerHTML = `<aside class="sidebar"><a class="brand" href="/" data-route="home"><span class="brand-mark">J</span><span>JARVIS<small>PERSONAL HUB</small></span></a><nav aria-label="Main navigation">${Object.entries(labels).map(([key,label])=>`<a href="${paths[key]}" data-route="${key}" ${key===route?'aria-current="page"':''}>${svg(key==='chat'?'chat':key==='board'?'board':'home')}<span>${label}</span></a>`).join('')}</nav><div class="sidebar-foot"><span class="status-dot"></span> Your space. One place.<small>VERSION 1.0</small></div></aside><div class="workspace"><header class="topbar"><span class="breadcrumb">PERSONAL / <strong>${labels[route].toUpperCase()}</strong></span><button class="connection" id="connection-button" aria-label="Connection details"><span class="status-dot ${API_ORIGIN && state?.syncedAt && !syncError && state.publisher?.ok !== false?'':'pending'}"></span><span>${connection()}</span></button></header><main id="content"></main><footer class="footnote">JARVIS <span>Built one useful thing at a time.</span></footer></div>`;
   $('connection-button').onclick = showConnection;
   drawPage();
 }
@@ -82,7 +83,7 @@ function drawBoard() {
 }
 function showConnection() {
   $('connection-state').textContent = connection();
-  $('connection-detail').textContent = !API_ORIGIN ? 'Your hub is live. Cloud storage is awaiting connection. Messages and board entries currently save only in this browser; clearing browser data will remove them.' : syncError || (state.syncedAt ? `Last synced ${time(state.syncedAt)}. One shared inbox. Messages are stored in Cloudflare; replies and briefings publish through this website.` : 'Opening the shared inbox.');
+  $('connection-detail').textContent = !API_ORIGIN ? 'Your hub is live. Cloud storage is awaiting connection. Messages and board entries currently save only in this browser; clearing browser data will remove them.' : syncError || (state.syncedAt ? `Last synced ${time(state.syncedAt)}. One shared inbox. Messages are stored in Cloudflare.${state.mode === 'github-publications' ? (state.publisher?.ok ? ' Replies and briefings are connected.' : ' Your messages remain saved. Reply delivery is temporarily delayed: ' + (state.publisher?.error || 'waiting for publication sync')) : ' Publication upgrade pending.'}` : 'Opening the shared inbox.');
   $('sync-now').hidden = !API_ORIGIN || !!storageError;
   $('sync-now').disabled = busy;
   $('connection-dialog').showModal();
