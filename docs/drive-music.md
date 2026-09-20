@@ -25,3 +25,14 @@ Use a private key file outside the repository. Review the output and publish thr
 `npm test` covers Drive pagination, recursive folders, key-free stored metadata, source isolation, failed reads, waveform revision validation, and every generated binary waveform. Browser verification must prove actual playback, seeking, switching tracks, and persistence. Screen-lock/background behavior on the physical restricted Android remains a device test, not something a desktop cloud browser can prove.
 
 Baseline before Drive: source `55f338a3aecb3898c88665f22310fd14e9d024c1`; Storage deployment `6bc585cf3995bb24356cc31fc374703c80724048`. Use the workflow's pre-deployment blob backup or revert source and the release pin. If reverting an already-used browser, first remove Drive through its settings so an older player does not mistake persisted Drive tracks for A15 tracks. No files were changed or deleted in the source Drive folder.
+
+
+## Embedded metadata after a Drive remux
+
+Drive's file listing does not expose embedded music tags. DrawerCast now reads bounded byte ranges for visible songs and the selected song, using its existing tag parser. Opus/Ogg tags and embedded artwork are read from the file header; the full song is never downloaded for metadata or waveform analysis. Range responses must be exact HTTP 206 responses, with a 2 MiB / 8 request ceiling per metadata job. A refused range is cancelled. Jobs run one at a time, pause new work while playback buffers, prioritize the selected track, and cancel abandoned cover reads when tracks change.
+
+Tags and 220px artwork thumbnails are cached in IndexedDB. Cache validity includes Drive ID, MD5 and file size; refresh preserves unchanged metadata and invalidates changed content. Numbered `track - artist - title.opus` filenames give immediate display labels until real tags arrive. Album/category metadata fills as songs are inspected; a complete prebuilt Drive catalog remains a future option for large libraries. No automatic full-library metadata scan or waveform preparation is added.
+
+The now-playing cover clears on selection rather than showing the previous track while loading. The normal player visualization redraws at most 30 times per second; fullscreen visualization retains the normal animation rate. Actual first-play latency still depends on Drive and the connection. Muse replaced the initial 50 files with new Drive IDs, so the old prepared waveforms cannot be reused blindly.
+
+Rollback for this fix: source `9a537718b28ee1e4c905864e4ae1b3546d9fc7ae`, Storage deployment `856140c507f900b0bd8304c1187b63b41f4ec139`. The existing Storage deployment creates its normal pre-upload blob backup. Drive music and Azure federation are unchanged.

@@ -56,19 +56,56 @@ export function createDriveApi(key, fetcher = fetch) {
     }
     return {id:root,name:info.name,files:[...files.values()]};
   }
-  return {list,mediaURL};
+  // Metadata reads are bounded byte ranges, never full-track downloads.
+  function metadataFile(track, signal) {
+    const size=Number(track.size), blocks=[];
+    let budget=0, count=0;
+    if(!Number.isSafeInteger(size)||size<=0)throw Error('Invalid audio file size.');
+    return {size, slice(start=0,end=size){
+      start=Math.max(0,start<0?size+start:start);end=Math.min(size,end);
+      return {async arrayBuffer(){
+        if(signal?.aborted)throw new DOMException('Aborted','AbortError');
+        const cached=blocks.find(b=>start>=b.start&&end<=b.end);
+        if(cached)return cached.bytes.slice(start-cached.start,end-cached.start).buffer;
+        const length=Math.max(end-start,Math.min(128*1024,size-start));
+        if(length<=0)return new ArrayBuffer(0);
+        if(++count>8||budget+length>2*1024*1024)throw Error('Embedded artwork exceeds the metadata read budget.');
+        budget+=length;
+        const stop=start+length;
+        const response=await fetcher(mediaURL({id:track.remoteId}),{signal,credentials:'omit',referrerPolicy:'no-referrer',headers:{Range:'bytes='+start+'-'+(stop-1)}});
+        const range=response.headers.get('content-range');
+        if(response.status!==206||range!==`bytes ${start}-${stop-1}/${size}`){
+          await response.body?.cancel();throw Error('Drive did not return the requested metadata range.');
+        }
+        const reader=response.body?.getReader();if(!reader)throw Error('Missing metadata response.');
+        const chunks=[];let total=0;
+        try{while(true){const {done,value}=await reader.read();if(done)break;total+=value.length;if(total>length)throw Error('Metadata response exceeded its byte range.');chunks.push(value);}}
+        finally{await reader.cancel();}
+        if(total!==length)throw Error('Incomplete metadata response.');
+        const bytes=new Uint8Array(total);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.length;}
+        blocks.push({start,end:stop,bytes});return bytes.slice(0,end-start).buffer;
+      }};
+    }};
+  }
+  return {list,mediaURL,metadataFile};
 }
 export function driveTrack(file, root, prepared, old = {}) {
-  const match = prepared && prepared.md5 === file.md5Checksum && prepared.size === Number(file.size);
-  const meta = match ? prepared : {};
-  const ext = file.name.split('.').at(-1).toLowerCase();
+  const same=!!file.md5Checksum && old.md5===file.md5Checksum && old.size===Number(file.size);
+  const match=!!prepared && prepared.md5===file.md5Checksum && prepared.size===Number(file.size);
+  const meta=match?prepared:(same&&old.driveTagVersion===1?old:{});
+  const ext=file.name.split('.').at(-1).toLowerCase();
+  const stem=file.name.replace(/\.[^.]+$/, '').replace(/^\d+\s*-\s*/, '').replace(/\s*\[[A-Za-z0-9_-]{11}\]$/, '');
+  const named=/^\d+\s*-\s*(.+?)\s+-\s+(.+)\.[^.]+$/.exec(file.name);
   return {...old, id:'gd_'+file.id, remote:true, source:'drive', remoteId:file.id, driveFolder:root,
-    title:meta.title || file.name.replace(/\.[^.]+$/, '').replace(/^\d+\s*-\s*/, '').replace(/\s*\[[A-Za-z0-9_-]{11}\]$/, ''),
-    artist:meta.artist || '', album:meta.album || '', albumArtist:meta.albumArtist || '', genre:meta.genre || '',
+    title:meta.title || named?.[2] || stem,
+    artist:meta.artist || named?.[1] || '', album:meta.album || '', albumArtist:meta.albumArtist || '', genre:meta.genre || '',
+    composer:meta.composer||'', year:meta.year||0, track:meta.track||0, disc:meta.disc||0,
+    artKey:same?old.artKey||null:null, customArt:same?old.customArt||false:false, driveTagVersion:same?old.driveTagVersion||0:0,
+    rgTrack:meta.rgTrack,rgAlbum:meta.rgAlbum,rgTrackPeak:meta.rgTrackPeak,rgAlbumPeak:meta.rgAlbumPeak,
     folder:'Google Drive/'+file.folder, path:file.folder+'/'+file.name, ext, mimeType:file.mimeType,
     size:Number(file.size)||0, mtime:Date.parse(file.modifiedTime)||0, md5:file.md5Checksum || '',
-    dur:meta.dur || (old.md5 === file.md5Checksum ? old.dur || 0 : 0), sr:meta.sr||0, ch:meta.ch||0,
-    codec:meta.codec||'', bits:0, rootId:null, rel:null, missing:false, needsPerm:false, errored:false,
+    dur:meta.dur || (same ? old.dur || 0 : 0), sr:meta.sr||0, ch:meta.ch||0,
+    codec:meta.codec||'', bits:meta.bits||0, rootId:null, rel:null, missing:false, needsPerm:false, errored:false,
     waveformVersion:match && meta.waveform ? 1 : 0,
     waveformFile:match && meta.waveform ? '/drawercast/drive-waveforms/'+file.id+'.dcw' : null,
     rating:old.rating||0, plays:old.plays||0, lastPlayed:old.lastPlayed||0, added:old.added||Date.now()};

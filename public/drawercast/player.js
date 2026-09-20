@@ -666,7 +666,7 @@ function parseOgg(b,out,skipArt){
     if(pk.length<8) continue;
     const head=TDL.decode(pk.slice(0,8));
     if(head==='OpusHead'){
-      out.codec='opus'; out.channels=pk[9]; out.sampleRate=48000; out.bits=out.bits||16;
+      out.codec='opus'; out.channels=pk[9]; out.sampleRate=48000;
     } else if(head==='OpusTags'){
       parseVorbisComments(pk,8,out,skipArt);
       out.codec='opus';
@@ -787,7 +787,7 @@ function mergeTags(dst, src){
 async function readTags(file, opts){
   opts=opts||{};
   /* when reads are expensive, one big read already contains the art */
-  const skipArt=!!opts.skipArt && !IOSTAT.slow;
+  const skipArt=!!opts.skipArt && (opts.remote || !IOSTAT.slow);
   const out={};
   let reads=0;
   const now=function(){ return (typeof performance!=='undefined'?performance.now():Date.now()); };
@@ -798,7 +798,7 @@ async function readTags(file, opts){
     reads++;
     const t0=now();
     const extra=new Uint8Array(await file.slice(state.have, n).arrayBuffer());
-    ioNote(now()-t0);
+    if(!opts.remote)ioNote(now()-t0);
     if(!state.buf){ state.buf=extra; }
     else {
       const merged=new Uint8Array(state.have+extra.length);
@@ -814,11 +814,11 @@ async function readTags(file, opts){
     reads++;
     const t0=now();
     const t=new Uint8Array(await file.slice(file.size-n).arrayBuffer());
-    ioNote(now()-t0);
+    if(!opts.remote)ioNote(now()-t0);
     return t;
   };
   try{
-    let b=await need(IOSTAT.slow ? 256*1024 : 32*1024);
+    let b=await need(opts.remote ? 128*1024 : IOSTAT.slow ? 256*1024 : 32*1024);
     const sig4=TDL.decode(b.slice(0,4));
 
     if(sig4.slice(0,3)==='ID3'){
@@ -869,7 +869,7 @@ async function readTags(file, opts){
       try{
         /* the granule position lives at the end of the file - on slow storage
            that second read is deferred to a background pass after the scan */
-        if(IOSTAT.slow && !opts.wantDuration){ out.needDur=true; throw 0; }
+        if(opts.headerOnly || (IOSTAT.slow && !opts.wantDuration)){ out.needDur=true; throw 0; }
         const t=await tail(64*1024);
         let lastPage=-1;
         for(let i=t.length-27;i>=0;i--){
@@ -912,7 +912,7 @@ async function readTags(file, opts){
       mp3Duration(b,0,file.size,out);
     }
 
-    if(!out.title && file.size>128){
+    if(!opts.headerOnly && !out.title && file.size>128){
       const t=await tail(128);
       if(TDL.decode(t.slice(0,3))==='TAG'){
         const g=function(a,z){ return clean(TDL.decode(t.slice(a,z))); };
@@ -922,7 +922,7 @@ async function readTags(file, opts){
         if(ID3GENRES[t[127]]) out.genre=ID3GENRES[t[127]];
       }
     }
-  }catch(e){}
+  }catch(e){if(opts.throwErrors)throw e;}
   out._reads=reads;
   out._slow=IOSTAT.slow;
   return out;
@@ -1139,8 +1139,9 @@ const MetadataRepair={
 };
 /* small=true returns the cached 220px thumbnail used by lists */
 async function getArtURL(t, small){
-  await MetadataRepair.ensure(t);
-  if(t && t.remote && !t.artKey) return DrawerCast.artURL(t);
+  if(t?.source==='drive') await DriveSource.ensureMetadata(t);
+  else await MetadataRepair.ensure(t);
+  if(t && t.remote && !t.artKey) return t.source==='drive'?null:DrawerCast.artURL(t);
   if(!t || !t.artKey) return null;
   const key = small ? t.artKey+'_t' : t.artKey;
   if(artURLs.has(key)) return artURLs.get(key) || (small ? getArtURL(t,false) : null);
@@ -2164,7 +2165,7 @@ const DriveSource={
   async install(){
     PAGES.root.items.unshift(S_act('Google Drive Music','Stream your shared music folder',()=>this.show(),'folder'));
     try{
-      this.helper=await import('./drive-api.js');
+      this.helper=await import('./drive-api.js?v=metadata-r13');
       const response=await fetch('/assets/drive-config.json',{cache:'no-store',signal:AbortSignal.timeout(15000)});
       if(!response.ok)throw Error('Drive configuration could not be loaded.');
       const config=await response.json();this.api=this.helper.createDriveApi(config.apiKey);
@@ -2181,10 +2182,59 @@ const DriveSource={
     return {__remoteURL:this.api.mediaURL({id:t.remoteId}),name:baseName(t.path),size:t.size,type:t.mimeType};
   },
   waveformURL(t){return t.waveformVersion===1?t.waveformFile:null;},
+  tagJobs:new Map(),tagQueue:[],tagFailures:new Set(),tagActive:null,tagTimer:null,
+  prioritize(t){if(this.tagActive&&this.tagActive.t.id!==t?.id)this.tagActive.controller?.abort();},
+  ensureMetadata(t){
+    if(!t||t.source!=='drive'||t.driveTagVersion===1||!this.api)return Promise.resolve();
+    const key=t.id+'|'+t.md5+'|'+t.size;
+    if(this.tagFailures.has(key))return Promise.resolve();
+    if(this.tagJobs.has(key))return this.tagJobs.get(key);
+    const job=new Promise(resolve=>this.tagQueue.push({t,key,resolve}));this.tagJobs.set(key,job);this.pumpTags();return job;
+  },
+  pumpTags(){
+    if(this.tagActive||!this.tagQueue.length)return;
+    clearTimeout(this.tagTimer);
+    // Let audio acquire its first playable buffer before starting cover requests.
+    if(Engine.playing && Engine.el().readyState<3){this.tagTimer=setTimeout(()=>this.pumpTags(),500);return;}
+    const current=this.tagQueue.findIndex(j=>j.t.id===Engine.current?.id);
+    const job=this.tagQueue.splice(current<0?0:current,1)[0];
+    if(LIB.map.get(job.t.id)?.md5!==job.t.md5){this.tagJobs.delete(job.key);job.resolve();this.pumpTags();return;}
+    this.tagActive=job;
+    this.readMetadata(job.t).catch(e=>{if(e.name!=='AbortError')this.tagFailures.add(job.key);}).finally(()=>{
+      this.tagActive=null;this.tagJobs.delete(job.key);job.resolve();this.tagTimer=setTimeout(()=>this.pumpTags(),50);
+    });
+  },
+  async readMetadata(t){
+    const controller=new AbortController();if(this.tagActive)this.tagActive.controller=controller;
+    const timeout=setTimeout(()=>controller.abort(),25000);let tags;
+    try{const file=this.api.metadataFile(t,controller.signal);tags=await readTags(file,{remote:true,headerOnly:true,throwErrors:true});}
+    finally{clearTimeout(timeout);}
+    if(controller.signal.aborted)return;
+    const live=LIB.map.get(t.id);if(!live||live.md5!==t.md5||live.size!==t.size)return;
+    const update={driveTagVersion:1};
+    for(const key of ['title','artist','album','albumArtist','genre','composer','year','track','disc','rgTrack','rgAlbum','rgTrackPeak','rgAlbumPeak'])if(tags[key]!=null)update[key]=tags[key];
+    if(tags.sampleRate)update.sr=tags.sampleRate;if(tags.channels)update.ch=tags.channels;if(tags.codec)update.codec=tags.codec;
+    if(tags.bits)update.bits=tags.bits;
+    if(tags.pic?.data?.length>100&&!live.customArt){
+      const key='drive-'+hash(t.id+'|'+t.md5+'|'+t.size);
+      await storeArt(key,new Blob([tags.pic.data],{type:tags.pic.mime}));update.artKey=key;
+      artURLs.delete(key);artURLs.delete(key+'_t');
+    }
+    const target=LIB.map.get(t.id);if(!target||target.md5!==t.md5||target.size!==t.size)return;
+    Object.assign(target,update);Object.assign(live,update);if(t!==live)Object.assign(t,update);persistTrack(target);
+    // Update existing labels without rebuilding lists while the user is scrolling.
+    for(const row of document.querySelectorAll('[data-id]')){
+      if(row.dataset.id!==t.id)continue;
+      const title=row.querySelector('.t1'),sub=row.querySelector('.t2');
+      if(title&&!SET.listUiFilenameAsTitle){const stars=title.querySelector('.list-stars');title.textContent=(SET.trackNumType===3&&live.track?live.track+'. ':'')+live.title;if(stars)title.appendChild(stars);}
+      if(sub)sub.textContent=(nativeValues().use_albumartist?(live.albumArtist||trackArtist(live)):trackArtist(live))+' — '+trackAlbum(live);
+    }
+    if(Engine.current?.id===t.id){Object.assign(Engine.current,update);UI.renderNowPlaying(Engine.current);}
+  },
   async connect(value,quiet=false){
     if(this.busy)return false;
     if(!this.api){this.error='Drive configuration is unavailable. Reload the page and try again.';return false;}
-    this.busy=true;this.error='';this.status='Reading Drive…';
+    this.busy=true;this.error='';this.status='Reading Drive…';this.tagFailures.clear();
     const controller=new AbortController();this.controller=controller;
     const timeout=setTimeout(()=>controller.abort(),90000);
     try{
@@ -2432,6 +2482,7 @@ const Engine = {
     if(!t) return;
     if(t.source==='drive'&&!DriveSource.api){DriveSource.show();return;}
     if(t.remote && t.source!=='drive' && !DrawerCast.canPlay(t)){ DrawerCast.show(); return; }
+    DriveSource.prioritize(t);
     const request=++this._playRequest || (this._playRequest=1);
     const wasPlaying = autoplay!==false;
     this.current=t;
@@ -2849,6 +2900,7 @@ const UI = {
       $('#mini').hidden=true;
       return;
     }
+    if(UI.artTrackId!==t.id){UI.artTrackId=t.id;UI.setArtEl($('#artA'),null);UI.setArtEl($('#mini-art'),null);UI.setBackground(null);}
     title.innerHTML='<span>'+esc(t.title)+'</span>';
     sub.innerHTML='<span>'+esc(trackSub(t))+'</span>';
     $('#mini-title').textContent=t.title;
@@ -2859,6 +2911,8 @@ const UI = {
     UI.renderMeta();
     const [url,thumb] = await Promise.all([getArtURL(t),getArtURL(t,true)]);
     if(Engine.current?.id!==t.id)return;
+    title.innerHTML='<span>'+esc(t.title)+'</span>';sub.innerHTML='<span>'+esc(trackSub(t))+'</span>';
+    $('#mini-title').textContent=t.title;$('#mini-sub').textContent=trackSub(t);
     UI.renderMeta();
     UI.curArtURL=url;
     const cardA=$('#artA');
@@ -2948,7 +3002,7 @@ const UI = {
       const visible = document.visibilityState==='visible';
       /* full rate only where it shows: progress elsewhere ticks a few times a second */
       if(ts-UI.lastProg>(onPlayer?100:240)||UI.seekDragging){ UI.lastProg=ts; UI.renderProgress(); }
-      if(visible && (UI.vizFull || onPlayer)) UI.drawViz();
+      if(visible && (UI.vizFull || onPlayer) && (UI.vizFull || ts-(UI.lastViz||0)>=1000/30)){UI.lastViz=ts;UI.drawViz();}
       if((Engine.playing || UI.vizFull || (onPlayer && UI.settling)) && visible) UI.loopId=requestAnimationFrame(step);
       else if(Engine.playing) UI.loopId=setTimeout(function(){ UI.loopId=0; UI.startLoop(); }, 1000);
     };
@@ -3848,7 +3902,8 @@ async function exportTrack(t){
   setTimeout(function(){ URL.revokeObjectURL(u); }, 4000);
 }
 async function infoDialog(t){
-  await MetadataRepair.ensure(t);
+  if(t?.source==='drive') await DriveSource.ensureMetadata(t);
+  else await MetadataRepair.ensure(t);
   const rows=[
     ['Title',t.title],['Artist',t.artist||'-'],['Album artist',t.albumArtist||'-'],
     ['Album',t.album||'-'],['Genre',t.genre||'-'],['Year',t.year||'-'],
