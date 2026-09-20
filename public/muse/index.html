@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#121212">
+  <title>Muse · Jarvis</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/assets/shell.css">
+  <link rel="stylesheet" href="/assets/muse.css">
+  <script type="module" src="/assets/muse.js"></script>
+</head>
+<body>
+  <div class="workspace muse">
+    <header class="topbar"><a class="text-button" href="/" aria-label="Back to Jarvis">← Jarvis</a><span class="brand">Muse</span><div class="toolbar-actions"><button class="text-button" id="refresh">Refresh</button><button class="text-button" id="setup">Setup</button></div></header>
+    <main>
+      <p class="muse-note">Your Muse agent · Conversation shared across your devices</p>
+      <p class="muse-note">Replies arrive when Muse checks your inbox, then can take up to five minutes to appear. <span id="last-reply"></span></p>
+      <section class="messages" id="messages" aria-label="Muse conversation"></section>
+      <p id="error" role="alert" hidden></p>
+      <form class="composer" id="composer">
+        <label class="sr-only" for="prompt">Message Muse</label>
+        <textarea id="prompt" rows="3" placeholder="Ask Muse something…" required></textarea>
+        <div class="composer-bottom"><span id="status" role="status">Connecting…</span><button class="primary" id="send">Send</button></div>
+      </form>
+      <p class="muse-note">Your messages and replies are public. Muse setup controls automatic checks; this page does not confirm that a schedule is active.</p>
+    </main>
+  </div>
+  <dialog id="setup-dialog" aria-labelledby="setup-heading">
+    <div class="dialog-heading"><h2 id="setup-heading">Automatic Muse replies</h2><button class="close" id="close-setup" aria-label="Close setup">×</button></div>
+    <p>Paste these instructions into your existing Muse conversation. They reuse the GitHub connection you already verified and ask Muse to check this inbox every 15 minutes.</p>
+    <p>Muse must confirm the task exists and complete a scheduled test before automatic replies are verified.</p>
+    <label class="sr-only" for="setup-text">Muse setup instructions</label>
+    <textarea id="setup-text" rows="9" readonly></textarea>
+    <button class="primary" id="copy-setup">Copy instructions</button>
+    <a class="text-link" href="/muse/setup.txt" target="_blank" rel="noopener">Read full instructions</a>
+    <p id="copy-status" role="status"></p>
+  </dialog>
+  <noscript><p>Enable JavaScript to use Muse.</p></noscript>
+</body>
+</html>

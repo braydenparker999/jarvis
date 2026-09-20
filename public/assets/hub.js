@@ -1,6 +1,7 @@
 export const apps = [
   {id:'jarvis',name:'Jarvis',description:'Messages',href:'/jarvis/',icon:'chat',group:'Conversation'},
   {id:'quick-ai',name:'Quick AI',description:'Fast answers · Groq',href:'/quick-ai/',icon:'chat',group:'Conversation'},
+  {id:'muse',name:'Muse',description:'Your agent · Shared conversation',href:'/muse/',icon:'chat',group:'Conversation'},
   {id:'board',name:'Daily Board',description:'Your briefing',href:'/daily-board/',icon:'board',group:'Conversation'},
   {id:'drawercast',name:'DrawerCast',description:'Music',href:'/drawercast/',icon:'music',group:'Library'},
   {id:'media',name:'Media',description:'Astra · Videos',href:'/media/',icon:'media',group:'Library'},

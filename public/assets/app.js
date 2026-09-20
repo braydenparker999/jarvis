@@ -2,6 +2,7 @@ import { apps, icon, loadPreferences, savePreferences, renderUtility } from './h
 import { API_ORIGIN } from './config.js';
 import { request } from './shared-api.js';
 import { STORAGE_KEY, LEGACY_KEY, readState, mergeState } from './shared-store.js';
+import { channelMessages } from './channels.js';
 
 const $ = id => document.getElementById(id);
 const icons = {
@@ -95,7 +96,8 @@ function drawSettings() {
   $('settings-favorites').onclick=editFavorites;
 }
 function drawChat() {
-  $('content').innerHTML = `<section class="page-heading"><div><p class="eyebrow">MESSAGES</p><h1>Jarvis</h1></div><span class="pill">${API_ORIGIN?'INBOX':'DRAFT MODE'}</span></section><section class="chat-panel"><div class="chat-notice">${API_ORIGIN?'Messages and replies, shared across your phones. Replies are asynchronous.':'Cloud messaging is not connected yet. Your drafts stay on this device and have not been sent.'}</div><div class="messages" id="messages" aria-label="Conversation">${state.messages.length?state.messages.map(messageMarkup).join(''):`<div class="chat-empty"><h2>A place to pick up your thoughts.</h2><p>Write a message below. ${API_ORIGIN?'Messages appear here when saved.':'It will wait here until cloud messaging is ready.'}</p></div>`}</div><form class="composer" id="message-form"><label class="sr-only" for="message-text">Message Jarvis</label><textarea id="message-text" rows="2" maxlength="4000" placeholder="Write something…" required>${escape(state.composer || '')}</textarea><div class="composer-bottom"><span>${API_ORIGIN?'Enter to send · Shift + Enter for a new line':'Saved on this device · not sent'}</span><button class="primary" type="submit" id="send-message">${API_ORIGIN?'Send':'Save draft'} ${svg('send')}</button></div></form></section>`;
+  const visibleMessages = channelMessages(state.messages);
+  $('content').innerHTML = `<section class="page-heading"><div><p class="eyebrow">MESSAGES</p><h1>Jarvis</h1></div><span class="pill">${API_ORIGIN?'INBOX':'DRAFT MODE'}</span></section><section class="chat-panel"><div class="chat-notice">${API_ORIGIN?'Messages and replies, shared across your phones. Replies are asynchronous.':'Cloud messaging is not connected yet. Your drafts stay on this device and have not been sent.'}</div><div class="messages" id="messages" aria-label="Conversation">${visibleMessages.length?visibleMessages.map(messageMarkup).join(''):`<div class="chat-empty"><h2>A place to pick up your thoughts.</h2><p>Write a message below. ${API_ORIGIN?'Messages appear here when saved.':'It will wait here until cloud messaging is ready.'}</p></div>`}</div><form class="composer" id="message-form"><label class="sr-only" for="message-text">Message Jarvis</label><textarea id="message-text" rows="2" maxlength="4000" placeholder="Write something…" required>${escape(state.composer || '')}</textarea><div class="composer-bottom"><span>${API_ORIGIN?'Enter to send · Shift + Enter for a new line':'Saved on this device · not sent'}</span><button class="primary" type="submit" id="send-message">${API_ORIGIN?'Send':'Save draft'} ${svg('send')}</button></div></form></section>`;
   $('message-text').oninput = e => { try { commit({ ...state, composer: e.target.value }); } catch { notify('Could not save your draft. Keep this page open and copy your text.'); } };
   $('message-text').onkeydown = e => { if (e.key==='Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); $('message-form').requestSubmit(); } };
   $('message-form').onsubmit = e => { e.preventDefault(); submitMessage(); };
