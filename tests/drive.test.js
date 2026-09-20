@@ -52,7 +52,7 @@ const source=await readFile(new URL('../public/drawercast/player.js',import.meta
 function integration({fail=false}={}){
   const tracks=new Map([['a15',{id:'a15',remote:true}],['local',{id:'local'}],['gd_old12345678',{id:'gd_old12345678',source:'drive'}]]);
   const removed=[];const component=source.slice(source.indexOf('const DriveSource={'),source.indexOf('\nconst Engine = {'));
-  const context=vm.createContext({AbortController,setTimeout,clearTimeout,LIB:{map:tracks},
+  const context=vm.createContext({AbortController,setTimeout,clearTimeout,SourceLibrary:{enabled:()=>true},sourceTrackEnabled:t=>!!t,MusicSources:{refresh(){}},LIB:{map:tracks},
     allTracks:()=>[...tracks.values()],IDB:{async bulk(){}},libAdd:t=>tracks.set(t.id,t),
     async removeTracks(ids){removed.push(...ids);ids.forEach(id=>tracks.delete(id));},
     Engine:{queue:[],current:null,buildOrder(){this.order=this.queue.map((_,i)=>i);},saveState(){},stop(){}},

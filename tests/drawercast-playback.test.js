@@ -39,7 +39,7 @@ test('rapid manual Drive skips select immediately without awaiting cloud crossfa
   const calls=[],fades=[];
   const Engine={queue:[{id:'one',source:'drive'},{id:'two',source:'drive'},{id:'three',source:'drive'}],current:{id:'one',source:'drive'},playing:true,
     el:()=>({ended:false}),async playIndex(index){this.current=this.queue[index];calls.push(index);}};
-  const ctx=vm.createContext({Engine,PlaybackTransitions:{cancel(){},to(index){fades.push(index);return new Promise(()=>{});}},
+  const ctx=vm.createContext({sourceTrackEnabled:t=>!!t,Engine,PlaybackTransitions:{cancel(){},to(index){fades.push(index);return new Promise(()=>{});}},
     nativeValues:()=>({fade_manual_advance:1}),clearTimeout,SET:{crossfadeLen:2}});
   const wrapper=source.slice(source.indexOf('  const playIndex=Engine.playIndex;'),source.indexOf('  Engine.setGain=function(i,value,ms)'));
   vm.runInContext(wrapper,ctx);
