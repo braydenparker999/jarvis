@@ -52,3 +52,28 @@ API routes:
 All protected routes require `Authorization: Bearer <credential>`. Keys are stored in the corresponding browser's local storage; only hashes identify server records. CORS permits the Azure site. There is no global inbox. An agent must connect to the owner's workspace before it can read phone messages. Existing drafts and messages are preserved. Workspace message/board data is limited to 100 KB; export and archival are future work.
 
 Run `npm test` (Node 24, no dependencies). Tests cover persistence, isolation, validation, retry behavior, draft merging, unanswered filtering, responder rotation/revocation and reply target checks. Cloud deployments need a separate live test. Never claim a scheduled task exists unless its creation and required connector access have succeeded.
+
+
+## ChatGPT connector (0.4, integration pending)
+
+MCP URL: `https://jarvis-hub-api.braydenparker999.workers.dev/mcp`
+
+The existing Worker now exposes streamable HTTP tools for inbox reading, replying,
+and briefing publication. OAuth uses authorization code + S256 PKCE, a fixed
+ChatGPT redirect allowlist, one-use 5-minute codes, one-hour access tokens and
+rotating refresh tokens. Refresh access lasts until owner revocation. No new
+Azure/Cloudflare resources, AI provider, or paid plan are configured.
+
+Connect from ChatGPT Plugins using OAuth and dynamic client registration, then
+open the authorization screen in the same browser that holds the Jarvis workspace.
+The owner approves the three displayed scopes there; the owner key never leaves
+Jarvis's existing frontend/backend path. No bearer code is pasted into ChatGPT.
+`Disconnect responder` revokes both manual responder and OAuth access.
+
+Official setup: https://developers.openai.com/plugins/deploy/connect-chatgpt
+Official authentication: https://developers.openai.com/plugins/build/auth
+
+Do not call this 1.0 complete until a real connected tool reads the user's inbox,
+posts a reply, and publishes a briefing. Hourly automation still requires a verified
+connector and a model/usage choice compatible with the user's no-Astra preference.
+Quick Chat still needs a verified free provider and secure provider credentials.

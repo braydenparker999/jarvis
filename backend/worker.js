@@ -1,3 +1,4 @@
+import {connector,oauthStore} from './connector.js';
 const ALLOWED_ORIGIN = 'https://gray-meadow-09216fd10.1.azurestaticapps.net';
 const paths = new Set(['/v1/state', '/v1/messages', '/v1/board', '/v1/responder/connect', '/v1/responder/revoke', '/v1/agent/inbox', '/v1/agent/replies', '/v1/agent/board']);
 const digest = async value => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))),b=>b.toString(16).padStart(2,'0')).join('');
@@ -7,6 +8,7 @@ const publicState = state => ({messages:state.messages, posts:state.posts});
 const unanswered = state => state.messages.filter(m=>m.role==='user' && !state.messages.some(r=>r.kind==='reply' && r.replyTo===m.id));
 export default {
   async fetch(request, env) {
+    const connected=await connector(request,env);if(connected)return connected;
     const origin=request.headers.get('Origin');
     if(origin && origin!==ALLOWED_ORIGIN) return json({error:'Origin not allowed'},403);
     const headers={'Access-Control-Allow-Origin':ALLOWED_ORIGIN,'Access-Control-Allow-Methods':'GET, POST, OPTIONS','Access-Control-Allow-Headers':'Authorization, Content-Type','Access-Control-Max-Age':'600','Vary':'Origin','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'};
@@ -62,6 +64,7 @@ export class Hub {
   constructor(ctx){this.ctx=ctx;}
   async fetch(request){
     const path=new URL(request.url).pathname;
+    if(path==='/internal/oauth-store')return oauthStore(this.ctx.storage,await request.json());
     if(path==='/internal/register'){await this.ctx.storage.put('access',await request.json());return json({ok:true});}
     if(path==='/internal/access')return json(await this.ctx.storage.get('access') || {});
     if(path==='/internal/authorize'){await this.ctx.storage.put('responder',await request.json());return json({ok:true});}
