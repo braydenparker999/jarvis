@@ -10,17 +10,17 @@ Mobile-first personal hub: Home, Jarvis messages, and assistant-published Daily 
 
 Every phone opens the same website. No account, password, device linking, or plugin setup. The owner explicitly chose public access: anyone who discovers the website can read messages and post regular messages. Only changes to this GitHub repository can publish trusted Jarvis replies and briefings.
 
-The frontend calls `/shared/state` and `/shared/messages`. One existing Cloudflare Durable Object stores the conversation. Drafts and retry queues remain in browser storage when offline. Original private inboxes remain intact; opening the updated website on an original phone copies its user messages into the shared inbox once. Old delivery receipts and personal board drafts are not published into the shared space.
+The frontend adapter uses the already deployed `/v1/state` and `/v1/messages` endpoints with one deliberately public inbox identifier. No Cloudflare redeployment is needed. Only user messages from that Worker are displayed; all Worker assistant and board rows are ignored. Trusted replies and briefings come exclusively from the GitHub-deployed `/content/jarvis.json` on Azure. Drafts and retry queues remain in browser storage when offline. Original private inboxes remain intact; opening the updated website on an original phone copies its user messages into the shared inbox once. Old delivery receipts and personal board drafts are not published into the shared space.
 
 ## Assistant publishing
 
 1. Open `/reader/` on the Azure website. Its visible JSON contains messages, posts, unanswered messages, and publisher health.
-2. Read `content/jarvis.json` from GitHub main with its current file SHA.
+2. Read `public/content/jarvis.json` from GitHub main with its current file SHA.
 3. Append a reply `{id, replyTo, body, createdAt}` or briefing `{id, title, body, createdAt}`. IDs must be UUIDs; timestamps ISO 8601. Reply target must be an existing user message. Preserve existing entries and skip already answered targets.
-4. Update that file using the GitHub connector and current SHA. On conflict, reread and merge. No app deployment is needed for content publishing.
-5. Refresh `/reader/`. The Worker checks the fixed GitHub feed at most once per 15 seconds. Website polling is every 30 seconds while visible.
+4. Update that file using the GitHub connector and current SHA. On conflict, reread and merge. The existing Azure workflow publishes the updated file, normally within a minute or two.
+5. Refresh `/reader/`. Wait for the Azure deployment to succeed. Website polling is every 30 seconds while visible.
 
-Public visitors cannot select a feed or publish assistant content. If GitHub is temporarily unavailable, saved messages and previously published content remain available. The shared record has a 512 KB cap; reaching it returns an explicit error and preserves the unsent draft. Export/archival is future work.
+Public visitors cannot alter the GitHub-deployed publication file. The backend retains messages if Azure publishing is delayed. The existing Worker record has a 100 KB cap; reaching it returns an explicit error and preserves the unsent draft. Export/archival is future work.
 
 Recurring assistant execution is separate from website hosting. Never claim an hourly check or daily briefing is scheduled without verifying the automation. Quick Chat and additional modules are not implemented yet.
 
@@ -36,6 +36,6 @@ Do not create or upgrade paid resources, enable paid plans, or enter billing inf
 
 Native JavaScript modules and system fonts; no frontend dependencies. Future modules can be separate directories under `public/`. Keep provider secrets out of the frontend.
 
-`npm test` checks persistence, public role restrictions, trusted publishing, retry deduplication, migration, preserved drafts, and compatibility of legacy data routes. Cloud deployments also require a live round-trip test.
+`npm test` checks persistence, public role restrictions, trusted publication filtering, retry deduplication, migration, preserved drafts, and compatibility of legacy data routes. Cloud deployments also require a live round-trip test.
 
 Legacy private API code remains only for compatibility and recovery. The active website no longer depends on device credentials or the old OAuth connector.

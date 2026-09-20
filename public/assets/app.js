@@ -1,4 +1,5 @@
 import { API_ORIGIN } from './config.js';
+import { request } from './shared-api.js';
 import { STORAGE_KEY, LEGACY_KEY, readState, mergeState } from './shared-store.js';
 
 const $ = id => document.getElementById(id);
@@ -85,13 +86,6 @@ function showConnection() {
   $('sync-now').hidden = !API_ORIGIN || !!storageError;
   $('sync-now').disabled = busy;
   $('connection-dialog').showModal();
-}
-async function request(path, body, extraHeaders={}) {
-  const response = await fetch(API_ORIGIN + path, { method: body?'POST':'GET', headers: { ...(body?{'Content-Type':'application/json'}:{}),...extraHeaders }, body:body?JSON.stringify(body):undefined, cache:'no-store', signal:AbortSignal.timeout(15000) });
-  const data=await response.json();
-  if (!response.ok) throw new Error(data.error || `Cloud connection failed (${response.status}). Your drafts are safe.`);
-  if(!Array.isArray(data.messages)||!Array.isArray(data.posts)) throw new Error('The inbox could not be read. Your drafts are safe.');
-  return data;
 }
 async function sync() {
   if (!API_ORIGIN || busy || storageError) return;
