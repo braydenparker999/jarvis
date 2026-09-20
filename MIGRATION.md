@@ -52,3 +52,7 @@ Disabling static website hosting alone does not eliminate charges for retained b
 ## Preservation and rollback
 
 The pre-redesign GitHub main revision is `7dc124b94dd1b81a0e9bee9802e9020be28a46fd`. The backend, publication issue and Cloudflare deployment are unchanged. All 25 existing regression tests passed before frontend deployment. New module scripts load only on their own pages; no Azure media proxy is introduced.
+
+## Live verification
+
+Release `8aded44f5eda600c7f97aa345ce9ab2c2ca48024` deployed successfully in GitHub Actions run `35493448832`. Verified the live dark launcher, search, favorites save, message/reply history, composer draft persistence, Daily Board, DrawerCast startup/settings/Home action, Astra catalog loading, HTML preview and sandboxed Ianua document rendering. No app console errors observed during these checks. Actual A15 playback and restricted-phone behavior still require device verification.

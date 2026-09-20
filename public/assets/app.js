@@ -51,7 +51,7 @@ function drawShell() {
   $('app').innerHTML = `<div class="workspace"><header class="topbar">${hub?`<button class="icon-button" id="menu-button" aria-label="Open navigation">${icon('menu')}</button>`:`<a class="icon-button" href="/" data-route="home" aria-label="Back to Home">${icon('back')}</a>`}<a class="brand" href="/" data-route="home">Jarvis</a><div class="toolbar-actions">${hub?`<button class="icon-button" id="search-button" aria-label="Search apps">${icon('search')}</button>`:''}<button class="icon-button" id="connection-button" aria-label="Connection details">${icon('more')}<span class="sr-only">${connection()}</span></button></div></header><main id="content" tabindex="-1"></main>${hub?`<nav class="bottom-nav" aria-label="Hub navigation">${['home','favorites','settings'].map(key=>`<a href="${paths[key]}" data-route="${key}" ${key===route?'aria-current="page"':''}>${icon(key)}<span>${labels[key]}</span></a>`).join('')}</nav>`:''}</div>`;
   $('connection-button').onclick = showConnection;
   if ($('menu-button')) $('menu-button').onclick = showNavigation;
-  if ($('search-button')) $('search-button').onclick = () => { searchOpen=!searchOpen; route='home'; history.pushState({},'',paths.home); drawShell(); $('app-search')?.focus(); };
+  if ($('search-button')) $('search-button').onclick = () => { searchOpen=!searchOpen; if(!searchOpen)searchQuery=''; route='home'; history.pushState({},'',paths.home); drawShell(); $('app-search')?.focus(); };
   drawPage();
 }
 function drawPage() {
