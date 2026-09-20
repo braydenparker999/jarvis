@@ -159,3 +159,11 @@ test('rapid track changes abort abandoned artwork reads',()=>{
   const {drive}=integration();const controller=new AbortController();
   drive.tagActive={t:{id:'old'},controller};drive.prioritize({id:'new'});assert.ok(controller.signal.aborted);
 });
+
+
+test('Drive CORS may hide Content-Range; an exact bounded 206 body is still readable',async()=>{
+  const api=createDriveApi(key,async()=>new Response(new Uint8Array(131072),{status:206,headers:{'content-length':'131072'}}));
+  const f=api.metadataFile({remoteId:file,size:500000});assert.equal((await f.slice(0,32768).arrayBuffer()).byteLength,32768);
+  const bad=createDriveApi(key,async()=>new Response(new Uint8Array(131073),{status:206}));
+  await assert.rejects(bad.metadataFile({remoteId:file,size:500000}).slice(0,32768).arrayBuffer(),/exceeded/);
+});

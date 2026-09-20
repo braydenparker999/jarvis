@@ -74,7 +74,9 @@ export function createDriveApi(key, fetcher = fetch) {
         const stop=start+length;
         const response=await fetcher(mediaURL({id:track.remoteId}),{signal,credentials:'omit',referrerPolicy:'no-referrer',headers:{Range:'bytes='+start+'-'+(stop-1)}});
         const range=response.headers.get('content-range');
-        if(response.status!==206||range!==`bytes ${start}-${stop-1}/${size}`){
+        // Drive does not CORS-expose Content-Range. Validate it when available;
+        // always require HTTP 206 and exactly the requested body length.
+        if(response.status!==206||(range&&range!==`bytes ${start}-${stop-1}/${size}`)){
           await response.body?.cancel();throw Error('Drive did not return the requested metadata range.');
         }
         const reader=response.body?.getReader();if(!reader)throw Error('Missing metadata response.');
