@@ -23,7 +23,7 @@ Sources: https://learn.microsoft.com/en-us/azure/static-web-apps/quotas and http
 - `/server/`: messaging diagnostics, manual refresh and player link.
 - `/favorites/`, `/settings/`: working hub preferences, stored in this browser.
 
-Quick AI and authenticated Drive browsing remain future integrations. No provider key or working free AI endpoint has been configured by this migration. Hourly assistant checks remain deferred to a separate chat.
+Quick AI is available at `/quick-ai/`, using direct browser requests to Groq with GPT-OSS 120B and streaming replies. The `GROQ_API_KEY` Actions secret is injected into the deployed frontend by `scripts/configure-quick-ai.mjs`. The key is kept out of repository history and logs. Its public frontend availability is intentional and owner-authorized; no per-device key entry or new backend is needed. Conversations and drafts stay in each browser's local storage. Groq usage limits apply; the UI supports Stop and Retry without automatic retries. Authenticated Drive browsing and hourly assistant checks remain deferred to a separate chat.
 
 ## Existing storage resources
 

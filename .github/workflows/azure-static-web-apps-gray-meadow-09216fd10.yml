@@ -21,6 +21,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - name: Configure shared Quick AI
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: node scripts/configure-quick-ai.mjs public
       - name: Deploy static shell
         uses: Azure/static-web-apps-deploy@v1
         with:

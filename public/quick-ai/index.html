@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#121212">
+  <title>Quick AI · Jarvis</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/assets/shell.css">
+  <link rel="stylesheet" href="/assets/quick-ai.css">
+  <script type="module" src="/assets/quick-ai.js"></script>
+</head>
+<body>
+  <div class="workspace quick-ai">
+    <header class="topbar"><a class="text-button" href="/" aria-label="Back to Jarvis">← Jarvis</a><span class="brand">Quick AI</span><button class="text-button" id="new-chat">New chat</button></header>
+    <main id="content">
+      <div class="chat-controls"><label class="sr-only" for="history">Saved chats</label><select id="history"></select><button class="text-button" id="delete-chat">Delete</button></div>
+      <p class="model-note">GPT-OSS 120B · Groq · Chats saved on this device</p>
+      <section id="messages" aria-label="Conversation" aria-busy="false"></section>
+      <p id="storage-status" role="status" class="warning" hidden></p>
+    </main>
+    <form id="composer" class="ai-composer">
+      <label class="sr-only" for="prompt">Message Quick AI</label>
+      <textarea id="prompt" rows="3" maxlength="6000" placeholder="Ask anything…" required></textarea>
+      <div class="send-row"><span id="status" role="status">Connecting…</span><button class="text-button" type="button" id="retry" hidden>Retry</button><button class="text-button" type="button" id="stop" hidden>Stop</button><button class="primary" id="send" disabled>Send</button></div>
+    </form>
+  </div>
+  <noscript><p>Enable JavaScript to use Quick AI.</p></noscript>
+</body>
+</html>
