@@ -15,6 +15,8 @@ Azure serves the lightweight application shell. Cloudflare stores messages, repl
 
 Replies and briefings are data: publishing a comment does not redeploy either website or Worker. The site polls every 30 seconds while visible. Cloudflare checks GitHub at most once per five minutes when the inbox is read, shared across all visitors. Imported entries remain available if GitHub is unavailable. The reply-delivery status is reported separately from message storage.
 
+Ordinary reply bodies are limited to 6,000 characters. Daily Board briefing bodies may contain up to 20,000 characters; titles remain limited to 120 characters.
+
 The importer is append-only. Do not edit or delete published comments to correct entries: these changes do not remove already imported data. Reply targets and dated briefings are deduplicated. Conflicting publications preserve the first accepted entry and appear in reader diagnostics. GitHub pagination resumes after outages or large backlogs.
 
 ## Safe rollout
