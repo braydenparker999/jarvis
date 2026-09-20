@@ -5,20 +5,21 @@ import vm from 'node:vm';
 
 // Execute the actual waveform component without booting the monolithic player UI.
 const source=await readFile(new URL('../public/drawercast/player.js',import.meta.url),'utf8');
-const start=source.indexOf('const Waveform={');
+const start=source.indexOf('const PreparedWaveform={');
 const end=source.indexOf('\nfunction installLyricsRework()',start);
 assert.ok(start>=0&&end>start);
-function harness({cached,remoteFile=true,cacheRead}={}){
+function harness({cached,remoteFile=true,cacheRead,response}={}){
   const calls={files:0,fetch:0,decode:0,reads:0,writes:0,draw:0};
   const context=vm.createContext({
-    Float32Array,Uint8Array,Map,AbortController,Blob,setTimeout,clearTimeout,
+    Float32Array,Uint8Array,Map,AbortController,Blob,DataView,setTimeout,clearTimeout,
     UI:{drawViz(){calls.draw++;}},
     clamp:(x,min,max)=>Math.max(min,Math.min(max,x)),
     IDB:{async get(){return cacheRead?cacheRead():cached;},async set(){calls.writes++;}},
     async getFileFor(){calls.files++;return remoteFile?
       {__remoteURL:'http://music.example.test/audio/track',size:32}:
       {size:32,async arrayBuffer(){calls.reads++;return new ArrayBuffer(32);}};},
-    async fetch(){calls.fetch++;throw new Error('Waveform must not download streamed audio');},
+    DrawerCast:{waveformURL:t=>t.waveformVersion===1?'http://music.example.test/waveform/track':null},
+    async fetch(url,options){calls.fetch++;calls.url=url;calls.signal=options.signal;if(response)return response;throw new Error('Waveform must not download streamed audio');},
     window:{OfflineAudioContext:class{async decodeAudioData(){calls.decode++;return {
       duration:1,sampleRate:16,length:16,numberOfChannels:1,
       getChannelData(){return new Float32Array(16).fill(.5);}
@@ -67,4 +68,33 @@ test('changing tracks while cache loads cannot apply the previous waveform',asyn
   select(null);resolveCache({duration:1,peaks:Uint8Array.of(255)});await pending;
   assert.equal(waveform.id,null);assert.equal(waveform.ready,false);
   assert.equal(calls.files,0);assert.equal(calls.fetch,0);assert.equal(calls.draw,0);
+});
+
+function prepared(durationMs=1000){
+  const data=new Uint8Array(16+Math.ceil(durationMs*16/1000)),view=new DataView(data.buffer);
+  view.setUint32(0,0x44435731);view.setUint32(4,durationMs);view.setUint32(8,data.length-16);view.setUint16(12,16);data.fill(200,16);return data;
+}
+test('capable server returns only a compact waveform, cached by file revision',async()=>{
+  const response=new Response(prepared());
+  const {waveform,calls,select}=harness({response});
+  select({id:'remote',remote:true,waveformVersion:1,mtime:100,size:10000,dur:1});await waveform.run();
+  assert.equal(calls.files,0);assert.equal(calls.fetch,1);assert.match(calls.url,/\/waveform\//);assert.equal(calls.decode,0);
+  assert.equal(waveform.ready,true);assert.equal(calls.writes,1);assert.equal(waveform.peaks.length,16);
+  select({id:'remote',remote:true,waveformVersion:1,mtime:101,size:10000,dur:1});
+  assert.equal(waveform.ready,false,'edited song must not reuse stale peaks');select(null);
+});
+test('not-yet-prepared waveform falls back without requesting audio',async()=>{
+  const {waveform,calls,select}=harness({response:new Response('',{status:404})});
+  select({id:'remote',remote:true,waveformVersion:1,dur:180});await waveform.run();
+  assert.equal(waveform.ready,false);assert.equal(calls.fetch,1);assert.equal(calls.files,0);assert.equal(calls.decode,0);
+});
+test('malformed and oversized waveform responses cannot allocate unbounded peaks',async()=>{
+  for(const response of [new Response(new Uint8Array(32)),new Response(prepared(),{headers:{'content-length':'10000000'}})]){
+    const {waveform,calls,select}=harness({response});select({id:'bad',remote:true,waveformVersion:1,dur:1});await waveform.run();
+    assert.equal(waveform.ready,false);assert.equal(calls.writes,0);assert.equal(calls.files,0);assert.equal(calls.signal.aborted,true);
+  }
+});
+test('new server capability triggers loading even when the same track is selected',()=>{
+  const {waveform,select}=harness();const t={id:'same',remote:true,dur:1};select(t);const token=waveform.token;
+  t.waveformVersion=1;select(t);assert.equal(waveform.token,token+1);select(null);
 });

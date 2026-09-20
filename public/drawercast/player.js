@@ -1976,7 +1976,7 @@ const DrawerCast = (function(){
     }finally{clearTimeout(handle);if(activeRequest===ctrl)activeRequest=null;}
   }
   function diagnostics(){
-    return JSON.stringify({playerVersion:'0.5.1',website:location.origin,secureContext:!!window.isSecureContext,
+    return JSON.stringify({playerVersion:'0.6.0',website:location.origin,secureContext:!!window.isSecureContext,
       server:cfg?cfg.base:null,mode:cfg?(isLoopback(cfg.base)?'this phone':'another phone'):'unpaired',
       keyPresent:!!(cfg&&cfg.key),remembered:savedOnDevice,connected,connecting,permission:permissionState,
       error:lastError,browser:typeof navigator!=='undefined'?navigator.userAgent:'unknown'},null,2);
@@ -1985,6 +1985,7 @@ const DrawerCast = (function(){
     if(!cfg||!t||t.serverId!==cfg.serverId)return null;
     return cfg.base+'/'+(art?'art':'audio')+'/'+encodeURIComponent(t.remoteId)+'?k='+encodeURIComponent(cfg.key)+(art?'&v='+encodeURIComponent(t.mtime||0):'');
   }
+  function waveformURL(t){return t?.waveformVersion===1?mediaURL(t,false)?.replace('/audio/','/waveform/'):null;}
   function canPlay(t){return !!(cfg&&t&&t.serverId===cfg.serverId);}
   function fileFor(t){const url=mediaURL(t,false);return url?{__remoteURL:url,name:baseName(t.path||t.title),size:t.size,type:'audio/'+t.ext}:null;}
   function artURL(t){return t.hasArt?mediaURL(t,true):null;}
@@ -2001,7 +2002,7 @@ const DrawerCast = (function(){
       if(!defaults.title)defaults.title=titleFromName(defaults.path)||'Untitled';
       for(const k of ['dur','size','mtime','track','disc','year','sr','ch','bits','added'])defaults[k]=Math.max(0,numeric(raw[k],0));
       defaults.rating=old?old.rating||0:0;defaults.plays=old?old.plays||0:0;defaults.lastPlayed=old?old.lastPlayed||0:0;
-      defaults.hasArt=!!raw.hasArt;defaults.artKey=old?old.artKey||null:null;defaults.rgTrack=null;defaults.rgAlbum=null;
+      defaults.waveformVersion=data.waveformVersion===1?1:0;defaults.hasArt=!!raw.hasArt;defaults.artKey=old?old.artKey||null:null;defaults.rgTrack=null;defaults.rgAlbum=null;
       Object.assign(t,defaults);libAdd(t);fresh.push(t);
     }
     const gone=allTracks().filter(t=>t.remote&&!seen.has(t.id)).map(t=>t.id);
@@ -2118,7 +2119,7 @@ const DrawerCast = (function(){
     if(Engine.current&&Engine.current.remote)Engine.stop();
     await removeTracks(allTracks().filter(t=>t.remote).map(t=>t.id));statusText='Connect your A15';lastError='';banner();closeSheet();toast('Connection forgotten on this browser. Songs on the A15 are unchanged.');
   }
-  function markError(message){connected=false;lastError=message;statusText='Stream interrupted · reconnect A15';retryable=false;banner();}
+  function markError(message,retry=false){connected=false;lastError=message;statusText='Stream interrupted · reconnect A15';retryable=retry;banner();if(retry){automaticAttempts=0;scheduleRetry();}}
   function install(){
     PAGES.root.items.unshift(S_act('Jarvis Home','Return to your personal hub',()=>{location.href='/';},'back'));
     PAGES.root.items.unshift(S_act('A15 Music Server','Remembered connection, access key and local player',show,'cast'));
@@ -2150,7 +2151,7 @@ const DrawerCast = (function(){
     const u=mediaURL(t,false);if(!u){show();return;}toast('Downloading this song…');
     try{const r=await fetch(u,{credentials:'omit',referrerPolicy:'no-referrer'});if(!r.ok)throw new Error('Server refused the download');const b=await r.blob();const x=URL.createObjectURL(b);const a=document.createElement('a');a.href=x;a.download=baseName(t.path)||'song.'+t.ext;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(x),10000);}catch(e){toast(failMessage(e),6000);}
   }
-  return {install,restoreConfig,connect,show,forget,fileFor,artURL,canPlay,markError,exportRemote,parse,validateProfile,pairingLink,
+  return {install,restoreConfig,connect,show,forget,fileFor,artURL,waveformURL,canPlay,markError,exportRemote,parse,validateProfile,pairingLink,
     samePhoneProfile,isLoopback,diagnostics,browserPermission,get connection(){return cfg;},get connected(){return connected;},get remembered(){return savedOnDevice;}};
 })();
 function audioSource(file){return file&&file.__remoteURL?file.__remoteURL:URL.createObjectURL(file);}
@@ -2387,7 +2388,7 @@ const Engine = {
       const prev=this.el();
       this.cur=1-this.cur;
       this.preloadId=null;
-      try{ prev.pause(); }catch(e){}
+      this.releaseSlot(1-this.cur);
       this.setGain(this.cur, this.rgGain(t), 0);
       this.setGain(1-this.cur, 0, 0);
       const b=this.el();
@@ -2411,6 +2412,12 @@ const Engine = {
     else { this.playing=false; UI.renderPlayState(); }
     this.saveState();
   },
+  releaseSlot:function(i){
+    const a=this.els[i];if(!a)return;const old=a.src;
+    a.pause();a.removeAttribute('src');a.load();a.preload='metadata';
+    if(old?.startsWith('blob:'))URL.revokeObjectURL(old);
+    if(i!==this.cur)this.preloadId=null;
+  },
   play:function(){
     this.ensureCtx();
     const a=this.el();
@@ -2419,8 +2426,10 @@ const Engine = {
       if(this.queue.length) this.playIndex(this.order[Math.max(this.pos,0)]||0,true);
       else { toast('Add some music first'); return; }
     }
+    const request=this._playRequest,source=a.src;
     const p=a.play();
     if(p&&p.catch) p.catch(function(e){
+      if(request!==Engine._playRequest||a!==Engine.el()||source!==a.src)return;
       if(e && e.name==='AbortError') return;
       Engine.playing=false; UI.renderPlayState();
       if(e && e.name==='NotAllowedError') toast('Tap play again to start audio');
@@ -2491,7 +2500,7 @@ const Engine = {
     if(t && t.remote){
       this.playing=false;UI.renderPlayState();
       const msg='Unable to stream this song. Check the A15 and Wi-Fi connection, or try an MP3. Open A15 Music Server to reconnect.';
-      DrawerCast.markError(msg);toast(msg,6500);return;
+      DrawerCast.markError(msg,this.el().error?.code===2);toast(msg,6500);return;
     }
     if(t && !t.errored){
       t.errored=true;
@@ -6883,7 +6892,7 @@ const PlaybackQueue={
   }
 };
 const PlaybackTransitions={token:0,finish:null,pending:false,
-  cancel(pauseOther=true){this.token++;clearTimeout(this.finish);this.finish=null;this.pending=false;Engine.xfading=false;if(pauseOther&&Engine.els.length===2){Engine.other().pause();Engine.setGain(1-Engine.cur,0,0);}},
+  cancel(pauseOther=true,keepPreload=null){this.token++;clearTimeout(this.finish);this.finish=null;this.pending=false;Engine.xfading=false;if(pauseOther&&Engine.els.length===2){if(keepPreload&&Engine.preloadId===keepPreload)Engine.other().pause();else Engine.releaseSlot(1-Engine.cur);Engine.setGain(1-Engine.cur,0,0);}},
   async to(index,ms){
     const track=Engine.queue[index];if(!track)return;
     this.cancel();this.pending=true;Engine._playRequest=(Engine._playRequest||0)+1;const token=this.token,old=Engine.cur,next=1-old;let file;try{file=await getFileFor(track);}catch(e){if(token===this.token){this.pending=false;toast('Could not load the next track');}return;}if(token!==this.token)return;if(!file){this.pending=false;return;}
@@ -6894,7 +6903,7 @@ const PlaybackTransitions={token:0,finish:null,pending:false,
     this.pending=false;Engine.preloadId=null;Engine.xfading=true;Engine.cur=next;Engine.current=track;Engine.pos=Math.max(0,Engine.order.indexOf(index));Engine.dur=track.dur||0;Engine.playing=true;
     Engine.setGain(old,0,ms);Engine.setGain(next,Engine.rgGain(track),ms);
     UI.renderNowPlaying(track);UI.renderPlayState();Engine.updateMediaSession();Engine.listened=0;Engine.listenedLast=0;Engine.counted=false;UI.startLoop();
-    this.finish=setTimeout(()=>{if(token!==this.token)return;Engine.els[old].pause();Engine.setGain(old,0,0);Engine.xfading=false;Engine.saveState();},ms+30);
+    this.finish=setTimeout(()=>{if(token!==this.token)return;Engine.releaseSlot(old);Engine.setGain(old,0,0);Engine.xfading=false;Engine.saveState();},ms+30);
     if(oldURL?.startsWith('blob:'))URL.revokeObjectURL(oldURL);
   }
 };
@@ -6913,7 +6922,7 @@ function installPlaybackRework(){
     const outgoing=this.current;if(outgoing&&!this._autoAdvance&&!this.el().ended&&nativeValues().restore_pos){outgoing.resumeAt=this.time();persistTrack(outgoing);}
     const mode=nativeValues().fade_manual_advance||0;
     if(autoplay!==false&&this.playing&&outgoing?.id!==t.id&&mode&&!this._autoAdvance)return PlaybackTransitions.to(index,mode===1?nativeValues().fade_short_xfade_ms||400:SET.crossfadeLen*1000);
-    PlaybackTransitions.cancel();this.listened=0;this.listenedLast=0;this.counted=false;clearTimeout(this.silenceTimer);clearTimeout(this.fadeTimer);
+    PlaybackTransitions.cancel(true,t.id);this.listened=0;this.listenedLast=0;this.counted=false;clearTimeout(this.silenceTimer);clearTimeout(this.fadeTimer);
     return playIndex.call(this,index,autoplay).then(()=>{if(this.current?.id===t.id&&nativeValues().restore_pos&&t.resumeAt>0&&t.resumeAt<(t.dur||0)-3&&(t.dur||0)>=(nativeValues().restore_pos_min_dur||45)*60){this.el().currentTime=t.resumeAt;}});
   };
   Engine.setGain=function(i,value,ms){const node=this.gains[i];if(node&&this.ctx){const now=this.ctx.currentTime;node.gain.cancelScheduledValues(now);node.gain.setValueAtTime(Math.max(0,node.gain.value),now);ms>0?node.gain.linearRampToValueAtTime(Math.max(0,value),now+ms/1000):node.gain.setValueAtTime(Math.max(0,value),now);}else if(this.els[i])this.els[i].volume=clamp(value,0,1)*SET.volume*SET.volume;};
@@ -6964,20 +6973,32 @@ showReferenceLyrics=function(){
   $('#lyrics-find').onclick=()=>{let url=nativeValues().lyrics_custom_url||'https://www.google.com/search?q=%artist%+%title%+lyrics';url=url.replace(/%artist%|\{artist\}/g,encodeURIComponent(trackArtist(t))).replace(/%title%|\{title\}/g,encodeURIComponent(t.title));try{const u=new URL(url);if(!['https:','http:'].includes(u.protocol))throw Error();window.open(u.href,'_blank','noopener,noreferrer');}catch(e){toast('Enter an http or https lyrics search URL in settings');}};
   Nav.go('lyrics');SyncedLyrics.update();
 };
-/* Local files can be decoded once and cached compactly. A15 streams use cached
-   peaks or the playback analyser: never download a second copy for a waveform. */
+/* A15 waveforms are prepared by the server and cached by file revision.
+   Fallback uses live samples; only local files receive an offline decode. */
+const PreparedWaveform={
+  parse(bytes){
+    if(bytes.length<17||bytes.length>230416)throw Error('Invalid waveform length');
+    const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+    const ms=view.getUint32(4),bins=view.getUint32(8);
+    if(view.getUint32(0)!==0x44435731||view.getUint16(12)!==16||view.getUint16(14)!==0||!ms||ms>14400000||bins!==Math.ceil(ms*16/1000)||bytes.length!==16+bins)throw Error('Invalid waveform format');
+    return {duration:ms/1000,peaks:bytes.slice(16)};
+  }
+};
 const Waveform={
   id:null,token:0,peaks:new Float32Array(0),known:new Uint8Array(0),duration:0,ready:false,
-  pending:null,busy:false,timer:0,cache:new Map(),lastSample:-1,
+  pending:null,busy:false,timer:0,abort:null,cache:new Map(),lastSample:-1,
+  key(t){return 'waveform-v3:'+t.id+':'+(t.mtime||0)+':'+(t.size||0)+':v'+(t.waveformVersion||0);},
   span(duration){return Math.min(90,Math.max(10,duration||90));},
   load(t){
-    if((t?.id||null)===this.id)return;
-    this.id=t?.id||null;this.token++;clearTimeout(this.timer);this.pending=t||null;
+    const identity=t?this.key(t):null;
+    if(identity===this.identity)return;
+    this.identity=identity;
+    this.id=t?.id||null;this.token++;clearTimeout(this.timer);this.abort?.abort();this.pending=t||null;
     this.duration=Number(t?.dur)||0;this.ready=false;this.lastSample=-1;
     this.peaks=new Float32Array(Math.ceil(Math.max(this.duration,1)*16));this.known=new Uint8Array(this.peaks.length);
     UI.seekPreview=null;
     if(!t)return;
-    const cached=this.cache.get(t.id);if(cached){this.accept(cached);this.pending=null;return;}
+    const cached=this.cache.get(this.key(t));if(cached){this.accept(cached);this.pending=null;return;}
     this.timer=setTimeout(()=>this.run(),180);
   },
   accept(result){
@@ -6989,14 +7010,32 @@ const Waveform={
     if(this.busy||!this.pending)return;
     const t=this.pending,token=this.token;this.pending=null;this.busy=true;
     const stale=()=>token!==this.token;
-    const key='waveform-v2:'+t.id;
+    const key=this.key(t);
     try{
       let result;try{result=await IDB.get('kv',key);}catch(e){}
       if(stale())return;
-      if(result?.peaks?.length&&result.duration>0){this.remember(t.id,result);this.accept(result);return;}
-      // Streaming gets all available server bandwidth. Live samples keep the
-      // seekbar useful without another full-song request or offline decode.
-      if(t.remote)return;
+      if(result?.peaks?.length&&result.duration>0){this.remember(key,result);this.accept(result);return;}
+      // Only ask capable servers for their compact prepared peaks. Never fetch audio.
+      if(t.remote){
+        if(t.waveformVersion!==1)return;
+        const url=DrawerCast.waveformURL(t);if(!url)return;
+        const controller=new AbortController();this.abort=controller;
+        const timeout=setTimeout(()=>controller.abort(),3000);
+        try{
+          const response=await fetch(url,{signal:controller.signal,credentials:'omit',referrerPolicy:'no-referrer',cache:'no-store'});
+          if(!response.ok)return; // Not prepared yet, old server, or disconnected: keep live samples.
+          const maxBytes=16+16*4*60*60;
+          if(Number(response.headers.get('content-length'))>maxBytes)return;
+          const reader=response.body?.getReader();if(!reader)return;
+          const chunks=[];let length=0;
+          while(true){const {done,value}=await reader.read();if(done)break;length+=value.length;if(length>maxBytes||stale()){await reader.cancel();return;}chunks.push(value);}
+          const bytes=new Uint8Array(length);let at=0;for(const chunk of chunks){bytes.set(chunk,at);at+=chunk.length;}
+          result=PreparedWaveform.parse(bytes);
+          if(stale())return;this.remember(key,result);this.accept(result);
+          try{await IDB.set('kv',key,result);}catch(e){}
+        }finally{clearTimeout(timeout);controller.abort();}
+        return;
+      }
       const f=await getFileFor(t);if(stale()||!f)return;
       if(f.__remoteURL)return;
       // Bound temporary decode memory on the A15; longer files retain timed live samples.
@@ -7017,10 +7056,10 @@ const Waveform={
       }
       const sorted=Array.from(peaks).sort((a,b)=>a-b),normal=Math.max(.02,sorted[Math.floor(sorted.length*.98)]||0);
       result={duration:decoded.duration,peaks:Uint8Array.from(peaks,v=>Math.round(clamp(v/normal,0,1)*255))};
-      if(stale())return;this.remember(t.id,result);this.accept(result);
+      if(stale())return;this.remember(key,result);this.accept(result);
       try{await IDB.set('kv',key,result);}catch(e){}
     }catch(e){/* Seeking still works when a local source cannot be decoded. */}
-    finally{this.busy=false;if(this.pending)this.timer=setTimeout(()=>this.run(),0);}
+    finally{this.busy=false;this.abort=null;if(this.pending)this.timer=setTimeout(()=>this.run(),0);}
   },
   remember(id,result){this.cache.delete(id);this.cache.set(id,result);while(this.cache.size>8)this.cache.delete(this.cache.keys().next().value);},
   sample(data,time,duration){
