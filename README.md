@@ -1,5 +1,10 @@
 # Jarvis 1.0
 
+The direct Cloudflare messaging replacement is staged in this branch. See
+[DIRECT-MESSAGING.md](DIRECT-MESSAGING.md) for implementation, verification and
+the live acceptance gates. `DIRECT_API_ENABLED` is false; the description below
+continues to describe the current production frontend until cutover.
+
 Mobile-first personal hub: Home, Jarvis messages, and assistant-published Daily Board.
 
 - Website: https://gray-meadow-09216fd10.1.azurestaticapps.net/

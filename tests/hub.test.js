@@ -82,39 +82,9 @@ test('ongoing responder publishes briefings and revocation blocks publishing',as
  assert.equal((await call(e,'/v1/agent/board',{...post,id:crypto.randomUUID()},access.token)).status,401);
 });
 
-test('OAuth connector reads, replies, publishes, rotates tokens and respects revocation',async()=>{
- const e=env(),base='https://jarvis-hub-api.braydenparker999.workers.dev',resource=base+'/mcp',redirect='https://chatgpt.com/connector_platform_oauth_redirect';
- const req=(path,body,headers={})=>worker.fetch(new Request(base+path,{method:body?'POST':'GET',headers:{'Content-Type':'application/json',...headers},body:body?typeof body==='string'?body:JSON.stringify(body):undefined}),e);
- const original={id:crypto.randomUUID(),body:'Please send a real reply.'};await call(e,'/v1/messages',original);
- assert.equal((await req('/mcp')).status,401);
- assert.equal((await req('/oauth/register',{redirect_uris:['https://evil.example/callback']})).status,400);
- const client=await (await req('/oauth/register',{redirect_uris:[redirect],token_endpoint_auth_method:'none'})).json();
- const verifier='x'.repeat(43),digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(verifier));
- const challenge=Buffer.from(digest).toString('base64url');
- const p={client_id:client.client_id,redirect_uri:redirect,resource,response_type:'code',code_challenge_method:'S256',code_challenge:challenge,state:'state-123',scope:'inbox:read replies:write briefings:write'};
- assert.equal((await req('/oauth/authorize?'+new URLSearchParams(p))).status,302);
- assert.equal((await req('/oauth/approve',p,{Authorization:'Bearer '+key,Origin:'https://evil.example'})).status,403);
- const approved=await req('/oauth/approve',p,{Authorization:'Bearer '+key,Origin:'https://gray-meadow-09216fd10.1.azurestaticapps.net'});assert.equal(approved.status,200);
- const callback=new URL((await approved.json()).redirect);assert.equal(callback.searchParams.get('state'),p.state);assert.equal(callback.searchParams.get('iss'),base);
- const exchange={grant_type:'authorization_code',client_id:p.client_id,redirect_uri:redirect,resource,code:callback.searchParams.get('code'),code_verifier:verifier};
- const form=b=>new URLSearchParams(b).toString();
- assert.equal((await req('/oauth/token',form({...exchange,code_verifier:'y'.repeat(43)}))).status,400);
- const issued=await req('/oauth/token',form(exchange));assert.equal(issued.status,200);const tokens=await issued.json();
- assert.equal((await req('/oauth/token',form(exchange))).status,400);
- const rpc=(name,args={},token=tokens.access_token)=>req('/mcp',{jsonrpc:'2.0',id:1,method:'tools/call',params:{name,arguments:args}},{Authorization:'Bearer '+token});
- let read=await (await rpc('jarvis_read_inbox')).json();assert.equal(JSON.parse(read.result.content[0].text).unanswered[0].id,original.id);
- const reply={replyTo:original.id,body:'Yes, I can read this message.'};
- assert.equal((await (await rpc('jarvis_reply',reply)).json()).result.isError,false);
- assert.equal((await (await rpc('jarvis_reply',reply)).json()).result.isError,false);
- const briefing={id:crypto.randomUUID(),title:'Daily briefing',body:'Your connection works.'};
- assert.equal((await (await rpc('jarvis_publish_briefing',briefing)).json()).result.isError,false);
- const state=await (await call(e,'/v1/state')).json();assert.equal(state.messages.filter(m=>m.kind==='reply').length,1);assert.equal(state.posts[0].body,briefing.body);
- const refresh={grant_type:'refresh_token',client_id:p.client_id,resource,refresh_token:tokens.refresh_token};
- const refreshed=await (await req('/oauth/token',form(refresh))).json();assert.ok(refreshed.access_token);
- assert.equal((await req('/oauth/token',form(refresh))).status,400);
- assert.equal((await rpc('jarvis_read_inbox')).status,401);
- assert.equal((await rpc('jarvis_read_inbox',{},refreshed.access_token)).status,200);
- await call(e,'/v1/responder/revoke',{});
- assert.equal((await rpc('jarvis_read_inbox',{},refreshed.access_token)).status,401);
- assert.equal((await req('/oauth/token',form({...refresh,refresh_token:refreshed.refresh_token}))).status,400);
+test('legacy device authorization cannot connect the new shared assistant',async()=>{
+ const e=env();
+ const r=await call(e,'/oauth/approve',{});
+ assert.equal(r.status,410);
+ assert.equal((await call(e,'/mcp')).status,401);
 });

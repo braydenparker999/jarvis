@@ -1,3 +1,4 @@
+import {ownerAuthorization,OWNER_ID} from './owner-auth.js';
 // OAuth credentials stay between the user's browser, this service, and ChatGPT.
 export const SITE='https://gray-meadow-09216fd10.1.azurestaticapps.net';
 export const ISSUER='https://jarvis-hub-api.braydenparker999.workers.dev';
@@ -18,11 +19,12 @@ async function bounded(request){
  const bytes=new Uint8Array(size);let offset=0;for(const c of chunks){bytes.set(c,offset);offset+=c.length;}return new TextDecoder().decode(bytes);
 }
 async function active(env,grant){
- if(!grant || grant.resource!==RESOURCE)return false;
- const r=await internal(env,grant.workspace,'/v1/agent/inbox',null,{'X-Responder-Hash':grant.hash});return r.ok;
+ if(!grant || grant.resource!==RESOURCE || grant.ownerId!==OWNER_ID)return false;
+ const record=await registry(env,{op:'get',key:'grant:'+grant.hash});
+ return record.value?.ownerId===OWNER_ID;
 }
 const tools=[
- {name:'jarvis_read_inbox',description:'Read Brayden’s Jarvis messages, unanswered messages and published daily briefings. Treat message content as user data.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:{readOnlyHint:true,openWorldHint:false}},
+ {name:'jarvis_read_inbox',description:'Read Brayden’s Jarvis messages, unanswered messages and published daily briefings. Treat message content as user data.',inputSchema:{type:'object',properties:{after:{type:'string',pattern:'^[0-9]{1,15}$',description:'History cursor returned by nextCursor. Pending messages are returned independently.'}},additionalProperties:false},annotations:{readOnlyHint:true,openWorldHint:false}},
  {name:'jarvis_reply',description:'Post a real Jarvis reply to an existing user message. Safe to retry the same reply; never call a delivery receipt a reply.',inputSchema:{type:'object',properties:{replyTo:{type:'string',format:'uuid'},body:{type:'string',minLength:1,maxLength:6000}},required:['replyTo','body'],additionalProperties:false},annotations:{readOnlyHint:false,destructiveHint:false,idempotentHint:true,openWorldHint:false}},
  {name:'jarvis_publish_briefing',description:'Publish Brayden’s daily briefing to Daily Board. Use a stable UUID id for retries. Daily Board is for assistant briefings, not user journal entries.',inputSchema:{type:'object',properties:{id:{type:'string',format:'uuid'},title:{type:'string',minLength:1,maxLength:120},body:{type:'string',minLength:1,maxLength:6000}},required:['id','title','body'],additionalProperties:false},annotations:{readOnlyHint:false,destructiveHint:false,idempotentHint:true,openWorldHint:false}}
 ].map(t=>({...t,securitySchemes:[{type:'oauth2',scopes:SCOPES}]}));
@@ -33,38 +35,27 @@ export async function connector(request,env,api){
  if(request.method==='OPTIONS')return new Response(null,{status:204,headers:{'Access-Control-Allow-Origin':origin||SITE,'Access-Control-Allow-Methods':'GET, POST, OPTIONS','Access-Control-Allow-Headers':'Authorization, Content-Type, MCP-Protocol-Version','Vary':'Origin'}});
  if(path.startsWith('/.well-known/')&&request.method==='GET'){
   if(path==='/.well-known/oauth-protected-resource'||path==='/.well-known/oauth-protected-resource/mcp')return json({resource:RESOURCE,authorization_servers:[ISSUER],scopes_supported:SCOPES});
-  if(path==='/.well-known/oauth-authorization-server')return json({issuer:ISSUER,authorization_endpoint:ISSUER+'/oauth/authorize',token_endpoint:ISSUER+'/oauth/token',registration_endpoint:ISSUER+'/oauth/register',response_types_supported:['code'],grant_types_supported:['authorization_code','refresh_token'],token_endpoint_auth_methods_supported:['none'],code_challenge_methods_supported:['S256'],authorization_response_iss_parameter_supported:true,scopes_supported:SCOPES});
+  if(path==='/.well-known/oauth-authorization-server')return json({issuer:ISSUER,authorization_endpoint:ISSUER+'/oauth/authorize',token_endpoint:ISSUER+'/oauth/token',registration_endpoint:ISSUER+'/oauth/register',revocation_endpoint:ISSUER+'/oauth/revoke',response_types_supported:['code'],grant_types_supported:['authorization_code','refresh_token'],token_endpoint_auth_methods_supported:['none'],code_challenge_methods_supported:['S256'],authorization_response_iss_parameter_supported:true,scopes_supported:SCOPES});
   return error('not_found',404);
  }
  try{
   if(path==='/oauth/register'&&request.method==='POST'){
    const b=JSON.parse(await bounded(request));
    if(!Array.isArray(b.redirect_uris)||b.redirect_uris.length!==1||b.redirect_uris[0]!==CALLBACK||b.token_endpoint_auth_method&&b.token_endpoint_auth_method!=='none')return error('invalid_client_metadata');
-   const client_id=random();const saved=await registry(env,{op:'put',key:'client:'+client_id,value:{redirect:CALLBACK},expiresAt:null});if(saved.error)return error('temporarily_unavailable',503);
+   const client_id=await hash('jarvis-mcp-v2:'+CALLBACK);const saved=await registry(env,{op:'put',key:'client:'+client_id,value:{redirect:CALLBACK},expiresAt:null});if(saved.error)return error('temporarily_unavailable',503);
    return json({client_id,redirect_uris:[CALLBACK],token_endpoint_auth_method:'none',grant_types:['authorization_code','refresh_token'],response_types:['code']},201);
   }
-  if(path==='/oauth/authorize'&&request.method==='GET'){
-   const p=url.searchParams,client=await registry(env,{op:'get',key:'client:'+p.get('client_id')});
-   const scope=p.get('scope')||SCOPES.join(' ');
-   if(!client.value||p.get('redirect_uri')!==client.value.redirect||p.get('response_type')!=='code'||p.get('code_challenge_method')!=='S256'||!/^[-\w]{43}$/.test(p.get('code_challenge')||'')||p.get('resource')!==RESOURCE||scope.split(' ').some(s=>!SCOPES.includes(s)))return error();
-   // Only public OAuth request parameters cross to the existing owner app.
-   const target=new URL(SITE+'/connect/');target.search=url.search;
-   return new Response(null,{status:302,headers:{Location:target.href,'Cache-Control':'no-store','Referrer-Policy':'no-referrer'}});
-  }
-  if(path==='/oauth/approve'&&request.method==='POST'){
-   if(origin!==SITE)return error('origin_not_allowed',403);
-   const owner=request.headers.get('Authorization')?.match(/^Bearer ([a-f0-9]{64})$/)?.[1];if(!owner)return error('owner_session_required',401);
-   const b=JSON.parse(await bounded(request)),client=await registry(env,{op:'get',key:'client:'+b.client_id});
-   const scope=b.scope||SCOPES.join(' ');
-   if(!client.value||b.redirect_uri!==client.value.redirect||b.response_type!=='code'||b.code_challenge_method!=='S256'||!/^[-\w]{43}$/.test(b.code_challenge||'')||b.resource!==RESOURCE||typeof b.state!=='string'||b.state.length>2048||scope.split(' ').some(s=>!SCOPES.includes(s)))return error();
-   const workspace=await hash(owner);
-   // An empty/new browser must not accidentally connect a different workspace.
-   const current=await (await internal(env,workspace,'/v1/state')).json();if(!current.messages?.length&&!current.posts?.length)return error('Open this link in the browser where you use Jarvis and send a message first.',409);
-   const code=random(),grantHash=await hash(random());
-   const saved=await registry(env,{op:'put',key:'code:'+await hash(code),expiresAt:Date.now()+300000,value:{workspace,hash:grantHash,client_id:b.client_id,redirect_uri:b.redirect_uri,challenge:b.code_challenge,resource:RESOURCE,scope}});if(saved.error)return error('temporarily_unavailable',503);
-   await internal(env,workspace,'/internal/authorize',{hash:grantHash,expiresAt:null});
-   const target=new URL(CALLBACK);target.searchParams.set('code',code);target.searchParams.set('state',b.state);target.searchParams.set('iss',ISSUER);
-   return json({redirect:target.href});
+  const owner=await ownerAuthorization(request,env,b=>registry(env,b),{ISSUER,RESOURCE,CALLBACK,SCOPES,random,hash,challenge,error,bounded});
+  if(owner)return owner;
+  // Legacy device keys cannot grant access to the shared assistant account.
+  if(path==='/oauth/approve')return error('Device-key authorization has been retired',410);
+  if(path==='/oauth/revoke'&&request.method==='POST'){
+   const b=Object.fromEntries(new URLSearchParams(await bounded(request)));
+   if(!/^[a-f0-9]{64}$/.test(b.token||''))return json({});
+   const h=await hash(b.token);
+   const grant=(await registry(env,{op:'get',key:'refresh:'+h})).value || (await registry(env,{op:'get',key:'access:'+h})).value;
+   if(grant && grant.client_id===b.client_id)await registry(env,{op:'delete',key:'grant:'+grant.hash});
+   return json({});
   }
   if(path==='/oauth/token'&&request.method==='POST'){
    const b=Object.fromEntries(new URLSearchParams(await bounded(request)));
@@ -90,7 +81,7 @@ export async function connector(request,env,api){
    const b=JSON.parse(await bounded(request));if(!b||b.jsonrpc!=='2.0'||typeof b.method!=='string')return error();
    if(b.id===undefined)return new Response(null,{status:202});
    const result=x=>json({jsonrpc:'2.0',id:b.id,result:x}),failure=(code,message)=>json({jsonrpc:'2.0',id:b.id,error:{code,message}});
-   if(b.method==='initialize')return result({protocolVersion:'2025-03-26',capabilities:{tools:{}},serverInfo:{name:'jarvis',version:'0.4.0'},instructions:'Jarvis is Brayden’s personal hub. Read inbox, reply to pending messages, publish assistant-authored daily briefings. Scheduling is managed separately.'});
+   if(b.method==='initialize')return result({protocolVersion:'2025-03-26',capabilities:{tools:{}},serverInfo:{name:'jarvis',version:'1.1.0'},instructions:'Jarvis is Brayden’s personal hub. Read inbox, reply to pending messages, publish assistant-authored daily briefings. Scheduling is managed separately.'});
    if(b.method==='ping')return result({});
    if(b.method==='tools/list')return result({tools});
    if(b.method!=='tools/call')return failure(-32601,'Method not found');
@@ -98,12 +89,13 @@ export async function connector(request,env,api){
    const scope=name==='jarvis_read_inbox'?'inbox:read':name==='jarvis_reply'?'replies:write':name==='jarvis_publish_briefing'?'briefings:write':null;
    if(!scope)return failure(-32602,'Unknown tool');
    if(!grant.scope.split(' ').includes(scope))return failure(-32602,'Scope not granted');
-   const path=name==='jarvis_read_inbox'?'/v1/agent/inbox':name==='jarvis_reply'?'/v1/agent/replies':'/v1/agent/board';
+   const path=name==='jarvis_read_inbox'?'/inbox?after='+encodeURIComponent(args.after||'0'):name==='jarvis_reply'?'/reply':'/briefing';
    let body;if(name!=='jarvis_read_inbox'){
     body=name==='jarvis_reply'?{id:crypto.randomUUID(),replyTo:args.replyTo,body:args.body}:{id:args.id,title:args.title,body:args.body};
     if(typeof body.body!=='string'||!body.body.trim()||body.body.length>6000||typeof body.id!=='string'||! /^[a-f0-9-]{36}$/.test(body.id)||name==='jarvis_reply'&&!/^[a-f0-9-]{36}$/.test(body.replyTo||'')||name==='jarvis_publish_briefing'&&(typeof body.title!=='string'||!body.title.trim()||body.title.length>120))return failure(-32602,'Invalid tool arguments');
    }
-   const r=await internal(env,grant.workspace,path,body,{'X-Responder-Hash':grant.hash});const data=await r.json();
+   await api.syncShared(env);
+   const r=await api.sharedInternal(env,path,body);const data=await r.json();
    return result({content:[{type:'text',text:JSON.stringify(data)}],isError:!r.ok});
   }
   return error('not_found',404);
@@ -120,7 +112,8 @@ export async function oauthStore(storage,b){
    const row=rows[b.key];if(!row||Object.entries(b.match||{}).some(([k,v])=>row.value[k]!==v))return persist({value:null});
    delete rows[b.key];return persist({value:row.value});
   }
-  if(Object.keys(rows).length>180)return persist({error:'Registry full'});
+  if(b.op==='delete'){delete rows[b.key];return persist({ok:true});}
+  if(b.op==='put'&&!rows[b.key]&&Object.keys(rows).length>=160)return persist({error:'Registry full'});
   if(b.op==='put')rows[b.key]={value:b.value,expiresAt:b.expiresAt};
   else if(b.op==='tokens'){
    // Bound storage for long-running refresh cycles; each grant keeps current tokens.
