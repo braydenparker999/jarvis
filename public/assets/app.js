@@ -1,5 +1,6 @@
 import { API_ORIGIN } from './config.js';
 import { STORAGE_KEY, readState, mergeState } from './store.js';
+import { PREVIOUS_WORKSPACE, linkedState, saveLinkedState } from './devices.js';
 
 const $ = id => document.getElementById(id);
 const icons = {
@@ -158,3 +159,53 @@ $('revoke-responder').onclick=async()=>{
   try {await request('/v1/responder/revoke',{});$('responder-code').value='';$('responder-access').hidden=true;notify('Responder access disconnected.');}
   catch(e){notify(e.message);}
 };
+
+$('link-device').onclick = () => {
+  if (storageError) { notify(storageError); return; }
+  $('device-code').value = state.key;
+  $('incoming-device-code').value = '';
+  $('device-status').textContent = '';
+  $('restore-device').hidden = !localStorage.getItem(PREVIOUS_WORKSPACE);
+  $('connection-dialog').close();
+  $('device-dialog').showModal();
+};
+$('device-dialog').addEventListener('close', () => {
+  $('device-code').value = '';
+  $('incoming-device-code').value = '';
+});
+$('copy-device-code').onclick = async () => {
+  try { await navigator.clipboard.writeText($('device-code').value); $('device-status').textContent = 'Copied. Paste it into Jarvis on your other phone.'; }
+  catch { $('device-code').type='text'; $('device-code').select(); $('device-status').textContent='Select and copy the code, then close this window.'; }
+};
+$('device-dialog').addEventListener('close', () => { $('device-code').type='password'; });
+async function useDeviceKey(key) {
+  if (!API_ORIGIN || storageError) { $('device-status').textContent = 'Cloud access and browser storage are required.'; return; }
+  if (busy) { $('device-status').textContent = 'Please wait for the current sync to finish, then try again.'; return; }
+  if (key === state.key) { $('device-status').textContent = 'This device already uses that inbox.'; return; }
+  if (!/^[a-f0-9]{64}$/.test(key)) { $('device-status').textContent = 'Paste the complete device code from your original phone.'; return; }
+  busy=true;
+  $('use-device-code').disabled=true;
+  $('restore-device').disabled=true;
+  $('device-status').textContent='Opening your saved inbox…';
+  try {
+    const response=await fetch(API_ORIGIN+'/v1/state', {headers:{Authorization:`Bearer ${key}`},cache:'no-store',signal:AbortSignal.timeout(12000)});
+    if (!response.ok) throw new Error('Could not open that inbox. Nothing was changed. Try again when connected.');
+    const next=linkedState(key,await response.json());
+    state=saveLinkedState(localStorage,state,next);
+    syncError='';
+    $('responder-code').value='';
+    $('responder-access').hidden=true;
+    $('device-dialog').close();
+    notify('Device linked. Your messages and Daily Board are ready.');
+  } catch(e) { $('device-status').textContent=e.message || 'Could not link this device. Nothing was changed.'; }
+  finally { busy=false; $('use-device-code').disabled=false; $('restore-device').disabled=false; drawShell(); }
+}
+$('device-link-form').onsubmit=e=>{ e.preventDefault(); useDeviceKey($('incoming-device-code').value.trim()); };
+$('restore-device').onclick=()=>{
+  try { const previous=readState({getItem:()=>localStorage.getItem(PREVIOUS_WORKSPACE)}); useDeviceKey(previous.key); }
+  catch { $('device-status').textContent='The previous inbox could not be read. Use its saved device code.'; }
+};
+window.addEventListener('storage',e=>{
+  if(e.key!==STORAGE_KEY || !e.newValue) return;
+  try { if(JSON.parse(e.newValue).key!==state.key) location.reload(); } catch {}
+});
