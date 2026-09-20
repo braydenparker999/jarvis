@@ -2643,7 +2643,7 @@ const Engine = {
     }
     if(t && t.remote){
       this.playing=false;UI.renderPlayState();
-      const msg='Unable to stream this song. Check the A15 and Wi-Fi connection, or try an MP3. Open A15 Music Server to reconnect.';
+      const msg='Unable to stream this song. Check the A15 and Wi-Fi connection, or try an MP3. Reconnect in Settings → Library → Music Sources.';
       DrawerCast.markError(msg,this.el().error?.code===2);toast(msg,6500);return;
     }
     if(t && !t.errored){
@@ -6963,9 +6963,8 @@ function installSettingsShortcuts(){
     add('Library',()=>Settings.open('library'));
     add('Album Art',()=>Settings.open('art'));
     row.append(el('span','menu-shortcut-break'));
-    add('A15 Music Server',()=>MainMenu.act('server'));
-    add('Add Music',()=>MainMenu.act('add'));
-    const count=clamp(SET.shortcuts??5,0,10),keys=[...new Set([...recent,'audio','look','skin','player','equalizer'])].filter(p=>PAGES[p]&&!['library','art','root'].includes(p)).slice(0,Math.max(0,count-4));
+    add('Music Sources',()=>Settings.open('sources'));
+    const count=clamp(SET.shortcuts??5,0,10),keys=[...new Set([...recent,'audio','look','skin','player','equalizer'])].filter(p=>PAGES[p]&&!['library','art','root','sources'].includes(p)).slice(0,Math.max(0,count-3));
     if(keys.length)row.append(el('span','menu-shortcut-break'));
     for(const key of keys)add(PAGES[key].title,()=>Settings.open(key));
   };
@@ -7284,7 +7283,7 @@ const MusicSources={
     const library=PAGES.library.items;
     // Replace the old scanner preamble; retain supported library/playback options.
     const advanced=library.findIndex(it=>it.t==='head'&&it.text==='Advanced');
-    PAGES.library.items=[S_nav('Music Sources','Local files, Google Drive, and your music server','folder','sources'),
+    PAGES.library.items=[{t:'native',kind:'nav',title:'Music Sources',desc:'Local files, Google Drive, and your music server',page:'sources'},
       S_note('Enabled sources appear together throughout your library.')].concat(advanced>=0?library.slice(advanced):library);
     for(const it of PAGES.root.items)if(it.page==='library')it.desc='Music sources, playlists, search, and queue';
     PAGES.about.items=PAGES.about.items.filter(it=>it.key!=='drawercast_server');
@@ -7293,7 +7292,7 @@ const MusicSources={
     const tracks=allTracks(true).filter(t=>SourceLibrary.kind(t)===kind),count=tracks.length;
     let status='';
     if(!SourceLibrary.enabled(kind))status='Disabled · saved music retained';
-    else if(kind==='drive')status=DriveSource.error?'Refresh unavailable · saved library retained':DriveSource.status;
+    else if(kind==='drive')status=DriveSource.error?'Refresh unavailable · saved library retained':DriveSource.status.replace(/ · \d+ songs$/, '');
     else if(kind==='server')status=DrawerCast.connecting?'Connecting…':DrawerCast.connected?'Connected':DrawerCast.connection?'Connection saved · '+DrawerCast.status:'Not connected';
     else status=tracks.some(t=>t.needsPerm)?'Folder permission needed':count?'Files saved on this browser':'No files added';
     return count+' song'+(count===1?'':'s')+' · '+status;
@@ -7301,7 +7300,7 @@ const MusicSources={
   refresh(){
     for(const kind of ['local','drive','server']){
       const status=$('[data-source-status="'+kind+'"]');if(status)status.textContent=this.status(kind);
-      const toggle=$('[data-source-toggle="'+kind+'"]');if(toggle){const on=SourceLibrary.enabled(kind);toggle.setAttribute('aria-checked',String(on));toggle.classList.toggle('on',on);}
+      const toggle=$('[data-source-toggle="'+kind+'"]');if(toggle){const on=SourceLibrary.enabled(kind);toggle.setAttribute('aria-checked',String(on));toggle.querySelector('.native-switch').classList.toggle('on',on);}
     }
   },
   setEnabled(kind,on,connect=true){
@@ -7327,11 +7326,11 @@ const MusicSources={
   render(body){
     body.appendChild(el('div','native-note','Choose what appears in your library. Disabling a source keeps its playlists, ratings, and saved track information. Choices apply to this browser.'));
     for(const kind of ['local','drive','server']){
-      const row=el('div','setrow source-row');
+      const row=el('div','native-setting setrow source-row');
       const manage=el('button','source-manage','<span class="n">'+esc(this.names[kind])+'</span><span class="d" data-source-status="'+kind+'"></span>');
       manage.setAttribute('aria-label','Manage '+this.names[kind]);
       manage.onclick=()=>kind==='local'?Settings.open('source-local'):kind==='drive'?DriveSource.show():DrawerCast.show();
-      const toggle=el('button','switch source-switch');toggle.dataset.sourceToggle=kind;toggle.setAttribute('role','switch');toggle.setAttribute('aria-label','Enable '+this.names[kind]);
+      const toggle=el('button','source-switch','<span class="native-switch" aria-hidden="true"><i></i></span>');toggle.dataset.sourceToggle=kind;toggle.setAttribute('role','switch');toggle.setAttribute('aria-label','Enable '+this.names[kind]);
       toggle.onclick=()=>this.setEnabled(kind,!SourceLibrary.enabled(kind));
       row.append(manage,toggle);body.append(row);
     }
@@ -7339,7 +7338,7 @@ const MusicSources={
     this.refresh();
   },
   renderLocal(body){
-    const add=(label,desc,fn)=>{const row=Settings.item(S_act(label,desc,fn));row.setAttribute('role','button');row.tabIndex=0;row.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();fn();}};body.append(row);};
+    const add=(label,desc,fn)=>{const row=Settings.item(S_act(label,desc,fn));row.classList.add('native-setting');row.setAttribute('role','button');row.tabIndex=0;row.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();fn();}};body.append(row);};
     body.append(el('div','native-note','Files added here stay on this browser. Enable On this device in Music Sources to include them in your library.'));
     add('Add Files','Choose audio files',()=>$('#pick-files').click());
     add('Add ZIP','Import folders and subfolders from a ZIP',()=>$('#pick-zip').click());
