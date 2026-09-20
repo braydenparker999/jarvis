@@ -1,79 +1,41 @@
-# Jarvis
+# Jarvis 1.0
 
-A mobile-first personal hub with Home, Jarvis messaging, and Daily Board. Only `public/` is deployed to Azure. The UI uses small native JavaScript modules and system fonts, with no frontend dependencies or build step.
+Mobile-first personal hub: Home, Jarvis messages, and assistant-published Daily Board.
 
-## Deployment
+- Website: https://gray-meadow-09216fd10.1.azurestaticapps.net/
+- Backend: https://jarvis-hub-api.braydenparker999.workers.dev
+- GitHub: braydenparker999/jarvis, main.
 
-- Live site: https://gray-meadow-09216fd10.1.azurestaticapps.net/
-- Source: https://github.com/braydenparker999/jarvis, branch `main`.
-- Hosting: Azure Static Web Apps **Free**, app `jarvis`, resource group `jarvis_group`.
-- Azure's GitHub integration created the deployment workflow and repository secret. The workflow now deploys the static files directly, without build, API, or preview jobs. The original bootstrap workflow was removed to avoid duplicate deployments.
-- Custom preset; app location `public`; empty API and output locations.
-- Push changes to `main` to deploy. Check GitHub Actions for the deployment result and Azure Overview for the generated HTTPS `*.azurestaticapps.net` URL.
-- The initial domain test succeeded on the restricted Android device. Cloud message storage and automatic receipts are deployed and verified, including the Android device test.
+## One shared inbox
 
-## Cost boundary
+Every phone opens the same website. No account, password, device linking, or plugin setup. The owner explicitly chose public access: anyone who discovers the website can read messages and post regular messages. Only changes to this GitHub repository can publish trusted Jarvis replies and briefings.
 
-- Keep the Static Web App on **Free**. Never upgrade automatically.
-- Stop and ask the owner before creating or enabling any paid resource or entering billing information.
-- Do not enable Front Door, Application Insights, paid databases, storage accounts, or separate Functions resources without explicit approval.
-- The GitHub workflow deploys to an existing app; it does not create or upgrade Azure resources.
-- Free bandwidth overage is unavailable: https://learn.microsoft.com/en-us/azure/static-web-apps/quotas . This does not protect unrelated resources elsewhere in an Azure subscription.
-- The repository is public and uses a standard GitHub-hosted runner. Review GitHub's separate billing rules before changing visibility, runner type, or artifact storage.
+The frontend calls `/shared/state` and `/shared/messages`. One existing Cloudflare Durable Object stores the conversation. Drafts and retry queues remain in browser storage when offline. Original private inboxes remain intact; opening the updated website on an original phone copies its user messages into the shared inbox once. Old delivery receipts and personal board drafts are not published into the shared space.
 
-## Module structure
+## Assistant publishing
 
-Home, `jarvis/`, and `daily-board/` share the lightweight shell and native navigation in `public/assets/`. Later modules can use independent directories and assets beneath `public/`: `drawercast/`, `media/`, `chat/`, `notes/`, `tools/`, and `status/`. No placeholder routes for these future modules are shipped.
+1. Open `/reader/` on the Azure website. Its visible JSON contains messages, posts, unanswered messages, and publisher health.
+2. Read `content/jarvis.json` from GitHub main with its current file SHA.
+3. Append a reply `{id, replyTo, body, createdAt}` or briefing `{id, title, body, createdAt}`. IDs must be UUIDs; timestamps ISO 8601. Reply target must be an existing user message. Preserve existing entries and skip already answered targets.
+4. Update that file using the GitHub connector and current SHA. On conflict, reread and merge. No app deployment is needed for content publishing.
+5. Refresh `/reader/`. The Worker checks the fixed GitHub feed at most once per 15 seconds. Website polling is every 30 seconds while visible.
 
-Keep large media and data at external origins. Have future modules fetch directly from those services, subject to CORS and device access; do not proxy them through Azure. Never put API secrets in the frontend. Review each provider's free limits before connecting it. Expand the content security policy deliberately when adding module scripts or external connections.
+Public visitors cannot select a feed or publish assistant content. If GitHub is temporarily unavailable, saved messages and previously published content remain available. The shared record has a 512 KB cap; reaching it returns an explicit error and preserves the unsent draft. Export/archival is future work.
 
-Local preview: `python3 -m http.server 8000 --directory public`.
+Recurring assistant execution is separate from website hosting. Never claim an hourly check or daily briefing is scheduled without verifying the automation. Quick Chat and additional modules are not implemented yet.
 
-## Version 0.3 — responder connection
+## Deployment and costs
 
-Cloud backend: https://jarvis-hub-api.braydenparker999.workers.dev
+Azure Static Web Apps **Free**, app `jarvis`, resource group `jarvis_group`. Only `public/` deploys to Azure, with no build step, API deployment, or media storage. Keep large media and datasets outside Azure.
 
-Cloudflare Builds must use an empty Build command and Deploy command `npx wrangler deploy --config backend/wrangler.jsonc` from repository root. Azure deploys only `public/`. No AI API, cron trigger, or paid resource is configured.
+Cloudflare uses the existing `jarvis-hub-api` Worker and existing SQLite Durable Object binding. Build settings: root `/backend`, no build command, deploy `npx wrangler deploy`. Alternatively root `/` with deploy `npx wrangler deploy --config backend/wrangler.jsonc`.
 
-Jarvis and Quick Chat are separate products:
-- Jarvis is intended for ChatGPT to check the inbox hourly and write thoughtful replies. **No scheduled task is enabled yet.** The owner does not want Astra for routine replies. Model selection, usage accounting, and scheduled tool access must be verified before enabling it.
-- Quick Chat is planned as on-demand responses from a free AI API. It is not implemented.
-- Daily Board is for briefings published by Jarvis, not a user journal. Scheduled publishing is not enabled.
+Do not create or upgrade paid resources, enable paid plans, or enter billing information without explicit owner approval. No new infrastructure is required by this version.
 
-The responder console is `/respond/`. On the owner's phone, Connection → Create responder connection creates a separate bearer credential valid until explicitly revoked. Enter it in the responder console's connection form through secure credential entry, never paste it into a chat, repository, URL, or log. One responder connection is active per workspace. Creating another replaces the old connection. Disconnect responder revokes access immediately. The owner key is not disclosed to the responder. The responder may read messages and board entries and reply to existing messages, and publish Daily Board briefings, but cannot send as the owner.
+## Development
 
-API routes:
-- Owner: GET `/v1/state`, POST `/v1/messages`, POST `/v1/board`.
-- Owner: POST `/v1/responder/connect` or `/v1/responder/revoke` with `{}`.
-- Responder: GET `/v1/agent/inbox` returns history and `unanswered` messages. Delivery receipts do not count as answers.
-- Responder: POST `/v1/agent/board` with `{id, title, body}` publishes a briefing.
-- Responder: POST `/v1/agent/replies` with `{id, replyTo, body}`. Repeating the same reply is idempotent even with a new request ID; a different second answer returns 409. Reply targets must exist in that workspace.
+Native JavaScript modules and system fonts; no frontend dependencies. Future modules can be separate directories under `public/`. Keep provider secrets out of the frontend.
 
-All protected routes require `Authorization: Bearer <credential>`. Keys are stored in the corresponding browser's local storage; only hashes identify server records. CORS permits the Azure site. There is no global inbox. An agent must connect to the owner's workspace before it can read phone messages. Existing drafts and messages are preserved. Workspace message/board data is limited to 100 KB; export and archival are future work.
+`npm test` checks persistence, public role restrictions, trusted publishing, retry deduplication, migration, preserved drafts, and compatibility of legacy data routes. Cloud deployments also require a live round-trip test.
 
-Run `npm test` (Node 24, no dependencies). Tests cover persistence, isolation, validation, retry behavior, draft merging, unanswered filtering, responder rotation/revocation and reply target checks. Cloud deployments need a separate live test. Never claim a scheduled task exists unless its creation and required connector access have succeeded.
-
-
-## ChatGPT connector (0.4, integration pending)
-
-MCP URL: `https://jarvis-hub-api.braydenparker999.workers.dev/mcp`
-
-The existing Worker now exposes streamable HTTP tools for inbox reading, replying,
-and briefing publication. OAuth uses authorization code + S256 PKCE, a fixed
-ChatGPT redirect allowlist, one-use 5-minute codes, one-hour access tokens and
-rotating refresh tokens. Refresh access lasts until owner revocation. No new
-Azure/Cloudflare resources, AI provider, or paid plan are configured.
-
-Connect from ChatGPT Plugins using OAuth and dynamic client registration, then
-open the authorization screen in the same browser that holds the Jarvis workspace.
-The owner approves the three displayed scopes there; the owner key never leaves
-Jarvis's existing frontend/backend path. No bearer code is pasted into ChatGPT.
-`Disconnect responder` revokes both manual responder and OAuth access.
-
-Official setup: https://developers.openai.com/plugins/deploy/connect-chatgpt
-Official authentication: https://developers.openai.com/plugins/build/auth
-
-Do not call this 1.0 complete until a real connected tool reads the user's inbox,
-posts a reply, and publishes a briefing. Hourly automation still requires a verified
-connector and a model/usage choice compatible with the user's no-Astra preference.
-Quick Chat still needs a verified free provider and secure provider credentials.
+Legacy private API code remains only for compatibility and recovery. The active website no longer depends on device credentials or the old OAuth connector.

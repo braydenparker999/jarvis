@@ -14,45 +14,13 @@
   <a href="#content" class="skip-link">Skip to content</a>
   <div id="app"><main class="loading"><h1>JARVIS</h1><p>Opening your hub…</p></main></div>
   <noscript><p>Enable JavaScript to use your messages and Daily Board.</p></noscript>
-  <dialog id="entry-dialog" aria-labelledby="entry-heading">
-    <div class="dialog-heading"><h2 id="entry-heading">A new entry</h2><button type="button" class="close" data-close="entry-dialog" aria-label="Close entry">×</button></div>
-    <form id="entry-form">
-      <label for="entry-title">Title</label><input id="entry-title" maxlength="120" placeholder="Give this moment a name" required>
-      <label for="entry-body">Your note</label><textarea id="entry-body" rows="7" maxlength="6000" placeholder="What's worth keeping?" required></textarea>
-      <div class="dialog-actions"><button type="button" class="secondary" data-close="entry-dialog">Cancel</button><button type="submit" class="primary" id="entry-save">Save on this device</button></div>
-    </form>
-  </dialog>
   <dialog id="connection-dialog" aria-labelledby="connection-heading">
     <div class="dialog-heading"><h2 id="connection-heading">Connection</h2><button type="button" class="close" data-close="connection-dialog" aria-label="Close connection details">×</button></div>
     <h3 id="connection-state"></h3><p id="connection-detail"></p>
-    <p class="muted">Hourly Jarvis replies and scheduled Daily Board posts are not enabled yet. Quick Chat will be a separate module.</p>
-    <button class="primary" id="sync-now" hidden>Sync now</button>
-    <hr><h3>Your devices</h3>
-    <p>Use the same messages and Daily Board on another phone. ChatGPT only needs to connect once per inbox.</p>
-    <button class="secondary" id="link-device">Link another device</button>
-    <hr><h3>Jarvis responder</h3>
-    <p>Connect ChatGPT to read your inbox, reply, and publish daily briefings.</p><p><a href="/connect/">Connect ChatGPT →</a></p><p>Advanced: manual responder connection</p>
-    <button class="secondary" id="connect-responder">Create responder connection</button>
-    <button class="secondary" id="revoke-responder">Disconnect responder</button>
-    <div id="responder-access" hidden><p id="responder-info"></p><label for="responder-code">Responder connection code</label><input id="responder-code" readonly autocomplete="off"><button class="secondary" id="copy-responder">Copy code</button></div>
-  </dialog>
-  <dialog id="device-dialog" aria-labelledby="device-heading">
-    <div class="dialog-heading"><h2 id="device-heading">Link another device</h2><button type="button" class="close" data-close="device-dialog" aria-label="Close device linking">×</button></div>
-    <p>On your original phone, copy this code. On your other phone, open Jarvis → Connected → Link another device, and paste it below.</p>
-    <label for="device-code">This inbox's private device code</label>
-    <input id="device-code" type="password" readonly autocomplete="off">
-    <button class="secondary" id="copy-device-code">Copy device code</button>
-    <p class="muted">This code gives access to your inbox. Keep a private backup; you can also use it after clearing browser data. Don't send it in chat.</p>
-    <hr>
-    <form id="device-link-form">
-      <label for="incoming-device-code">Code from your original phone</label>
-      <input id="incoming-device-code" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="80" required>
-      <p>This switches this device to that inbox. Your existing inbox stays saved, and you can switch back below.</p>
-      <button class="primary" id="use-device-code" type="submit">Use this inbox</button>
-    </form>
-    <p id="device-status" role="status"></p>
-    <button class="secondary" id="restore-device" hidden>Switch back to previous inbox</button>
+    <p>Open this same website on any phone to see your messages and Daily Board. No account or device linking needed.</p>
+    <button class="primary" id="sync-now" hidden>Refresh messages</button>
   </dialog>
   <div id="toast" class="toast" role="status" hidden></div>
 </body>
 </html>
+
