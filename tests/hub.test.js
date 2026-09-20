@@ -73,9 +73,10 @@ test('responder connections rotate, revoke, isolate workspaces and reject invali
 test('ongoing responder publishes briefings and revocation blocks publishing',async()=>{
  const e=env(),access=await (await call(e,'/v1/responder/connect',{})).json();
  assert.equal(access.expiresAt,null);
- const post={id:crypto.randomUUID(),title:'Daily briefing',body:'Your hub update.'};
+ const post={id:crypto.randomUUID(),title:'Daily briefing',body:'x'.repeat(20000)};
  assert.equal((await call(e,'/v1/agent/board',post,access.token)).status,201);
  assert.equal((await call(e,'/v1/agent/board',post,access.token)).status,200);
+ assert.equal((await call(e,'/v1/agent/board',{...post,id:crypto.randomUUID(),body:'x'.repeat(20001)},access.token)).status,400);
  const state=await (await call(e,'/v1/state')).json();
  assert.equal(state.posts.length,1);assert.equal(state.posts[0].title,post.title);
  await call(e,'/v1/responder/revoke',{});
@@ -106,8 +107,9 @@ test('OAuth connector reads, replies, publishes, rotates tokens and respects rev
  const reply={replyTo:original.id,body:'Yes, I can read this message.'};
  assert.equal((await (await rpc('jarvis_reply',reply)).json()).result.isError,false);
  assert.equal((await (await rpc('jarvis_reply',reply)).json()).result.isError,false);
- const briefing={id:crypto.randomUUID(),title:'Daily briefing',body:'Your connection works.'};
+ const briefing={id:crypto.randomUUID(),title:'Daily briefing',body:'x'.repeat(20000)};
  assert.equal((await (await rpc('jarvis_publish_briefing',briefing)).json()).result.isError,false);
+ assert.equal((await (await rpc('jarvis_publish_briefing',{...briefing,id:crypto.randomUUID(),body:'x'.repeat(20001)})).json()).error.code,-32602);
  const state=await (await call(e,'/v1/state')).json();assert.equal(state.messages.filter(m=>m.kind==='reply').length,1);assert.equal(state.posts[0].body,briefing.body);
  const refresh={grant_type:'refresh_token',client_id:p.client_id,resource,refresh_token:tokens.refresh_token};
  const refreshed=await (await req('/oauth/token',form(refresh))).json();assert.ok(refreshed.access_token);
