@@ -46,7 +46,7 @@ export function sharedStore(ctx, path, body = {}, params = new URLSearchParams()
     const selected = page.slice(0,200);
     const result = {messages:selected.filter(r=>r.kind!=='briefing').map(entry),posts:selected.filter(r=>r.kind==='briefing').map(entry),
       nextCursor:page.length>200 ? String(selected.at(-1).seq) : null,
-      mode:'github-publications',serviceVersion:6,publisher:{source:'GitHub issue #2 → Cloudflare',...JSON.parse(rows("SELECT value FROM shared_meta WHERE key='publisher-status'")[0]?.value || '{"ok":false,"error":"Publication sync has not run yet"}')}};
+      mode:'github-publications',serviceVersion:7,publisher:{source:'GitHub issue #2 → Cloudflare',...JSON.parse(rows("SELECT value FROM shared_meta WHERE key='publisher-status'")[0]?.value || '{"ok":false,"error":"Publication sync has not run yet"}')}};
     if (path.endsWith('/inbox')) {
       // Pending queue is independent of history pagination; never hide old pending messages.
       const pending=rows("SELECT * FROM shared_entries u WHERE kind='user' AND NOT EXISTS(SELECT 1 FROM shared_entries r WHERE r.reply_to=u.id) ORDER BY seq LIMIT 101");
@@ -57,7 +57,8 @@ export function sharedStore(ctx, path, body = {}, params = new URLSearchParams()
   }
   const kind = path === '/internal/shared/message' ? 'user' : path === '/internal/shared/reply' ? 'reply' : path === '/internal/shared/briefing' ? 'briefing' : null;
   if (!kind) return json({error:'Not found'},404);
-  if (!id(body.id) || !text(body.body,kind==='user'?4000:6000) || kind==='reply'&&!id(body.replyTo) || kind==='briefing'&&!text(body.title,120)) return json({error:'Invalid entry'},400);
+  const bodyLimit = kind==='user' ? 4000 : kind==='briefing' ? 20000 : 6000;
+  if (!id(body.id) || !text(body.body,bodyLimit) || kind==='reply'&&!id(body.replyTo) || kind==='briefing'&&!text(body.title,120)) return json({error:'Invalid entry'},400);
   return ctx.storage.transactionSync(() => {
     const existing=rows('SELECT * FROM shared_entries WHERE id=?',body.id)[0];
     const dated=kind==='briefing'&&body.date?rows('SELECT e.* FROM shared_entries e JOIN shared_briefing_dates d ON e.id=d.entry_id WHERE d.date=?',body.date)[0]:null;
