@@ -1,5 +1,5 @@
 const ALLOWED_ORIGIN = 'https://gray-meadow-09216fd10.1.azurestaticapps.net';
-const paths = new Set(['/v1/state', '/v1/messages', '/v1/board', '/v1/responder/connect', '/v1/responder/revoke', '/v1/agent/inbox', '/v1/agent/replies']);
+const paths = new Set(['/v1/state', '/v1/messages', '/v1/board', '/v1/responder/connect', '/v1/responder/revoke', '/v1/agent/inbox', '/v1/agent/replies', '/v1/agent/board']);
 const digest = async value => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))),b=>b.toString(16).padStart(2,'0')).join('');
 const randomKey = () => Array.from(crypto.getRandomValues(new Uint8Array(32)),b=>b.toString(16).padStart(2,'0')).join('');
 const json = (data, status=200) => Response.json(data, {status});
@@ -31,7 +31,7 @@ export default {
       try{body=JSON.parse(new TextDecoder().decode(bytes));}catch{return reply({error:'Invalid JSON'},400);}
       if(!path.startsWith('/v1/responder/')) {
       if(!body || typeof body.id!=='string' || !/^[a-f0-9-]{36}$/.test(body.id) || typeof body.body!=='string' || !body.body.trim() || body.body.length>(path==='/v1/messages'?4000:6000)) return reply({error:'Invalid entry'},400);
-      if(path==='/v1/board' && (typeof body.title!=='string' || !body.title.trim() || body.title.length>120)) return reply({error:'Invalid title'},400);
+      if((path==='/v1/board' || path==='/v1/agent/board') && (typeof body.title!=='string' || !body.title.trim() || body.title.length>120)) return reply({error:'Invalid title'},400);
       if(path==='/v1/agent/replies' && (typeof body.replyTo!=='string' || !/^[a-f0-9-]{36}$/.test(body.replyTo))) return reply({error:'Reply target required'},400);
       }
     }
@@ -43,7 +43,7 @@ export default {
       if(path==='/v1/responder/connect') {
         // Separate responder credential; never hand the browser's owner key to an agent.
         const responderToken=randomKey(), responderHash=await digest(responderToken);
-        const expiresAt=Date.now()+30*24*60*60*1000;
+        const expiresAt=null;
         await internal('responder:'+responderHash,'/internal/register',{workspace:name,expiresAt});
         await internal(name,'/internal/authorize',{hash:responderHash,expiresAt});
         return reply({token:responderToken,expiresAt});
@@ -51,7 +51,7 @@ export default {
         response=await internal(name,'/internal/authorize',{hash:null,expiresAt:0});
       } else if(path.startsWith('/v1/agent/')) {
         const access=await (await internal('responder:'+name,'/internal/access')).json();
-        if(!access.workspace || access.expiresAt<=Date.now()) return reply({error:'Responder connection expired or invalid'},401);
+        if(!access.workspace || (access.expiresAt!==null && access.expiresAt<=Date.now())) return reply({error:'Responder connection expired or invalid'},401);
         response=await internal(access.workspace,path,body,{'X-Responder-Hash':name});
       } else response=await internal(name,path,body);
       return new Response(response.body,{status:response.status,headers:{...headers,'Content-Type':'application/json'}});
@@ -67,7 +67,7 @@ export class Hub {
     if(path==='/internal/authorize'){await this.ctx.storage.put('responder',await request.json());return json({ok:true});}
     if(path.startsWith('/v1/agent/')) {
       const access=await this.ctx.storage.get('responder');
-      if(!access || access.expiresAt<=Date.now() || access.hash!==request.headers.get('X-Responder-Hash'))return json({error:'Responder disconnected'},401);
+      if(!access || (access.expiresAt!==null && access.expiresAt<=Date.now()) || access.hash!==request.headers.get('X-Responder-Hash'))return json({error:'Responder disconnected'},401);
     }
     if(request.method==='GET'){
       const state=await this.ctx.storage.get('state') || {messages:[],posts:[]};
@@ -77,21 +77,23 @@ export class Hub {
     return this.ctx.storage.transaction(async tx=>{
       const state=await tx.get('state') || {messages:[],posts:[],lastWrite:0};
       // Repeat checks inside the write transaction so revocation cannot race a reply.
-      if(path==='/v1/agent/replies') {
+      if(path.startsWith('/v1/agent/')) {
         const access=await tx.get('responder');
-        if(!access || access.expiresAt<=Date.now() || access.hash!==request.headers.get('X-Responder-Hash'))return json({error:'Responder disconnected'},401);
+        if(!access || (access.expiresAt!==null && access.expiresAt<=Date.now()) || access.hash!==request.headers.get('X-Responder-Hash'))return json({error:'Responder disconnected'},401);
+      }
+      if(path==='/v1/agent/replies') {
         if(!state.messages.some(m=>m.id===body.replyTo && m.role==='user'))return json({error:'Original message not found'},404);
         const prior=state.messages.find(m=>m.kind==='reply' && m.replyTo===body.replyTo);
         if(prior)return prior.body===body.body.trim()?json(publicState(state)):json({error:'Message already answered'},409);
       }
       const existing=[...state.messages,...state.posts].find(x=>x.id===body.id);
       if(existing){
-        if(existing.body!==body.body.trim() || (path==='/v1/board' && existing.title!==body.title.trim()) || (path==='/v1/messages' && existing.role!=='user') || (path==='/v1/agent/replies' && (existing.kind!=='reply' || existing.replyTo!==body.replyTo)))return json({error:'Entry ID conflict'},409);
+        if(existing.body!==body.body.trim() || ((path==='/v1/board' || path==='/v1/agent/board') && existing.title!==body.title.trim()) || (path==='/v1/messages' && existing.role!=='user') || (path==='/v1/agent/replies' && (existing.kind!=='reply' || existing.replyTo!==body.replyTo)))return json({error:'Entry ID conflict'},409);
         return json(publicState(state));
       }
       const now=Date.now();
       const createdAt=new Date(now).toISOString();
-      if(path==='/v1/messages')state.messages.push({id:body.id,role:'user',body:body.body.trim(),createdAt},{id:'receipt-'+body.id,role:'assistant',kind:'receipt',body:'Message received and saved. Cloud messaging is working. This is an automatic delivery receipt; AI replies are not connected yet.',createdAt});
+      if(path==='/v1/messages')state.messages.push({id:body.id,role:'user',body:body.body.trim(),createdAt},{id:'receipt-'+body.id,role:'assistant',kind:'receipt',body:'Message received and saved. This is an automatic delivery receipt, not a Jarvis reply.',createdAt});
       else if(path==='/v1/agent/replies')state.messages.push({id:body.id,role:'assistant',kind:'reply',replyTo:body.replyTo,body:body.body.trim(),createdAt});
       else state.posts.push({id:body.id,title:body.title.trim(),body:body.body.trim(),createdAt});
       state.lastWrite=now;

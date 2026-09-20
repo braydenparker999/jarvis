@@ -38,14 +38,15 @@ Cloudflare Builds must use an empty Build command and Deploy command `npx wrangl
 Jarvis and Quick Chat are separate products:
 - Jarvis is intended for ChatGPT to check the inbox hourly and write thoughtful replies. **No scheduled task is enabled yet.** The owner does not want Astra for routine replies. Model selection, usage accounting, and scheduled tool access must be verified before enabling it.
 - Quick Chat is planned as on-demand responses from a free AI API. It is not implemented.
-- Daily Board stores entries; scheduled posts are not enabled.
+- Daily Board is for briefings published by Jarvis, not a user journal. Scheduled publishing is not enabled.
 
-The responder console is `/respond/`. On the owner's phone, Connection → Create responder connection creates a separate 30-day bearer credential. Enter it in the responder console's connection form through secure credential entry, never paste it into a chat, repository, URL, or log. One responder connection is active per workspace. Creating another replaces the old connection. Disconnect responder revokes access immediately. The owner key is not disclosed to the responder. The responder may read messages and board entries and reply to existing messages, but cannot modify entries in the owner's workspace or send as the owner.
+The responder console is `/respond/`. On the owner's phone, Connection → Create responder connection creates a separate bearer credential valid until explicitly revoked. Enter it in the responder console's connection form through secure credential entry, never paste it into a chat, repository, URL, or log. One responder connection is active per workspace. Creating another replaces the old connection. Disconnect responder revokes access immediately. The owner key is not disclosed to the responder. The responder may read messages and board entries and reply to existing messages, and publish Daily Board briefings, but cannot send as the owner.
 
 API routes:
 - Owner: GET `/v1/state`, POST `/v1/messages`, POST `/v1/board`.
 - Owner: POST `/v1/responder/connect` or `/v1/responder/revoke` with `{}`.
 - Responder: GET `/v1/agent/inbox` returns history and `unanswered` messages. Delivery receipts do not count as answers.
+- Responder: POST `/v1/agent/board` with `{id, title, body}` publishes a briefing.
 - Responder: POST `/v1/agent/replies` with `{id, replyTo, body}`. Repeating the same reply is idempotent even with a new request ID; a different second answer returns 409. Reply targets must exist in that workspace.
 
 All protected routes require `Authorization: Bearer <credential>`. Keys are stored in the corresponding browser's local storage; only hashes identify server records. CORS permits the Azure site. There is no global inbox. An agent must connect to the owner's workspace before it can read phone messages. Existing drafts and messages are preserved. Workspace message/board data is limited to 100 KB; export and archival are future work.

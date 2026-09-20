@@ -31,4 +31,11 @@ $('reply-form').onsubmit=async e=>{
  catch(e){$('status').textContent=e.message;}
  finally{$('post-reply').disabled=false;}
 };
+$('briefing-form').onsubmit=async e=>{
+ e.preventDefault();const title=$('briefing-title').value.trim(),body=$('briefing-body').value.trim();if(!title||!body)return;
+ $('post-briefing').disabled=true;
+ try{await request('/v1/agent/board',{id:crypto.randomUUID(),title,body});$('briefing-form').reset();$('status').textContent='Daily briefing published.';}
+ catch(e){$('status').textContent=e.message;}
+ finally{$('post-briefing').disabled=false;}
+};
 if(token)refresh();

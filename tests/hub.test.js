@@ -69,3 +69,15 @@ test('responder connections rotate, revoke, isolate workspaces and reject invali
  assert.equal((await call(e,'/v1/agent/inbox',null,second.token)).status,401);
  assert.equal((await call(e,'/v1/agent/inbox',null,other.token)).status,200);
 });
+
+test('ongoing responder publishes briefings and revocation blocks publishing',async()=>{
+ const e=env(),access=await (await call(e,'/v1/responder/connect',{})).json();
+ assert.equal(access.expiresAt,null);
+ const post={id:crypto.randomUUID(),title:'Daily briefing',body:'Your hub update.'};
+ assert.equal((await call(e,'/v1/agent/board',post,access.token)).status,201);
+ assert.equal((await call(e,'/v1/agent/board',post,access.token)).status,200);
+ const state=await (await call(e,'/v1/state')).json();
+ assert.equal(state.posts.length,1);assert.equal(state.posts[0].title,post.title);
+ await call(e,'/v1/responder/revoke',{});
+ assert.equal((await call(e,'/v1/agent/board',{...post,id:crypto.randomUUID()},access.token)).status,401);
+});
