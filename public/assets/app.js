@@ -82,7 +82,7 @@ function drawBoard() {
 }
 function showConnection() {
   $('connection-state').textContent = connection();
-  $('connection-detail').textContent = !API_ORIGIN ? 'Your hub is live. Cloud storage is awaiting connection. Messages and board entries currently save only in this browser; clearing browser data will remove them.' : syncError || (state.syncedAt ? `Last synced ${time(state.syncedAt)}. One shared inbox. Messages and briefings are stored in Cloudflare.` : 'Opening the shared inbox.');
+  $('connection-detail').textContent = !API_ORIGIN ? 'Your hub is live. Cloud storage is awaiting connection. Messages and board entries currently save only in this browser; clearing browser data will remove them.' : syncError || (state.syncedAt ? `Last synced ${time(state.syncedAt)}. One shared inbox. Messages are stored in Cloudflare; replies and briefings publish through this website.` : 'Opening the shared inbox.');
   $('sync-now').hidden = !API_ORIGIN || !!storageError;
   $('sync-now').disabled = busy;
   $('connection-dialog').showModal();

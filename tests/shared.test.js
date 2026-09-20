@@ -7,7 +7,7 @@ function setup(){
  const objects=new Map();const env={HUBS:{idFromName:n=>n,get(id){if(!objects.has(id)){const values=new Map(),storage={async get(k){return structuredClone(values.get(k));},async put(k,v){values.set(k,structuredClone(v));},async transaction(fn){return fn(storage);}};objects.set(id,new Hub({storage}));}return objects.get(id);}}};
  const feed={version:1,replies:[],posts:[]};
  const fetcher=async(url,options)=>url==='/content/jarvis.json'?Response.json(feed):worker.fetch(new Request(url,options),env);
- return {request:createSharedApi(fetcher,'https://api.example'),other:createSharedApi(fetcher,'https://api.example'),feed};
+ return {request:createSharedApi(fetcher,'https://api.example'),other:createSharedApi(fetcher,'https://api.example'),feed,fetcher};
 }
 test('independent clients share persisted inbox; retries deduplicate without automatic receipts',async()=>{
  const s=setup(),m={id:crypto.randomUUID(),body:'Hello'};
@@ -30,4 +30,13 @@ test('pending drafts survive remote refresh; damaged storage is not reset',()=>{
  const store={getItem:k=>k===LEGACY_KEY?JSON.stringify(old):null};const state=readState(store);assert.equal(state.legacyPending,true);assert.equal(state.composer,'Unfinished');
  const next=mergeState(state,{messages:[],posts:[]});assert.equal(next.messages[0].body,'Keep me');assert.equal(next.composer,'Unfinished');
  assert.throws(()=>readState({getItem:k=>k===STORAGE_KEY?'broken':null}));
+});
+
+test('original phone messages migrate idempotently and original inbox remains intact',async()=>{
+ const s=setup(),key='b'.repeat(64),m={id:crypto.randomUUID(),body:'Previous phone message'};
+ const headers={Authorization:'Bearer '+key,'Content-Type':'application/json'};
+ await s.fetcher('https://api.example/v1/messages',{method:'POST',headers,body:JSON.stringify(m)});
+ await s.request('/shared/migrate',{},headers);await s.request('/shared/migrate',{},headers);
+ const shared=await s.other('/shared/state');assert.equal(shared.messages.length,1);assert.equal(shared.messages[0].id,m.id);
+ const original=await (await s.fetcher('https://api.example/v1/state',{headers})).json();assert.equal(original.messages.length,2);
 });
