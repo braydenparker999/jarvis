@@ -39,7 +39,17 @@ export async function upstream(url, { fetcher = fetch, signal, timeout = 15000 }
   if (signal?.aborted) abort();
   const timer = setTimeout(abort, timeout);
   try {
-    const r = await fetcher(url, { signal: controller.signal, headers: { Accept: 'application/json,text/html', 'User-Agent': 'Jarvis-Guitar/1.0' }, redirect: 'error' });
+    let r, target = url;
+    for (let hops = 0; hops < 4; hops++) {
+      r = await fetcher(target, { signal: controller.signal, headers: { Accept: 'application/json,text/html', 'User-Agent': 'Jarvis-Guitar/1.0' }, redirect: 'manual' });
+      if (![301, 302, 303, 307, 308].includes(r.status)) break;
+      const location = r.headers.get('Location');
+      await r.body?.cancel();
+      if (!location) throw new SongsterrError('Songsterr returned an invalid redirect.');
+      const next = new URL(location, target);
+      if (next.origin !== new URL(url).origin || hops === 3) throw new SongsterrError('Songsterr returned an invalid redirect.');
+      target = next.href;
+    }
     if (!r.ok) { await r.body?.cancel(); throw new SongsterrError(r.status === 404 ? 'This Songsterr version is unavailable. Try another result.' : 'Songsterr is unavailable. Please try again.', r.status === 404 ? 404 : 502); }
     let bytes = await readBounded(r);
     // Some revision CDN responses are gzip files without Content-Encoding.

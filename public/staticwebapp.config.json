@@ -7,6 +7,12 @@
   },
   "routes": [
     {
+      "route": "/guitar*",
+      "headers": {
+        "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://jarvis-hub-api.braydenparker999.workers.dev; worker-src 'self'; base-uri 'none'; frame-ancestors 'self'; form-action 'self'; frame-src 'self'"
+      }
+    },
+    {
       "route": "/quick-ai*",
       "headers": {
         "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://api.groq.com; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
