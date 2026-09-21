@@ -21,6 +21,13 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - name: Verify Guitar release assets
+        run: |
+          for asset in public/guitar/render-worker.js public/guitar/pdf.js public/guitar/vendor/Bravura.otf; do
+            test -s "$asset" || { echo "Missing or empty release asset: $asset"; exit 1; }
+          done
+          node --check public/guitar/render-worker.js
+          node --check public/guitar/pdf.js
       - name: Configure shared Quick AI
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}

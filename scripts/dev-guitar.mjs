@@ -7,6 +7,8 @@ const types = { '.js': 'application/javascript', '.css': 'text/css', '.html': 't
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, 'http://localhost');
+    const harness = { '/guitar/qa-mobile.html': 'tests/guitar-browser.html', '/guitar/qa-mobile.js': 'tests/guitar-browser.js' }[url.pathname];
+    if (harness) { res.setHeader('Content-Type', types[extname(harness)]); res.end(await readFile(harness)); return; }
     if (url.pathname === '/assets/config.js') { res.setHeader('Content-Type', types['.js']); res.end('export const API_ORIGIN = location.origin; export const DIRECT_API_ENABLED = false;'); return; }
     if (url.pathname.startsWith('/guitar/search') || url.pathname.startsWith('/guitar/songs/')) {
       const result = await songsterr(new Request(url, { method: req.method }), (body, status = 200) => Response.json(body, { status }));

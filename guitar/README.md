@@ -69,6 +69,10 @@ Generated bundles and font are checked in so both existing static deployment
 workflows continue copying `public/` without a new build stage. The renderer,
 font and PDF bundle together are about 2.3 MiB, fetched only for PDF generation.
 `node scripts/dev-guitar.mjs` starts a development page/API on port 8787.
+Its `/guitar/qa-mobile.html` route serves the 390 × 844 browser harness from
+`tests/`; it is not included in the production static files. Select a captured
+fixture JSON for repeatable failure and layout checks, or leave it empty to use
+the development API directly.
 `node scripts/qa-songsterr-live.mjs /tmp/guitar-live-fixtures.json` captures live
 responses for reproducible browser testing; it uses curl only as the local
 environment's transport adapter. This is not production code or a fallback API.
