@@ -33,7 +33,7 @@ test('render emits every measure for individual and combined guitar selections',
   for (const revisions of [input.revisions, [...input.revisions, { trackMeta: { ...trackMeta, partId: 2, name: 'Guitar 2' }, revision }]]) {
     const r = renderScore({ meta, revisions });
     assert.equal(r.measures, 2); assert.ok(r.systems.some(s => s.first === 0)); assert.ok(r.systems.some(s => s.last === 1));
-    assert.ok(r.systems.every(s => s.width === 740 && s.svg.includes('<svg')));
+    assert.ok(r.systems.every(s => s.width === 840 && s.svg.includes('<svg')));
   }
 });
 test('percussion direct rendering preserves MIDI articulation instead of GP7-only index', () => {

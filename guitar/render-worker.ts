@@ -19,8 +19,17 @@ self.onmessage = async ({ data }) => {
     const r = await fetch(new URL('./vendor/Bravura.otf', self.location.href), { signal: AbortSignal.timeout(15000) });
     if (!r.ok) throw Error('Notation font unavailable');
     const font = parse(await r.arrayBuffer());
-    const result = renderScore(data);
-    for (const system of result.systems) system.svg = outlineMusic(system.svg, font, result.musicFontSize);
+    // A collection of parts prints as consecutive complete parts. Stacking many
+    // guitar staves into one system would exceed A4 height or require tiny type.
+    const parts = data.revisions.map(revision => ({ ...data, revisions: [revision] }));
+    const result = { systems: [], warnings: [], measures: 0 };
+    for (const part of parts) {
+      const rendered = renderScore(part);
+      for (const system of rendered.systems) system.svg = outlineMusic(system.svg, font, rendered.musicFontSize);
+      if (parts.length > 1) rendered.systems[0].sectionName = part.revisions[0].trackMeta.name || part.revisions[0].trackMeta.title || 'Guitar';
+      result.systems.push(...rendered.systems); result.warnings.push(...rendered.warnings); result.measures += rendered.measures;
+    }
+    if (!result.systems.length) throw Error('No score');
     self.postMessage({ ok: true, ...result });
   } catch { self.postMessage({ ok: false }); }
 };

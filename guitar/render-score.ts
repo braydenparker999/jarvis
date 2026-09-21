@@ -1,7 +1,7 @@
 import * as alphaTab from '@coderline/alphatab';
 import { SongsterrToAlphaTabConverter } from './vendor/songsterr-to-alphatab.converter';
 
-export const SCORE_WIDTH = 740;
+export const SCORE_WIDTH = 840;
 export function renderScore(input) {
   const { score, settings, warnings } = new SongsterrToAlphaTabConverter().buildScore(input);
   if (!score.tracks.length || !score.masterBars.length) throw Error('Empty score');
