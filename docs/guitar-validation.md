@@ -2,19 +2,26 @@
 
 ## Release status
 
-Implementation is committed to Jarvis and the frontend is deployed to the
-existing Azure Static Web Apps preview. **The production phone workflow is not
-accepted or released yet.** The live Cloudflare Worker still returns 404 for
-`/guitar/search`. Wrangler has no authenticated account in this environment;
-the Cloudflare dashboard presents a persistent browser verification challenge.
-The primary Azure Storage release pin has not been advanced.
+The user deployed the existing Cloudflare Worker, and live Songsterr search,
+metadata and PDF downloads now pass. The primary Azure Storage release was
+promoted to Jarvis commit `24453c47e08a02e802e03bef662456ff57bd6814` by
+Missionarytube commit `b1aa319ec904edd43cde3a6aeb982d61c9d6cdb2`.
+Deployment run `35551327276` completed successfully, including the existing
+backend/origin and static-file checks.
 
-Deploy the existing Worker using `backend/wrangler.jsonc`, verify real search,
-metadata and selected revision requests from the two allowed Jarvis origins,
-then repeat the browser downloads against that live backend. Only then advance
-`jarvis-release.json` in `braydenparker000/Missionarytube-` and verify the primary
-phone URL. No new service, database binding, or persistent Songsterr cache is
-needed.
+Live browser checks used the normal application with no fixture overrides:
+
+- Backup frontend: Greensleeves search, track metadata, revision retrieval and
+  real one-page PDF download; Mediterranean Sundance selection of Paco's part,
+  real 51-page PDF download and final measure 291 verified.
+- Primary phone URL: homepage Guitar entry, live Greensleeves search, automatic
+  single-guitar selection and real one-page A4 PDF download; title, artist and
+  final measure 13 verified.
+- The live API returned the correct CORS origin for the primary Storage site.
+
+Production entry: https://missionarytube.z13.web.core.windows.net/guitar/
+The earlier mobile viewport and failure checks below remain applicable. An
+actual physical Galaxy A15 performance test still requires the user's device.
 
 ## Checks completed
 
@@ -29,8 +36,8 @@ needed.
   this environment's transport adapter; production uses Worker fetch.
 - Chromium used the actual mobile page and generated real downloaded PDF
   files, using those captured responses through the test harness. This tests
-  the complete frontend conversion/download path, **not a live deployed
-  backend end-to-end request**.
+  the complete frontend conversion/download path. The separate live deployment
+  checks above subsequently verified the deployed backend end to end.
 
 | Arrangement | Observed result |
 | --- | --- |

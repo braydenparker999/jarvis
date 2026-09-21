@@ -86,6 +86,6 @@ Update `jarvis-release.json` in `braydenparker000/Missionarytube-` to the verifi
 Jarvis source commit only after those checks. The existing Storage workflow
 preserves rollback bytes and validates the shell before promoting its homepage.
 
-The main Storage release pin has intentionally not been advanced while Worker
-deployment access is unavailable. See `docs/guitar-validation.md` for the exact
-verification status; a published frontend alone is not a completed rollout.
+The Worker and primary Storage release are deployed and live downloads have
+passed. See `docs/guitar-validation.md` for the release commits, verification
+evidence, and the remaining physical-device testing limitation.
