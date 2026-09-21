@@ -42,3 +42,11 @@ test('percussion direct rendering preserves MIDI articulation instead of GP7-onl
   assert.equal(score.tracks[0].staves[0].bars[0].voices[0].beats[0].notes[0].percussionArticulation, 38);
   assert.equal(renderScore(data).measures, 1);
 });
+test('full resting measures print rests while padding absent voices stays invisible', () => {
+  const data = { meta, revisions: [{ trackMeta, revision: { tuning, measures: [{ signature: [7, 4], marker: 'Intro', voices: [{ rest: true, beats: [{ rest: true, duration: [7, 4], notes: [{ rest: true }] }] }] }] } }] };
+  const score = new SongsterrToAlphaTabConverter().buildScore(data).score;
+  const beats = score.tracks[0].staves[0].bars[0].voices[0].beats;
+  assert.ok(beats.length > 0); assert.ok(beats.every(b => b.isRest && !b.isEmpty));
+  assert.equal(score.masterBars[0].section.marker, ''); assert.equal(score.masterBars[0].section.text, 'Intro');
+  const rendered = renderScore(data); assert.ok(rendered.systems[0].svg.includes('Intro'));
+});

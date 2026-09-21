@@ -159,7 +159,7 @@ export class SongsterrToAlphaTabConverter {
       if (measure?.marker) {
         const section = new alphaTab.model.Section();
         const markerText = this.extractMarkerText(measure.marker);
-        section.marker = markerText;
+        section.marker = '';
         section.text = markerText;
         masterBar.section = section;
       }
@@ -291,6 +291,8 @@ export class SongsterrToAlphaTabConverter {
       for (let v = bar.voices.length; v < maxVoiceCount; v++) {
         const restVoice = new alphaTab.model.Voice();
         this.fillWithRestBeats(restVoice, score.masterBars[measureIndex]);
+        // Padding an absent secondary voice must stay invisible.
+        for (const beat of restVoice.beats) beat.isEmpty = true;
         bar.addVoice(restVoice);
       }
 
@@ -352,9 +354,8 @@ export class SongsterrToAlphaTabConverter {
     const beat = new alphaTab.model.Beat();
 
     // Handle rest beats
-    if (beatData.rest) {
-      beat.isEmpty = true;
-    }
+    // A note-less, non-empty beat is a visible rest in alphaTab. isEmpty hides
+    // the rest entirely when rendering directly (GP7 round trips hid this bug).
 
     // Duration mapping
     const mappedDuration = mapSongsterrDuration(beatData.duration);
@@ -672,7 +673,7 @@ export class SongsterrToAlphaTabConverter {
     const mappedDuration = mapSongsterrDuration([1, denominator]);
     for (let i = 0; i < numerator; i++) {
       const restBeat = new alphaTab.model.Beat();
-      restBeat.isEmpty = true;
+      restBeat.isEmpty = false;
       restBeat.duration = mappedDuration.duration;
       restBeat.dots = mappedDuration.dots;
       voice.addBeat(restBeat);

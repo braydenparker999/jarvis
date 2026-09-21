@@ -36,11 +36,16 @@ instrument mapper and types. Changes are limited to relative imports, exposing
 `buildScore`, removing GP7/MIDI export-only code, removing the exporter credit
 from the score and using raw MIDI percussion IDs for direct alphaTab rendering
 (GP7-only articulation indexes are inappropriate without the GP7 round trip).
-The observed `upwards` slide is accepted as an alias of `out_up`, parallel to the
+Direct rendering also requires visible rests (`isEmpty=false`); only synthetic
+secondary-voice padding stays invisible. Section text is printed once rather
+than duplicated as both marker and label. The observed `upwards` slide is accepted as an alias of `out_up`, parallel to the
 existing `downwards` alias. All remaining technique conversion stays upstream.
 
 Print settings separately apply the conventional octave display for guitar/bass,
-black secondary voices, neutral measure numbers, and automatic measure spacing.
+black secondary voices, neutral measure numbers, and automatic measure spacing across an 840-unit score width. Multiple selected
+guitars print as consecutive complete parts, avoiding staves compressed to fit
+a single page. SVG dominant baselines are translated to the alignment-baseline
+attribute supported by svg2pdf.
 Header/footer partials are omitted: Jarvis supplies wrapped title, artist, track
 and page numbering. Notation, tempo, sections, repeats and alternate endings
 remain in alphaTab's system output. Unsupported upstream effects cause a quiet
