@@ -99,7 +99,7 @@ export function validateRevision(r, meta, partId) {
   return r;
 }
 export async function getRevisions(meta, selected, options) {
-  const revisions = [];
+  const revisions = []; let totalSize = 0;
   // Bounded concurrency: no all-track fanout and never return a partial selection.
   for (let start = 0; start < selected.length; start += 3) {
     const group = await Promise.all(selected.slice(start, start + 3).map(async t => {
@@ -108,6 +108,8 @@ export async function getRevisions(meta, selected, options) {
         try { raw = await upstream(`${CDNS[i]}/${meta.songId}/${meta.revisionId}/${meta.image}/${t.partId}.json`, options); break; }
         catch (e) { if (e.status !== 404 || i === CDNS.length - 1) throw e; }
       }
+      totalSize += raw.length;
+      if (totalSize > 12 * 1024 * 1024) throw new SongsterrError('This tab is too large. Choose fewer tracks.', 413);
       return { trackMeta: t, revision: validateRevision(parseJSON(raw), meta, t.partId) };
     }));
     revisions.push(...group);

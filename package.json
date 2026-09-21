@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.js",
-    "build:guitar": "node scripts/build-guitar.mjs"
+    "build:guitar": "node scripts/build-guitar.mjs",
+    "test:guitar-score": "node scripts/test-guitar-score.mjs"
   },
   "dependencies": {
     "@coderline/alphatab": "1.8.1",

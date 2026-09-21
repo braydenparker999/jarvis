@@ -560,7 +560,7 @@ export class SongsterrToAlphaTabConverter {
       note.slideInType = alphaTab.model.SlideInType.IntoFromAbove;
       return;
     }
-    if (normalizedSlide === 'out_up') {
+    if (normalizedSlide === 'out_up' || normalizedSlide === 'upwards') {
       note.slideOutType = alphaTab.model.SlideOutType.OutUp;
       return;
     }

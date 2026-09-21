@@ -6,8 +6,12 @@ export function renderScore(input) {
   const { score, settings, warnings } = new SongsterrToAlphaTabConverter().buildScore(input);
   if (!score.tracks.length || !score.masterBars.length) throw Error('Empty score');
   for (const t of score.tracks) for (const s of t.staves) {
+    const program = t.playbackInfo.program;
+    const guitar = program >= 24 && program <= 31, bass = program >= 32 && program <= 39;
     s.showStandardNotation = true;
-    s.showTablature = !s.isPercussion && s.tuning.length > 0;
+    s.showTablature = !s.isPercussion && s.tuning.length > 0 && (guitar || bass);
+    if (guitar || bass) s.displayTranspositionPitch = -12;
+    if (bass) for (const b of s.bars) b.clef = alphaTab.model.Clef.F4;
   }
   settings.core.engine = 'svg';
   settings.core.enableLazyLoading = false;
@@ -18,6 +22,8 @@ export function renderScore(input) {
   settings.display.systemPaddingTop = 10;
   settings.display.systemPaddingBottom = 14;
   settings.display.barsPerRow = -1;
+  settings.display.resources.secondaryGlyphColor = new alphaTab.model.Color(0, 0, 0);
+  settings.display.resources.barNumberColor = new alphaTab.model.Color(65, 65, 65);
   // Header is drawn separately with wrapping; keep alphaTab's tuning/tempo/track labels.
   for (const name of ['ScoreTitle', 'ScoreSubTitle', 'ScoreArtist', 'ScoreAlbum', 'ScoreWords', 'ScoreMusic', 'ScoreWordsAndMusic', 'ScoreTranscriber', 'ScoreCopyright']) {
     const key = alphaTab.NotationElement[name];
@@ -28,7 +34,7 @@ export function renderScore(input) {
   const systems = []; let failure;
   renderer.error.on(e => { failure = e; });
   renderer.partialRenderFinished.on(e => {
-    if (typeof e.renderResult === 'string') systems.push({ svg: e.renderResult, width: e.width, height: e.height,
+    if (typeof e.renderResult === 'string' && e.firstMasterBarIndex >= 0) systems.push({ svg: e.renderResult, width: e.width, height: e.height,
       first: e.firstMasterBarIndex, last: e.lastMasterBarIndex });
   });
   try {

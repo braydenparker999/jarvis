@@ -21,6 +21,12 @@ test('page metadata preserves real nonsequential part IDs and rejects invalid pa
   assert.throws(() => parseMeta(html, 99), /unavailable/);
   assert.throws(() => parseMeta('<html>Error</html>', 12), /invalid song page/);
 });
+test('canonical redirects stay on Songsterr and share the request deadline', async () => {
+  const visited = [];
+  const m = await getSong(12, { fetcher: async url => { visited.push(url); return visited.length === 1 ? new Response(null, { status: 301, headers: { Location: '/a/wsa/artist-song-tab-s12' } }) : new Response(html); } });
+  assert.equal(m.songId, 12); assert.equal(visited.length, 2);
+  await assert.rejects(getSong(12, { fetcher: async () => new Response(null, { status: 302, headers: { Location: 'https://other.example/' } }) }), /invalid redirect/);
+});
 test('only requested revision is retrieved, gzip is decoded and missing data never becomes blank bars', async () => {
   let calls = [];
   const r = await getRevisions(meta, [meta.tracks[1]], { fetcher: async url => { calls.push(url); return new Response(gzipSync(JSON.stringify(revision))); } });
