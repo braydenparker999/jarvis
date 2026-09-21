@@ -7,6 +7,7 @@ export const apps = [
   {id:'media',name:'Media',description:'Astra · Videos',href:'/media/',icon:'media',group:'Library'},
   {id:'notes',name:'Notes',description:'Saved in this browser',href:'/notes/',icon:'notes',group:'Utilities'},
   {id:'tools',name:'Tools',description:'Files and HTML preview',href:'/tools/',icon:'tools',group:'Utilities'},
+  {id:'guitar',name:'Guitar',description:'Songsterr · PDF tabs',href:'/guitar/',icon:'music',group:'Utilities'},
   {id:'server',name:'Server',description:'Connection & status',href:'/server/',icon:'server',group:'Utilities'}
 ];
 const glyphs={

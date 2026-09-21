@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#121212"><title>Guitar · Jarvis</title>
+  <link rel="icon" href="data:,"><link rel="stylesheet" href="/assets/shell.css">
+  <link rel="stylesheet" href="/guitar/guitar.css"><script type="module" src="/guitar/guitar.js"></script>
+</head>
+<body>
+  <a href="#content" class="skip-link">Skip to content</a>
+  <div class="workspace">
+    <header class="topbar"><a class="icon-button" href="/" aria-label="Back to Home"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="m12 5-7 7 7 7M5 12h15"/></svg></a><a class="brand" href="/">Jarvis</a></header>
+    <main id="content">
+      <section class="page-heading"><h1>Guitar</h1></section>
+      <form id="search-form" role="search">
+        <label for="song-query">Search Songsterr</label>
+        <div class="guitar-search"><input id="song-query" name="q" type="search" placeholder="Song or artist" minlength="2" maxlength="160" autocomplete="off" required><button id="search-button" type="submit" class="icon-button" aria-label="Search Songsterr"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg></button></div>
+      </form>
+      <p id="status" class="guitar-status" role="status" aria-live="polite"></p>
+      <section id="song" hidden aria-label="Selected song"></section>
+      <section id="results" aria-label="Songsterr results"></section>
+      <footer class="guitar-footer"><a href="/guitar/credits.html">Credits</a></footer>
+    </main>
+  </div>
+  <noscript><p>Enable JavaScript to search and download tablature.</p></noscript>
+</body>
+</html>
