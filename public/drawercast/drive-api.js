@@ -31,6 +31,23 @@ export function createDriveApi(key, fetcher = fetch) {
     url.searchParams.set('alt','media'); url.searchParams.set('key', key);
     return url.href;
   }
+  async function manifest(folder, signal) {
+    const root = folderId(folder);
+    const page = await get('', {
+      q:"'" + root + "' in parents and name = 'drive-prepared.json' and trashed = false",
+      pageSize:'1',
+      fields:'files(id,md5Checksum,size)'
+    }, signal);
+    const file = page.files?.[0];
+    if (!file) throw Error('Drive metadata manifest was not found.');
+    const response = await fetcher(mediaURL(file), {signal, credentials:'omit', referrerPolicy:'no-referrer', cache:'no-store'});
+    if (!response.ok) throw Error('Drive metadata manifest could not be downloaded.');
+    const data = await response.json();
+    if (data?.version !== 1 || !data.files || typeof data.files !== 'object' || Array.isArray(data.files)) {
+      throw Error('Drive metadata manifest is invalid.');
+    }
+    return data.files;
+  }
   async function list(folder, signal) {
     const root = folderId(folder);
     const info = await get('/' + root, {fields:'id,name,mimeType'}, signal);
@@ -89,7 +106,7 @@ export function createDriveApi(key, fetcher = fetch) {
       }};
     }};
   }
-  return {list,mediaURL,metadataFile};
+  return {list,mediaURL,manifest,metadataFile};
 }
 export function driveTrack(file, root, prepared, old = {}) {
   const same=!!file.md5Checksum && old.md5===file.md5Checksum && old.size===Number(file.size);

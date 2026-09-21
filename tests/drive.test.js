@@ -41,6 +41,30 @@ test('media descriptor streams from the API with no token embedded in stored tra
   assert.equal(JSON.stringify(track).includes(key),false);assert.equal(track.waveformVersion,0);
   assert.throws(()=>api.mediaURL({id:'../private'}));
 });
+test('loads the prepared metadata manifest from the selected Drive folder',async()=>{
+  const manifestId='manifest12345678',calls=[];
+  const api=createDriveApi(key,async(url,options)=>{
+    calls.push({url:new URL(url),options});
+    if(calls.length===1)return Response.json({files:[{id:manifestId,md5Checksum:'manifest-md5',size:'123'}]});
+    return Response.json({version:1,files:{[file]:{size:4000,md5:'one',title:'Prepared title'}}});
+  });
+  const files=await api.manifest(root);
+  assert.equal(files[file].title,'Prepared title');
+  assert.equal(calls[0].url.searchParams.get('q'),"'"+root+"' in parents and name = 'drive-prepared.json' and trashed = false");
+  assert.equal(calls[0].url.searchParams.get('fields'),'files(id,md5Checksum,size)');
+  assert.equal(calls[1].url.pathname,'/drive/v3/files/'+manifestId);
+  assert.equal(calls[1].url.searchParams.get('alt'),'media');
+  assert.equal(calls[1].options.cache,'no-store');
+  assert.ok(calls.every(c=>c.options.credentials==='omit'));
+});
+test('missing, corrupt, or unsupported Drive manifests reject for graceful caller fallback',async()=>{
+  const missing=createDriveApi(key,async()=>Response.json({files:[]}));
+  await assert.rejects(missing.manifest(root),/not found/);
+  const corrupt=createDriveApi(key,async(url)=>url.includes('alt=media')?new Response('{',{headers:{'content-type':'application/json'}}):Response.json({files:[{id:'manifest12345678'}]}));
+  await assert.rejects(corrupt.manifest(root),SyntaxError);
+  const unsupported=createDriveApi(key,async(url)=>url.includes('alt=media')?Response.json({version:2,files:{}}):Response.json({files:[{id:'manifest12345678'}]}));
+  await assert.rejects(unsupported.manifest(root),/invalid/);
+});
 test('prepared metadata and waveform are accepted only for the matching file revision',()=>{
   const prepared={size:4000,md5:'one',dur:200,codec:'opus',waveform:true};
   const valid=driveTrack(song,root,prepared);

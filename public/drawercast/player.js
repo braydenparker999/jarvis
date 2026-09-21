@@ -2176,13 +2176,14 @@ const DriveSource={
   async install(){
 
     try{
-      this.helper=await import('./drive-api.js?v=metadata-r14');
+      this.helper=await import('./drive-api.js?v=metadata-r15');
       const response=await fetch('/assets/drive-config.json',{cache:'no-store',signal:AbortSignal.timeout(15000)});
       if(!response.ok)throw Error('Drive configuration could not be loaded.');
       const config=await response.json();this.api=this.helper.createDriveApi(config.apiKey);
       this.folder=this.helper.folderId(config.folderId);
       try{this.folder=localStorage.getItem('drawercast.drive.folder')||this.folder;}catch(e){}
-      try{const r=await fetch('/drawercast/drive-prepared.json',{signal:AbortSignal.timeout(10000)});if(r.ok){const p=await r.json();if(p.version===1)this.prepared=p.files||{};}}catch(e){}
+      this.prepared={};
+      try{this.prepared=await this.api.manifest(this.folder,AbortSignal.timeout(10000));}catch(e){}
       if(!SourceLibrary.enabled('drive')){this.status='Disabled';MusicSources.refresh();return;}
       this.connect(this.folder,true);
     }catch(e){this.error=e.message;this.status='Drive unavailable';}finally{MusicSources.refresh();}
