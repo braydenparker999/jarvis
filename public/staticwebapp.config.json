@@ -31,6 +31,12 @@
       }
     },
     {
+      "route": "/mymedia*",
+      "headers": {
+        "Content-Security-Policy": "default-src 'none'; script-src 'self' blob: 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: https://i.ytimg.com https://www.googleapis.com https://*.googleusercontent.com; media-src 'self' blob: https://www.googleapis.com; connect-src 'self' https://www.googleapis.com; worker-src 'self' blob:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+      }
+    },
+    {
       "route": "/portal*",
       "headers": {
         "Content-Security-Policy": "default-src 'none'; script-src 'self' 'unsafe-inline' blob: https:; style-src 'self' 'unsafe-inline' https:; font-src 'self' data: https:; img-src 'self' data: blob: https:; connect-src https:; media-src blob: https:; frame-src 'self' blob: https:; base-uri 'none'; frame-ancestors 'none'; form-action https:"

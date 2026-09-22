@@ -1,0 +1,44 @@
+/* My Media: a media library may use more width than the launcher (style guide). */
+.mymedia.workspace{max-width:1200px;padding-bottom:calc(32px + env(safe-area-inset-bottom))}
+.mymedia .topbar{justify-content:space-between;padding-left:max(8px,env(safe-area-inset-left));padding-right:max(8px,env(safe-area-inset-right))}
+.mymedia .brand{font-size:20px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mymedia .text-button{white-space:nowrap}
+.mymedia main{padding:0 max(20px,env(safe-area-inset-right)) 0 max(20px,env(safe-area-inset-left))}
+.mymedia [hidden]{display:none!important}
+.mymedia :focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.mymedia input,.mymedia select{min-height:48px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--text);font-size:16px;padding:8px 12px}
+.library-tools{display:flex;gap:8px;margin:4px 0 8px}
+.library-tools input{flex:1;min-width:0}
+.library-tools select{flex:0 0 auto;width:auto}
+.status{font-size:13px;line-height:1.5;color:var(--muted);margin:8px 0 16px}
+.status.error{color:var(--error)}
+.shelf{margin:0 0 24px}
+.video-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:20px 12px}
+@media(min-width:700px){.video-grid{grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:24px 16px}}
+.video-card{display:block;min-width:0;border-radius:8px}
+.video-card:hover{background:none}
+.thumb{position:relative;aspect-ratio:16/9;border-radius:8px;overflow:hidden;background:var(--raised)}
+.thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.thumb .placeholder{position:absolute;inset:0;display:grid;place-items:center;color:var(--label)}
+.thumb .length{position:absolute;right:6px;bottom:6px;background:#000c;color:#fff;font-size:12px;line-height:16px;padding:1px 5px;border-radius:4px}
+.thumb .bar{position:absolute;left:0;right:0;bottom:0;height:3px;background:#ffffff33}
+.thumb .bar span{display:block;height:100%;background:var(--accent)}
+.video-card strong{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;font-size:15px;line-height:21px;font-weight:500;margin-top:8px;overflow-wrap:anywhere}
+.card-text{display:block;min-width:0}
+.video-card small{display:block;color:var(--muted);font-size:13px;line-height:18px;margin-top:2px}
+.video-card .watched-mark{color:var(--success)}
+.empty{padding:12vh 0;color:var(--muted);text-align:center}
+
+/* Player */
+.stage{margin:0 calc(-1 * max(20px,env(safe-area-inset-right))) 0 calc(-1 * max(20px,env(safe-area-inset-left)));background:#000}
+.stage video{display:block;width:100%;max-height:75svh;aspect-ratio:16/9;background:#000}
+@media(min-width:700px){.stage{margin:0;border-radius:8px;overflow:hidden}}
+.watch-body h1{font-size:20px;line-height:26px;font-weight:600;margin:16px 0 4px;overflow-wrap:anywhere}
+.watch-meta{font-size:13px;color:var(--muted);margin:0 0 8px}
+.player-tools{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 24px}
+.player-tools button{padding:8px 12px;border:1px solid var(--line);border-radius:6px;color:var(--text);font-size:14px}
+.player-tools button[aria-pressed="true"]{border-color:var(--accent);color:var(--accent)}
+.player-tools select{font-size:14px;width:auto;flex:0 0 auto}
+.next-list{display:grid;gap:12px}
+.next-list .video-card{display:grid;grid-template-columns:160px 1fr;gap:12px;align-items:start}
+.next-list .video-card strong{margin-top:0}
