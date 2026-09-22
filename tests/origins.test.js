@@ -19,8 +19,8 @@ for (const origin of FRONTEND_ORIGINS) {
     }
   });
 }
-test('migration does not allow other origins or a lookalike Storage domain',async()=>{
-  for(const origin of ['https://evil.example','https://missionarytube.z13.web.core.windows.net.evil.example']) {
+test('only the Storage site is allowed; lookalikes and the retired Static Web App are rejected',async()=>{
+  for(const origin of ['https://evil.example','https://missionarytube.z13.web.core.windows.net.evil.example','https://gray-meadow-09216fd10.1.azurestaticapps.net']) {
     for(const path of ['/health','/shared/messages','/oauth/approve']) {
       const response=await worker.fetch(new Request('https://api.example'+path,{method:'OPTIONS',headers:{Origin:origin}}),{});
       assert.equal(response.status,403);

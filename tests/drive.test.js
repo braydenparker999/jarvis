@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFile,readdir} from 'node:fs/promises';
+import {readFile} from 'node:fs/promises';
 import vm from 'node:vm';
 import {folderId,createDriveApi,driveTrack} from '../public/drawercast/drive-api.js';
 const root='folder123456789',file='song12345678901',child='child1234567890',key='AIza'+'x'.repeat(35);
@@ -65,15 +65,15 @@ test('missing, corrupt, or unsupported Drive manifests reject for graceful calle
   const unsupported=createDriveApi(key,async(url)=>url.includes('alt=media')?Response.json({version:2,files:{}}):Response.json({files:[{id:'manifest12345678'}]}));
   await assert.rejects(unsupported.manifest(root),/invalid/);
 });
-test('prepared metadata and waveform are accepted only for the matching file revision',()=>{
+test('prepared metadata is accepted only for the matching file revision and never points at bundled waveforms',()=>{
   const prepared={size:4000,md5:'one',dur:200,codec:'opus',waveform:true};
-  const valid=driveTrack(song,root,prepared);
-  assert.equal(valid.dur,200);assert.equal(valid.waveformVersion,1);
+  const valid=driveTrack(song,root,prepared,{waveformVersion:1,waveformFile:'/drawercast/drive-waveforms/x.dcw'});
+  assert.equal(valid.dur,200);assert.equal(valid.waveformVersion,0);assert.equal(valid.waveformFile,null);
   const changed=driveTrack({...song,md5Checksum:'two'},root,prepared,valid);
-  assert.equal(changed.waveformVersion,0);assert.equal(changed.dur,0);
+  assert.equal(changed.dur,0);
 });
 const source=await readFile(new URL('../public/drawercast/player.js',import.meta.url),'utf8');
-function integration({fail=false,manifest=null}={}){
+function integration({fail=false,manifest=null,files=[song]}={}){
   const tracks=new Map([['a15',{id:'a15',remote:true}],['local',{id:'local'}],['gd_old12345678',{id:'gd_old12345678',source:'drive'}]]);
   const removed=[];const component=source.slice(source.indexOf('const DriveSource={'),source.indexOf('\nconst Engine = {'));
   const context=vm.createContext({AbortController,setTimeout,clearTimeout,SourceLibrary:{enabled:()=>true},sourceTrackEnabled:t=>!!t,MusicSources:{refresh(){}},LIB:{map:tracks},
@@ -86,21 +86,27 @@ function integration({fail=false,manifest=null}={}){
   let listCalls=0,manifestCalls=0;
   drive.api={
     async manifest(){manifestCalls++;if(manifest instanceof Error)throw manifest;if(manifest)return manifest;throw Error('Drive metadata manifest was not found.');},
-    async list(){listCalls++;if(fail)throw Error('Network failure');return {id:root,name:'Music',files:[song]};}
+    async list(){listCalls++;if(fail)throw Error('Network failure');return {id:root,name:'Music',files};}
   };
   drive.helper={driveTrack,folderId};return {drive,tracks,removed,engine:context.Engine,get listCalls(){return listCalls;},get manifestCalls(){return manifestCalls;}};
 }
-test('Drive refresh builds the library directly from the prepared manifest without walking folders',async()=>{
-  const prepared={[file]:{name:'01 - Prepared Artist - Prepared Song.opus',folder:'Prepared Artist',mimeType:'audio/ogg',size:4000,md5:'one',title:'Manifest title',artist:'Manifest artist',dur:123}};
+test('Drive refresh lists the folder and applies manifest metadata only to matching files',async()=>{
+  const prepared={[file]:{size:4000,md5:'one',title:'Manifest title',artist:'Manifest artist',dur:123},
+    stale12345678901:{name:'Removed.opus',size:1,md5:'gone',title:'Removed song'}};
   const state=integration({manifest:prepared});assert.equal(await state.drive.connect(root),true);
-  assert.equal(state.manifestCalls,1);assert.equal(state.listCalls,0);
+  assert.equal(state.manifestCalls,1);assert.equal(state.listCalls,1);
   const track=state.tracks.get('gd_'+file);assert.equal(track.title,'Manifest title');assert.equal(track.artist,'Manifest artist');assert.equal(track.dur,123);
-  assert.equal(track.path,'Prepared Artist/01 - Prepared Artist - Prepared Song.opus');assert.equal(track.mimeType,'audio/ogg');
-  assert.equal(state.drive.folder,root);assert.match(state.drive.status,/Google Drive · 1 songs/);
+  assert.equal(track.waveformVersion,0);assert.equal(track.waveformFile,null);
+  assert.equal(state.tracks.has('gd_stale12345678901'),false);assert.match(state.drive.status,/Music · 1 songs/);
 });
-test('Drive refresh falls back to the recursive listing when the manifest is unavailable',async()=>{
+test('songs added after the manifest was written still appear',async()=>{
+  const state=integration({manifest:{},files:[song,{...song,id:'newsong12345678',name:'02 - New Artist - New Song.opus',md5Checksum:'new'}]});
+  assert.equal(await state.drive.connect(root),true);
+  const added=state.tracks.get('gd_newsong12345678');assert.equal(added.title,'New Song');assert.equal(added.artist,'New Artist');
+});
+test('Drive refresh still succeeds when the manifest is unavailable',async()=>{
   const state=integration({manifest:new Error('Drive metadata manifest was not found.')});assert.equal(await state.drive.connect(root),true);
-  assert.equal(state.manifestCalls,1);assert.equal(state.listCalls,1);assert.ok(state.tracks.has('gd_'+file));
+  assert.equal(state.listCalls,1);assert.ok(state.tracks.has('gd_'+file));
 });
 test('Drive refresh removes only missing Drive tracks and preserves A15/local sources',async()=>{
   const {drive,tracks,removed}=integration();assert.equal(await drive.connect(root),true);
@@ -110,18 +116,6 @@ test('Drive read failure preserves the previous library',async()=>{
   const {drive,tracks,removed}=integration({fail:true});assert.equal(await drive.connect(root),false);
   assert.equal(tracks.size,3);assert.deepEqual(removed,[]);
 });
-test('every prepared waveform has the matching compact binary header and a bounded duration',async()=>{
-  const directory=new URL('../public/drawercast/drive-waveforms/',import.meta.url);
-  const catalog=JSON.parse(await readFile(new URL('../public/drawercast/drive-prepared.json',import.meta.url),'utf8'));
-  const files=await readdir(directory);assert.ok(files.length>0);
-  for(const name of files){
-    const bytes=await readFile(new URL(name,directory));const ms=bytes.readUInt32BE(4),bins=bytes.readUInt32BE(8);
-    assert.equal(bytes.readUInt32BE(0),0x44435731);assert.equal(bytes.length,16+bins);assert.equal(bins,Math.ceil(ms*16/1000));
-    assert.equal(bytes.readUInt16BE(12),16);assert.ok(ms>0&&ms<=1800000);
-    assert.ok(catalog.files[name.replace('.dcw','')].waveform);
-  }
-});
-
 test('numbered Muse filenames provide immediate artist/title while embedded tags load',()=>{
   const t=driveTrack({...song,name:'10 - Alice In Chains - Nutshell (Unplugged).opus'},root);
   assert.equal(t.title,'Nutshell (Unplugged)');assert.equal(t.artist,'Alice In Chains');

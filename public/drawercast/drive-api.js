@@ -125,7 +125,6 @@ export function driveTrack(file, root, prepared, old = {}) {
     size:Number(file.size)||0, mtime:Date.parse(file.modifiedTime)||0, md5:file.md5Checksum || '',
     dur:meta.dur || (same ? old.dur || 0 : 0), sr:meta.sr||0, ch:meta.ch||0,
     codec:meta.codec||'', bits:meta.bits||0, rootId:null, rel:null, missing:false, needsPerm:false, errored:false,
-    waveformVersion:match && meta.waveform ? 1 : 0,
-    waveformFile:match && meta.waveform ? '/drawercast/drive-waveforms/'+file.id+'.dcw' : null,
+    waveformVersion:0, waveformFile:null,
     rating:old.rating||0, plays:old.plays||0, lastPlayed:old.lastPlayed||0, added:old.added||Date.now()};
 }

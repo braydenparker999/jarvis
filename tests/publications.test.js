@@ -7,7 +7,7 @@ import {createDirectApi} from '../public/assets/direct-api.js';
 import {decodePublication,syncPublications,COMMENTS_URL} from '../backend/publications.js';
 import {SHARED_OBJECT,sharedStore} from '../backend/shared.js';
 const BASE='https://jarvis-hub-api.braydenparker999.workers.dev';
-const SITE='https://gray-meadow-09216fd10.1.azurestaticapps.net';
+const SITE='https://missionarytube.z13.web.core.windows.net';
 const CALLBACK='https://chatgpt.com/connector_platform_oauth_redirect';
 export function setup() {
   const objects=new Map();
