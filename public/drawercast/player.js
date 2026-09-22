@@ -2250,9 +2250,22 @@ const DriveSource={
     const controller=new AbortController();this.controller=controller;
     const timeout=setTimeout(()=>controller.abort(),90000);
     try{
-      const listing=await this.api.list(value,controller.signal);
+      const folderId=this.helper.folderId(value);
+      let prepared={},listing;
+      try{
+        prepared=await this.api.manifest(folderId,controller.signal);
+        const files=Object.entries(prepared).map(([id,entry])=>({
+          id,name:entry.name||id,mimeType:entry.mimeType||'audio/ogg',
+          size:Number(entry.size)||0,modifiedTime:0,md5Checksum:entry.md5||'',folder:entry.folder||''
+        }));
+        listing={id:folderId,name:'Google Drive',files};
+        this.prepared=prepared;
+      }catch(e){
+        if(controller.signal.aborted)throw e;
+        listing=await this.api.list(folderId,controller.signal);
+      }
       if(controller.signal.aborted||!SourceLibrary.enabled('drive'))return false;
-      const fresh=listing.files.map(f=>this.helper.driveTrack(f,listing.id,this.prepared[f.id],LIB.map.get('gd_'+f.id)));
+      const fresh=listing.files.map(f=>this.helper.driveTrack(f,listing.id,prepared[f.id],LIB.map.get('gd_'+f.id)));
       // Commit only after every page succeeds. Failed reads keep the old library.
       await IDB.bulk('tracks',fresh.map(t=>[t.id,t]));
       const seen=new Set(fresh.map(t=>t.id));

@@ -73,7 +73,7 @@ test('prepared metadata and waveform are accepted only for the matching file rev
   assert.equal(changed.waveformVersion,0);assert.equal(changed.dur,0);
 });
 const source=await readFile(new URL('../public/drawercast/player.js',import.meta.url),'utf8');
-function integration({fail=false}={}){
+function integration({fail=false,manifest=null}={}){
   const tracks=new Map([['a15',{id:'a15',remote:true}],['local',{id:'local'}],['gd_old12345678',{id:'gd_old12345678',source:'drive'}]]);
   const removed=[];const component=source.slice(source.indexOf('const DriveSource={'),source.indexOf('\nconst Engine = {'));
   const context=vm.createContext({AbortController,setTimeout,clearTimeout,SourceLibrary:{enabled:()=>true},sourceTrackEnabled:t=>!!t,MusicSources:{refresh(){}},LIB:{map:tracks},
@@ -83,9 +83,25 @@ function integration({fail=false}={}){
     Views:{refreshAll(){}},UI:{renderNowPlaying(){},renderPlayState(){}},localStorage:{setItem(){},removeItem(){}},
     toast(){},$:()=>null,Waveform:{load(){}}});
   const drive=vm.runInContext(component+'\nDriveSource;',context);
-  drive.api={async list(){if(fail)throw Error('Network failure');return {id:root,name:'Music',files:[song]};}};
-  drive.helper={driveTrack};return {drive,tracks,removed,engine:context.Engine};
+  let listCalls=0,manifestCalls=0;
+  drive.api={
+    async manifest(){manifestCalls++;if(manifest instanceof Error)throw manifest;if(manifest)return manifest;throw Error('Drive metadata manifest was not found.');},
+    async list(){listCalls++;if(fail)throw Error('Network failure');return {id:root,name:'Music',files:[song]};}
+  };
+  drive.helper={driveTrack,folderId};return {drive,tracks,removed,engine:context.Engine,get listCalls(){return listCalls;},get manifestCalls(){return manifestCalls;}};
 }
+test('Drive refresh builds the library directly from the prepared manifest without walking folders',async()=>{
+  const prepared={[file]:{name:'01 - Prepared Artist - Prepared Song.opus',folder:'Prepared Artist',mimeType:'audio/ogg',size:4000,md5:'one',title:'Manifest title',artist:'Manifest artist',dur:123}};
+  const state=integration({manifest:prepared});assert.equal(await state.drive.connect(root),true);
+  assert.equal(state.manifestCalls,1);assert.equal(state.listCalls,0);
+  const track=state.tracks.get('gd_'+file);assert.equal(track.title,'Manifest title');assert.equal(track.artist,'Manifest artist');assert.equal(track.dur,123);
+  assert.equal(track.path,'Prepared Artist/01 - Prepared Artist - Prepared Song.opus');assert.equal(track.mimeType,'audio/ogg');
+  assert.equal(state.drive.folder,root);assert.match(state.drive.status,/Google Drive · 1 songs/);
+});
+test('Drive refresh falls back to the recursive listing when the manifest is unavailable',async()=>{
+  const state=integration({manifest:new Error('Drive metadata manifest was not found.')});assert.equal(await state.drive.connect(root),true);
+  assert.equal(state.manifestCalls,1);assert.equal(state.listCalls,1);assert.ok(state.tracks.has('gd_'+file));
+});
 test('Drive refresh removes only missing Drive tracks and preserves A15/local sources',async()=>{
   const {drive,tracks,removed}=integration();assert.equal(await drive.connect(root),true);
   assert.deepEqual(removed,['gd_old12345678']);assert.ok(tracks.has('a15'));assert.ok(tracks.has('local'));assert.ok(tracks.has('gd_'+file));
