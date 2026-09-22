@@ -1,5 +1,7 @@
 # Jarvis hosting migration — 2026-09-20
 
+> **Superseded (2026-09-22):** the Static Web App below no longer works. The live frontend is the Azure Storage static website https://missionarytube.z13.web.core.windows.net/, which is also the only origin the Worker accepts. This document is kept as a historical record.
+
 ## Destination
 
 https://gray-meadow-09216fd10.1.azurestaticapps.net/

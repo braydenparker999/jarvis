@@ -2,8 +2,8 @@
 
 Mobile-first personal hub: Jarvis messages and an assistant-published Daily Board.
 
-- Website: https://gray-meadow-09216fd10.1.azurestaticapps.net/
-- Inbox reader: https://gray-meadow-09216fd10.1.azurestaticapps.net/reader/
+- Website: https://missionarytube.z13.web.core.windows.net/
+- Inbox reader: https://missionarytube.z13.web.core.windows.net/reader/
 - Backend: https://jarvis-hub-api.braydenparker999.workers.dev
 - Publications: https://github.com/braydenparker999/jarvis/issues/2
 
@@ -11,7 +11,7 @@ Mobile-first personal hub: Jarvis messages and an assistant-published Daily Boar
 
 Every phone opens the same public conversation. No password, device pairing, or plugin setup. The owner explicitly accepts public reading and ordinary message posting. Anyone finding the URL can do both.
 
-Azure serves the lightweight application shell. Cloudflare stores messages, replies, and briefings in the existing SQLite Durable Object binding. The assistant publishes structured comments through the connected GitHub account in issue #2. Cloudflare accepts only comments authored by owner ID 183016859, validates their schema, and imports them into SQLite. Ordinary visitors cannot publish assistant replies or briefings.
+The Azure Storage static website serves the lightweight application shell. Cloudflare stores messages, replies, and briefings in the existing SQLite Durable Object binding. The assistant publishes structured comments through the connected GitHub account in issue #2. Cloudflare accepts only comments authored by owner ID 183016859, validates their schema, and imports them into SQLite. Ordinary visitors cannot publish assistant replies or briefings.
 
 Replies and briefings are data: publishing a comment does not redeploy either website or Worker. The site polls every 30 seconds while visible. Cloudflare checks GitHub at most once per five minutes when the inbox is read, shared across all visitors. Imported entries remain available if GitHub is unavailable. The reply-delivery status is reported separately from message storage.
 
@@ -31,7 +31,7 @@ See [JARVIS-HANDOFF.md](JARVIS-HANDOFF.md). Scheduling is configured in a separa
 
 ## Deployment and costs
 
-GitHub main is the source. Azure Static Web Apps **Free**, app `jarvis`, resource group `jarvis_group`, deploys `public/` using the existing workflow, with no frontend build or Azure API deployment. Keep large media and data outside Azure.
+GitHub main is the source. `public/` is published to the Azure Storage static website `missionarytube` by the existing pinned-release workflow in the Missionarytube repository, which injects the Quick AI and Drive keys and backs up current blobs before upload. There is no frontend build or Azure API deployment. The former Static Web App (`gray-meadow-09216fd10`) is retired: its deploy workflow was removed and the Worker no longer accepts its origin. `public/staticwebapp.config.json` is ignored by Storage hosting, so its per-route security headers do not apply there. Keep large media and data outside Azure.
 
 Cloudflare uses the existing `jarvis-hub-api` Worker and existing `HUBS` SQLite Durable Object binding. Build settings: root `/backend`, build command empty, deploy command `npx wrangler deploy`, production branch `main`. No new binding or paid resource is required.
 

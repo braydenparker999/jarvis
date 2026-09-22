@@ -11,7 +11,7 @@ function env(){
  }return objects.get(id);}}};
 }
 const key='a'.repeat(64);
-const call=(environment,path,body,token=key)=>worker.fetch(new Request('https://api.example'+path,{method:body?'POST':'GET',headers:{Origin:'https://gray-meadow-09216fd10.1.azurestaticapps.net',Authorization:'Bearer '+token,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined}),environment);
+const call=(environment,path,body,token=key)=>worker.fetch(new Request('https://api.example'+path,{method:body?'POST':'GET',headers:{Origin:'https://missionarytube.z13.web.core.windows.net',Authorization:'Bearer '+token,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined}),environment);
 test('message survives fresh read and retry creates exactly one receipt',async()=>{
  const e=env(),body={id:crypto.randomUUID(),body:'Phone connection test'};
  assert.equal((await call(e,'/v1/messages',body)).status,201);
@@ -95,7 +95,7 @@ test('OAuth connector reads, replies, publishes, rotates tokens and respects rev
  const p={client_id:client.client_id,redirect_uri:redirect,resource,response_type:'code',code_challenge_method:'S256',code_challenge:challenge,state:'state-123',scope:'inbox:read replies:write briefings:write'};
  assert.equal((await req('/oauth/authorize?'+new URLSearchParams(p))).status,302);
  assert.equal((await req('/oauth/approve',p,{Authorization:'Bearer '+key,Origin:'https://evil.example'})).status,403);
- const approved=await req('/oauth/approve',p,{Authorization:'Bearer '+key,Origin:'https://gray-meadow-09216fd10.1.azurestaticapps.net'});assert.equal(approved.status,200);
+ const approved=await req('/oauth/approve',p,{Authorization:'Bearer '+key,Origin:'https://missionarytube.z13.web.core.windows.net'});assert.equal(approved.status,200);
  const callback=new URL((await approved.json()).redirect);assert.equal(callback.searchParams.get('state'),p.state);assert.equal(callback.searchParams.get('iss'),base);
  const exchange={grant_type:'authorization_code',client_id:p.client_id,redirect_uri:redirect,resource,code:callback.searchParams.get('code'),code_verifier:verifier};
  const form=b=>new URLSearchParams(b).toString();

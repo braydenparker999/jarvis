@@ -2176,7 +2176,7 @@ const DriveSource={
   async install(){
 
     try{
-      this.helper=await import('./drive-api.js?v=metadata-r15');
+      this.helper=await import('./drive-api.js?v=metadata-r16');
       const response=await fetch('/assets/drive-config.json',{cache:'no-store',signal:AbortSignal.timeout(15000)});
       if(!response.ok)throw Error('Drive configuration could not be loaded.');
       const config=await response.json();this.api=this.helper.createDriveApi(config.apiKey);
@@ -2251,19 +2251,13 @@ const DriveSource={
     const timeout=setTimeout(()=>controller.abort(),90000);
     try{
       const folderId=this.helper.folderId(value);
-      let prepared={},listing;
-      try{
-        prepared=await this.api.manifest(folderId,controller.signal);
-        const files=Object.entries(prepared).map(([id,entry])=>({
-          id,name:entry.name||id,mimeType:entry.mimeType||'audio/ogg',
-          size:Number(entry.size)||0,modifiedTime:0,md5Checksum:entry.md5||'',folder:entry.folder||''
-        }));
-        listing={id:folderId,name:'Google Drive',files};
-        this.prepared=prepared;
-      }catch(e){
-        if(controller.signal.aborted)throw e;
-        listing=await this.api.list(folderId,controller.signal);
-      }
+      // The folder listing is authoritative; the manifest only supplies prepared
+      // metadata for files whose size and MD5 still match.
+      const [listing,prepared]=await Promise.all([
+        this.api.list(folderId,controller.signal),
+        this.api.manifest(folderId,controller.signal).catch(()=>({}))
+      ]);
+      this.prepared=prepared;
       if(controller.signal.aborted||!SourceLibrary.enabled('drive'))return false;
       const fresh=listing.files.map(f=>this.helper.driveTrack(f,listing.id,prepared[f.id],LIB.map.get('gd_'+f.id)));
       // Commit only after every page succeeds. Failed reads keep the old library.
@@ -2291,7 +2285,7 @@ const DriveSource={
       '<p>Streams directly from your shared Drive folder. No A15 or Google login needed. Internet is required.</p>'+
       '<p id="drive-status" role="status">'+esc(this.error||this.status)+'</p>'+
       '<label for="drive-folder">Music folder link</label><input class="field" id="drive-folder" value="'+esc(this.folder?'https://drive.google.com/drive/folders/'+this.folder:'')+'" style="margin:8px 0 14px" autocomplete="off">'+
-      '<p class="note">Only folders shared as Anyone with the link → Viewer can be read. Prepared waveforms load separately from the audio.</p>'+
+      '<p class="note">Only folders shared as Anyone with the link → Viewer can be read.</p>'+
       '<p class="note">Turning this source off keeps its saved track information and playlist entries.</p>',
       [{label:'Refresh folder',pri:true},{label:'Close'}]);
     const refresh=$$('#sheet .actions .btn')[0];
