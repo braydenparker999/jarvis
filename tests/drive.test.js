@@ -40,6 +40,20 @@ test('scans sibling folders concurrently and reports useful progress',async()=>{
   assert.equal(result.files.length,2);assert.equal(maxActive,2);
   assert.deepEqual(updates.at(-1),{files:2,folders:3});
 });
+test('supports music collections with more than 500 subfolders',async()=>{
+  const children=Array.from({length:510},(_,i)=>({
+    id:'folder'+String(i).padStart(8,'0'),name:'Album '+i,mimeType:'application/vnd.google-apps.folder'
+  }));
+  let calls=0;
+  const api=createDriveApi(key,async url=>{
+    calls++;const request=new URL(url),q=request.searchParams.get('q')||'';
+    if(request.pathname.endsWith('/'+root))return Response.json(folder);
+    if(q.includes("'"+root+"'"))return Response.json({files:children});
+    return Response.json({files:[]});
+  });
+  const result=await api.list(root);
+  assert.equal(result.files.length,0);assert.equal(calls,512);
+});
 test('a failure on a later page rejects the entire snapshot',async()=>{
   const responses=[Response.json(folder),Response.json({files:[song],nextPageToken:'next'}),Response.json({error:{}},{status:403})];
   const api=createDriveApi(key,async()=>responses.shift());
