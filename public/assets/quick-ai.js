@@ -1,8 +1,7 @@
-import {MODELS,STORAGE_KEY,ACCESS_KEY,API,parseHistory,selectedMessages,streamReply,imageDB,prepareImage,blobData,cleanURL} from './quick-ai-core.js';
-const $=id=>document.getElementById(id),db=imageDB();let state,storageOK=true,run=null,preparing=false,access='',ready={};let pending=[];
+import {MODELS,STORAGE_KEY,parseHistory,selectedMessages,streamReply,imageDB,prepareImage,blobData,cleanURL} from './quick-ai-core.js';
+const $=id=>document.getElementById(id),db=imageDB();let state,storageOK=true,run=null,preparing=false,keys={},ready={};let pending=[];
 function warn(s){$('storage-status').hidden=false;$('storage-status').textContent=s;}
 try{state=parseHistory(localStorage.getItem(STORAGE_KEY));}catch{state=parseHistory(null);storageOK=false;warn('Saved chats could not be read. This session will not overwrite them.');}
-try{access=localStorage.getItem(ACCESS_KEY)||'';}catch{}
 function save(){if(!storageOK)return false;try{localStorage.setItem(STORAGE_KEY,JSON.stringify(state));return true;}catch{storageOK=false;warn('Storage is full or blocked. Existing chats will not be overwritten; copy new messages before leaving.');return false;}}
 const current=()=>state.chats.find(c=>c.id===state.active);
 function create(){const c={id:crypto.randomUUID(),title:'New chat',draft:'',provider:'gemini',search:false,messages:[]};state.chats.unshift(c);state.active=c.id;return c;}
@@ -28,9 +27,9 @@ function messageElement(m){const article=text('article','','ai-message '+m.role)
   }return article;}
 function render(){const c=current();$('history').replaceChildren(...state.chats.map(chat=>{const o=document.createElement('option');o.value=chat.id;o.textContent=chat.title;return o;}));$('history').value=c.id;$('model').value=c.provider;$('search').checked=c.search;$('search-row').hidden=!c.search;$('prompt').value=c.draft;
   $('messages').replaceChildren(...c.messages.map(messageElement));if(!c.messages.length){const empty=text('div','','empty-chat');empty.append(text('h1','What’s on your mind?'),text('p','Ask a question, attach an image, or turn on Search for current sources.'));$('messages').append(empty);}controls();}
-function controls(){$('open-unlock').hidden=!!access;const busy=!!run||preparing,c=current(),last=c.messages.at(-1),available=!!ready[c.provider];$('send').disabled=busy||!access||!available||!($('prompt').value.trim()||pending.length)||(c.search&&!$('query').value.trim());$('send').hidden=busy;$('stop').hidden=!busy;$('prompt').disabled=busy;$('image').disabled=busy;$('model').disabled=busy;$('search').disabled=busy;$('query').disabled=busy;$('retry').hidden=busy||!access||!available||!(last?.role==='user'||last?.status==='interrupted');$('switch-retry').hidden=busy||!access||!ready.qwen||c.provider!=='gemini'||last?.errorCode!=='limit';$('history').disabled=busy;$('new-chat').disabled=busy;$('delete-chat').disabled=busy;$('messages').setAttribute('aria-busy',String(busy));}
-function status(){const c=current();$('status').textContent=!access?'Unlock required':!ready[c.provider]?`${c.provider} is not ready on the free tier`:'Ready · provider limits apply';controls();}
-async function refresh(){try{const r=await fetch(API+'/quick-ai/status',{cache:'no-store'});if(!r.ok)throw Error('Worker unavailable');const info=await r.json();ready=info.ready||{};if(!info.accessConfigured)$('status').textContent='Worker unlock needs setup';else status();}catch{$('status').textContent='Quick Chat Worker unavailable';}}
+function controls(){const busy=!!run||preparing,c=current(),last=c.messages.at(-1),available=!!ready[c.provider];$('send').disabled=busy||!available||(c.search&&!ready.search)||!($('prompt').value.trim()||pending.length)||(c.search&&!$('query').value.trim());$('send').hidden=busy;$('stop').hidden=!busy;$('prompt').disabled=busy;$('image').disabled=busy;$('model').disabled=busy;$('search').disabled=busy;$('query').disabled=busy;$('retry').hidden=busy||!available||!(last?.role==='user'||last?.status==='interrupted');$('switch-retry').hidden=busy||!ready.qwen||c.provider!=='gemini'||last?.errorCode!=='limit';$('history').disabled=busy;$('new-chat').disabled=busy;$('delete-chat').disabled=busy;$('messages').setAttribute('aria-busy',String(busy));}
+function status(){const c=current();$('status').textContent=!ready[c.provider]?`${c.provider} key is not configured`:c.search&&!ready.search?'Search key is not configured':'Ready · provider limits apply';controls();}
+async function refresh(){try{const r=await fetch('/assets/quick-ai-config.json',{cache:'no-store'});if(!r.ok)throw Error('Configuration unavailable');const config=await r.json();if(config.version!==3)throw Error('Quick Chat needs its new configuration');keys={geminiKey:config.geminiKey||'',groqKey:config.groqKey||'',tavilyKey:config.tavilyKey||''};ready={gemini:!!keys.geminiKey,qwen:!!keys.groqKey,search:!!keys.tavilyKey};status();}catch(error){$('status').textContent=error.message;}}
 $('prompt').oninput=()=>{current().draft=$('prompt').value;if(current().search&&!$('query').dataset.edited)$('query').value=$('prompt').value.trim().slice(0,350);save();controls();};
 $('query').oninput=()=>{$('query').dataset.edited='yes';controls();};
 $('prompt').onkeydown=e=>{if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();$('composer').requestSubmit();}};
@@ -42,9 +41,7 @@ $('image').onchange=async e=>{for(const file of e.target.files){if(pending.lengt
 window.addEventListener('paste',async e=>{const files=[...(e.clipboardData?.files||[])].filter(f=>f.type.startsWith('image/'));if(!files.length)return;e.preventDefault();for(const file of files){if(pending.length>=3)break;try{pending.push({id:crypto.randomUUID(),blob:await prepareImage(file)});}catch(error){$('status').textContent=error.message;}}renderPreviews();controls();});
 function renderPreviews(){$('previews').replaceChildren(...pending.map(item=>{const box=text('div','','preview');const img=document.createElement('img'),url=URL.createObjectURL(item.blob);img.src=url;img.alt='Image preview';img.onload=()=>URL.revokeObjectURL(url);const b=text('button','Remove','text-button');b.type='button';b.onclick=()=>{pending=pending.filter(p=>p!==item);renderPreviews();controls();};box.append(img,b);return box;}));}
 $('stop').onclick=()=>run?.controller.abort();$('retry').onclick=()=>send(true);$('switch-retry').onclick=()=>{current().provider='qwen';save();render();send(true);};$('composer').onsubmit=e=>{e.preventDefault();send(false);};
-$('unlock-save').onclick=e=>{e.preventDefault();const value=$('access').value.trim();if(!/^[a-f0-9]{64}$/.test(value)){$('status').textContent='Access credential must be 64 lowercase hexadecimal characters.';return;}access=value;try{localStorage.setItem(ACCESS_KEY,access);}catch{warn('Unlock will last only until this page closes.');}$('unlock').close();status();};
-$('open-unlock').onclick=()=>$('unlock').showModal();
-async function send(retry){if(run||preparing||!access||!ready[current().provider]){if(!access)$('unlock').showModal();return;}const c=current();let user;
+async function send(retry){if(run||preparing||!ready[current().provider])return;const c=current();let user;
   if(retry){user=c.messages.findLast(m=>m.role==='user');if(!user||c.messages.at(-1)?.role==='assistant'&&c.messages.at(-1).status==='complete')return;}
   else{const content=$('prompt').value.trim();if(!content&&!pending.length)return;if(c.search&&!$('query').value.trim()){$('status').textContent='Enter a search query.';return;}user={role:'user',content,attachments:pending.map(p=>p.id),search:c.search,query:$('query').value.trim()};
     // Commit images before changing saved chat state.
@@ -56,14 +53,14 @@ async function send(retry){if(run||preparing||!access||!ready[current().provider
   }catch(error){preparing=false;$('status').textContent=error.message;save();render();return;}
   const reply={role:'assistant',provider:c.provider,model:MODELS[c.provider],content:'',status:'streaming'};c.messages.push(reply);const controller=new AbortController();run={controller};preparing=false;save();render();$('status').textContent=selected.omitted?'Thinking · older context omitted…':'Thinking…';let lastSave=0;
   const article=$('messages').lastElementChild,body=article.querySelector('.body');
-  try{const result=await streamReply({access,provider:c.provider,messages:selected.messages,search:user.search,query:user.query||user.content,retry,signal:controller.signal,onEvent:(type,data,content)=>{
+  try{const result=await streamReply({keys,provider:c.provider,messages:selected.messages,search:user.search,query:user.query||user.content,retry,signal:controller.signal,onEvent:(type,data,content)=>{
     if(type==='metadata'){reply.provider=data.provider;reply.model=data.model;reply.sources=data.search;}
     if(type==='continuation')reply.continuation=data;
     if(type==='usage')reply.usage={input:Number(data.promptTokenCount??data.prompt_tokens??0),output:Number(data.candidatesTokenCount??data.completion_tokens??0)};
     if(type==='text'){const nearBottom=window.innerHeight+window.scrollY>=document.documentElement.scrollHeight-160;reply.content=content;bodyRender(body,reply);$('status').textContent='Replying…';if(Date.now()-lastSave>1000){save();lastSave=Date.now();}if(nearBottom)window.scrollTo(0,document.documentElement.scrollHeight);}
     if(type==='complete')reply.truncated=data.truncated;
   }});reply.status='complete';reply.content=result.content;status();}
-  catch(error){reply.status='interrupted';reply.errorCode=error.code||'';if(error.status===401){access='';try{localStorage.removeItem(ACCESS_KEY);}catch{}}$('status').textContent=controller.signal.aborted?'Stopped. Tap Retry.':error.message||'Connection failed. Tap Retry.';controls();}
+  catch(error){reply.status='interrupted';reply.errorCode=error.code||'';$('status').textContent=controller.signal.aborted?'Stopped. Tap Retry.':error.message||'Connection failed. Tap Retry.';controls();}
   finally{run=null;save();render();}
 }
 window.addEventListener('pagehide',()=>{run?.controller.abort();save();});

@@ -3,7 +3,6 @@ import {sharedStore,SHARED_OBJECT,PUBLIC_KEY} from './shared.js';
 import {syncPublications} from './publications.js';
 import {PRIMARY_SITE,FRONTEND_ORIGINS} from './origins.js';
 import {songsterr} from './songsterr.js';
-import {quickChat,quickLimit} from './quick-chat.js';
 const paths = new Set(['/v1/state', '/v1/messages', '/v1/board', '/v1/responder/connect', '/v1/responder/revoke', '/v1/agent/inbox', '/v1/agent/replies', '/v1/agent/board']);
 const digest = async value => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))),b=>b.toString(16).padStart(2,'0')).join('');
 const randomKey = () => Array.from(crypto.getRandomValues(new Uint8Array(32)),b=>b.toString(16).padStart(2,'0')).join('');
@@ -20,7 +19,6 @@ export default {
     if(request.method==='OPTIONS') return new Response(null,{status:204,headers});
     const guitar=await songsterr(request,reply);if(guitar)return guitar;
     const path=new URL(request.url).pathname;
-    if(path.startsWith('/quick-ai/')) return quickChat(request,env,headers,reply);
     if(path==='/health' && request.method==='GET') return reply({ok:true,mode:'github-publications',version:7,publicationIssue:2});
     if(path==='/shared/state' || path==='/shared/messages') {
       if((path==='/shared/state'&&request.method!=='GET')||(path==='/shared/messages'&&request.method!=='POST'))return reply({error:'Method not allowed'},405);
@@ -89,7 +87,6 @@ export class Hub {
   constructor(ctx){this.ctx=ctx;}
   async fetch(request){
     const path=new URL(request.url).pathname;
-    if(path.startsWith('/internal/quick-ai/')) return quickLimit(this.ctx,path,request);
     if(path.startsWith('/internal/shared/')) {
       if(path==='/internal/shared/state') {
         // A single in-flight importer for the shared object, across all phones.

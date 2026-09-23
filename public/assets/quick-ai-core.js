@@ -1,7 +1,6 @@
-export const MODELS={gemini:'gemini-3.5-flash-lite',qwen:'qwen/qwen3.8-27b'};
+import {MODELS,directReply} from './quick-ai-providers.js';
+export {MODELS};
 export const STORAGE_KEY='jarvis.quick-ai.v1';
-export const ACCESS_KEY='jarvis.quick-ai.access.v1';
-export const API='https://jarvis-hub-api.braydenparker999.workers.dev';
 export function parseHistory(raw){
   if(!raw)return {version:1,active:null,chats:[]};
   const state=JSON.parse(raw);
@@ -26,10 +25,12 @@ export function selectedMessages(messages){
   if(kept.at(-1)?.role!=='user')throw Error('No question to send');
   return {messages:kept,omitted};
 }
-export async function streamReply({access,provider,messages,search=false,query='',retry=false,signal,onEvent=()=>{},fetcher=fetch}){
-  if(!/^[a-f0-9]{64}$/.test(access||''))throw Error('Unlock Quick Chat first.');
-  const res=await fetcher(API+'/quick-ai/chat',{method:'POST',headers:{Authorization:`Bearer ${access}`,'Content-Type':'application/json'},body:JSON.stringify({provider,messages,search,query,retry}),signal});
-  if(!res.ok){let data={};try{data=await res.json();}catch{}const e=new Error(data.error||`Quick Chat failed (${res.status})`);e.code=data.code||'';e.status=res.status;throw e;}
+export async function streamReply({keys,provider,messages,search=false,query='',retry=false,signal,onEvent=()=>{},fetcher=fetch}){
+  const timeout=new AbortController(),timer=setTimeout(()=>timeout.abort(),120000);
+  const combined=signal?AbortSignal.any([signal,timeout.signal]):timeout.signal;
+  let res;
+  try{res=await directReply({keys,provider,messages,search,query,retry,signal:combined,fetcher});}
+  catch(error){clearTimeout(timer);if(timeout.signal.aborted){const e=new Error('Provider timed out. Tap Retry.');e.code='timeout';throw e;}throw error;}
   if(!res.body)throw Error('Streaming unavailable');
   const reader=res.body.getReader(),decoder=new TextDecoder();let buffer='',content='',complete=false,meta=null;
   const consume=block=>{
@@ -46,7 +47,7 @@ export async function streamReply({access,provider,messages,search=false,query='
     if(!complete)throw Error('Connection ended before the reply completed. Tap Retry.');
     if(!content)throw Error('Provider returned no answer. Tap Retry.');
     return {content,meta};
-  }finally{await reader.cancel().catch(()=>{});reader.releaseLock();}
+  }finally{clearTimeout(timer);await reader.cancel().catch(()=>{});reader.releaseLock();}
 }
 const DB='jarvis.quick-ai.attachments';
 export function imageDB(){
