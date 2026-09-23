@@ -1,6 +1,7 @@
 export const MODELS = Object.freeze({gemini:'gemini-3.5-flash-lite',qwen:'qwen/qwen3.8-27b'});
 const MAX_BODY = 9_000_000, MAX_IMAGE = 2_000_000, MAX_IMAGES = 3;
-const LIMIT = {gemini:8192,qwen:8192};
+// Keep Qwen's requested output below its 8,000 TPM free-plan limit, leaving room for the prompt.
+const LIMIT = {gemini:8192,qwen:2048};
 const enc = new TextEncoder();
 const fail = (message,status=400,code='invalid') => Object.assign(new Error(message),{status,code});
 const stamp = () => new Intl.DateTimeFormat('en-CA',{timeZone:'America/Argentina/Cordoba',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
