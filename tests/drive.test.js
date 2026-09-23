@@ -123,7 +123,8 @@ function integration({fail=false,manifest=null,files=[song]}={}){
   drive.helper={driveTrack,folderId};return {drive,tracks,removed,engine:context.Engine,get listCalls(){return listCalls;},get manifestCalls(){return manifestCalls;}};
 }
 test('Drive startup keeps a complete cached snapshot and makes recursive refresh on-demand',()=>{
-  const install=source.slice(source.indexOf('async install(){'),source.indexOf('fileFor(t){'));
+  const driveStart=source.indexOf('const DriveSource={');
+  const install=source.slice(source.indexOf('async install(){',driveStart),source.indexOf('fileFor(t){',driveStart));
   assert.match(install,/Saved library · ['"]?\+fresh\.length\+['"]? songs · refresh on demand/);
   assert.match(install,/if\(cached\.length\)/);
   assert.match(install,/else\{\s*await this\.connect\(this\.folder,true\)/);
