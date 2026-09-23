@@ -30,3 +30,11 @@ test('Worker rejects disallowed Origin before reaching private Quick Chat route'
   const response=await worker.fetch(new Request('https://worker/quick-ai/status',{headers:{Origin:'https://other.example'}}),{...env,HUBS:{idFromName:n=>n,get:()=>({fetch:()=>{calls++;return Response.json({ok:true});}})}});
   assert.equal(response.status,403);assert.equal(calls,0);
 });
+test('Gemini continuation is retained opaquely only for Gemini turns',async()=>{
+  const candidate={candidates:[{content:{parts:[{text:'Answer',thoughtSignature:'YWJj'}]},finishReason:'STOP'}]};
+  const wire=await new Response(normalizeStream(sse([candidate]),'gemini',{},new AbortController().signal)).text();assert.match(wire,/event: continuation/);
+  const message={role:'assistant',content:'Answer',provider:'gemini',continuation:{text:'Answer',signature:'YWJj'},images:[]};
+  const valid=validate(input('gemini',{messages:[{role:'user',content:'Question',images:[]},message,{role:'user',content:'Follow-up',images:[]}]}));
+  assert.equal(geminiBody(valid.messages,null).contents[1].parts[0].thoughtSignature,'YWJj');
+  assert.doesNotMatch(JSON.stringify(groqBody(valid.messages,null)),/YWJj/);
+});

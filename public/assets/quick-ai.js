@@ -51,12 +51,13 @@ async function send(retry){if(run||!access||!ready[current().provider]){if(!acce
     c.messages.push(user);c.draft='';if(c.messages.length===1)c.title=(content||'Image question').slice(0,60);pending=[];renderPreviews();$('query').value='';delete $('query').dataset.edited;}
   if(retry){user.search=c.search;if(c.search){user.query=$('query').value.trim()||user.query||user.content;if(!user.query){$('status').textContent='Enter a search query.';return;}}save();}
   let selected;try{selected=selectedMessages(c.messages);const count=selected.messages.reduce((n,m)=>n+(m.attachments?.length||0),0);if(count>3)throw Error('Qwen supports at most three images in a request, including earlier images. Start a new chat or reduce images.');
-    const payload=[];for(const m of selected.messages){const images=[];for(const id of m.attachments||[]){const blob=await db.get(id);if(!blob)throw Error('An earlier image is missing. Reattach it in a new message.');images.push(await blobData(blob));}payload.push({role:m.role,content:m.content,images});}selected.messages=payload;
+    const payload=[];for(const m of selected.messages){const images=[];for(const id of m.attachments||[]){const blob=await db.get(id);if(!blob)throw Error('An earlier image is missing. Reattach it in a new message.');images.push(await blobData(blob));}payload.push({role:m.role,content:m.content,images,provider:m.provider,continuation:c.provider==='gemini'&&m.provider==='gemini'?m.continuation:null});}selected.messages=payload;
   }catch(error){$('status').textContent=error.message;save();render();return;}
   const reply={role:'assistant',provider:c.provider,model:MODELS[c.provider],content:'',status:'streaming'};c.messages.push(reply);const controller=new AbortController();run={controller};save();render();$('status').textContent=selected.omitted?'Thinking · older context omitted…':'Thinking…';let lastSave=0;
   const article=$('messages').lastElementChild,body=article.querySelector('.body');
   try{const result=await streamReply({access,provider:c.provider,messages:selected.messages,search:user.search,query:user.query||user.content,retry,signal:controller.signal,onEvent:(type,data,content)=>{
     if(type==='metadata'){reply.provider=data.provider;reply.model=data.model;reply.sources=data.search;}
+    if(type==='continuation')reply.continuation=data;
     if(type==='text'){const nearBottom=window.innerHeight+window.scrollY>=document.documentElement.scrollHeight-160;reply.content=content;bodyRender(body,reply);$('status').textContent='Replying…';if(Date.now()-lastSave>1000){save();lastSave=Date.now();}if(nearBottom)window.scrollTo(0,document.documentElement.scrollHeight);}
     if(type==='complete')reply.truncated=data.truncated;
   }});reply.status='complete';reply.content=result.content;status();}

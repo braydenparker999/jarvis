@@ -33,7 +33,9 @@ export function validate(body){
   const messages=body.messages.map(m=>{
     if(!m||!['user','assistant'].includes(m.role)||typeof m.content!=='string'||m.content.length>16000||typeof m.images!=='undefined'&&!Array.isArray(m.images))throw fail('Invalid message');
     if(m.role==='assistant' && m.images?.length)throw fail('Invalid assistant image');
-    return {role:m.role,content:m.content,images:(m.images||[]).map(img)};
+    const continuation=m.role==='assistant'&&m.provider==='gemini'&&body.provider==='gemini'&&m.continuation;
+    if(continuation&&(typeof continuation.text!=='string'||typeof continuation.signature!=='string'||continuation.text.length>16000||continuation.signature.length>10000||!/^[A-Za-z0-9+/=]+$/.test(continuation.signature)))throw fail('Invalid Gemini continuation');
+    return {role:m.role,content:m.content,images:(m.images||[]).map(img),continuation:continuation||null};
   });
   if(messages.at(-1).role!=='user'||!messages.at(-1).content.trim()&&!messages.at(-1).images.length)throw fail('A question or image is required');
   if(body.search && (typeof body.query!=='string'||body.query.trim().length<3||body.query.length>350))throw fail('Enter a short search query');
@@ -49,7 +51,13 @@ function sourceData(data,query){
 }
 const evidence = search => search.sources.map(s=>`[${s.id}] ${s.title} (${s.url}) ${s.date}\n${s.excerpt}`).join('\n\n');
 export function geminiBody(messages,search){
-  const contents=messages.map(m=>({role:m.role==='assistant'?'model':'user',parts:[{text:m.content||'Please describe the attached image.'},...m.images.map(i=>({inline_data:{mime_type:i.mime,data:i.data}}))]}));
+  const contents=messages.map(m=>{
+    const text=m.content||'Please describe the attached image.',signed=m.continuation;
+    let parts=[{text}];
+    if(m.role==='assistant'&&signed){const offset=text.indexOf(signed.text);if(offset>=0)parts=[...(offset?[{text:text.slice(0,offset)}]:[]),{text:signed.text,thoughtSignature:signed.signature},...(offset+signed.text.length<text.length?[{text:text.slice(offset+signed.text.length)}]:[])];}
+    parts.push(...m.images.map(i=>({inline_data:{mime_type:i.mime,data:i.data}})));
+    return {role:m.role==='assistant'?'model':'user',parts};
+  });
   if(search)contents.at(-1).parts.push({text:`Retrieved evidence for query ${JSON.stringify(search.query)} at ${search.retrievedAt}:\n${evidence(search)}`});
   return {systemInstruction:{parts:[{text:system(!!search)}]},contents,generationConfig:{maxOutputTokens:LIMIT.gemini,thinkingConfig:{thinkingLevel:'MEDIUM'}}};
 }
@@ -81,6 +89,7 @@ export function normalizeStream(response,provider,metadata,signal){
         if(provider==='gemini'){
           const candidate=chunk.candidates?.[0], part=(candidate?.content?.parts||[]).filter(p=>!p.thought).map(p=>p.text||'').join('');
           if(part){content+=part;emit('text',{text:part});}
+          for(const p of candidate?.content?.parts||[])if(!p.thought&&p.thoughtSignature&&p.text)emit('continuation',{text:p.text,signature:p.thoughtSignature});
           if(candidate?.finishReason)finish=candidate.finishReason;
           if(chunk.usageMetadata)usage=chunk.usageMetadata;
           if(chunk.promptFeedback?.blockReason)finish='BLOCKED';
@@ -93,7 +102,8 @@ export function normalizeStream(response,provider,metadata,signal){
       };
       while(!done){const next=await reader.read();buffer+=decoder.decode(next.value,{stream:!next.done});buffer=buffer.replace(/\r\n/g,'\n');let end;while((end=buffer.indexOf('\n\n'))>=0){consume(buffer.slice(0,end));buffer=buffer.slice(end+2);}if(next.done){if(buffer.trim())consume(buffer);break;}}
       if(signal.aborted)throw fail('Stopped',499,'stopped');
-      if(!content)throw fail(finish==='BLOCKED'||finish==='SAFETY'?'Provider blocked this response':'Provider returned no answer',502,'empty');
+      if(['BLOCKED','SAFETY','RECITATION','PROHIBITED_CONTENT','content_filter'].includes(finish))throw fail('Provider blocked this response',502,'blocked');
+      if(!content)throw fail('Provider returned no answer',502,'empty');
       if(!finish || provider==='qwen'&&!done)throw fail('Connection ended before the response completed',502,'interrupted');
       if(usage)emit('usage',usage);
       emit('complete',{truncated:['MAX_TOKENS','length'].includes(finish),finish});
