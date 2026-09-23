@@ -122,6 +122,18 @@ function integration({fail=false,manifest=null,files=[song]}={}){
   };
   drive.helper={driveTrack,folderId};return {drive,tracks,removed,engine:context.Engine,get listCalls(){return listCalls;},get manifestCalls(){return manifestCalls;}};
 }
+test('Drive startup keeps a complete cached snapshot and makes recursive refresh on-demand',()=>{
+  const install=source.slice(source.indexOf('async install(){'),source.indexOf('fileFor(t){'));
+  assert.match(install,/Saved library · ['"]?\+fresh\.length\+['"]? songs · refresh on demand/);
+  assert.match(install,/if\(cached\.length\)/);
+  assert.match(install,/else\{\s*await this\.connect\(this\.folder,true\)/);
+});
+test('Drive playback retries one fresh URL and metadata work yields during a refresh',()=>{
+  assert.match(source,/retryFileFor\(t\)/);
+  assert.match(source,/Drive stream stalled · retrying once/);
+  assert.match(source,/if\(this\.busy\).*setTimeout\(\(\)=>this\.pumpTags\(\),1000\)/s);
+});
+
 test('Drive refresh lists the folder and applies manifest metadata only to matching files',async()=>{
   const prepared={[file]:{size:4000,md5:'one',title:'Manifest title',artist:'Manifest artist',dur:123},
     stale12345678901:{name:'Removed.opus',size:1,md5:'gone',title:'Removed song'}};
