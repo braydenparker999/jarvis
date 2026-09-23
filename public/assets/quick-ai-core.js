@@ -1,73 +1,75 @@
-export const MODEL = 'openai/gpt-oss-120b';
-export const STORAGE_KEY = 'jarvis.quick-ai.v1';
-const SYSTEM = 'You are Quick AI, the on-demand assistant in Jarvis. Be helpful, direct, and honest. You have no browsing, tools, access to other Jarvis messages, or ability to perform actions. Never imply you checked live information or performed an action. Follow the language of the user. Today is ';
-
-export function buildMessages(messages) {
-  const turns = [];
-  for (const message of messages) {
-    if (message.role === 'user') turns.push([{role: 'user', content: message.content.slice(0, 6000)}]);
-    else if (message.role === 'assistant' && message.status === 'complete' && turns.length)
-      turns.at(-1).push({role: 'assistant', content: message.content});
-  }
-  const selected = [];
-  let size = 0;
-  for (const turn of turns.reverse()) {
-    const length = turn.reduce((n, m) => n + m.content.length, 0);
-    if (size + length > 10000 && selected.length) break;
-    selected.unshift(turn); size += length;
-  }
-  return [{role: 'system', content: SYSTEM + new Date().toISOString().slice(0, 10) + '.'}, ...selected.flat()];
-}
-
-export function parseHistory(raw) {
-  if (!raw) return {version: 1, active: null, chats: []};
-  const state = JSON.parse(raw);
-  if (state.version !== 1 || !Array.isArray(state.chats) || state.chats.length > 50) throw new Error('Invalid saved chats');
-  for (const chat of state.chats) {
-    if (typeof chat.id !== 'string' || typeof chat.title !== 'string' || typeof chat.draft !== 'string' || !Array.isArray(chat.messages)) throw new Error('Invalid saved chat');
-    for (const m of chat.messages) {
-      if (!['user', 'assistant'].includes(m.role) || typeof m.content !== 'string') throw new Error('Invalid saved message');
-      if (m.role === 'assistant' && m.status !== 'complete') m.status = 'interrupted';
-    }
+export const MODELS={gemini:'gemini-3.5-flash-lite',qwen:'qwen/qwen3.8-27b'};
+export const STORAGE_KEY='jarvis.quick-ai.v1';
+export const ACCESS_KEY='jarvis.quick-ai.access.v1';
+export const API='https://jarvis-hub-api.braydenparker999.workers.dev';
+export function parseHistory(raw){
+  if(!raw)return {version:1,active:null,chats:[]};
+  const state=JSON.parse(raw);
+  if(state.version!==1||!Array.isArray(state.chats)||state.chats.length>50)throw Error('Invalid saved chats');
+  for(const c of state.chats){
+    if(typeof c.id!=='string'||typeof c.title!=='string'||typeof c.draft!=='string'||!Array.isArray(c.messages))throw Error('Invalid saved chat');
+    if(!MODELS[c.provider])c.provider='gemini';
+    if(typeof c.search!=='boolean')c.search=false;
+    for(const m of c.messages){if(!['user','assistant'].includes(m.role)||typeof m.content!=='string')throw Error('Invalid saved message');if(m.role==='assistant'&&m.status!=='complete')m.status='interrupted';if(!Array.isArray(m.attachments))m.attachments=[];}
   }
   return state;
 }
-
-export async function streamReply({key, messages, signal, onText, fetcher = fetch}) {
-  if (!key) throw new Error('Quick AI has not been configured yet.');
-  const response = await fetcher('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST', headers: {'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json'},
-    body: JSON.stringify({model: MODEL, messages: buildMessages(messages), reasoning_effort: 'low', max_completion_tokens: 2048, stream: true}), signal
-  });
-  if (!response.ok) {
-    if (response.status === 429) throw new Error('The free usage limit was reached. Wait a little, then tap Retry.');
-    if ([401, 403].includes(response.status)) throw new Error('Groq rejected the configured key. It needs to be updated once for the site.');
-    throw new Error(`Groq is unavailable (${response.status}). Try again in a moment.`);
+export function selectedMessages(messages){
+  const turns=[];
+  for(const m of messages){if(m.role==='user')turns.push([m]);else if(m.role==='assistant'&&m.status==='complete'&&turns.length)turns.at(-1).push(m);}
+  const kept=[];let cost=0,omitted=0;
+  for(const turn of turns.reverse()){
+    const n=turn.reduce((sum,m)=>sum+Math.ceil(m.content.length/3)+(m.attachments?.length||0)*2048,0);
+    if(cost+n>12000&&kept.length){omitted++;continue;}
+    kept.unshift(...turn);cost+=n;
   }
-  if (!response.body) throw new Error('Streaming is unavailable. Please retry.');
-  const reader = response.body.getReader(), decoder = new TextDecoder();
-  let buffer = '', content = '', finish = null, done = false;
-  const event = block => {
-    const data = block.split('\n').filter(l => l.startsWith('data:')).map(l => l.slice(5).trimStart()).join('\n');
-    if (!data) return;
-    if (data === '[DONE]') { done = true; return; }
-    const chunk = JSON.parse(data);
-    if (chunk.error) throw new Error('Groq interrupted the reply. Please retry.');
-    const choice = chunk.choices?.[0];
-    if (typeof choice?.delta?.content === 'string') { content += choice.delta.content; onText(content); }
-    if (choice?.finish_reason) finish = choice.finish_reason;
-  };
-  try {
-    while (!done) {
-      const next = await reader.read();
-      buffer += decoder.decode(next.value, {stream: !next.done});
-      buffer = buffer.replace(/\r\n/g, '\n');
-      let end;
-      while ((end = buffer.indexOf('\n\n')) >= 0) { event(buffer.slice(0, end)); buffer = buffer.slice(end + 2); }
-      if (next.done) { if (buffer.trim()) event(buffer); break; }
-    }
-    if (!done || !finish) throw new Error('The connection ended before the reply finished. Tap Retry.');
-    if (!content) throw new Error('No answer was returned. Tap Retry.');
-    return {content, truncated: finish === 'length'};
-  } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+  if(kept.at(-1)?.role!=='user')throw Error('No question to send');
+  return {messages:kept,omitted};
 }
+export async function streamReply({access,provider,messages,search=false,query='',retry=false,signal,onEvent=()=>{},fetcher=fetch}){
+  if(!/^[a-f0-9]{64}$/.test(access||''))throw Error('Unlock Quick Chat first.');
+  const res=await fetcher(API+'/quick-ai/chat',{method:'POST',headers:{Authorization:`Bearer ${access}`,'Content-Type':'application/json'},body:JSON.stringify({provider,messages,search,query,retry}),signal});
+  if(!res.ok){let data={};try{data=await res.json();}catch{}const e=new Error(data.error||`Quick Chat failed (${res.status})`);e.code=data.code||'';e.status=res.status;throw e;}
+  if(!res.body)throw Error('Streaming unavailable');
+  const reader=res.body.getReader(),decoder=new TextDecoder();let buffer='',content='',complete=false,meta=null;
+  const consume=block=>{
+    let type='message';const lines=block.split('\n');for(const line of lines)if(line.startsWith('event:'))type=line.slice(6).trim();
+    const raw=lines.filter(l=>l.startsWith('data:')).map(l=>l.slice(5).trimStart()).join('\n');if(!raw)return;
+    const data=JSON.parse(raw);if(type==='error'){const e=new Error(data.message);e.code=data.code;throw e;}
+    if(type==='metadata')meta=data;
+    if(type==='text')content+=data.text;
+    if(type==='complete')complete=true;
+    onEvent(type,data,content);
+  };
+  try{
+    while(true){const next=await reader.read();buffer+=decoder.decode(next.value,{stream:!next.done});buffer=buffer.replace(/\r\n/g,'\n');let end;while((end=buffer.indexOf('\n\n'))>=0){consume(buffer.slice(0,end));buffer=buffer.slice(end+2);}if(next.done){if(buffer.trim())consume(buffer);break;}}
+    if(!complete)throw Error('Connection ended before the reply completed. Tap Retry.');
+    if(!content)throw Error('Provider returned no answer. Tap Retry.');
+    return {content,meta};
+  }finally{await reader.cancel().catch(()=>{});reader.releaseLock();}
+}
+const DB='jarvis.quick-ai.attachments';
+export function imageDB(){
+  const open=()=>new Promise((resolve,reject)=>{const req=indexedDB.open(DB,1);req.onupgradeneeded=()=>req.result.createObjectStore('images');req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error);});
+  const transaction=async (mode,fn)=>{const db=await open();try{return await new Promise((resolve,reject)=>{const tx=db.transaction('images',mode),s=tx.objectStore('images');let value;const req=fn(s);req.onsuccess=()=>{value=req.result;};req.onerror=()=>reject(req.error);tx.oncomplete=()=>resolve(value);tx.onabort=()=>reject(tx.error||Error('Image storage failed'));tx.onerror=()=>reject(tx.error);});}finally{db.close();}};
+  return {put:(id,blob)=>transaction('readwrite',s=>s.put(blob,id)),get:id=>transaction('readonly',s=>s.get(id)),delete:id=>transaction('readwrite',s=>s.delete(id))};
+}
+export async function prepareImage(file){
+  if(!['image/jpeg','image/png','image/webp'].includes(file.type))throw Error('Choose a JPEG, PNG, or WebP image.');
+  if(file.size>12_000_000)throw Error('Image exceeds the 12 MB import limit.');
+  let bitmap;try{bitmap=await createImageBitmap(file);}catch{throw Error('The image could not be decoded.');}
+  try{
+    if(!bitmap.width||!bitmap.height||bitmap.width*bitmap.height>30_000_000)throw Error('Image dimensions are unsupported.');
+    const scale=Math.min(1,2048/Math.max(bitmap.width,bitmap.height));
+    const canvas=document.createElement('canvas');canvas.width=Math.round(bitmap.width*scale);canvas.height=Math.round(bitmap.height*scale);
+    canvas.getContext('2d').drawImage(bitmap,0,0,canvas.width,canvas.height);
+    let quality=.88,blob;
+    do{blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',quality));quality-=.1;}while(blob?.size>2_000_000&&quality>.48);
+    if(!blob||blob.size>2_000_000)throw Error('Image is too detailed to send under the 2 MB limit.');
+    return blob;
+  }finally{bitmap.close();}
+}
+export async function blobData(blob){
+  const raw=await blob.arrayBuffer();const bytes=new Uint8Array(raw);let str='';for(let i=0;i<bytes.length;i+=8192)str+=String.fromCharCode(...bytes.subarray(i,i+8192));return {mime:blob.type,data:btoa(str)};
+}
+export function cleanURL(value){try{const u=new URL(value);return ['https:','http:'].includes(u.protocol)?u.href:null;}catch{return null;}}

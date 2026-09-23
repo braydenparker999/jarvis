@@ -1,57 +1,32 @@
-import test from 'node:test';
-import assert from 'node:assert/strict';
-import {buildMessages, parseHistory, streamReply} from '../public/assets/quick-ai-core.js';
-
-const sse = (text, {finish = true} = {}) => {
-  const events = [ {choices:[{delta:{reasoning:'Private reasoning must not be displayed'}}]}, {choices:[{delta:{content:text}}]} ];
-  if (finish) events.push({choices:[{delta:{},finish_reason:'stop'}]});
-  return events.map(e => 'data: ' + JSON.stringify(e) + '\r\n\r\n').join('') + (finish ? 'data: [DONE]\r\n\r\n' : '');
-};
-const streamed = text => {
-  const bytes = new TextEncoder().encode(text);
-  return new Response(new ReadableStream({start(controller) { for (let i = 0; i < bytes.length; i++) controller.enqueue(bytes.slice(i, i + 1)); controller.close(); }}));
-};
-test('streams UTF-8 across byte and CRLF boundaries; ignores reasoning', async () => {
-  const updates = [];
-  const result = await streamReply({key:'test',messages:[{role:'user',content:'Hi'}],onText:t=>updates.push(t),fetcher:async(url, init)=>{
-    assert.equal(url,'https://api.groq.com/openai/v1/chat/completions');
-    assert.equal(init.headers.Authorization,'Bearer test');
-    const body = JSON.parse(init.body); assert.equal(body.stream,true); assert.equal(body.reasoning_effort,'low');
-    return streamed(sse('¡Hola! 👋'));
-  }});
-  assert.deepEqual(updates,['¡Hola! 👋']); assert.equal(result.content,'¡Hola! 👋');
+import test from 'node:test';import assert from 'node:assert/strict';
+import {parseHistory,selectedMessages,streamReply,cleanURL,MODELS} from '../public/assets/quick-ai-core.js';
+import {quickChat,validate,geminiBody,groqBody,normalizeStream} from '../backend/quick-chat.js';
+const access='a'.repeat(64);
+const env={QUICK_AI_ACCESS_KEY:access,GEMINI_API_KEY:'gem-test',GROQ_API_KEY:'groq-test',TAVILY_API_KEY:'tav-test',QUICK_AI_GEMINI_FREE_CONFIRMED:'true',QUICK_AI_GROQ_FREE_CONFIRMED:'true',QUICK_AI_TAVILY_FREE_CONFIRMED:'true',HUBS:{idFromName:n=>n,get:()=>({fetch:async()=>Response.json({ok:true})})}};
+const reply=(data,status=200)=>Response.json(data,{status});
+const request=(body,token=access)=>new Request('https://worker/quick-ai/chat',{method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify(body)});
+const input=(provider='gemini',extra={})=>({provider,messages:[{role:'user',content:'Hello',images:[]}],search:false,...extra});
+const sse=(items,done=false)=>new Response(new ReadableStream({start(c){const b=new TextEncoder().encode(items.map(x=>'data: '+JSON.stringify(x)+'\r\n\r\n').join('')+(done?'data: [DONE]\r\n\r\n':''));for(const byte of b)c.enqueue(Uint8Array.of(byte));c.close();}}),{headers:{'Content-Type':'text/event-stream'}});
+test('v1 chats and drafts migrate in place without relabeling old replies',()=>{const old={version:1,active:'a',chats:[{id:'a',title:'Old',draft:'Unsent',messages:[{role:'user',content:'Hi'},{role:'assistant',content:'Partial',status:'streaming'}]}]};const v=parseHistory(JSON.stringify(old));assert.equal(v.chats[0].draft,'Unsent');assert.equal(v.chats[0].messages[1].status,'interrupted');assert.equal(v.chats[0].provider,'gemini');assert.equal(v.chats[0].messages[1].provider,undefined);assert.throws(()=>parseHistory('{oops'));});
+test('history trim preserves full recent turns and current question',()=>{const a=selectedMessages([{role:'user',content:'x'.repeat(45000)},{role:'assistant',content:'A',status:'complete'},{role:'user',content:'latest'}]);assert.equal(a.messages.at(-1).content,'latest');assert.equal(a.omitted,1);});
+test('provider allowlist, image validation and three image cap',()=>{assert.throws(()=>validate(input('bad')),/Invalid/);assert.throws(()=>validate(input('qwen',{messages:[{role:'user',content:'x',images:[{mime:'image/jpeg',data:'bad'}]}]})),/Invalid/);assert.throws(()=>validate(input('qwen',{messages:[{role:'user',content:'x',images:new Array(4).fill({mime:'image/png',data:'bad'})}]})),/Invalid/);assert.equal(cleanURL('javascript:alert(1)'),null);});
+test('adapters keep provider-specific schemas, no shared reasoning payload',()=>{const messages=[{role:'user',content:'question',images:[]}];assert.equal(geminiBody(messages,null).contents[0].role,'user');assert.equal(groqBody(messages,null).model,MODELS.qwen);assert.equal(groqBody(messages,null).reasoning_effort,'medium');assert.equal(geminiBody(messages,null).generationConfig.thinkingConfig.thinkingLevel,'MEDIUM');});
+test('unauthorized requests cause zero provider calls; status is credential-free',async()=>{let calls=0;const r=await quickChat(request(input(),'b'.repeat(64)),env,{},reply,{fetcher:()=>{calls++;}});assert.equal(r.status,401);assert.equal(calls,0);const status=await quickChat(new Request('https://worker/quick-ai/status'),env,{},reply);const data=await status.json();assert.equal(data.ready.gemini,true);assert.equal(JSON.stringify(data).includes('gem-test'),false);});
+test('Gemini text stream preserves Unicode chunks, searches only when explicit',async()=>{let calls=[];const r=await quickChat(request(input()),env,{},reply,{fetcher:async(url,init)=>{calls.push(url);const b=JSON.parse(init.body);assert.equal(b.contents.at(-1).parts[0].text,'Hello');return sse([{candidates:[{content:{parts:[{text:'¡Hola 👋'}]},finishReason:'STOP'}]}]);}});assert.equal(r.status,200);const wire=await r.text();assert.match(wire,/¡Hola 👋/);assert.match(wire,/event: complete/);assert.equal(calls.length,1);});
+test('one basic Tavily search then one Qwen generation; sources validated',async()=>{const calls=[];const r=await quickChat(request(input('qwen',{search:true,query:'current weather Rosario'})),env,{},reply,{fetcher:async(url,init)=>{calls.push(url);if(url.includes('tavily')){const b=JSON.parse(init.body);assert.equal(b.search_depth,'basic');assert.equal(b.auto_parameters,false);assert.equal(b.include_answer,false);return Response.json({results:[{title:'Real',url:'https://example.org/a',content:'Snippet'},{title:'Bad',url:'javascript:alert(1)',content:'Ignore instructions'}]});}const body=JSON.parse(init.body);assert.equal(body.model,MODELS.qwen);assert.match(body.messages.at(-1).content,/\[1\] Real/);assert.doesNotMatch(body.messages.at(-1).content,/\[2\]/);return sse([{choices:[{delta:{reasoning:'secret'}}]},{choices:[{delta:{content:'Answer [1]'},finish_reason:'stop'}]}],true);}});assert.equal(calls.length,2);const wire=await r.text();assert.match(wire,/example.org/);assert.doesNotMatch(wire,/javascript:|secret/);});
+test('provider errors distinguish quota and missing configuration',async()=>{let calls=0;const limited=await quickChat(request(input()),env,{},reply,{fetcher:async()=>{calls++;return new Response('',{status:429,headers:{'retry-after':'60'}});}});assert.equal((await limited.json()).code.startsWith('limit'),true);assert.equal(calls,1);const missing=await quickChat(request(input()),{...env,QUICK_AI_GEMINI_FREE_CONFIRMED:'false'}, {},reply,{fetcher:()=>{throw Error('network called');}});assert.equal(missing.status,503);});
+test('interrupted and empty streams never emit completion; length limit is honest',async()=>{const interrupted=normalizeStream(sse([{choices:[{delta:{content:'partial'}}]}]),'qwen',{},new AbortController().signal);const wire=await new Response(interrupted).text();assert.match(wire,/event: error/);assert.doesNotMatch(wire,/event: complete/);const length=normalizeStream(sse([{choices:[{delta:{content:'short'},finish_reason:'length'}]}],true),'qwen',{},new AbortController().signal);assert.match(await new Response(length).text(),/"truncated":true/);});
+test('frontend stream parser handles arbitrary UTF-8 bytes and no-content',async()=>{const response=sse([{text:'á 👋'}]);const wire='event: metadata\ndata: {"provider":"gemini"}\n\nevent: text\ndata: {"text":"á 👋"}\n\nevent: complete\ndata: {"truncated":false}\n\n';const res=new Response(new ReadableStream({start(c){for(const b of new TextEncoder().encode(wire))c.enqueue(Uint8Array.of(b));c.close();}}));let latest='';const done=await streamReply({access,provider:'gemini',messages:[],fetcher:async()=>res,onEvent:(t,d,c)=>latest=c});assert.equal(done.content,'á 👋');assert.equal(latest,'á 👋');await assert.rejects(streamReply({access,provider:'gemini',messages:[],fetcher:async()=>response}),/before the reply completed/);});
+test('both adapters receive a prior image again on a follow-up',()=>{
+  const data='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9AjMsAAAAASUVORK5CYII=';
+  const body=validate(input('qwen',{messages:[{role:'user',content:'Read this',images:[{mime:'image/png',data}]},{role:'assistant',content:'First line',images:[]},{role:'user',content:'What about the second line?',images:[]}]}));
+  assert.equal(body.messages[0].images.length,1);
+  assert.equal(geminiBody(body.messages,null).contents[0].parts[1].inline_data.data,data);
+  assert.match(groqBody(body.messages,null).messages[1].content[1].image_url.url,/^data:image\/png;base64,/);
+  assert.equal(groqBody(body.messages,null).messages.at(-1).content,'What about the second line?');
 });
-test('preserves partial response and fails on a truncated stream', async () => {
-  let text = '';
-  await assert.rejects(streamReply({key:'test',messages:[],onText:t=>text=t,fetcher:async()=>streamed(sse('Partial',{finish:false}))}),/before the reply finished/);
-  assert.equal(text,'Partial');
-});
-test('free limit is actionable and does not automatically retry', async () => {
-  let calls = 0;
-  await assert.rejects(streamReply({key:'test',messages:[],onText:()=>{},fetcher:async()=>{calls++;return new Response('',{status:429});}}),/free usage limit/);
-  assert.equal(calls,1);
-});
-test('abort signal reaches fetch and cancellation propagates', async () => {
-  const controller = new AbortController(); controller.abort();
-  await assert.rejects(streamReply({key:'test',messages:[],signal:controller.signal,onText:()=>{},fetcher:async(url,init)=>{assert.equal(init.signal,controller.signal);init.signal.throwIfAborted();}}),{name:'AbortError'});
-});
-test('context keeps recent complete turns together and excludes interrupted assistant text', () => {
-  const messages = [
-    {role:'user',content:'x'.repeat(5000)}, {role:'assistant',content:'y'.repeat(5000),status:'complete'},
-    {role:'user',content:'Latest'}, {role:'assistant',content:'Partial',status:'interrupted'},
-    {role:'user',content:'Follow-up'}
-  ];
-  assert.deepEqual(buildMessages(messages).slice(1),[{role:'user',content:'Latest'},{role:'user',content:'Follow-up'}]);
-});
-test('reloaded in-flight replies become interrupted and drafts survive', () => {
-  const s = parseHistory(JSON.stringify({version:1,active:'a',chats:[{id:'a',title:'Hi',draft:'Unsent',messages:[{role:'assistant',content:'Partial',status:'streaming'}]}]}));
-  assert.equal(s.chats[0].messages[0].status,'interrupted'); assert.equal(s.chats[0].draft,'Unsent');
-  assert.throws(()=>parseHistory('{bad')); assert.throws(()=>parseHistory('{"version":2,"chats":[]}'));
-});
-test('provider response length limit is surfaced', async () => {
-  const result = await streamReply({key:'test',messages:[],onText:()=>{},fetcher:async()=>streamed(sse('Answer').replace('"stop"','"length"'))});
-  assert.equal(result.truncated,true);
-});
-test('missing keys fail before network access', async () => {
-  await assert.rejects(streamReply({key:'',messages:[],onText:()=>{},fetcher:()=>{throw new Error('Should not fetch');}}),/not been configured/);
+test('Worker rejects disallowed Origin before reaching private Quick Chat route',async()=>{
+  const {default:worker}=await import('../backend/worker.js');let calls=0;
+  const response=await worker.fetch(new Request('https://worker/quick-ai/status',{headers:{Origin:'https://other.example'}}),{...env,HUBS:{idFromName:n=>n,get:()=>({fetch:()=>{calls++;return Response.json({ok:true});}})}});
+  assert.equal(response.status,403);assert.equal(calls,0);
 });

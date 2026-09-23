@@ -1,30 +1,12 @@
 <!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#121212">
-  <title>Quick AI · Jarvis</title>
-  <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="/assets/shell.css">
-  <link rel="stylesheet" href="/assets/quick-ai.css">
-  <script type="module" src="/assets/quick-ai.js"></script>
-</head>
-<body>
-  <div class="workspace quick-ai">
-    <header class="topbar"><a class="text-button" href="/" aria-label="Back to Jarvis">← Jarvis</a><span class="brand">Quick AI</span><button class="text-button" id="new-chat">New chat</button></header>
-    <main id="content">
-      <div class="chat-controls"><label class="sr-only" for="history">Saved chats</label><select id="history"></select><button class="text-button" id="delete-chat">Delete</button></div>
-      <p class="model-note">GPT-OSS 120B · Groq · Chats saved on this device</p>
-      <section id="messages" aria-label="Conversation" aria-busy="false"></section>
-      <p id="storage-status" role="status" class="warning" hidden></p>
-    </main>
-    <form id="composer" class="ai-composer">
-      <label class="sr-only" for="prompt">Message Quick AI</label>
-      <textarea id="prompt" rows="3" maxlength="6000" placeholder="Ask anything…" required></textarea>
-      <div class="send-row"><span id="status" role="status">Connecting…</span><button class="text-button" type="button" id="retry" hidden>Retry</button><button class="text-button" type="button" id="stop" hidden>Stop</button><button class="primary" id="send" disabled>Send</button></div>
-    </form>
-  </div>
-  <noscript><p>Enable JavaScript to use Quick AI.</p></noscript>
-</body>
-</html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="theme-color" content="#121212"><title>Quick AI · Jarvis</title><link rel="icon" href="data:,"><link rel="stylesheet" href="/assets/shell.css"><link rel="stylesheet" href="/assets/quick-ai.css"><script type="module" src="/assets/quick-ai.js"></script></head>
+<body><div class="workspace quick-ai">
+<header class="topbar"><a class="text-button" href="/">← Jarvis</a><span class="brand">Quick AI</span><button class="text-button" id="new-chat">New chat</button></header>
+<main id="content"><div class="chat-controls"><label class="sr-only" for="history">Saved chats</label><select id="history"></select><button class="text-button" id="delete-chat">Delete</button></div>
+<div class="chat-controls options"><label for="model">Model</label><select id="model"><option value="gemini">Gemini · 3.5 Flash-Lite</option><option value="qwen">Qwen · 3.8 27B (Groq)</option></select><label class="search-switch"><input type="checkbox" id="search"> Search</label></div>
+<p class="model-note">Chats stay on this device. Messages and images go to the selected provider. Search sends your text query to Tavily. Google’s free API tier permits product improvement use. Switching models sends relevant chat history to the new provider.</p>
+<section id="messages" aria-label="Conversation" aria-busy="false"></section><p id="storage-status" role="status" class="warning" hidden></p></main>
+<form id="composer" class="ai-composer"><div id="previews" class="previews"></div><div id="search-row" hidden><label for="query">Search query (editable)</label><input id="query" maxlength="350" placeholder="What should Tavily search?"></div><label class="sr-only" for="prompt">Message Quick AI</label><textarea id="prompt" rows="2" maxlength="16000" placeholder="Ask anything…"></textarea>
+<div class="send-row"><label class="attach text-button" for="image">＋ Image</label><input id="image" type="file" accept="image/jpeg,image/png,image/webp" multiple hidden><button type="button" class="text-button" id="open-unlock">Unlock</button><span id="status" role="status">Checking…</span><button class="text-button" type="button" id="retry" hidden>Retry</button><button class="text-button" type="button" id="switch-retry" hidden>Retry with Qwen</button><button class="text-button" type="button" id="stop" hidden>Stop</button><button class="primary" id="send" disabled>Send</button></div></form>
+<dialog id="unlock"><form method="dialog"><h2>Unlock Quick Chat</h2><p>Enter your Quick Chat access credential. Provider keys stay on the server.</p><label for="access">Access credential</label><input id="access" type="password" pattern="[a-f0-9]{64}" autocomplete="off" required><div class="send-row"><button id="unlock-save" class="primary">Unlock</button><button value="cancel">Cancel</button></div></form></dialog>
+</div><noscript>Enable JavaScript to use Quick AI.</noscript></body></html>
