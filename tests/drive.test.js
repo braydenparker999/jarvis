@@ -22,6 +22,24 @@ test('lists every page and subfolder, deduplicates songs, skips non-audio and fo
   assert.equal(calls[2].url.searchParams.get('pageToken'),'next');
   assert.ok(calls.every(c=>c.url.origin==='https://www.googleapis.com'&&c.options.credentials==='omit'));
 });
+test('scans sibling folders concurrently and reports useful progress',async()=>{
+  const firstChild='childA123456789',secondChild='childB123456789';
+  let active=0,maxActive=0,release;const gate=new Promise(resolve=>release=resolve),updates=[];
+  const api=createDriveApi(key,async url=>{
+    const request=new URL(url),q=request.searchParams.get('q')||'';
+    if(request.pathname.endsWith('/'+root))return Response.json(folder);
+    if(q.includes("'"+root+"'"))return Response.json({files:[
+      {id:firstChild,name:'A',mimeType:'application/vnd.google-apps.folder'},
+      {id:secondChild,name:'B',mimeType:'application/vnd.google-apps.folder'}
+    ]});
+    active++;maxActive=Math.max(maxActive,active);if(active===2)release();await gate;active--;
+    const id=q.includes(firstChild)?'parallelSongOne':'parallelSongTwo';
+    return Response.json({files:[{...song,id,name:id+'.opus'}]});
+  });
+  const result=await api.list(root,undefined,update=>updates.push(update));
+  assert.equal(result.files.length,2);assert.equal(maxActive,2);
+  assert.deepEqual(updates.at(-1),{files:2,folders:3});
+});
 test('a failure on a later page rejects the entire snapshot',async()=>{
   const responses=[Response.json(folder),Response.json({files:[song],nextPageToken:'next'}),Response.json({error:{}},{status:403})];
   const api=createDriveApi(key,async()=>responses.shift());
