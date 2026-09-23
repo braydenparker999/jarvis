@@ -49,4 +49,6 @@ Quick Chat runs in the browser. It calls Gemini `gemini-3.5-flash-lite`, Qwen `q
 
 Quick Chat keeps its existing `jarvis.quick-ai.v1` text chats and drafts; new image bytes stay in browser IndexedDB. Search sends one editable textual query to Tavily only when enabled, followed by one selected-model request. Google free-tier API data may be used for product improvement. Main Chat and Muse remain on their check-based integrations.
 
+The composer shows reported token usage for completed replies in the current saved chat and Tavily credits for searches made after usage reporting was added. It includes searches even if the model request fails. Groq's remaining daily requests and minute tokens appear when the browser can read its response headers; a rate-limit error without exposed headers is labeled as such. These chat totals omit other devices and consumers of the same public keys and are not an account balance. Gemini project quotas must be checked in AI Studio.
+
 Rollback: pin a previous *public-config* Jarvis revision or disable Quick Chat while preserving the local chat storage. Do not roll back to the older exposed `apiKey` format or reintroduce a Cloudflare Worker dependency. Rotate the old Groq key only after confirming other consumers and the new frontend release.

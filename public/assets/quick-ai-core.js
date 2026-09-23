@@ -25,11 +25,16 @@ export function selectedMessages(messages){
   if(kept.at(-1)?.role!=='user')throw Error('No question to send');
   return {messages:kept,omitted};
 }
+export function chatUsage(messages){
+  const count=value=>Number.isSafeInteger(value)&&value>=0?value:0;
+  const replies=messages.filter(m=>m.role==='assistant'&&m.status==='complete');
+  return {replies:replies.length,reported:replies.filter(m=>m.usage).length,input:replies.reduce((n,m)=>n+count(m.usage?.input),0),output:replies.reduce((n,m)=>n+count(m.usage?.output),0),credits:messages.reduce((n,m)=>n+(m.role==='user'?count(m.searchCredits):0),0)};
+}
 export async function streamReply({keys,provider,messages,search=false,query='',retry=false,signal,onEvent=()=>{},fetcher=fetch}){
   const timeout=new AbortController(),timer=setTimeout(()=>timeout.abort(),120000);
   const combined=signal?AbortSignal.any([signal,timeout.signal]):timeout.signal;
   let res;
-  try{res=await directReply({keys,provider,messages,search,query,retry,signal:combined,fetcher});}
+  try{res=await directReply({keys,provider,messages,search,query,retry,signal:combined,fetcher,onSearchUsage:data=>onEvent('searchUsage',data,'')});}
   catch(error){clearTimeout(timer);if(timeout.signal.aborted){const e=new Error('Provider timed out. Tap Retry.');e.code='timeout';throw e;}throw error;}
   if(!res.body)throw Error('Streaming unavailable');
   const reader=res.body.getReader(),decoder=new TextDecoder();let buffer='',content='',complete=false,meta=null;

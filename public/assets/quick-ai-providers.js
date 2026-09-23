@@ -66,11 +66,20 @@ export function groqBody(messages,search){
   if(search){const last=mapped.at(-1);const item=`\n\nRetrieved evidence for query ${JSON.stringify(search.query)} at ${search.retrievedAt}:\n${evidence(search)}`;if(typeof last.content==='string')last.content+=item;else last.content.push({type:'text',text:item});}
   return {model:MODELS.qwen,messages:mapped,stream:true,stream_options:{include_usage:true},max_completion_tokens:LIMIT.qwen,reasoning_effort:'medium',reasoning_format:'hidden'};
 }
+export function groqAllowance(response){
+  const read=name=>{const value=response.headers.get('x-ratelimit-'+name);return value!==null&&/^\d+$/.test(value)&&Number.isSafeInteger(Number(value))?Number(value):null;};
+  const dailyRemaining=read('remaining-requests'),dailyLimit=read('limit-requests');
+  const minuteTokensRemaining=read('remaining-tokens'),minuteTokensLimit=read('limit-tokens');
+  if(dailyRemaining===null&&minuteTokensRemaining===null)return null;
+  return {dailyRemaining,dailyLimit,minuteTokensRemaining,minuteTokensLimit,observedAt:Date.now()};
+}
 async function upstream(response,provider){
   if(response.ok)return response;
   const status=response.status, retry=response.headers.get('retry-after');
   const code=status===429?'limit':status===401||status===403?'credential':status===404?'model':status===413?'context':status>=500?'unavailable':'provider';
-  throw fail((code==='limit'?`${provider} reported a rate or quota limit. Retry later or choose the other model.`:code==='credential'?`${provider} rejected its server key.`:code==='model'?`${provider} model is unavailable for this project.`:`${provider} request failed (${status}).`)+(retry?` Retry after: ${retry}.`:''),status,code);
+  const error=fail((code==='limit'?`${provider} reported a rate or quota limit. Retry later or choose the other model.`:code==='credential'?`${provider} rejected its server key.`:code==='model'?`${provider} model is unavailable for this project.`:`${provider} request failed (${status}).`)+(retry?` Retry after: ${retry}.`:''),status,code);
+  if(provider==='qwen')error.allowance=groqAllowance(response);
+  throw error;
 }
 const event=(type,data)=>`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
 export function normalizeStream(response,provider,metadata,signal){
@@ -113,7 +122,7 @@ export function normalizeStream(response,provider,metadata,signal){
 
 // Keys in the static configuration are intentionally public at the owner's request.
 const searchCache=new Map();
-export async function directReply({provider,messages,search=false,query='',retry=false,keys,signal=new AbortController().signal,fetcher=fetch}){
+export async function directReply({provider,messages,search=false,query='',retry=false,keys,signal=new AbortController().signal,fetcher=fetch,onSearchUsage=()=>{}}){
   const body=validate({provider,messages,search,query});
   const key=provider==='gemini'?keys?.geminiKey:keys?.groqKey;
   if(!key)throw fail(`${provider} has no configured public API key yet`,503,'configuration');
@@ -124,7 +133,9 @@ export async function directReply({provider,messages,search=false,query='',retry
     if(retry&&prior&&Date.now()-prior.time<300000)evidence=prior.search;
     if(!evidence){
       const found=await fetcher('https://api.tavily.com/search',{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${keys.tavilyKey}`},body:JSON.stringify({query:trimmed,search_depth:'basic',auto_parameters:false,max_results:5,include_answer:false,include_raw_content:false,include_usage:true}),signal});
-      await upstream(found,'Tavily');evidence=sourceData(await found.json(),trimmed);
+      await upstream(found,'Tavily');const data=await found.json(),credits=data.usage?.credits;
+      if(Number.isSafeInteger(credits)&&credits>=0&&credits<=100)onSearchUsage({credits});
+      evidence=sourceData(data,trimmed);
       if(evidence.sources.length)searchCache.set(trimmed,{search:evidence,time:Date.now()});
     }
     if(!evidence.sources.length)throw fail('Search returned no usable sources. Retry or turn Search off.',422,'search_empty');
@@ -132,5 +143,6 @@ export async function directReply({provider,messages,search=false,query='',retry
   const url=provider==='gemini'?`https://generativelanguage.googleapis.com/v1beta/models/${MODELS.gemini}:streamGenerateContent?alt=sse`:'https://api.groq.com/openai/v1/chat/completions';
   const response=await fetcher(url,{method:'POST',headers:provider==='gemini'?{'Content-Type':'application/json','x-goog-api-key':key}:{'Content-Type':'application/json',Authorization:`Bearer ${key}`},body:JSON.stringify(provider==='gemini'?geminiBody(body.messages,evidence):groqBody(body.messages,evidence)),signal});
   await upstream(response,provider);
-  return new Response(normalizeStream(response,provider,evidence?{search:evidence}:{},signal),{headers:{'Content-Type':'text/event-stream; charset=utf-8'}});
+  const metadata={...(evidence?{search:evidence}:{}),...(provider==='qwen'?{allowance:groqAllowance(response)}:{})};
+  return new Response(normalizeStream(response,provider,metadata,signal),{headers:{'Content-Type':'text/event-stream; charset=utf-8'}});
 }
