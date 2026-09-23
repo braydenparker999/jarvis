@@ -79,7 +79,7 @@ export function createDriveApi(key, fetcher = fetch) {
       const level = [];
       for (const current of frontier) {
         if (visited.has(current.id)) continue;
-        if (visited.size >= 500) throw Error('This folder has too many subfolders. Choose a smaller music folder.');
+        if (visited.size >= 5000) throw Error('This folder has more than 5,000 subfolders. Choose a smaller music folder.');
         visited.add(current.id); level.push(current);
       }
       frontier = [];
