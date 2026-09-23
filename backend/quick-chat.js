@@ -43,7 +43,7 @@ export function validate(body){
   if(count>MAX_IMAGES)throw fail('A request supports at most three images, including images from earlier turns');
   const budget=body.provider==='qwen'?18000:30000;
   const estimated=messages.reduce((n,m)=>n+Math.ceil(m.content.length/3)+m.images.length*2048,0);
-  if(estimated+LIMIT[body.provider]>budget)throw fail('This conversation is too large. Start a new chat or remove older images.',413,'context');
+  if(estimated+LIMIT[body.provider]+(body.search?2500:500)>budget)throw fail('This conversation is too large. Start a new chat or remove older images.',413,'context');
   return {...body,messages};
 }
 function sourceData(data,query){
