@@ -2176,7 +2176,7 @@ const DriveSource={
   async install(){
 
     try{
-      this.helper=await import('./drive-api.js?v=metadata-r16');
+      this.helper=await import('./drive-api.js?v=metadata-r17');
       const response=await fetch('/assets/drive-config.json',{cache:'no-store',signal:AbortSignal.timeout(15000)});
       if(!response.ok)throw Error('Drive configuration could not be loaded.');
       const config=await response.json();this.api=this.helper.createDriveApi(config.apiKey);
@@ -2248,13 +2248,19 @@ const DriveSource={
     if(!this.api){this.error='Drive configuration is unavailable. Reload the page and try again.';return false;}
     this.busy=true;this.error='';this.status='Reading Drive…';this.tagFailures.clear();MusicSources.refresh();
     const controller=new AbortController();this.controller=controller;
-    const timeout=setTimeout(()=>controller.abort(),90000);
+    const timeout=setTimeout(()=>controller.abort(),240000);
     try{
       const folderId=this.helper.folderId(value);
+      const progress=state=>{
+        if(controller.signal.aborted)return;
+        this.status='Reading Drive… '+state.files+' songs · '+state.folders+' folders';
+        MusicSources.refresh();
+        if($('#drive-status'))$('#drive-status').textContent=this.status;
+      };
       // The folder listing is authoritative; the manifest only supplies prepared
       // metadata for files whose size and MD5 still match.
       const [listing,prepared]=await Promise.all([
-        this.api.list(folderId,controller.signal),
+        this.api.list(folderId,controller.signal,progress),
         this.api.manifest(folderId,controller.signal).catch(()=>({}))
       ]);
       this.prepared=prepared;
@@ -2277,7 +2283,7 @@ const DriveSource={
       else if(Engine.current?.source==='drive'){Engine.current=LIB.map.get(Engine.current.id)||Engine.current;UI.renderNowPlaying(Engine.current);Waveform.load(Engine.current);}
       if(!quiet)toast('Drive library ready · '+fresh.length+' songs');
       return true;
-    }catch(e){this.error=e.name==='AbortError'?'Drive took too long. Refresh to retry; your saved library is unchanged.':e.message;this.status='Drive refresh failed';if(!quiet)toast(this.error,6500);return false;}
+    }catch(e){this.error=e.name==='AbortError'?'Drive scan exceeded four minutes. Refresh to retry; your saved library is unchanged.':e.message;this.status='Drive refresh failed';if(!quiet)toast(this.error,6500);return false;}
     finally{clearTimeout(timeout);this.busy=false;this.controller=null;MusicSources.refresh();if($('#drive-status'))$('#drive-status').textContent=this.error||this.status;}
   },
   show(){
