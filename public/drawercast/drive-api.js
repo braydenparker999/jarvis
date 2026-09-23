@@ -48,21 +48,20 @@ export function createDriveApi(key, fetcher = fetch) {
     }
     return data.files;
   }
-  async function list(folder, signal) {
+  async function list(folder, signal, progress) {
     const root = folderId(folder);
     const info = await get('/' + root, {fields:'id,name,mimeType'}, signal);
     if (info.mimeType !== 'application/vnd.google-apps.folder') throw Error('Choose a folder, not an individual file.');
-    const queue = [{id:root,path:info.name}], visited = new Set(), files = new Map();
-    while (queue.length) {
-      if (visited.size >= 500) throw Error('This folder has too many subfolders. Choose a smaller music folder.');
-      const current = queue.shift(); if (visited.has(current.id)) continue; visited.add(current.id);
+    const visited = new Set(), files = new Map();
+    async function readFolder(current) {
+      const children = [];
       let token = '', seen = new Set();
       do {
         const page = await get('', {q:"'" + current.id + "' in parents and trashed = false", pageSize:'1000', fields:'nextPageToken,files(id,name,mimeType,size,modifiedTime,md5Checksum,capabilities(canDownload))', ...(token ? {pageToken:token} : {})}, signal);
         if (!Array.isArray(page.files)) throw Error('Drive returned an incomplete folder listing. Your saved library is unchanged.');
         for (const f of page.files) {
           if (!ID.test(f.id || '') || typeof f.name !== 'string') continue;
-          if (f.mimeType === 'application/vnd.google-apps.folder') queue.push({id:f.id,path:current.path+'/'+f.name});
+          if (f.mimeType === 'application/vnd.google-apps.folder') children.push({id:f.id,path:current.path+'/'+f.name});
           else if (AUDIO.test(f.name) && f.capabilities?.canDownload !== false) files.set(f.id,{...f,folder:current.path});
         }
         if (files.size > 50000) throw Error('Choose a folder with fewer than 50,000 songs.');
@@ -70,6 +69,25 @@ export function createDriveApi(key, fetcher = fetch) {
         if (token && seen.has(token)) throw Error('Drive pagination repeated. Your saved library is unchanged.');
         seen.add(token);
       } while (token);
+      return children;
+    }
+    // Most large libraries contain many sibling album/artist folders. Read a
+    // small batch in parallel so a complete snapshot does not spend one network
+    // round trip per folder, while keeping concurrency low enough for Drive.
+    let frontier = [{id:root,path:info.name}];
+    while (frontier.length) {
+      const level = [];
+      for (const current of frontier) {
+        if (visited.has(current.id)) continue;
+        if (visited.size >= 500) throw Error('This folder has too many subfolders. Choose a smaller music folder.');
+        visited.add(current.id); level.push(current);
+      }
+      frontier = [];
+      for (let i=0; i<level.length; i+=6) {
+        const children = await Promise.all(level.slice(i,i+6).map(readFolder));
+        for (const group of children) frontier.push(...group);
+        if (typeof progress === 'function') progress({files:files.size,folders:visited.size});
+      }
     }
     return {id:root,name:info.name,files:[...files.values()]};
   }
