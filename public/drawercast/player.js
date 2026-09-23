@@ -2172,11 +2172,11 @@ function audioSource(file){return file&&file.__remoteURL?file.__remoteURL:URL.cr
 /* Google Drive is a separate remote source. API credentials stay out of track
    metadata and exports; the deployment injects the owner-approved shared key. */
 const DriveSource={
-  api:null,helper:null,folder:'',prepared:{},busy:false,status:'Not connected',error:'',controller:null,
+  api:null,helper:null,folder:'',prepared:{},busy:false,status:'Not connected',error:'',controller:null,playbackRetry:new Map(),
   async install(){
 
     try{
-      this.helper=await import('./drive-api.js?v=metadata-r17');
+      this.helper=await import('./drive-api.js?v=drive-qol-r21');
       const response=await fetch('/assets/drive-config.json',{cache:'no-store',signal:AbortSignal.timeout(15000)});
       if(!response.ok)throw Error('Drive configuration could not be loaded.');
       const config=await response.json();this.api=this.helper.createDriveApi(config.apiKey);
@@ -2185,12 +2185,35 @@ const DriveSource={
       this.prepared={};
       try{this.prepared=await this.api.manifest(this.folder,AbortSignal.timeout(10000));}catch(e){}
       if(!SourceLibrary.enabled('drive')){this.status='Disabled';MusicSources.refresh();return;}
-      this.connect(this.folder,true);
+      // Open instantly from the last complete snapshot. A recursive Drive walk is
+      // intentionally manual: doing 500+ folder requests at every launch competes
+      // with the first audio stream and was the main source of playback failures.
+      const cached=allTracks(true).filter(t=>t.source==='drive'&&t.driveFolder===this.folder);
+      if(cached.length){
+        const fresh=cached.map(old=>{
+          const name=baseName(old.path||old.title||'track.opus');
+          const folder=(old.path||'').split('/').slice(0,-1).join('/')||'Music';
+          const file={id:old.remoteId,name,mimeType:old.mimeType||'audio/'+(old.ext||'opus'),size:String(old.size||0),
+            modifiedTime:new Date(old.mtime||0).toISOString(),md5Checksum:old.md5||'',folder};
+          return this.helper.driveTrack(file,this.folder,this.prepared[old.remoteId],old);
+        });
+        await persistTracks(fresh);fresh.forEach(libAdd);
+        this.status='Saved library · '+fresh.length+' songs · refresh on demand';
+        Views.refreshAll();
+      }else{
+        await this.connect(this.folder,true);
+      }
     }catch(e){this.error=e.message;this.status='Drive unavailable';}finally{MusicSources.refresh();}
   },
   fileFor(t){
     if(!this.api)return null;
-    return {__remoteURL:this.api.mediaURL({id:t.remoteId}),name:baseName(t.path),size:t.size,type:t.mimeType};
+    const retry=this.playbackRetry.get(t.id)||0;
+    const url=this.api.mediaURL({id:t.remoteId})+(retry?'&retry='+retry:'');
+    return {__remoteURL:url,name:baseName(t.path),size:t.size,type:t.mimeType};
+  },
+  retryFileFor(t){
+    this.playbackRetry.set(t.id,Date.now());
+    return this.fileFor(t);
   },
   waveformURL(t){return t.waveformVersion===1?t.waveformFile:null;},
   tagJobs:new Map(),tagQueue:[],tagFailures:new Set(),tagActive:null,tagTimer:null,
@@ -2204,6 +2227,7 @@ const DriveSource={
   },
   pumpTags(){
     if(!SourceLibrary.enabled('drive')||this.tagActive||!this.tagQueue.length)return;
+    if(this.busy){clearTimeout(this.tagTimer);this.tagTimer=setTimeout(()=>this.pumpTags(),1000);return;}
     clearTimeout(this.tagTimer);
     const delay=(this.tagNotBefore||0)-Date.now();if(delay>0){this.tagTimer=setTimeout(()=>this.pumpTags(),delay);return;}
     // Let audio acquire its first playable buffer before starting cover requests.
@@ -2246,14 +2270,15 @@ const DriveSource={
   async connect(value,quiet=false){
     if(!SourceLibrary.enabled('drive')||this.busy)return false;
     if(!this.api){this.error='Drive configuration is unavailable. Reload the page and try again.';return false;}
-    this.busy=true;this.error='';this.status='Reading Drive…';this.tagFailures.clear();MusicSources.refresh();
+    this.busy=true;this.error='';this.status='Checking Drive…';this.tagFailures.clear();
+    this.tagActive?.controller?.abort();clearTimeout(this.tagTimer);MusicSources.refresh();
     const controller=new AbortController();this.controller=controller;
     const timeout=setTimeout(()=>controller.abort(),240000);
     try{
       const folderId=this.helper.folderId(value);
       const progress=state=>{
         if(controller.signal.aborted)return;
-        this.status='Reading Drive… '+state.files+' songs · '+state.folders+' folders';
+        this.status='Checking Drive… '+state.files+' songs · '+state.folders+' folders';
         MusicSources.refresh();
         if($('#drive-status'))$('#drive-status').textContent=this.status;
       };
@@ -2284,7 +2309,7 @@ const DriveSource={
       if(!quiet)toast('Drive library ready · '+fresh.length+' songs');
       return true;
     }catch(e){this.error=e.name==='AbortError'?'Drive scan exceeded four minutes. Refresh to retry; your saved library is unchanged.':e.message;this.status='Drive refresh failed';if(!quiet)toast(this.error,6500);return false;}
-    finally{clearTimeout(timeout);this.busy=false;this.controller=null;MusicSources.refresh();if($('#drive-status'))$('#drive-status').textContent=this.error||this.status;}
+    finally{clearTimeout(timeout);this.busy=false;this.controller=null;MusicSources.refresh();this.pumpTags();if($('#drive-status'))$('#drive-status').textContent=this.error||this.status;}
   },
   show(){
     dialog('Google Drive Music',
@@ -2292,6 +2317,7 @@ const DriveSource={
       '<p id="drive-status" role="status">'+esc(this.error||this.status)+'</p>'+
       '<label for="drive-folder">Music folder link</label><input class="field" id="drive-folder" value="'+esc(this.folder?'https://drive.google.com/drive/folders/'+this.folder:'')+'" style="margin:8px 0 14px" autocomplete="off">'+
       '<p class="note">Only folders shared as Anyone with the link → Viewer can be read.</p>'+
+      '<p class="note">Your saved library opens instantly. Refresh folder only when Drive music changes; playback stays available while the new snapshot is checked.</p>'+
       '<p class="note">Turning this source off keeps its saved track information and playlist entries.</p>',
       [{label:'Refresh folder',pri:true},{label:'Close'}]);
     const refresh=$$('#sheet .actions .btn')[0];
@@ -2652,8 +2678,23 @@ const Engine = {
     if(i!==this.cur) return;
     const t=this.current;
     if(t?.source==='drive'){
+      const a=this.el();
+      if(this._driveRetryId!==t.id){
+        this._driveRetryId=t.id;this.playing=false;UI.renderPlayState();
+        const f=DriveSource.retryFileFor(t);
+        a.pause();a.src=audioSource(f);a.currentTime=0;
+        toast('Drive stream stalled · retrying once…',2500);
+        setTimeout(()=>{
+          if(this.current?.id!==t.id)return;
+          this.playing=true;UI.renderPlayState();
+          const p=a.play();
+          if(p?.catch)p.catch(()=>{if(this.current?.id===t.id){this.playing=false;UI.renderPlayState();toast('Drive audio still could not play. Check internet and folder sharing, then try again.',7000);}});
+        },800);
+        return;
+      }
+      this._driveRetryId=null;DriveSource.playbackRetry.delete(t.id);
       this.playing=false;UI.renderPlayState();
-      toast('Drive audio could not play. Check internet and folder sharing, then try Play again. Refresh Google Drive Music if the file changed.',7000);return;
+      toast('Drive audio still could not play. Check internet and folder sharing, then try again.',7000);return;
     }
     if(t && t.remote){
       this.playing=false;UI.renderPlayState();
@@ -2676,6 +2717,7 @@ const Engine = {
   onMeta:function(i){
     if(i!==this.cur) return;
     this._err=0;
+    if(this.current?.source==='drive'){this._driveRetryId=null;DriveSource.playbackRetry.delete(this.current.id);}
     const a=this.els[i];
     if(isFinite(a.duration) && a.duration>0){
       this.dur=a.duration;
