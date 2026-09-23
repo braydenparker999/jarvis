@@ -78,7 +78,15 @@ async function upstream(response,provider){
   if(response.ok)return response;
   const status=response.status, retry=response.headers.get('retry-after');
   const code=status===429?'limit':status===401||status===403?'credential':status===404?'model':status===413?'context':status>=500?'unavailable':'provider';
-  const error=fail((code==='limit'?`${provider} reported a rate or quota limit. Retry later or choose the other model.`:code==='credential'?`${provider} rejected its server key.`:code==='model'?`${provider} model is unavailable for this project.`:`${provider} request failed (${status}).`)+(retry?` Retry after: ${retry}.`:''),status,code);
+  let limitDetails='';
+  if(provider==='qwen'&&status===429){
+    // Groq's error can include account identifiers. Extract only numeric quota facts.
+    const payload=await response.json().catch(()=>null);
+    const message=typeof payload?.error?.message==='string'?payload.error.message:'';
+    const values=message.match(/on\s+(tokens|requests)\s+per\s+(minute|day)\s*\([^)]*\)\s*:\s*Limit\s*([\d,]+)\s*,\s*Used\s*([\d,]+)\s*,\s*Requested\s*([\d,]+)/i);
+    if(values)limitDetails=`Groq ${values[1].toLowerCase()} per ${values[2].toLowerCase()}: ${values[4]} of ${values[3]} used; this request needs ${values[5]}.`;
+  }
+  const error=fail((limitDetails|| (code==='limit'?`${provider} reported a rate or quota limit. Retry later or choose the other model.`:code==='credential'?`${provider} rejected its server key.`:code==='model'?`${provider} model is unavailable for this project.`:`${provider} request failed (${status}).`))+(retry?` Retry after: ${retry}.`:''),status,code);
   if(provider==='qwen')error.allowance=groqAllowance(response);
   throw error;
 }
