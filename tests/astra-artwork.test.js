@@ -55,19 +55,21 @@ test('Astra preserves catalog artwork when full metadata returns blanks',()=>{
 });
 
 test('Astra startup scripts are deferred and release assets share one version',()=>{
-  assert.match(indexSource,/meta name="astra-release" content="0\.34\.0"/);
+  assert.match(indexSource,/meta name="astra-release" content="0\.34\.1"/);
   assert.match(indexSource,/rel="preconnect" href="https:\/\/v3-cinemeta\.strem\.io"/);
   assert.match(indexSource,/rel="preconnect" href="https:\/\/images\.metahub\.space"/);
   const externalScripts=[...indexSource.matchAll(/<script\b[^>]*\bsrc="([^"]+)"[^>]*>/g)];
   assert.ok(externalScripts.length>20);
   for(const match of externalScripts){
     assert.match(match[0],/\bdefer\b/,match[1]);
-    assert.match(match[1],/\?v=0\.34\.0$/,match[1]);
+    assert.match(match[1],/\?v=0\.34\.1$/,match[1]);
   }
 });
 
 test('Astra images use ordered fallback handling without a referrer',()=>{
   assert.match(appSource,/globalThis\.AstraArtworkFallback=function/);
+  assert.match(appSource,/function bindArtwork\(root=document\)/);
+  assert.doesNotMatch(appSource,/\son(?:load|error)="/);
   assert.match(appSource,/referrerpolicy="no-referrer"/);
   assert.match(appSource,/AstraCatalogs\.mergeMeta\(item,d\.meta\)/);
 });
