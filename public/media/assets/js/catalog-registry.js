@@ -60,6 +60,55 @@
     return provider ? "m1:" + provider + ":" + content : content;
   }
 
+  function artworkValue(value) {
+    if (value == null) return "";
+    var out = String(value).trim();
+    return out && !/^javascript:/i.test(out) ? out : "";
+  }
+
+  /**
+   * Stremio-compatible add-ons are not consistent about artwork field names.
+   * Keep the ordered candidate list in one place so cards, details and episode
+   * rows can fall back without showing an empty rectangle after one CDN miss.
+   */
+  function artCandidates(meta, kind) {
+    var item = meta && typeof meta === "object" ? meta : {};
+    var fields = kind === "backdrop"
+      ? ["background", "backgroundUrl", "backdrop", "backdropUrl", "landscapePoster", "thumbnail", "thumbnailUrl", "poster", "posterUrl", "image", "imageUrl", "logo"]
+      : kind === "video"
+        ? ["thumbnail", "thumbnailUrl", "still", "stillUrl", "image", "imageUrl", "background", "backgroundUrl", "poster", "posterUrl"]
+        : ["poster", "posterUrl", "portrait", "portraitUrl", "image", "imageUrl", "thumbnail", "thumbnailUrl", "background", "backgroundUrl", "logo"];
+    var seen = {};
+    var out = [];
+    fields.forEach(function (field) {
+      var value = artworkValue(item[field]);
+      if (!value || seen[value]) return;
+      seen[value] = true;
+      out.push(value);
+    });
+    return out;
+  }
+
+  /**
+   * A full metadata response occasionally contains blank artwork properties.
+   * A normal object spread would erase the working catalog poster in that
+   * case. Preserve only the known artwork fields while allowing every real,
+   * non-empty full-metadata value to win.
+   */
+  function mergeMeta(base, incoming) {
+    var previous = base && typeof base === "object" ? base : {};
+    var update = incoming && typeof incoming === "object" ? incoming : {};
+    var merged = Object.assign({}, previous, update);
+    ["poster", "posterUrl", "background", "backgroundUrl", "backdrop", "backdropUrl", "thumbnail", "thumbnailUrl", "image", "imageUrl", "logo"].forEach(function (field) {
+      var fresh = artworkValue(update[field]);
+      var old = artworkValue(previous[field]);
+      if (fresh) merged[field] = fresh;
+      else if (old) merged[field] = old;
+      else if (field in merged) delete merged[field];
+    });
+    return merged;
+  }
+
   function isAdult(source, catalog) {
     return !!(catalog && catalog.adult) || !!(
       source && source.manifest && source.manifest.behaviorHints &&
@@ -192,6 +241,8 @@
     catalogKey: catalogKey,
     contentKey: contentKey,
     mediaRef: mediaRef,
+    artCandidates: artCandidates,
+    mergeMeta: mergeMeta,
     build: build,
     defaults: defaults,
     reconcile: reconcile,
