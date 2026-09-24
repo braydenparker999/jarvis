@@ -3,6 +3,20 @@ export function filename(title, track) {
   const name = `${clean(title).slice(0, 110)} - ${clean(track).slice(0, 60)}`.trim();
   return `${name || 'Guitar tab'}.pdf`;
 }
+export function createDownload(blob, name, urlApi = URL) {
+  if (!(blob instanceof Blob) || blob.size < 100) throw Error('Empty PDF');
+  const url = urlApi.createObjectURL(blob);
+  let active = true;
+  return {
+    url,
+    name,
+    revoke() {
+      if (!active) return;
+      active = false;
+      urlApi.revokeObjectURL(url);
+    }
+  };
+}
 export async function withDeadline(work, ms) {
   const controller = new AbortController(); let timer;
   try { return await Promise.race([work(controller.signal), new Promise((_, reject) => {
