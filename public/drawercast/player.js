@@ -2531,6 +2531,10 @@ const Engine = {
     if(!sourceTrackEnabled(t))return;
     if(t.source==='drive'&&!DriveSource.api){toast('Google Drive is unavailable. Check Music Sources in Library settings.');return;}
     if(t.remote && t.source!=='drive' && !DrawerCast.canPlay(t)){toast('Music server is unavailable. Reconnect in Music Sources.');return;}
+    // A deliberate new selection gets its own retry budget. Metadata from a
+    // failed retry does not prove the audio ever became playable.
+    this._driveRetryId=null;
+    if(t.source==='drive')DriveSource.playbackRetry.delete(t.id);
     DriveSource.prioritize(t);
     const request=++this._playRequest || (this._playRequest=1);
     const wasPlaying = autoplay!==false;
@@ -2683,16 +2687,16 @@ const Engine = {
         this._driveRetryId=t.id;this.playing=false;UI.renderPlayState();
         const f=DriveSource.retryFileFor(t);
         a.pause();a.src=audioSource(f);a.currentTime=0;
+        const request=this._playRequest,source=a.src;
         toast('Drive stream stalled · retrying once…',2500);
         setTimeout(()=>{
-          if(this.current?.id!==t.id)return;
+          if(this.current?.id!==t.id||this._playRequest!==request||this.el()!==a||a.src!==source)return;
           this.playing=true;UI.renderPlayState();
           const p=a.play();
-          if(p?.catch)p.catch(()=>{if(this.current?.id===t.id){this.playing=false;UI.renderPlayState();toast('Drive audio still could not play. Check internet and folder sharing, then try again.',7000);}});
+          if(p?.catch)p.catch(()=>{if(this.current?.id===t.id&&this._playRequest===request&&this.el()===a&&a.src===source){this.playing=false;UI.renderPlayState();toast('Drive audio still could not play. Check internet and folder sharing, then try again.',7000);}});
         },800);
         return;
       }
-      this._driveRetryId=null;DriveSource.playbackRetry.delete(t.id);
       this.playing=false;UI.renderPlayState();
       toast('Drive audio still could not play. Check internet and folder sharing, then try again.',7000);return;
     }
@@ -2717,7 +2721,6 @@ const Engine = {
   onMeta:function(i){
     if(i!==this.cur) return;
     this._err=0;
-    if(this.current?.source==='drive'){this._driveRetryId=null;DriveSource.playbackRetry.delete(this.current.id);}
     const a=this.els[i];
     if(isFinite(a.duration) && a.duration>0){
       this.dur=a.duration;

@@ -17,6 +17,33 @@
     const entries=[value,...(Array.isArray(list)?list:[])].filter(v=>typeof v==='string').map(clean).filter(v=>v&&v.length<=160);
     const seen=new Set();return entries.filter(v=>{const key=folded(v);if(seen.has(key))return false;seen.add(key);return true;}).slice(0,8);
   }
+  // A damaged or partially imported browser value must not prevent Astra from
+  // starting. Keep valid saved items while dropping only malformed records.
+  function restoreAddons(raw,defaults=[]){
+    const entries=Array.isArray(raw)?raw:defaults,seen=new Set(),out=[];
+    for(const addon of entries.slice(0,100)){
+      if(!record(addon)||typeof addon.url!=='string')continue;
+      let url;try{url=new URL(addon.url)}catch{continue}
+      if(!((url.protocol==='https:')||(url.protocol==='http:'&&['localhost','127.0.0.1'].includes(url.hostname)))||
+          url.username||url.password||!url.pathname.endsWith('/manifest.json')||seen.has(url.href))continue;
+      seen.add(url.href);
+      out.push({...addon,url:url.href,enabled:addon.enabled!==false,
+        name:clean(addon.name).slice(0,160),logo:typeof addon.logo==='string'?addon.logo.slice(0,512):''});
+    }
+    return out.length||!entries.length?out:Array.isArray(raw)?restoreAddons(defaults,[]):out;
+  }
+  function restoreLibrary(raw){
+    if(!record(raw))return {};
+    const out={};
+    for(const [key,value] of Object.entries(raw)){
+      if(!record(value)||!record(value.meta)||typeof value.meta.id!=='string'||
+          typeof value.meta.type!=='string'||!value.meta.id||!value.meta.type||
+          key!==value.meta.type+':'+value.meta.id)continue;
+      Object.defineProperty(out,key,{value:{meta:value.meta,added:Number.isFinite(value.added)?value.added:0},
+        enumerable:true,writable:true,configurable:true});
+    }
+    return out;
+  }
   function backup(raw){
     if(!record(raw)||raw.app!=='Astra'||!Array.isArray(raw.addons)||raw.addons.length>100)throw Error('Choose an Astra backup with a valid add-on list.');
     const addons=raw.addons.map(addon=>{
@@ -44,5 +71,5 @@
     try{for(const [key,value] of entries)storage.setItem(key,value);}
     catch(error){for(const [key,value] of before){try{if(value===null)storage.removeItem(key);else storage.setItem(key,value);}catch{}}throw Error('Chrome could not save the backup. Free some device storage and try again.');}
   }
-  global.AstraCollections=Object.freeze({select,recent,backup,commit});
+  global.AstraCollections=Object.freeze({select,recent,restoreAddons,restoreLibrary,backup,commit});
 })(globalThis);

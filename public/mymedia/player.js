@@ -43,12 +43,18 @@ export async function driveProblem(url, fetcher = fetch) {
   }
 }
 
-export function play(media, url, {startTime = 0, onError = () => {}, onMode = () => {}} = {}) {
-  let adapter = null, closed = false, fellBack = false, retries = 0;
+export function play(media, url, {startTime = 0, onError = () => {}, onMode = () => {}, stallMs = 12000, retryDelayMs = 650} = {}) {
+  let adapter = null, closed = false, fellBack = false, retries = 0, failed = false;
   let resumeAt = startTime, restartTimer = null, stallTimer = null;
   const cleanup = [];
   const listen = (type, fn) => { media.addEventListener(type, fn); cleanup.push(() => media.removeEventListener(type, fn)); };
   const clearStall = () => { clearTimeout(stallTimer); stallTimer = null; };
+  const fail = message => {
+    if (closed || failed) return;
+    failed = true;
+    clearStall();
+    onError(message);
+  };
   const startNative = () => {
     if (closed || fellBack) return;
     media.src = url;
@@ -64,22 +70,23 @@ export function play(media, url, {startTime = 0, onError = () => {}, onMode = ()
     media.pause();
     media.removeAttribute('src');
     media.load();
-    restartTimer = setTimeout(startNative, 650);
+    restartTimer = setTimeout(startNative, retryDelayMs);
     return true;
   };
   const armStallRetry = () => {
-    if (closed || fellBack || media.paused || media.ended || retries >= 1) return;
+    if (closed || fellBack || failed || media.paused || media.ended) return;
     clearStall();
     stallTimer = setTimeout(() => {
-      if (!retryNative('stalled') && !closed && !fellBack) {
-        onError('The video stopped loading. Check your connection, then retry.');
-      }
-    }, 12000);
+      if (closed || fellBack || failed) return;
+      if (!retryNative('stalled')) fail('The video stopped loading. Check your connection, then retry.');
+    }, stallMs);
   };
 
   async function fallback() {
-    if (fellBack || closed) return;
+    if (fellBack || closed || failed) return;
     fellBack = true;
+    clearStall();
+    clearTimeout(restartTimer);
     const at = media.currentTime || startTime;
     onMode('compatibility');
     try {
@@ -95,19 +102,20 @@ export function play(media, url, {startTime = 0, onError = () => {}, onMode = ()
   }
 
   listen('error', async () => {
-    if (closed || fellBack) return;
+    if (closed || fellBack || failed) return;
     if (!formatProblem(media)) {
-      if (!retryNative('network')) onError('The video stopped loading. Check your connection, then retry.');
+      if (!retryNative('network')) fail('The video stopped loading. Check your connection, then retry.');
       return;
     }
     const problem = await driveProblem(url);
     if (closed) return;
-    if (problem) onError(problem); else fallback();
+    if (problem) fail(problem); else fallback();
   });
   // A transient Drive connection can stall without emitting a media error.
   // Give it one clean reload, preserving the playhead, before surfacing failure.
   listen('waiting', armStallRetry);
   listen('stalled', armStallRetry);
+  listen('play', () => { if (retries) armStallRetry(); });
   listen('playing', clearStall);
   listen('timeupdate', clearStall);
   // Chrome sometimes plays the audio of an unsupported video track with no picture.

@@ -122,10 +122,22 @@ export function thumbnails(video, key) {
   return list;
 }
 
-export function parseLibrary(raw) {
+export function parseLibrary(raw, expectedFolder = '') {
   try {
     const data = JSON.parse(raw);
-    if (data && typeof data.id === 'string' && Array.isArray(data.videos)) return data;
+    if (!data || !ID.test(data.id || '') || expectedFolder && data.id !== expectedFolder ||
+        typeof data.name !== 'string' || !Array.isArray(data.videos) || data.videos.length > 20000) return null;
+    const videos = data.videos.filter(v => v && ID.test(v.id || '') &&
+      typeof v.title === 'string' && typeof v.folder === 'string' && typeof v.name === 'string')
+      .map(v => ({...v,
+        image:ID.test(v.image || '') ? v.image : null,
+        youtubeId:/^[A-Za-z0-9_-]{11}$/.test(v.youtubeId || '') ? v.youtubeId : '',
+        thumbnail:/^https:\/\/[a-z0-9.-]+\.googleusercontent\.com\//.test(v.thumbnail || '') ? v.thumbnail : '',
+        duration:Number.isFinite(v.duration) && v.duration > 0 ? v.duration : 0,
+        subtitles:Array.isArray(v.subtitles)
+        ? v.subtitles.filter(s => s && ID.test(s.id || '') && typeof s.lang === 'string' && ['vtt','srt'].includes(s.format))
+        : []}));
+    return {...data, videos};
   } catch {}
   return null;
 }

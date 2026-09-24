@@ -86,7 +86,15 @@ test('stored data is validated before use', () => {
   assert.deepEqual(parseProgress('not json'), {});
   assert.deepEqual(parseProgress('[]'), {});
   assert.equal(parseLibrary('{"id":"x"}'), null);
-  assert.equal(parseLibrary('{"id":"x","videos":[]}').id, 'x');
+  assert.equal(parseLibrary('{"id":"x","videos":[]}'), null);
+  const saved = JSON.stringify({id:root,name:'Videos',fetched:1,videos:[
+    {id:'video1234567890',name:'One.mp4',title:'One',folder:'Videos',image:'bad id!',subtitles:[{id:'subtitle123456',lang:'en',format:'vtt'},null]},
+    {id:'bad id!',title:'Broken',folder:'Videos'}]});
+  assert.equal(parseLibrary(saved,child),null,'a cache from another folder is not used');
+  const restored=parseLibrary(saved,root);
+  assert.deepEqual(restored.videos.map(v=>v.id),['video1234567890']);
+  assert.equal(restored.videos[0].image,null);
+  assert.deepEqual(restored.videos[0].subtitles,[{id:'subtitle123456',lang:'en',format:'vtt'}]);
 });
 
 test('continue watching, search, sort and folder sections', () => {
@@ -136,12 +144,30 @@ test('a refused Drive request is reported instead of switching decoders', async 
 });
 
 
-test('My Media retries one transient Drive stall and manages PiP shutdown', async () => {
-  const player = await readFile(new URL('../public/mymedia/player.js', import.meta.url), 'utf8');
-  assert.match(player, /retries >= 1/);
-  assert.match(player, /listen\('waiting', armStallRetry\)/);
-  assert.match(player, /listen\('stalled', armStallRetry\)/);
-  assert.match(player, /setTimeout\(startNative, 650\)/);
+test('My Media reports a second silent stall after its one retry', async () => {
+  const {play}=await import('../public/mymedia/player.js');
+  const events=new Map(),errors=[],modes=[];
+  const media={src:'',paused:false,ended:false,currentTime:0,
+    addEventListener(type,fn){const list=events.get(type)||[];list.push(fn);events.set(type,list)},
+    removeEventListener(type,fn){events.set(type,(events.get(type)||[]).filter(x=>x!==fn))},
+    emit(type){for(const fn of events.get(type)||[])fn()},
+    play(){this.paused=false;this.emit('play');return Promise.resolve()},
+    pause(){this.paused=true},
+    removeAttribute(){this.src=''},
+    load(){}};
+  const done=new Promise(resolve=>{
+    const handle=play(media,'https://www.googleapis.com/file',{stallMs:5,retryDelayMs:1,
+      onMode:mode=>modes.push(mode),onError:message=>{errors.push(message);resolve(handle)}});
+    media.emit('waiting');
+  });
+  const handle=await Promise.race([done,new Promise((_,reject)=>setTimeout(()=>reject(Error('stall was never reported')),500))]);
+  assert.deepEqual(modes,['native','retrying']);
+  assert.equal(errors.length,1);
+  assert.match(errors[0],/stopped loading/);
+  handle.close();
+});
+
+test('My Media manages PiP shutdown', async () => {
 
   const app = await readFile(new URL('../public/mymedia/app.js', import.meta.url), 'utf8');
   assert.match(app, /enterpictureinpicture/);

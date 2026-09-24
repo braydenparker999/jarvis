@@ -13,7 +13,7 @@ function harness(){
   const audio=src=>({src,preload:'auto',paused:false,loads:0,pause(){this.paused=true;},removeAttribute(){this.src='';},load(){this.loads++;},play(){return {catch:fn=>{this.reject=fn;}};}});
   Engine.els=[audio('http://music.example.test/audio/current'),audio('http://music.example.test/audio/next')];
   Engine.cur=0;Engine.setGain=()=>{};Engine.ensureCtx=()=>{};Engine.updateMediaSession=()=>{};Engine._playRequest=1;
-  return {Engine,PlaybackTransitions,revoked,renders:()=>renders};
+  return {Engine,PlaybackTransitions,ctx:context,revoked,renders:()=>renders};
 }
 test('cancelled transition releases spare streaming request',()=>{
   const {Engine,PlaybackTransitions}=harness();Engine.preloadId='unused';PlaybackTransitions.cancel();
@@ -56,4 +56,24 @@ test('a streamed Ogg duration arriving after loadedmetadata updates the track an
   Engine.els[0].events.loadedmetadata();assert.equal(saved.length,0);
   Engine.els[0].duration=210;Engine.els[0].events.durationchange();assert.equal(Engine.current.dur,210);assert.equal(saved[0].dur,210);
   Engine.els[1].duration=999;Engine.els[1].events.durationchange();assert.equal(Engine.current.dur,210);
+});
+
+test('Drive metadata cannot reset the retry budget and an old timer cannot restart playback',()=>{
+  const {Engine,ctx}=harness(),timers=[],messages=[];let retries=0,plays=0;
+  ctx.setTimeout=fn=>{timers.push(fn);return timers.length};
+  ctx.toast=message=>messages.push(message);
+  ctx.UI.renderProgress=()=>{};ctx.UI.renderMeta=()=>{};
+  ctx.DriveSource={retryFileFor:()=>({__remoteURL:'https://drive.test/audio?retry='+ ++retries}),playbackRetry:new Map()};
+  ctx.audioSource=file=>file.__remoteURL;
+  Engine.current={id:'gd_song',source:'drive',dur:100};
+  Engine.els[0].duration=100;
+  Engine.els[0].play=()=>{plays++;return Promise.resolve()};
+  Engine.onError(0);
+  Engine.onMeta(0); // Drive can report metadata before the stream fails again.
+  Engine.onError(0);
+  assert.equal(retries,1,'one retry per selection, even if metadata arrived');
+  assert.equal(messages.filter(message=>message.includes('still could not play')).length,1);
+  Engine._playRequest++; // The user selected this same song again before the old timer fired.
+  timers[0]();
+  assert.equal(plays,0,'a stale retry must not start the new selection');
 });

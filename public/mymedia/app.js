@@ -1,4 +1,4 @@
-import {createVideoApi, mediaURL, thumbnails, parseLibrary, parseProgress, recordProgress, resumeTime,
+import {createVideoApi, folderId, mediaURL, thumbnails, parseLibrary, parseProgress, recordProgress, resumeTime,
   continueWatching, searchVideos, sortVideos, groupByFolder, formatDuration, srtToVtt,
   PROGRESS_KEY, LIBRARY_KEY} from './library.js';
 import {play} from './player.js';
@@ -314,9 +314,11 @@ async function start() {
   try {
     const response = await fetch('/assets/drive-config.json', {cache:'no-store', signal:AbortSignal.timeout(15000)});
     const config = await response.json();
-    key = String(config.apiKey || '').trim(); folder = String(config.videoFolderId || '').trim();
+    key = String(config.apiKey || '').trim();
+    if (!config.videoFolderId) throw Error('No video folder is configured.');
+    folder = folderId(config.videoFolderId);
     api = createVideoApi(key);
-    if (!folder) throw Error('No video folder is configured.');
+    if (library && library.id !== folder) library = null;
   } catch (error) {
     ready = true; route();
     status((error?.message || 'Drive settings could not be loaded.') + (library ? ' Showing the last saved list.' : ''), true);
