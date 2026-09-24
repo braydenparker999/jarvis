@@ -1,9 +1,15 @@
 import { API_ORIGIN } from '/assets/config.js';
-import { filename, withDeadline, renderInWorker } from './runtime.js';
+import { filename, createDownload, withDeadline, renderInWorker } from './runtime.js';
 const $ = id => document.getElementById(id);
-let busy = false, current = null, results = [];
+let busy = false, current = null, results = [], readyDownload = null;
 const text = (tag, value, className) => { const e = document.createElement(tag); e.textContent = value; if (className) e.className = className; return e; };
 function status(message, error = false) { $('status').textContent = message; $('status').classList.toggle('error', error); }
+function clearReadyDownload() {
+  readyDownload?.revoke(); readyDownload = null;
+  const save = $('save-pdf');
+  if (save) { save.hidden = true; save.removeAttribute('href'); save.removeAttribute('download'); }
+  const generate = $('download-pdf'); if (generate) generate.textContent = 'Download PDF';
+}
 function lock(value) {
   busy = value;
   for (const e of document.querySelectorAll('main button, main input')) e.disabled = value;
@@ -38,6 +44,7 @@ function showResults() {
 $('search-form').onsubmit = async e => {
   e.preventDefault(); if (busy) return;
   const q = $('song-query').value.trim(); if (q.length < 2) { status('Enter at least two characters.', true); return; }
+  clearReadyDownload();
   lock(true); status('Searching…'); current = null; $('song').hidden = true; $('results').replaceChildren();
   try {
     const data = await withDeadline(signal => api(`search?q=${encodeURIComponent(q)}`, signal), 20000);
@@ -47,6 +54,7 @@ $('search-form').onsubmit = async e => {
 };
 async function choose(id) {
   if (busy) return;
+  clearReadyDownload();
   lock(true); status('Loading tracks…');
   try {
     const data = await withDeadline(signal => api(`songs/${id}`, signal), 20000);
@@ -55,9 +63,10 @@ async function choose(id) {
   } catch (e) { status(e.message, true); } finally { lock(false); }
 }
 function showSong() {
+  clearReadyDownload();
   const root = $('song'); root.replaceChildren(); root.hidden = false; $('results').hidden = true;
   const back = text('button', '‹ Results', 'text-button change-song'); back.type = 'button';
-  back.onclick = () => { if (busy) return; root.hidden = true; current = null; $('results').hidden = false; status(''); };
+  back.onclick = () => { if (busy) return; clearReadyDownload(); root.hidden = true; current = null; $('results').hidden = false; status(''); };
   root.append(back, text('h2', current.title), text('p', current.artist, 'song-artist'));
   const guitars = current.tracks.filter(t => t.kind === 'guitar');
   const preferred = guitars.length ? guitars : current.tracks;
@@ -83,10 +92,14 @@ function showSong() {
     root.append(select);
   }
   const download = text('button', 'Download PDF', 'primary guitar-download'); download.type = 'button'; download.id = 'download-pdf';
-  download.onclick = () => generate(preferred.length === 1 ? String(chosen.partId) : select.querySelector('input:checked')?.value);
-  root.append(download);
+  const save = text('a', 'Save PDF to device', 'primary guitar-download guitar-save');
+  save.id = 'save-pdf'; save.hidden = true; save.target = '_blank'; save.rel = 'noopener';
+  save.onclick = () => status('Download started. If Chrome asks, choose Download.');
+  if (preferred.length > 1) select.onchange = () => { clearReadyDownload(); status(''); };
+  download.onclick = () => { clearReadyDownload(); generate(preferred.length === 1 ? String(chosen.partId) : select.querySelector('input:checked')?.value, download, save); };
+  root.append(download, save);
 }
-async function generate(parts) {
+async function generate(parts, download, save) {
   if (busy || !current || !parts) return;
   lock(true); status('Preparing tab…'); const song = current;
   const selected = parts.split(',').map(Number).map(id => song.tracks.find(t => t.partId === id));
@@ -99,12 +112,12 @@ async function generate(parts) {
       signal.throwIfAborted();
       const blob = await pdf.createPdf(score, data.meta, label, signal, (i, total) => status(`Creating PDF… ${Math.round(i / total * 100)}%`));
       signal.throwIfAborted();
-      if (!(blob instanceof Blob) || blob.size < 100) throw Error('Empty PDF');
-      const url = URL.createObjectURL(blob), a = document.createElement('a');
-      a.href = url; a.download = filename(song.title, label); document.body.append(a); a.click(); a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 60000);
-      status(score.warnings.length ? 'PDF downloaded. Some notation could not be converted exactly.' : 'PDF downloaded.');
+      readyDownload = createDownload(blob, filename(song.title, label));
+      save.href = readyDownload.url; save.download = readyDownload.name; save.hidden = false;
+      download.textContent = 'Generate PDF again'; save.focus();
+      status(score.warnings.length ? 'PDF ready — tap Save PDF to device. Some notation could not be converted exactly.' : 'PDF ready — tap Save PDF to device.');
     }, 120000);
   } catch (e) { status(e.message?.includes('Songsterr') || e.message?.includes('connection') ? e.message : "Couldn't generate this tab. Try another Songsterr version.", true); }
   finally { lock(false); }
 }
+window.addEventListener('pagehide', clearReadyDownload);
