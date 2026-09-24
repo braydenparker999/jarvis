@@ -87,21 +87,41 @@
     function mediaRef(m){return AstraCatalogs.mediaRef(m)}
     function refreshCatalogRegistry(){state.catalogRegistry=AstraCatalogs.build(manifests(),{includeAdult:state.settings.showAdult,excludeType:AstraHub.isOutOfScope});state.homeLayout=AstraCatalogs.reconcile(state.catalogRegistry,state.homeLayout);store.set('homeLayout',state.homeLayout);return state.catalogRegistry}
     function catalogEntries(visibleOnly=false){const entries=refreshCatalogRegistry();return AstraCatalogs.ordered(entries,state.homeLayout,visibleOnly)}
-    function recordMeta(m,source,cat){const item={...m,_addonUrl:source?.addon?.url||m._addonUrl,_addonName:source?.manifest?.name||m._addonName,_providerKey:source?AstraCatalogs.providerKey(source):m._providerKey,_catalogKey:source&&cat?AstraCatalogs.catalogKey(source,cat):m._catalogKey};const ref=mediaRef(item),key=mediaKey(item);if(ref)state.metaCache.set(ref,item);if(key&&!state.metaCache.has(key))state.metaCache.set(key,item);return item}
+    function recordMeta(m,source,cat){
+      const incoming={...m,_addonUrl:source?.addon?.url||m._addonUrl,_addonName:source?.manifest?.name||m._addonName,_providerKey:source?AstraCatalogs.providerKey(source):m._providerKey,_catalogKey:source&&cat?AstraCatalogs.catalogKey(source,cat):m._catalogKey},
+        ref=mediaRef(incoming),previous=ref?state.metaCache.get(ref):null,item=AstraCatalogs.mergeMeta(previous,incoming),key=mediaKey(item);
+      if(ref)state.metaCache.set(ref,item);
+      const generic=key?state.metaCache.get(key):null;
+      if(key&&(!generic||generic._providerKey===item._providerKey||(item._fullMeta&&!generic._fullMeta)))state.metaCache.set(key,item);
+      return item;
+    }
     async function getCatalog(source,cat,extra={}){const key=source.addon.url+'|'+cat.type+'|'+cat.id+'|'+JSON.stringify(extra);if(state.catalogCache.has(key))return state.catalogCache.get(key);const p=fetchAddonJSON(source.addon,'catalog',endpoint(source.addon,'catalog',cat.type,cat.id,extra),data=>!!(data&&Array.isArray(data.metas))).then(d=>d.metas.map(x=>recordMeta({...x,type:x.type||cat.type},source,cat))).catch(e=>{state.catalogCache.delete(key);throw e});state.catalogCache.set(key,p);return p}
     function catalogExtras(cat,overrides={}){const out={};for(const e of cat.extra||[]){if(e.isRequired&&e.name!=='search'&&e.name!=='skip'&&e.options?.length)out[e.name]=e.options[0]}return {...out,...overrides}}
     function yearOf(m){return m.releaseInfo||m.year||(m.released?String(m.released).slice(0,4):'')}
     function audioLanguageChoices(current){const choices=[['original','Original / source default'],['ja','Japanese'],['en','English'],['es','Spanish'],['fr','French'],['de','German'],['pt','Portuguese'],['it','Italian'],['ko','Korean'],['zh','Chinese']],value=String(current||'original').toLowerCase();if(value&&!choices.some(([id])=>id===value))choices.push([value,value.toUpperCase()]);return choices}
-    function poster(m){return safeUrl(m.poster||m.background||m.logo||'')}
-    function backdrop(m){return safeUrl(m.background||m.poster||'')}
+    function artCandidates(m,kind='poster'){return AstraCatalogs.artCandidates(m,kind).map(safeUrl).filter(Boolean)}
+    function posterCandidates(m){return artCandidates(m,'poster')}
+    function backdropCandidates(m){return artCandidates(m,'backdrop')}
+    function videoArtCandidates(video,m){return [...new Set([...artCandidates(video,'video'),...backdropCandidates(m||{})])]}
+    function poster(m){return posterCandidates(m)[0]||''}
+    function backdrop(m){return backdropCandidates(m)[0]||''}
     /* Artwork keeps its measured box while it loads, then crossfades in. The
        fallback remains underneath, so a slow or broken provider never leaves
        a blank card or causes the rail to jump. */
     function mediaImage(url,options={}){
-      if(!url)return '';
+      const candidates=[...new Set([safeUrl(url),...(options.fallbacks||[]).map(safeUrl)].filter(Boolean))];
+      if(!candidates.length)return '';
       const priority=options.priority?'fetchpriority="high"':'loading="lazy"';
-      return `<span class="art-loader" aria-hidden="true"></span><img class="media-image" ${priority} decoding="async" src="${esc(url)}" alt="" onload="this.parentElement.classList.add('image-ready')" onerror="this.parentElement.classList.add('image-error');this.remove()">`;
+      const fallbacks=encodeURIComponent(JSON.stringify(candidates.slice(1)));
+      return `<span class="art-loader" aria-hidden="true"></span><img class="media-image" ${priority} decoding="async" referrerpolicy="no-referrer" src="${esc(candidates[0])}" data-art-fallbacks="${esc(fallbacks)}" alt="" onload="this.parentElement.classList.remove('image-loading','image-error');this.parentElement.classList.add('image-ready')" onerror="window.AstraArtworkFallback(this)">`;
     }
+    globalThis.AstraArtworkFallback=function(image){
+      const host=image?.parentElement;if(!host)return;
+      let candidates=[];try{candidates=JSON.parse(decodeURIComponent(image.dataset.artFallbacks||''))}catch{}
+      const next=candidates.shift();
+      if(next){image.dataset.artFallbacks=encodeURIComponent(JSON.stringify(candidates));host.classList.remove('image-ready','image-error');host.classList.add('image-loading');image.src=next;return}
+      host.classList.remove('image-loading','image-ready');host.classList.add('image-error');image.remove();
+    };
     function progressEntries(m){return progress.entriesFor(mediaKey(m))}
     function latestProgress(m){return progress.latest(mediaKey(m))}
     function videoProgress(m,videoId){return progress.get(mediaKey(m),videoId)}
@@ -121,11 +141,11 @@
       return parts.join('');
     }
     function cardHTML(m,index=0,options={}){
-      const p=poster(m),prog=latestProgress(m),source=m._addonName||'',watched=m.type!=='series'&&prog?.completed;
+      const artwork=posterCandidates(m),p=artwork[0]||'',prog=latestProgress(m),source=m._addonName||'',watched=m.type!=='series'&&prog?.completed;
       const pct=prog?.duration?Math.min(100,prog.time/prog.duration*100):0;
       const meta=[yearOf(m),typeLabel(m.type)].filter(Boolean).join(' · ');
       return `<button class="card" style="--card-index:${Math.min(Number(index)||0,10)}" data-open="${esc(mediaRef(m))}" aria-label="Open ${esc(m.name||m.title||'title')} from ${esc(source||'this provider')}">
-        <span class="art ${p?'image-loading':'image-error'}">${mediaImage(p)}
+        <span class="art ${p?'image-loading':'image-error'}">${mediaImage(p,{fallbacks:artwork.slice(1)})}
           <span class="art-fallback">${icon(m.type==='channel'||m.type==='radio'?'radio':'film')}</span>
           ${watched?`<span class="art-watched">${icon('check')}</span>`:''}
           ${pct>0&&!watched?`<span class="art-progress"><i style="width:${pct}%"></i></span>`:''}
@@ -279,9 +299,9 @@
     }
     function featureHTML(choice){
       const m=choice?.item;if(!m)return welcomeFeatureHTML();
-      const b=backdrop(m),saved=!!state.library[mediaKey(m)],facts=[typeLabel(m.type),yearOf(m),m.imdbRating?`${m.imdbRating} IMDb`:''].filter(Boolean),summary=m.description||m.overview||'';
+      const artwork=backdropCandidates(m),b=artwork[0]||'',saved=!!state.library[mediaKey(m)],facts=[typeLabel(m.type),yearOf(m),m.imdbRating?`${m.imdbRating} IMDb`:''].filter(Boolean),summary=m.description||m.overview||'';
       return `<section class="feature feature-tonight" aria-label="Tonight"><article class="feature-slide">
-        <div class="feature-art ${b?'image-loading':'image-error'}">${mediaImage(b,{priority:true})}</div>
+        <div class="feature-art ${b?'image-loading':'image-error'}">${mediaImage(b,{priority:true,fallbacks:artwork.slice(1)})}</div>
         <div class="feature-body">
           <div class="feature-kicker"><span class="feature-label">Tonight’s feature</span></div>
           <h2 class="feature-title">${esc(m.name||m.title||'Untitled')}</h2>
@@ -347,10 +367,10 @@
         const left=entry?.duration?Math.max(0,entry.duration-entry.time):0;
         const video=(m.videos||[]).find(v=>String(v.id)===String(entry?.videoId));
         const context=resumeContext(m,entry);
-        const art=safeUrl(video?.thumbnail)||backdrop(m);
+        const artwork=videoArtCandidates(video,m),art=artwork[0]||'';
         return `<article class="card resume-card" style="--card-index:${Math.min(index,10)}">
           <button class="resume-open" data-open="${esc(mediaRef(m))}" aria-label="Resume ${esc(m.name||m.title||'title')}">
-          <span class="art resume-art ${art?'image-loading':'image-error'}">${mediaImage(art)}<span class="art-fallback">${icon('film')}</span>
+          <span class="art resume-art ${art?'image-loading':'image-error'}">${mediaImage(art,{fallbacks:artwork.slice(1)})}<span class="art-fallback">${icon('film')}</span>
           ${left?`<span class="resume-left">${esc(AstraAudio.formatTime(left))} left</span>`:''}
           <span class="art-progress"><i style="width:${pct}%"></i></span></span>
           <span class="resume-body"><span class="resume-title">${esc(m.name||m.title||'Untitled')}</span>
@@ -366,9 +386,9 @@
     function releaseSectionHTML(group){
       const cards=group.items.slice(0,HOME_LIMIT).map((m,index)=>{
         const meta=[yearOf(m),typeLabel(m.type)].filter(Boolean).join(' · ');
-        const full=m.name||m.title||'Untitled',p=poster(m);
+        const full=m.name||m.title||'Untitled',artwork=posterCandidates(m),p=artwork[0]||'';
         return `<button class="card release-card" style="--card-index:${Math.min(index,10)}" data-open="${esc(mediaRef(m))}" aria-label="Open ${esc(full)} from ${esc(m._addonName||'this provider')}">
-          <span class="release-art art ${p?'image-loading':'image-error'}">${mediaImage(p)}<span class="art-fallback">${icon('film')}</span></span>
+          <span class="release-art art ${p?'image-loading':'image-error'}">${mediaImage(p,{fallbacks:artwork.slice(1)})}<span class="art-fallback">${icon('film')}</span></span>
           <span class="release-copy"><span class="release-kicker">${providerChip(m._addonName||group.entry.providerName)}</span>
           <span class="card-title">${esc(full)}</span>
           <span class="card-meta">${esc(meta)}</span>
@@ -818,7 +838,7 @@
     async function fullMeta(item){if(item._fullMeta)return item;
       // YouTube's own record is the full metadata; no add-on can supply it.
       if(isYouTubeMeta(item)){try{const record=await youtubeProvider().client.video(item._youtube.videoId);return youtubeMeta(record)||item}catch{return item}}
-      const candidates=manifests().filter(s=>hasResource(s.manifest,'meta',item.type,item.id)).sort((a,b)=>(b.addon.url===item._addonUrl)-(a.addon.url===item._addonUrl));for(const s of candidates){try{const d=await fetchAddonJSON(s.addon,'meta',endpoint(s.addon,'meta',item.type,item.id),data=>!!data?.meta);return recordMeta({...item,...d.meta,_fullMeta:true},s)}catch{}}return item}
+      const candidates=manifests().filter(s=>hasResource(s.manifest,'meta',item.type,item.id)).sort((a,b)=>(b.addon.url===item._addonUrl)-(a.addon.url===item._addonUrl));for(const s of candidates){try{const d=await fetchAddonJSON(s.addon,'meta',endpoint(s.addon,'meta',item.type,item.id),data=>!!data?.meta);return recordMeta({...AstraCatalogs.mergeMeta(item,d.meta),_fullMeta:true},s)}catch{}}return item}
     async function openMedia(key,opener){
       cancelStreamLookup();
       if(state.currentPage==='search'&&state.query)rememberSearch(state.query);
@@ -850,12 +870,12 @@
           watched=!!p?.completed,active=String(state.detailBrowser?.videoId||state.currentVideo?.id)===String(v.id),
           number=kind==='episode'&&v.episode!=null?String(v.episode).padStart(2,'0'):'',
           code=kind==='episode'?episodeCode(v):'',name=v.title||v.name||(kind==='episode'?'Episode':'Untitled item'),
-          released=v.released?String(v.released).slice(0,10):'',still=safeUrl(v.thumbnail||v.background||v.poster||''),
+          released=v.released?String(v.released).slice(0,10):'',artwork=videoArtCandidates(v,m),still=artwork[0]||'',
           stateText=watched?'Watched':pct>0?`${pct}% watched`:'',
           sub=stateText||released||v.overview||`Tap to find ${kind==='episode'?'episode':'item'} sources`,
           eyebrow=[code||typeLabel(kind),released&&stateText?released:''].filter(Boolean).join(' · ');
         return `<button type="button" class="video-row ${watched?'watched':''} ${active?'active':''}" data-get-streams="${esc(v.id)}" aria-label="${esc([code,name,sub].filter(Boolean).join('. '))}">
-          <span class="video-art ${still?'image-loading':'image-error'}">${mediaImage(still)}<span class="video-art-fallback" aria-hidden="true">${esc(number||'•')}</span>${pct>0?`<span class="video-art-progress"><i style="width:${pct}%"></i></span>`:''}</span>
+          <span class="video-art ${still?'image-loading':'image-error'}">${mediaImage(still,{fallbacks:artwork.slice(1)})}<span class="video-art-fallback" aria-hidden="true">${esc(number||'•')}</span>${pct>0?`<span class="video-art-progress"><i style="width:${pct}%"></i></span>`:''}</span>
           <span class="video-main"><span class="video-eyebrow">${esc(eyebrow||kind)}</span><span class="video-title">${esc(name)}</span><span class="video-sub">${esc(sub)}</span></span>
           <span class="video-row-action" aria-hidden="true">${watched?icon('check'):icon('play')}</span>
         </button>`;
@@ -881,11 +901,11 @@
     function episodeFocusHTML(video,kind){
       if(!video)return '';
       const m=state.currentMeta,p=videoProgress(m,video.id),pct=p?.duration?Math.round(p.time/p.duration*100):0,
-        still=safeUrl(video.thumbnail||video.background||video.poster||m.background||''),code=kind==='episodes'?episodeCode(video):(DETAIL_KINDS.find(([id])=>id===kind)?.[1]||'Selected'),
+        artwork=videoArtCandidates(video,m),still=artwork[0]||'',code=kind==='episodes'?episodeCode(video):(DETAIL_KINDS.find(([id])=>id===kind)?.[1]||'Selected'),
         title=video.title||video.name||(kind==='episodes'?'Episode':'Untitled item'),summary=video.overview||video.description||(p?.completed?'Watched':pct?`${pct}% watched`:'Ready to open'),
         action=p&&!p.completed&&pct?'Continue':'Find sources';
       return `<article class="episode-focus">
-        <div class="episode-focus-art ${still?'image-loading':'image-error'}">${mediaImage(still)}<span class="video-art-fallback" aria-hidden="true">${esc(video.episode!=null?String(video.episode).padStart(2,'0'):'•')}</span><span class="episode-focus-shade" aria-hidden="true"></span></div>
+        <div class="episode-focus-art ${still?'image-loading':'image-error'}">${mediaImage(still,{fallbacks:artwork.slice(1)})}<span class="video-art-fallback" aria-hidden="true">${esc(video.episode!=null?String(video.episode).padStart(2,'0'):'•')}</span><span class="episode-focus-shade" aria-hidden="true"></span></div>
         <div class="episode-focus-copy"><span class="episode-focus-kicker">${esc(code||'Selected')} ${p?.completed?'· Watched':pct?`· ${pct}% watched`:''}</span><h3>${esc(title)}</h3><p>${esc(summary)}</p>
           <button type="button" class="btn btn-primary" data-get-streams="${esc(video.id)}">${icon('play')} ${esc(action)}</button></div>
       </article>`;
@@ -962,7 +982,7 @@
         groups=AstraPlayback.episodes.groupVideos(videos),hasVideoBrowser=groups.episodes.length>0||videos.length>1,
         seasons=[...new Set(groups.episodes.map(v=>v.season).filter(x=>x!=null))],
         resume=resumeVideo(m),resumeProg=videoProgress(m,resume.id),defaultSeason=resume.season??seasons[0],
-        art=backdrop(m),posterArt=poster(m),name=m.name||m.title||'Untitled',
+        backdropArtwork=backdropCandidates(m),art=backdropArtwork[0]||'',posterArtwork=posterCandidates(m),posterArt=posterArtwork[0]||'',name=m.name||m.title||'Untitled',
         target=episodeCode(resume)||resume.title||resume.name||'',
         cta=m.type==='youtube'
           ?`${resumeProg&&!resumeProg.completed?'Continue':'Play'} this video`
@@ -970,9 +990,9 @@
         headlineFacts=[m._youtube?.author,yearOf(m),typeLabel(m.type),m.runtime,m.imdbRating?`${m.imdbRating}/10`:''].filter(Boolean);
       root.innerHTML=`<div class="sheet" data-dismiss><section class="sheet-panel cinema-detail" role="dialog" aria-modal="true" aria-labelledby="dossierTitle">
         <button class="sheet-close" data-close aria-label="Close">${icon('close')}</button>
-        <div class="dossier-art ${art?'image-loading':'image-error'}">${mediaImage(art)}<span class="dossier-art-shade" aria-hidden="true"></span></div>
+        <div class="dossier-art ${art?'image-loading':'image-error'}">${mediaImage(art,{fallbacks:backdropArtwork.slice(1)})}<span class="dossier-art-shade" aria-hidden="true"></span></div>
         <header class="dossier-head">
-          <div class="dossier-poster ${posterArt?'image-loading':'image-error'}">${mediaImage(posterArt)}<span class="art-fallback">${icon('film')}</span></div>
+          <div class="dossier-poster ${posterArt?'image-loading':'image-error'}">${mediaImage(posterArt,{fallbacks:posterArtwork.slice(1)})}<span class="art-fallback">${icon('film')}</span></div>
           <div class="dossier-copy">
             <div class="dossier-tags">${providerChip(m._addonName)}<span class="tag">${esc(typeLabel(m.type))}</span></div>
             <h1 class="dossier-title" id="dossierTitle">${esc(name)}</h1>
@@ -1081,12 +1101,12 @@
        Cropping a thumbnail into a 2:3 card is how a native source starts
        looking like a foreign one. */
     function youtubeCardHTML(m,index=0){
-      const info=m._youtube||{},art=safeUrl(m.poster||m.background||''),prog=latestProgress(m);
+      const info=m._youtube||{},artwork=videoArtCandidates(m,m),art=artwork[0]||'',prog=latestProgress(m);
       const pct=prog?.duration?Math.min(100,prog.time/prog.duration*100):0;
       const facts=[info.author,info.views?youtubeCount(info.views)+' views':'',info.published].filter(Boolean).join(' · ');
       const duration=info.live?'LIVE':info.length?AstraAudio.formatTime(info.length):'';
       return `<button class="card yt-card" style="--card-index:${Math.min(Number(index)||0,10)}" data-open="${esc(mediaRef(m))}" aria-label="Open ${esc(m.name||'video')}${info.author?' by '+esc(info.author):''} on YouTube">
-        <span class="art yt-art ${art?'image-loading':'image-error'}">${mediaImage(art)}<span class="art-fallback">${icon('film')}</span>
+        <span class="art yt-art ${art?'image-loading':'image-error'}">${mediaImage(art,{fallbacks:artwork.slice(1)})}<span class="art-fallback">${icon('film')}</span>
         ${duration?`<span class="yt-duration ${info.live?'live':''}">${esc(duration)}</span>`:''}
         ${pct>0?`<span class="art-progress"><i style="width:${pct}%"></i></span>`:''}</span>
         <span class="yt-body"><span class="yt-title">${esc(m.name||'Untitled')}</span>
@@ -1695,9 +1715,9 @@
        path on Android Chrome — and the scrubber above them reports only what
        the element reports: elapsed, duration, and the real buffered edge. */
     function audioStageHTML(m,v,s){
-      const cover=poster(m),name=v.title||v.name||m.name||'Playing',sub=AstraAudio.describeTrack(m,s);
+      const artwork=posterCandidates(m),cover=artwork[0]||'',name=v.title||v.name||m.name||'Playing',sub=AstraAudio.describeTrack(m,s);
       return `<div class="audio-full-body">
-        <div class="audio-cover ${cover?'image-loading':'image-error'}" aria-hidden="true">${icon('music')}${mediaImage(cover)}</div>
+        <div class="audio-cover ${cover?'image-loading':'image-error'}" aria-hidden="true">${icon('music')}${mediaImage(cover,{fallbacks:artwork.slice(1)})}</div>
         <div class="audio-meta"><h2>${esc(name)}</h2><p>${esc(sub||typeLabel(m.type))}</p></div>
         <div class="audio-scrub">
           <div class="audio-track"><i class="audio-buffer" id="audioBuffer" style="width:0%"></i><i class="audio-played" id="audioPlayed" style="width:0%"></i></div>
