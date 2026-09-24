@@ -159,7 +159,11 @@ function openVideo(item) {
   current.handle = play(video, mediaURL(item.id, key), {
     startTime:resumeTime(progress[item.id]),
     onError:message => status(message, true, $('player-status')),
-    onMode:mode => mode === 'compatibility' && status('Preparing this file for your browser…', false, $('player-status'))
+    onMode:mode => {
+      if (mode === 'compatibility') status('Preparing this file for your browser…', false, $('player-status'));
+      else if (mode === 'retrying') status('Drive paused. Retrying this video once…', false, $('player-status'));
+      else status('', false, $('player-status'));
+    }
   });
   loadCaptions(item, controller.signal);
   renderNext(item);
@@ -193,7 +197,13 @@ function renderNext(item) {
 video.addEventListener('timeupdate', () => { if (Date.now() - lastSave > 5000) remember(); });
 video.addEventListener('pause', () => remember());
 video.addEventListener('ended', () => remember(true));
-video.addEventListener('playing', () => { if (current?.handle?.mode === 'compatibility') status('', false, $('player-status')); });
+video.addEventListener('playing', () => {
+  status('', false, $('player-status'));
+  if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
+});
+video.addEventListener('pause', () => {
+  if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+});
 addEventListener('pagehide', () => remember());
 document.addEventListener('visibilitychange', () => document.visibilityState === 'hidden' && remember());
 
@@ -212,6 +222,21 @@ $('captions').addEventListener('change', () => {
 });
 $('pip').hidden = !document.pictureInPictureEnabled;
 $('pip').addEventListener('click', () => (document.pictureInPictureElement ? document.exitPictureInPicture() : video.requestPictureInPicture()).catch(() => status('Picture in picture is not available for this video.', true, $('player-status'))));
+video.addEventListener('enterpictureinpicture', () => {
+  document.body.classList.add('pip-active');
+  $('pip').textContent = 'Close pop-out';
+});
+video.addEventListener('leavepictureinpicture', () => {
+  document.body.classList.remove('pip-active');
+  $('pip').textContent = 'Picture in picture';
+  // Android Chrome owns the system PiP window. Releasing playback while the
+  // page is still backgrounded prevents a closed pop-out from leaving a live
+  // tab or audio session behind.
+  if (document.visibilityState === 'hidden') {
+    video.pause();
+    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+  }
+});
 $('watched').addEventListener('click', () => {
   if (!current) return;
   const id = current.video.id, entry = progress[id];
@@ -224,7 +249,19 @@ document.addEventListener('fullscreenchange', () => {
   else if (!document.fullscreenElement) screen.orientation?.unlock?.();
 });
 if ('mediaSession' in navigator) {
-  const handlers = {seekbackward:d => skip(-(d.seekOffset || 10)), seekforward:d => skip(d.seekOffset || 10), seekto:d => current?.handle?.seek(d.seekTime)};
+  const stopPlayback = () => {
+    video.pause();
+    if (document.pictureInPictureElement === video) document.exitPictureInPicture().catch(() => {});
+    if (current) location.hash = '';
+  };
+  const handlers = {
+    play:() => video.play().catch(() => {}),
+    pause:() => video.pause(),
+    stop:stopPlayback,
+    seekbackward:d => skip(-(d.seekOffset || 10)),
+    seekforward:d => skip(d.seekOffset || 10),
+    seekto:d => current?.handle?.seek(d.seekTime)
+  };
   for (const [action, fn] of Object.entries(handlers)) { try { navigator.mediaSession.setActionHandler(action, fn); } catch {} }
 }
 document.addEventListener('keydown', event => {
