@@ -134,3 +134,18 @@ test('a refused Drive request is reported instead of switching decoders', async 
   assert.match(await driveProblem('https://www.googleapis.com/x', reply(404)), /no longer in Drive/);
   assert.match(await driveProblem('https://www.googleapis.com/x', async () => { throw TypeError('offline'); }), /connection/);
 });
+
+
+test('My Media retries one transient Drive stall and manages PiP shutdown', async () => {
+  const player = await readFile(new URL('../public/mymedia/player.js', import.meta.url), 'utf8');
+  assert.match(player, /retries >= 1/);
+  assert.match(player, /listen\('waiting', armStallRetry\)/);
+  assert.match(player, /listen\('stalled', armStallRetry\)/);
+  assert.match(player, /setTimeout\(startNative, 650\)/);
+
+  const app = await readFile(new URL('../public/mymedia/app.js', import.meta.url), 'utf8');
+  assert.match(app, /enterpictureinpicture/);
+  assert.match(app, /leavepictureinpicture/);
+  assert.match(app, /document\.visibilityState === 'hidden'/);
+  assert.match(app, /stop:stopPlayback/);
+});
