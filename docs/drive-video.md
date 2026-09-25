@@ -16,10 +16,11 @@ The folder is `1lU0PKBXwi6uMy5L9VV2bptYQm1t7ImoW`, set as `videoFolderId` in `pu
 ## Library
 
 - Every refresh reads the whole folder, including subfolders and every page of results. The list is replaced only when the whole read succeeds, and the last good list is kept in the browser for an instant, offline-tolerant start.
-- Video files: `.mp4 .m4v .webm .mkv .mov`. Each subfolder becomes its own section.
+- Video files: `.mp4 .m4v .webm .mkv .mov`. Each subfolder becomes a collapsed folder row that can be opened individually; the page also offers Open all/Close all controls and remembers open folders in that browser.
 - Titles: yt-dlp's `Title [videoID].ext` naming gives a clean title and the video's YouTube thumbnail. Files without an ID keep their file name as the title.
 - Sidecars with the same name as the video are picked up automatically: subtitles (`Title [id].en.vtt`, `.srt`, converted to WebVTT in the browser) and a thumbnail image (`.jpg .png .webp`).
 - Thumbnails are tried in order: a sidecar image, then YouTube's thumbnail, then Drive's own thumbnail, then a plain placeholder.
+- Thumbnail images are explicitly stacked above the placeholder layer so a successfully loaded image cannot be hidden by the fallback tile.
 - Search matches every word against the title and folder. Sorting: newest, title (numbers sort naturally) or longest.
 
 ## Playback

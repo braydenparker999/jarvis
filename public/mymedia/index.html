@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#101113">
-  <meta name="mymedia-release" content="0.34.0">
+  <meta name="mymedia-release" content="0.35.0">
   <title>My Media · Jarvis</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/assets/shell.css">
-  <link rel="stylesheet" href="/mymedia/mymedia.css?v=0.34.0">
-  <script type="module" src="/mymedia/app.js?v=0.34.0"></script>
+  <link rel="stylesheet" href="/mymedia/mymedia.css?v=0.35.0">
+  <script type="module" src="/mymedia/app.js?v=0.35.0"></script>
 </head>
 <body>
   <div class="workspace mymedia">
@@ -31,6 +31,10 @@
         </select>
       </div>
       <p id="status" class="status" role="status">Loading your videos…</p>
+      <div id="folder-actions" class="folder-actions" hidden>
+        <span id="folder-count"></span>
+        <button id="toggle-folders" type="button">Open all folders</button>
+      </div>
       <section id="continue" class="shelf" aria-labelledby="continue-label" hidden>
         <h2 class="eyebrow" id="continue-label">Continue watching</h2>
         <div class="video-grid" id="continue-grid"></div>

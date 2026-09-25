@@ -7,13 +7,19 @@ const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
 const read = key => { try { return localStorage.getItem(key); } catch { return null; } };
 const write = (key, value) => { try { localStorage.setItem(key, value); return true; } catch { return false; } };
-const SORT_KEY = 'mymedia.sort.v1', SPEED_KEY = 'mymedia.speed.v1';
+const SORT_KEY = 'mymedia.sort.v1', SPEED_KEY = 'mymedia.speed.v1', OPEN_FOLDERS_KEY = 'mymedia.open-folders.v1';
 
 let key = '', folder = '', api = null, loading = false;
 let library = parseLibrary(read(LIBRARY_KEY));
 let progress = parseProgress(read(PROGRESS_KEY));
 let query = '', sort = read(SORT_KEY) || 'newest';
 let current = null, libraryScroll = 0, depth = 0, ready = false;
+let openFolders = (() => {
+  try {
+    const paths = JSON.parse(read(OPEN_FOLDERS_KEY) || '[]');
+    return new Set(Array.isArray(paths) ? paths.filter(path => typeof path === 'string') : []);
+  } catch { return new Set(); }
+})();
 
 function status(text, error = false, el = $('status')) {
   el.hidden = !text; el.textContent = text; el.classList.toggle('error', error);
@@ -58,10 +64,11 @@ function renderLibrary() {
   paintBars($('library-view'));
 }
 function renderShelves() {
-  if (!library) { $('sections').innerHTML = ''; $('continue').hidden = true; return; }
+  if (!library) { $('sections').innerHTML = ''; $('continue').hidden = true; $('folder-actions').hidden = true; return; }
   const videos = sortVideos(searchVideos(library.videos, query), sort);
   if (query) {
     $('continue').hidden = true;
+    $('folder-actions').hidden = true;
     $('sections').innerHTML = videos.length
       ? `<section class="shelf"><h2 class="eyebrow">${videos.length} result${videos.length === 1 ? '' : 's'}</h2><div class="video-grid">${videos.map(v => card(v)).join('')}</div></section>`
       : `<p class="empty">No videos match “${esc(query)}”.</p>`;
@@ -71,9 +78,24 @@ function renderShelves() {
   $('continue').hidden = !resume.length;
   $('continue-grid').innerHTML = resume.map(v => card(v)).join('');
   const groups = groupByFolder(videos, library.name);
+  $('folder-actions').hidden = !groups.length;
+  $('folder-count').textContent = `${groups.length} folder${groups.length === 1 ? '' : 's'}`;
   $('sections').innerHTML = groups.length
-    ? groups.map(g => `<section class="shelf"><h2 class="eyebrow">${esc(g.label)} · ${g.items.length}</h2><div class="video-grid">${g.items.map(v => card(v)).join('')}</div></section>`).join('')
+    ? groups.map(g => `<details class="folder-shelf" data-folder="${esc(g.path)}"${openFolders.has(g.path) ? ' open' : ''}>` +
+      `<summary class="folder-summary"><span class="folder-icon" aria-hidden="true">📁</span><span class="folder-name">${esc(g.label)}</span>` +
+      `<span class="folder-total">${g.items.length} video${g.items.length === 1 ? '' : 's'}</span><span class="folder-chevron" aria-hidden="true">⌄</span></summary>` +
+      `<div class="video-grid folder-grid">${g.items.map(v => card(v)).join('')}</div></details>`).join('')
     : '<p class="empty">No videos in this folder yet. Add MP4 or WebM files in Google Drive, then refresh.</p>';
+  updateFolderToggle(groups);
+}
+
+function saveOpenFolders() {
+  write(OPEN_FOLDERS_KEY, JSON.stringify([...openFolders]));
+}
+function updateFolderToggle(groups = groupByFolder(sortVideos(library?.videos || [], sort), library?.name || '')) {
+  const allOpen = groups.length > 0 && groups.every(group => openFolders.has(group.path));
+  $('toggle-folders').textContent = allOpen ? 'Close all folders' : 'Open all folders';
+  $('toggle-folders').setAttribute('aria-expanded', String(allOpen));
 }
 
 function summary() {
@@ -305,6 +327,22 @@ $('search').addEventListener('input', () => { query = $('search').value.trim(); 
 $('sort').value = ['newest', 'title', 'longest'].includes(sort) ? sort : 'newest';
 $('sort').addEventListener('change', () => { sort = $('sort').value; write(SORT_KEY, sort); renderLibrary(); });
 $('refresh').addEventListener('click', refresh);
+$('sections').addEventListener('toggle', event => {
+  const details = event.target;
+  if (!(details instanceof HTMLDetailsElement) || !details.dataset.folder) return;
+  if (details.open) openFolders.add(details.dataset.folder);
+  else openFolders.delete(details.dataset.folder);
+  saveOpenFolders();
+  updateFolderToggle();
+}, true);
+$('toggle-folders').addEventListener('click', () => {
+  const folders = [...$('sections').querySelectorAll('.folder-shelf')];
+  const shouldOpen = folders.some(details => !details.open);
+  openFolders = new Set(shouldOpen ? folders.map(details => details.dataset.folder) : []);
+  for (const details of folders) details.open = shouldOpen;
+  saveOpenFolders();
+  updateFolderToggle();
+});
 
 /* ---- start ------------------------------------------------------------ */
 
