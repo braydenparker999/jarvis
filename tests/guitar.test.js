@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { gzipSync } from 'node:zlib';
 import { searchSongs, getSong, getRevisions, parseMeta, songsterr, upstream } from '../backend/songsterr.js';
-import { filename, createDownload, withDeadline } from '../public/guitar/runtime.js';
+import { filename, createDownload, nativeSaveMode, saveToDevice, triggerDownload, withDeadline } from '../public/guitar/runtime.js';
 const meta = { songId: 12, revisionId: 34, image: 'v0-test', title: 'Song', artist: 'Artist', tracks: [
   { partId: 0, name: 'Guitar 1', instrumentId: 24 }, { partId: 5, name: 'Guitar 2', instrumentId: 25 }, { partId: 6, name: 'Bass', instrumentId: 33 } ] };
 const html = `<script type="application/json" id="state">${JSON.stringify({ meta: { current: meta } })}</script>`;
@@ -64,9 +64,40 @@ test('generated PDFs remain available for a user-initiated mobile download', () 
     revokeObjectURL(url) { calls.push(['revoke', url]); }
   };
   const ready = createDownload(new Blob([new Uint8Array(128)], { type: 'application/pdf' }), 'Tab.pdf', urlApi);
-  assert.equal(ready.url, 'blob:tab-pdf'); assert.equal(ready.name, 'Tab.pdf');
+  assert.equal(ready.url, 'blob:tab-pdf'); assert.equal(ready.name, 'Tab.pdf'); assert.equal(ready.blob.size, 128);
   assert.deepEqual(calls, [['create', 128]]);
   ready.revoke(); ready.revoke();
   assert.deepEqual(calls, [['create', 128], ['revoke', 'blob:tab-pdf']]);
   assert.throws(() => createDownload(new Blob(['small']), 'bad.pdf', urlApi), /Empty PDF/);
+});
+test('native save prefers a file picker and writes the generated PDF', async () => {
+  const calls = [];
+  const download = { blob: new Blob([new Uint8Array(128)], { type: 'application/pdf' }), name: 'Tab.pdf' };
+  const env = { showSaveFilePicker: async options => {
+    calls.push(['picker', options.suggestedName]);
+    return { createWritable: async () => ({ write: async blob => calls.push(['write', blob.size]), close: async () => calls.push(['close']) }) };
+  } };
+  assert.equal(nativeSaveMode(download, env), 'file-picker');
+  assert.equal(await saveToDevice(download, env), 'file-picker');
+  assert.deepEqual(calls, [['picker', 'Tab.pdf'], ['write', 128], ['close']]);
+});
+test('native save uses Android file sharing when a file picker is unavailable', async () => {
+  const calls = [];
+  class TestFile extends Blob { constructor(parts, name, options) { super(parts, options); this.name = name; } }
+  const download = { blob: new Blob([new Uint8Array(128)], { type: 'application/pdf' }), name: 'Tab.pdf' };
+  const env = { File: TestFile, navigator: {
+    canShare: data => { calls.push(['canShare', data.files[0].name]); return true; },
+    share: async data => calls.push(['share', data.files[0].name, data.files[0].type])
+  } };
+  assert.equal(nativeSaveMode(download, env), 'share');
+  assert.equal(await saveToDevice(download, env), 'share');
+  assert.deepEqual(calls, [['canShare', 'Tab.pdf'], ['canShare', 'Tab.pdf'], ['share', 'Tab.pdf', 'application/pdf']]);
+});
+test('direct download fallback is an immediate user-gesture click', () => {
+  const calls = [];
+  const link = { hidden: false, click() { calls.push('click'); }, remove() { calls.push('remove'); } };
+  const documentApi = { createElement: tag => { calls.push(tag); return link; }, body: { append: item => calls.push(item === link ? 'append' : 'wrong') } };
+  triggerDownload({ url: 'blob:tab-pdf', name: 'Tab.pdf' }, documentApi);
+  assert.equal(link.href, 'blob:tab-pdf'); assert.equal(link.download, 'Tab.pdf'); assert.equal(link.hidden, true);
+  assert.deepEqual(calls, ['a', 'append', 'click', 'remove']);
 });
