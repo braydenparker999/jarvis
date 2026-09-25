@@ -1,13 +1,15 @@
 import { API_ORIGIN } from '/assets/config.js';
-import { filename, createDownload, withDeadline, renderInWorker } from './runtime.js';
+import { filename, createDownload, nativeSaveMode, saveToDevice, triggerDownload, withDeadline, renderInWorker } from './runtime.js';
 const $ = id => document.getElementById(id);
 let busy = false, current = null, results = [], readyDownload = null;
 const text = (tag, value, className) => { const e = document.createElement(tag); e.textContent = value; if (className) e.className = className; return e; };
 function status(message, error = false) { $('status').textContent = message; $('status').classList.toggle('error', error); }
 function clearReadyDownload() {
   readyDownload?.revoke(); readyDownload = null;
-  const save = $('save-pdf');
-  if (save) { save.hidden = true; save.removeAttribute('href'); save.removeAttribute('download'); }
+  const actions = $('pdf-actions'); if (actions) actions.hidden = true;
+  for (const id of ['open-pdf', 'direct-download']) {
+    const link = $(id); if (link) { link.removeAttribute('href'); link.removeAttribute('download'); }
+  }
   const generate = $('download-pdf'); if (generate) generate.textContent = 'Download PDF';
 }
 function lock(value) {
@@ -92,14 +94,32 @@ function showSong() {
     root.append(select);
   }
   const download = text('button', 'Download PDF', 'primary guitar-download'); download.type = 'button'; download.id = 'download-pdf';
-  const save = text('a', 'Save PDF to device', 'primary guitar-download guitar-save');
-  save.id = 'save-pdf'; save.hidden = true; save.target = '_blank'; save.rel = 'noopener';
-  save.onclick = () => status('Download started. If Chrome asks, choose Download.');
+  const actions = document.createElement('div'); actions.id = 'pdf-actions'; actions.className = 'pdf-actions'; actions.hidden = true;
+  const save = text('button', 'Save to files / share', 'primary guitar-download'); save.type = 'button'; save.id = 'save-pdf';
+  const open = text('a', 'Open PDF', 'secondary guitar-download'); open.id = 'open-pdf'; open.target = '_blank'; open.rel = 'noopener';
+  const direct = text('a', 'Direct download', 'secondary guitar-download'); direct.id = 'direct-download';
+  save.onclick = async () => {
+    if (!readyDownload || save.disabled) return;
+    if (!nativeSaveMode(readyDownload)) {
+      triggerDownload(readyDownload); status('Download requested. If Chrome stays quiet, use Open PDF.'); return;
+    }
+    save.disabled = true;
+    try {
+      const mode = await saveToDevice(readyDownload);
+      status(mode === 'file-picker' ? 'PDF saved to the folder you chose.' : 'Choose Files, Drive, or another app in the system sheet.');
+    } catch (e) {
+      if (e?.name === 'AbortError') status('Save cancelled. The PDF is still ready.');
+      else status("Couldn't open Android's save options. Try Open PDF or Direct download.", true);
+    } finally { save.disabled = false; }
+  };
+  open.onclick = () => status('PDF opened in a new tab. Use Chrome’s download button there.');
+  direct.onclick = () => status('Direct download requested. Check Chrome Downloads.');
+  actions.append(save, open, direct);
   if (preferred.length > 1) select.onchange = () => { clearReadyDownload(); status(''); };
-  download.onclick = () => { clearReadyDownload(); generate(preferred.length === 1 ? String(chosen.partId) : select.querySelector('input:checked')?.value, download, save); };
-  root.append(download, save);
+  download.onclick = () => { clearReadyDownload(); generate(preferred.length === 1 ? String(chosen.partId) : select.querySelector('input:checked')?.value, download, actions, open, direct, save); };
+  root.append(download, actions);
 }
-async function generate(parts, download, save) {
+async function generate(parts, download, actions, open, direct, save) {
   if (busy || !current || !parts) return;
   lock(true); status('Preparing tab…'); const song = current;
   const selected = parts.split(',').map(Number).map(id => song.tracks.find(t => t.partId === id));
@@ -113,11 +133,12 @@ async function generate(parts, download, save) {
       const blob = await pdf.createPdf(score, data.meta, label, signal, (i, total) => status(`Creating PDF… ${Math.round(i / total * 100)}%`));
       signal.throwIfAborted();
       readyDownload = createDownload(blob, filename(song.title, label));
-      save.href = readyDownload.url; save.download = readyDownload.name; save.hidden = false;
+      open.href = readyDownload.url;
+      direct.href = readyDownload.url; direct.download = readyDownload.name;
+      actions.hidden = false;
       download.textContent = 'Generate PDF again'; save.focus();
-      status(score.warnings.length ? 'PDF ready — tap Save PDF to device. Some notation could not be converted exactly.' : 'PDF ready — tap Save PDF to device.');
+      status(score.warnings.length ? 'PDF ready — choose a save method below. Some notation could not be converted exactly.' : 'PDF ready — choose a save method below.');
     }, 120000);
   } catch (e) { status(e.message?.includes('Songsterr') || e.message?.includes('connection') ? e.message : "Couldn't generate this tab. Try another Songsterr version.", true); }
   finally { lock(false); }
 }
-window.addEventListener('pagehide', clearReadyDownload);
