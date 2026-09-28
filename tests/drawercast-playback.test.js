@@ -296,3 +296,8 @@ test('saved shuffled queue retains duplicate selection after a source disappears
   ctx.IDB={get:async()=>({ids:['gone','a','b','a'],order:[2,3,0,1],pos:1,curId:'a',time:12})};
   await Engine.restoreState();assert.deepEqual([...Engine.order],[1,2,0]);assert.equal(Engine.pos,1);assert.equal(Engine.order[Engine.pos],2);
 });
+test('category skip retains loading playback intent',()=>{
+  const {Engine,ctx}=installed();ctx.Views.stack=[];vm.runInContext(block('function proSkip(direction){','function setupRework(){'),ctx);
+  Engine.queue=[{id:'a',album:'A'},{id:'b',album:'B'}];Engine.order=[0,1];Engine.pos=0;Engine.current=Engine.queue[0];Engine._loadingRequest=1;Engine._loadingAutoplay=true;
+  let args;Engine.playIndex=(...value)=>args=value;vm.runInContext('proSkip(1)',ctx);assert.deepEqual(args,[1,true]);
+});

@@ -7196,7 +7196,7 @@ function proSkip(direction){
   const longTrack=Engine.duration()>=(nativeValues().restore_pos_min_dur||45)*60||Views.stack.at(-1)?.kind==='long';
   if(nativeValues().long_skip_rewind&&longTrack){Engine.seekBy(direction*10);return;}
   if(!Engine.current)return;const key=t=>Engine.categoryKind==='folder'?t.folder:trackAlbum(t),current=key(Engine.current),n=Engine.order.length;
-  for(let step=1;step<=n;step++){const pos=(Engine.pos+direction*step+n)%n,t=Engine.queue[Engine.order[pos]];if(t&&key(t)!==current){Engine.playIndex(Engine.order[pos],Engine.playing);return;}}
+  for(let step=1;step<=n;step++){const pos=(Engine.pos+direction*step+n)%n,t=Engine.queue[Engine.order[pos]];if(t&&key(t)!==current){Engine.playIndex(Engine.order[pos],Engine.wantsPlayback());return;}}
 }
 
 function setupRework(){
