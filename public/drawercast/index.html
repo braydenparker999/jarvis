@@ -1445,8 +1445,8 @@ body.main-menu-open #nav button{opacity:1}
 
 <!-- ============ OVERLAYS ============ -->
 <div class="scrim" id="scrim"></div>
-<div class="sheet" id="sheet"></div>
-<div class="sheet bottom" id="bsheet"></div>
+<div class="sheet" id="sheet" inert aria-hidden="true"></div>
+<div class="sheet bottom" id="bsheet" inert aria-hidden="true"></div>
 <div id="toast"></div>
 <div id="drop">Drop music files or folders to add them to your library</div>
 <div id="vizfull"><canvas id="vizc"></canvas><button id="viz-mode-exit" aria-label="Disable visualization" data-ic="viz"></button><div class="vizhud" id="vizhud"></div></div>
@@ -1457,6 +1457,6 @@ body.main-menu-open #nav button{opacity:1}
 <input type="file" id="pick-img" accept="image/*" hidden>
 <input type="file" id="pick-zip" accept=".zip,application/zip" multiple hidden>
 <input type="file" id="pick-json" accept=".json,application/json" hidden>
-<script src="./player.js?v=poweramp-catalog-v2"></script>
+<script src="./player.js?v=poweramp-interactions-v1"></script>
 </body>
 </html>

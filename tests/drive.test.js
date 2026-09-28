@@ -111,7 +111,7 @@ function integration({fail=false,storageFail=false,unchanged=false,files=[song]}
   const component=source.slice(source.indexOf('const DriveSource={'),source.indexOf('\nconst Engine = {'));
   const context=vm.createContext({AbortController,AbortSignal,setTimeout,clearTimeout,navigator:{onLine:true},document:{visibilityState:'visible',addEventListener(){}},SourceLibrary:{enabled:()=>true},sourceTrackEnabled:t=>!!t,MusicSources:{refresh(){}},LIB:{map:tracks,ids:[...tracks.keys()]},FILES:new Map(),
     allTracks:()=>[...tracks.values()],IDB:{async catalog(module,snapshot){if(storageFail)throw Error('Storage full');writes++;const fresh=snapshot.records.map(f=>driveTrack(f,root));const ids=new Set(fresh.map(t=>t.id));const gone=[...tracks.values()].filter(t=>t.source==='drive'&&!ids.has(t.id)).map(t=>t.id);removed.push(...gone);return {fresh,gone};}},libAdd:t=>tracks.set(t.id,t),
-    Engine:{queue:[],current:null,buildOrder(){this.order=this.queue.map((_,i)=>i);},saveState(){},stop(){throw Error('Must not stop audio');}},
+    Engine:{queue:[],order:[],pos:0,current:null,buildOrder(){this.order=this.queue.map((_,i)=>i);},saveState(){},stop(){throw Error('Must not stop audio');}},
     Views:{refreshAll(){redraws++}},UI:{renderNowPlaying(){},renderPlayState(){}},localStorage:{setItem(){},removeItem(){}},
     toast(){},$:()=>null,Waveform:{load(){}}});
   const drive=vm.runInContext(component+'\nDriveSource;',context);
@@ -251,4 +251,11 @@ test('publisher rejects an incompleteSearch response instead of publishing delet
 test('migration never probes legacy cached tracks once the catalog reader is installed',async()=>{
   const state=integration();await state.drive.ensureMetadata({id:'gd_legacy',source:'drive',md5:'old',size:4000});
   assert.equal(state.drive.tagQueue.length,0);
+});
+
+test('catalog metadata refresh preserves shuffled order and duplicate occurrences',async()=>{
+  const state=integration();const a=state.tracks.get('a15'),b=state.tracks.get('local');
+  state.engine.queue=[a,b,a];state.engine.order=[2,0,1];state.engine.pos=1;state.engine.current=a;
+  assert.equal(await state.drive.connect(root),true);
+  assert.deepEqual(Array.from(state.engine.order),[2,0,1]);assert.equal(state.engine.pos,1);
 });

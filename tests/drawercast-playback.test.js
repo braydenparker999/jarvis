@@ -204,9 +204,95 @@ test('the installed end-of-track handler ignores old and delayed endings',()=>{
   ctx.setTimeout=fn=>{timers.push(fn);return timers.length};
   ctx.nativeValues=()=>({track_end_silence_ms:50});ctx.persistTrack=()=>{};
   vm.runInContext(block('  Engine.onEnded=function(i){','  Engine.startCrossfade=function()'),ctx);
-  Engine.current={id:'new'};Engine.countPlayed=()=>{};Engine.next=()=>{advances++};
+  Engine.current={id:'new'};Engine.playing=true;Engine.countPlayed=()=>{};Engine.next=()=>{advances++};
   Engine._loadingRequest=Engine._playRequest;
   Engine.onEnded(0);assert.equal(timers.length,0);
   Engine._loadingRequest=null;Engine.onEnded(0);assert.equal(timers.length,1);
   Engine._playRequest++;timers[0]();assert.equal(advances,0);
+});
+
+function installed(){
+  const h=harness(),{Engine,ctx}=h,values={queue_no_shuffle:false,queue_start:2,queue_end:1};
+  const nodes=new Map();
+  Object.assign(ctx,{sourceTrackEnabled:t=>!!t&&!t.disabled,LIB:{map:new Map()},nativeValues:()=>values,
+    trackAlbum:t=>t?.album||'',trackArtist:t=>t?.artist||'',shuffleArray:a=>a.slice().reverse(),
+    Views:{buildItems(){},counts:()=>({}),buildFabs(){},refreshAll(){}},ctxMenuList(){},
+    $:id=>{if(!nodes.has(id))nodes.set(id,{setAttribute(){},getAttribute(){}});return nodes.get(id);},$$:()=>[],icoHTML:()=>'',saveSet(){},
+    localStorage:{getItem:()=>null,setItem(){}},persistTrack(){},clamp:(x,l,h)=>Math.max(l,Math.min(h,x)),
+    DriveSource:{prioritize(){},api:{},playbackRetry:new Map(),pumpTags(){},status:''},DrawerCast:{canPlay:()=>true},
+    getFileFor:async t=>({__remoteURL:'https://audio.test/'+t.id}),audioSource:f=>f.__remoteURL});
+  Object.assign(ctx.UI,{renderToggles(){},renderNowPlaying(){},renderProgress(){},renderMeta(){}});
+  vm.runInContext(block('const PlaybackQueue={','const PlaybackTransitions={')+block('function installPlaybackRework(){','/* Synced lyrics')+'\ninstallPlaybackRework();',ctx);
+  const Queue=vm.runInContext('PlaybackQueue',ctx);
+  Engine.applySpeed=()=>{};Engine.rgGain=()=>1;Engine.saveState=()=>{};
+  Engine.els.forEach(a=>Object.assign(a,{readyState:1,duration:200,currentTime:0}));
+  return {...h,Queue,values};
+}
+test('shuffle starts on the selected occurrence and includes every song exactly once',()=>{
+  const {Engine,ctx}=installed();ctx.SET.shuffleOn=true;ctx.SET.shuffleMode=1;
+  const same={id:'duplicate'};Engine.queue=[same,{id:'middle'},same,{id:'end'}];Engine.order=[0,1,2,3];Engine.pos=0;Engine.current=same;
+  Engine.playIndex=function(i){this.current=this.queue[i]};Engine.setQueue(Engine.queue,2,false);
+  assert.equal(Engine.order[0],2);assert.equal(Engine.pos,0);
+  assert.deepEqual([...Engine.order].sort(),[0,1,2,3]);
+});
+test('all shuffle modes retain every occurrence after the starting song',()=>{
+  const {Engine,ctx}=installed();Engine.queue=[{id:'a',album:'Hits',artist:'A'},{id:'b',album:'Hits',artist:'B'},{id:'c',album:'Hits',artist:'A'}];
+  for(let mode=1;mode<=4;mode++){ctx.SET.shuffleOn=true;ctx.SET.shuffleMode=mode;Engine.buildOrder(1);assert.equal(Engine.order[0],1);assert.equal(new Set(Engine.order).size,3);}
+});
+test('rapid skips preserve playback intent while sources load; Pause cancels the final start',async()=>{
+  const {Engine,ctx}=installed(),pending=[];ctx.getFileFor=t=>new Promise(resolve=>pending.push({id:t.id,resolve}));
+  Engine.queue=['a','b','c'].map(id=>({id,source:'drive'}));Engine.order=[0,1,2];Engine.pos=0;Engine.current=Engine.queue[0];Engine.playing=true;
+  const first=Engine.playIndex(1,true);Engine.next();assert.equal(Engine.current.id,'c');assert.equal(Engine.wantsPlayback(),true);
+  Engine.toggle();assert.equal(Engine.wantsPlayback(),false);
+  pending.forEach(p=>p.resolve({__remoteURL:'https://audio.test/'+p.id}));await first;await Promise.resolve();
+  assert.equal(Engine.playing,false);assert.equal(Engine.el().src,'');
+});
+test('rapid skip starts the final selected song and ignores late prior sources',async()=>{
+  const {Engine,ctx}=installed(),pending=[];ctx.getFileFor=t=>new Promise(resolve=>pending.push({id:t.id,resolve}));
+  Engine.queue=['a','b','c'].map(id=>({id,source:'drive'}));Engine.order=[0,1,2];Engine.current=Engine.queue[0];Engine.pos=0;Engine.playing=true;
+  const first=Engine.playIndex(1,true);Engine.next();pending[1].resolve({__remoteURL:'https://audio.test/c'});await new Promise(setImmediate);
+  assert.equal(Engine.playing,true);assert.match(Engine.el().src,/\/c$/);
+  pending[0].resolve({__remoteURL:'https://audio.test/b'});await first;assert.match(Engine.el().src,/\/c$/);Engine.clearBuffering();
+});
+test('restored remote position is shown before loading and applied when metadata is ready',async()=>{
+  const {Engine,ctx}=installed(),track={id:'a',remote:true,source:'drive'};
+  ctx.SET.keepQueue=true;ctx.LIB.map.set('a',track);ctx.IDB={get:async()=>({ids:['a'],order:[0],curId:'a',time:42})};
+  Engine.el().src='';Engine.el().readyState=0;Engine.el().duration=NaN;
+  assert.equal(await Engine.restoreState(),true);assert.equal(Engine.time(),42);
+  Engine.play();await new Promise(setImmediate);assert.equal(Engine.time(),42);
+  Engine.el().readyState=1;Engine.el().duration=100;Engine.onMeta(0);assert.equal(Engine.el().currentTime,42);Engine.pause();
+});
+test('a pending seek cannot leak into the next track, even when metadata is late',async()=>{
+  const {Engine}=installed();Engine.queue=[{id:'a'},{id:'b'}];Engine.order=[0,1];Engine.el().readyState=0;
+  await Engine.playIndex(0,false,90);assert.equal(Engine.time(),90);
+  await Engine.playIndex(1,false);Engine.el().readyState=1;Engine.onMeta(0);assert.equal(Engine.el().currentTime,0);
+});
+test('queue return preserves duplicate occurrences and remaps a removed earlier track',()=>{
+  const {Engine,Queue,ctx}=installed(),a={id:'a'},b={id:'b'};ctx.LIB.map.set('a',a);ctx.LIB.map.set('b',b);
+  Queue.active=true;Queue.resume={ids:['gone','a','a','b'],order:[0,2,1,3],pos:1,time:37};
+  const calls=[];Engine.playIndex=(...args)=>calls.push(args);Queue.finish();
+  assert.deepEqual([...Engine.order],[1,0,2]);assert.deepEqual(calls,[[1,true,37]]);
+  Queue.active=true;assert.deepEqual(Queue.tracks().map(t=>t.id),['a','a','b']);Queue.play(2);assert.deepEqual(calls[1],[2,true]);
+});
+test('queue finish skips removed resume target without transferring its seek offset',()=>{
+  const {Engine,Queue,ctx}=installed();ctx.LIB.map.set('b',{id:'b'});Queue.resume={ids:['gone','b'],order:[0,1],pos:0,time:98};
+  let selection;Engine.playIndex=(...args)=>selection=args;Queue.finish(false);assert.deepEqual(selection,[0,false,0]);
+});
+test('autoplay ignores duplicate ended events and delayed ended events after Pause',()=>{
+  const {Engine,ctx,values}=installed(),timers=[];values.track_end_silence_ms=50;ctx.setTimeout=fn=>{timers.push(fn);return timers.length};
+  Engine.current={id:'a'};Engine.playing=true;let advances=0;Engine.next=()=>{advances++};Engine.onEnded(0);Engine.onEnded(0);assert.equal(timers.length,1);
+  Engine.pause();timers[0]();Engine.onEnded(0);assert.equal(advances,0);
+});
+test('repeat one re-arms end handling on each completed play',()=>{
+  const {Engine,ctx}=installed();ctx.SET.repeatMode='one';Engine.queue=[{id:'a'}];Engine.order=[0];Engine.pos=0;Engine.current=Engine.queue[0];Engine.playing=true;
+  let plays=0;Engine.play=()=>{plays++};Engine.onEnded(0);Engine.onEnded(0);assert.equal(plays,2);assert.equal(Engine.el().currentTime,0);
+});
+test('a paused Next starts pending queue paused',()=>{
+  const {Engine,Queue,ctx}=installed();const a={id:'a'},b={id:'b'};ctx.LIB.map.set('b',b);Engine.queue=[a];Engine.order=[0];Engine.pos=0;Engine.current=a;Queue.pending=['b'];
+  let play;Engine.setQueue=(...args)=>play=args;Engine.next();assert.equal(play[2],false);
+});
+test('saved shuffled queue retains duplicate selection after a source disappears',async()=>{
+  const {Engine,ctx}=installed(),a={id:'a',remote:true},b={id:'b',remote:true};ctx.SET.keepQueue=true;ctx.LIB.map.set('a',a);ctx.LIB.map.set('b',b);
+  ctx.IDB={get:async()=>({ids:['gone','a','b','a'],order:[2,3,0,1],pos:1,curId:'a',time:12})};
+  await Engine.restoreState();assert.deepEqual([...Engine.order],[1,2,0]);assert.equal(Engine.pos,1);assert.equal(Engine.order[Engine.pos],2);
 });
