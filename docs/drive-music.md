@@ -8,7 +8,7 @@ The owner approved public access to this folder and an embedded shared API key. 
 
 ## Metadata manifest
 
-The folder listing is always authoritative: every refresh walks the Drive folder, so songs added or removed after the manifest was written appear or disappear correctly. In parallel, DrawerCast reads `drive-prepared.json` from the folder itself. Its entries only supply metadata (tags, duration, codec) for files whose Drive ID, size and MD5 still match. A missing or invalid manifest is ignored.
+The folder listing remains authoritative. DrawerCast reads `drive-prepared.json` at startup, whenever the player becomes visible, and once per minute while it stays visible. A changed manifest updates matching cached metadata immediately; a new Drive ID or changed MD5/size triggers one quiet recursive folder sync so newly uploaded songs appear without using Refresh folder or reloading the page. The manifest is only the lightweight change signal—an authoritative folder walk still validates additions and removals before committing a new snapshot. A missing or invalid manifest is ignored and the last complete library remains available.
 
 `scripts/prepare-drive.py` downloads each file to a temporary directory, reads its tags with ffprobe and writes `drive-prepared.json`. Upload that file to the music folder. It never writes audio or keys into the output or git.
 
