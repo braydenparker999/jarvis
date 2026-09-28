@@ -2224,16 +2224,20 @@ const DriveSource={
     this.manifestChecking=true;
     try{
       const prepared=await this.api.manifest(this.folder,AbortSignal.timeout(10000));
-      this.prepared=prepared;
       const cached=allTracks(true).filter(t=>t.source==='drive'&&t.driveFolder===this.folder);
       const changed=Object.entries(prepared).some(([id,meta])=>{
         const old=LIB.map.get('gd_'+id);
         return !old||old.driveFolder!==this.folder||old.md5!==meta.md5||old.size!==Number(meta.size);
       });
+      const metadataChanged=JSON.stringify(prepared)!==JSON.stringify(this.prepared);
+      this.prepared=prepared;
       if(changed){
         this.status='Updated Drive catalog found · syncing…';MusicSources.refresh();
         return await this.connect(this.folder,true);
       }
+      // Most polls find the same manifest. Avoid rewriting the whole catalog
+      // and rebuilding a large song list every minute.
+      if(!metadataChanged)return true;
       const fresh=cached.map(old=>{
         const name=baseName(old.path||old.title||'track.opus');
         const folder=(old.path||'').split('/').slice(0,-1).join('/')||'Music';
@@ -2394,6 +2398,9 @@ const Engine = {
       a.addEventListener('durationchange', this.onMeta.bind(this,i));
       a.addEventListener('timeupdate', this.onTime.bind(this,i));
       a.addEventListener('progress', this.onTime.bind(this,i));
+      a.addEventListener('waiting', this.onBuffering.bind(this,i));
+      a.addEventListener('stalled', this.onBuffering.bind(this,i));
+      a.addEventListener('playing', ()=>{if(i===this.cur)this.clearBuffering();});
     }
   },
   ensureCtx:function(){
@@ -2576,15 +2583,25 @@ const Engine = {
     // A deliberate new selection gets its own retry budget. Metadata from a
     // failed retry does not prove the audio ever became playable.
     this._driveRetryId=null;
+    this._serverRetryId=null;
+    this._serverErrorReportedId=null;
+    clearTimeout(this._serverRetryTimer);
+    this.clearBuffering();
     if(t.source==='drive')DriveSource.playbackRetry.delete(t.id);
     DriveSource.prioritize(t);
     const request=++this._playRequest || (this._playRequest=1);
     const wasPlaying = autoplay!==false;
+    this._loadingRequest=request;
+    this.releaseSlot(this.cur);
+    this.playing=false;UI.renderPlayState();
     this.current=t;
     this.pos = Math.max(0, this.order.indexOf(qi));
     UI.renderNowPlaying(t);
-    const f = await getFileFor(t);
+    let f;
+    try{f=await getFileFor(t);}
+    catch(e){if(request===this._playRequest){this._loadingRequest=null;toast('Could not read this song. Check its source and try again.',6000);}return;}
     if(request!==this._playRequest) return;
+    this._loadingRequest=null;
     if(!f){
       if(t.needsPerm && rootsNeedingPermission().length){
         this.playing=false;
@@ -2627,7 +2644,7 @@ const Engine = {
     }
     const a=this.el();
     const old=a.src;
-    try{ a.src = audioSource(f); }catch(e){ return; }
+    try{ a.src = audioSource(f); }catch(e){this.playing=false;UI.renderPlayState();toast('Could not open this song. Try it again.',6000);return;}
     if(old && old.indexOf('blob:')===0) setTimeout(function(){ URL.revokeObjectURL(old); }, 1500);
     a.currentTime=0;
     this.setGain(this.cur, this.rgGain(t), 0);
@@ -2649,7 +2666,7 @@ const Engine = {
     const a=this.el();
     if(a.error && this.current && this.current.remote){this.playIndex(this.order[this.pos],true);return;}
     if(!a.src){
-      if(this.queue.length) this.playIndex(this.order[Math.max(this.pos,0)]||0,true);
+      if(this.queue.length){this.playIndex(this.order[Math.max(this.pos,0)]||0,true);return;}
       else { toast('Add some music first'); return; }
     }
     const request=this._playRequest,source=a.src;
@@ -2668,6 +2685,8 @@ const Engine = {
   },
   pause:function(){
     const a=this.el(), self=this;
+    this.clearBuffering();
+    clearTimeout(this._serverRetryTimer);
     this.playing=false;
     UI.renderPlayState();
     if(SET.fadeOnPause && this.ctx){
@@ -2679,10 +2698,13 @@ const Engine = {
   },
   toggle:function(){ this.playing ? this.pause() : this.play(); },
   stop:function(){
+    this.clearBuffering();
+    clearTimeout(this._serverRetryTimer);
     this.playing=false;
     this.els.forEach(function(a){ try{ a.pause(); a.removeAttribute('src'); a.load(); }catch(e){} });
     this.current=null; this.queue=[]; this.order=[]; this.pos=-1;
     UI.renderNowPlaying(null); UI.renderPlayState();
+    this.saveState();
   },
   next:function(auto){
     if(!this.queue.length) return;
@@ -2715,13 +2737,14 @@ const Engine = {
   duration:function(){ const a=this.el(); return (isFinite(a.duration)&&a.duration>0)?a.duration:(this.dur||0); },
 
   onEnded:function(i){
-    if(i!==this.cur) return;
+    if(i!==this.cur||this._loadingRequest) return;
     const t=this.current;
     if(t){ t.plays=(t.plays||0)+1; t.lastPlayed=Date.now(); persistTrack(t); }
     this.next(true);
   },
-  onError:function(i){
-    if(i!==this.cur) return;
+  onError:function(i,cause){
+    if(i!==this.cur||this._loadingRequest) return;
+    this.clearBuffering();
     const t=this.current;
     if(t?.source==='drive'){
       const a=this.el();
@@ -2735,7 +2758,8 @@ const Engine = {
           if(this.current?.id!==t.id||this._playRequest!==request||this.el()!==a||a.src!==source)return;
           this.playing=true;UI.renderPlayState();
           const p=a.play();
-          if(p?.catch)p.catch(()=>{if(this.current?.id===t.id&&this._playRequest===request&&this.el()===a&&a.src===source){this.playing=false;UI.renderPlayState();toast('Drive audio still could not play. Check internet and folder sharing, then try again.',7000);}});
+          this.onBuffering(i);
+          if(p?.catch)p.catch(()=>{if(this.current?.id===t.id&&this._playRequest===request&&this.el()===a&&a.src===source){this.clearBuffering();this.playing=false;UI.renderPlayState();toast('Drive audio still could not play. Check internet and folder sharing, then try again.',7000);}});
         },800);
         return;
       }
@@ -2743,9 +2767,41 @@ const Engine = {
       toast('Drive audio still could not play. Check internet and folder sharing, then try again.',7000);return;
     }
     if(t && t.remote){
+      const a=this.el(),error=a.error?.code;
+      if((error===2||cause==='stall')&&this._serverRetryId!==t.id){
+        const f=DrawerCast.fileFor(t);
+        if(f){
+          this._serverRetryId=t.id;
+          const at=a.currentTime||0;
+          this.playing=false;UI.renderPlayState();a.pause();
+          a.src=audioSource(f)+'&retry='+Date.now();
+          const request=this._playRequest,source=a.src;
+          if(at>0)a.addEventListener('loadedmetadata',function resume(){
+            a.removeEventListener('loadedmetadata',resume);
+            if(Engine._playRequest!==request||Engine.el()!==a||a.src!==source)return;
+            try{a.currentTime=Math.min(at,Number.isFinite(a.duration)?Math.max(0,a.duration-0.15):at);}catch(e){}
+          });
+          toast('A15 stream interrupted · retrying once…',2500);
+          this._serverRetryTimer=setTimeout(()=>{
+            if(this.current?.id!==t.id||this._playRequest!==request||this.el()!==a||a.src!==source||this._serverErrorReportedId===t.id)return;
+            try{a.currentTime=at;}catch(e){}
+            this.playing=true;UI.renderPlayState();
+            const p=a.play();this.onBuffering(i);
+            if(p?.catch)p.catch(e=>{
+              if(this.current?.id!==t.id||this._playRequest!==request||this.el()!==a||a.src!==source)return;
+              if(e?.name==='AbortError')return;
+              if(e?.name==='NotAllowedError'){this.clearBuffering();this.playing=false;UI.renderPlayState();toast('Tap play to resume the A15 stream.');return;}
+              this.onError(i);
+            });
+          },1500);
+          return;
+        }
+      }
+      if(this._serverErrorReportedId===t.id)return;
+      this._serverErrorReportedId=t.id;clearTimeout(this._serverRetryTimer);
       this.playing=false;UI.renderPlayState();
       const msg='Unable to stream this song. Check the A15 and Wi-Fi connection, or try an MP3. Reconnect in Settings → Library → Music Sources.';
-      DrawerCast.markError(msg,this.el().error?.code===2);toast(msg,6500);return;
+      DrawerCast.markError(msg,error===2||cause==='stall');toast(msg,6500);return;
     }
     if(t && !t.errored){
       t.errored=true;
@@ -2761,7 +2817,7 @@ const Engine = {
     setTimeout(function(){ if(self.playing) self.next(true); }, 350);
   },
   onMeta:function(i){
-    if(i!==this.cur) return;
+    if(i!==this.cur||this._loadingRequest) return;
     this._err=0;
     const a=this.els[i];
     if(isFinite(a.duration) && a.duration>0){
@@ -2775,13 +2831,25 @@ const Engine = {
     UI.renderMeta();
   },
   onTime:function(i){
-    if(i!==this.cur) return;
+    if(i!==this.cur||this._loadingRequest) return;
+    if(this._bufferAt!=null&&this.el().currentTime>this._bufferAt+0.05)this.clearBuffering();
     if(SET.gapless && !SET.crossfade && this.playing) this.preloadNext();
     if(SET.crossfade && this.playing){
       const a=this.els[i], d=this.duration();
       const left = d - a.currentTime;
       if(d>0 && left <= SET.crossfadeLen && left>0.15 && !this.xfading) this.startCrossfade();
     }
+  },
+  clearBuffering:function(){clearTimeout(this._stallTimer);this._stallTimer=null;this._bufferAt=null;},
+  onBuffering:function(i){
+    if(i!==this.cur||this._loadingRequest||!this.playing||!this.current?.remote)return;
+    this.clearBuffering();
+    const a=this.el(),request=this._playRequest,source=a.src,track=this.current.id;
+    this._bufferAt=a.currentTime||0;
+    this._stallTimer=setTimeout(()=>{
+      if(this._playRequest!==request||this.el()!==a||a.src!==source||this.current?.id!==track||!this.playing||a.ended)return;
+      if((a.currentTime||0)<=this._bufferAt+0.05)this.onError(i,'stall');
+    },12000);
   },
   async preloadNext(){
     const d=this.duration(), a=this.el();
@@ -2883,11 +2951,14 @@ const Engine = {
     if(!SET.keepQueue) return false;
     try{
       const s = await IDB.get('kv','state');
-      if(!s || !s.ids || !s.ids.length) return false;
-      const q = s.ids.map(function(id){ return LIB.map.get(id); }).filter(sourceTrackEnabled);
+      if(!s || !Array.isArray(s.ids) || !s.ids.length) return false;
+      const request=this._playRequest;
+      const q = s.ids.slice(0,50000).filter(id=>typeof id==='string').map(function(id){ return LIB.map.get(id); }).filter(sourceTrackEnabled);
       if(!q.length) return false;
+      if(request!==this._playRequest)return false;
       this.queue=q;
-      this.order = (s.order && s.order.length===q.length) ? s.order : q.map(function(_,i){ return i; });
+      this.order = (Array.isArray(s.order)&&s.order.length===q.length&&new Set(s.order).size===q.length&&
+        s.order.every(i=>Number.isInteger(i)&&i>=0&&i<q.length)) ? s.order : q.map(function(_,i){ return i; });
       const restoredIndex=q.findIndex(t=>t.id===s.curId);
       this.pos = restoredIndex>=0?Math.max(0,this.order.indexOf(restoredIndex)):0;
       const t = q[this.order[this.pos]] || q[0];
@@ -2897,12 +2968,15 @@ const Engine = {
       const self=this;
       if(t.remote){ this.dur=t.dur||0; UI.renderProgress(); return true; } // Restore UI/queue without fetching audio until Play is tapped.
       const f = await getFileFor(t);
+      if(request!==this._playRequest||this.current?.id!==t.id)return true;
       if(f){
         this.ensureCtxLater=true;
         const a=this.el();
         a.src=audioSource(f);
+        const source=a.src;
         a.addEventListener('loadedmetadata', function once(){
           a.removeEventListener('loadedmetadata', once);
+          if(self.current?.id!==t.id||a.src!==source)return;
           if(s.time) a.currentTime = Math.min(s.time, (a.duration||1e9)-0.5);
           UI.renderProgress();
         });
@@ -4550,7 +4624,7 @@ const PAGES={
   storage:{ title:'Storage', items:[] },
   folders:{ title:'Music Folders', items:[] },
   about:{ title:'About', items:[
-    S_act('DrawerCast Player 0.5.0','Your supplied Poweramp-style player, with local server streaming',function(){}),
+    S_act('Poweramp','Your music player, including local server streaming',function(){}),
     S_head('Gestures'),
     S_note('Swipe album art left/right: previous/next track. Swipe album art up: open the queue. Swipe down on the player: back to the library. Double tap art: play/pause. Long press art or a list row: context menu. Drag the seek bar or swipe horizontally on the transport area to scrub. Swipe the mini player up to open the player, left/right to change track.'),
     S_head('Storage'),
@@ -5066,7 +5140,7 @@ const MainMenu={
   align:function(){const s=$('#sheet');if(!s.querySelector('.main-menu-content'))return;const r=$('#nav').getBoundingClientRect();s.style.setProperty('--menu-left',r.left+'px');s.style.setProperty('--menu-width',r.width+'px');s.style.setProperty('--menu-bottom',(innerHeight-r.top-1)+'px');},
   show:function(){
     const s=$('#sheet');
-    s.innerHTML='<div class="main-menu-content"><header class="menu-brand"><div class="menu-wordmark">Poweramp</div><div class="menu-edition">DrawerCast Player</div></header>'+
+    s.innerHTML='<div class="main-menu-content"><header class="menu-brand"><div class="menu-wordmark">Poweramp</div><div class="menu-edition">Web player</div></header>'+
       '<button class="mi main-settings" data-menu-action="settings">'+icoHTML('settings')+'<span>Settings</span></button>'+
       '<div class="menu-settings-shortcuts" id="main-shortcuts"></div>'+
       '<button class="mi" data-menu-action="tools">'+icoHTML('playlist')+'<span>Music tools</span></button>'+
@@ -7180,10 +7254,10 @@ function installPlaybackRework(){
     this._autoAdvance=!!auto;try{return next.call(this,auto);}finally{this._autoAdvance=false;}
   };
   Engine.countPlayed=function(){if(!this.current||this.counted)return;this.counted=true;this.current.plays=(this.current.plays||0)+1;this.current.lastPlayed=Date.now();persistTrack(this.current);};
-  Engine.onEnded=function(i){if(i!==this.cur)return;if(this.current){this.current.resumeAt=0;this.countPlayed();persistTrack(this.current);}const advance=()=>{this.listened=0;this.counted=false;this.next(true);};const gap=nativeValues().track_end_silence_ms||0;if(gap){clearTimeout(this.silenceTimer);this.silenceTimer=setTimeout(advance,gap);}else advance();};
+  Engine.onEnded=function(i){if(i!==this.cur||this._loadingRequest)return;if(this.current){this.current.resumeAt=0;this.countPlayed();persistTrack(this.current);}const request=this._playRequest;const advance=()=>{if(request!==this._playRequest)return;this.listened=0;this.counted=false;this.next(true);};const gap=nativeValues().track_end_silence_ms||0;if(gap){clearTimeout(this.silenceTimer);this.silenceTimer=setTimeout(advance,gap);}else advance();};
   Engine.startCrossfade=function(){if(this.xfading||PlaybackTransitions.pending||!this.playing||PlaybackQueue.shouldStart()||SET.repeatMode==='one')return;let pos=this.pos+1;if(pos>=this.order.length){if(SET.repeatMode==='all')pos=0;else return;}return PlaybackTransitions.to(this.order[pos],Math.max(50,SET.crossfadeLen*1000));};
   const time=Engine.onTime;Engine.onTime=function(i){
-    if(i!==this.cur)return;
+    if(i!==this.cur||this._loadingRequest)return;
     if(this.playing){const now=this.time(),delta=now-(this.listenedLast||0);if(delta>0&&delta<3*Math.max(1,SET.speed))this.listened=(this.listened||0)+delta;this.listenedLast=now;const threshold=this.duration()*(nativeValues().played_dur??14)/100;if(this.listened>=Math.max(1,threshold))this.countPlayed();}
     const mode=nativeValues().crossfade_auto_advance||0,enabled=SET.crossfade,next=this.queue[this.order[this.pos+1]],sameAlbum=next&&trackAlbum(next)===trackAlbum(this.current);
     SET.crossfade=enabled&&mode!==0&&(mode!==3||SET.shuffleOn)&&(mode!==1||!sameAlbum);

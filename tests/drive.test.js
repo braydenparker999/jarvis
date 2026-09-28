@@ -107,12 +107,12 @@ test('prepared metadata is accepted only for the matching file revision and neve
 const source=await readFile(new URL('../public/drawercast/player.js',import.meta.url),'utf8');
 function integration({fail=false,manifest=null,files=[song]}={}){
   const tracks=new Map([['a15',{id:'a15',remote:true}],['local',{id:'local'}],['gd_old12345678',{id:'gd_old12345678',source:'drive'}]]);
-  const removed=[];const component=source.slice(source.indexOf('const DriveSource={'),source.indexOf('\nconst Engine = {'));
+  const removed=[];let writes=0,redraws=0;const component=source.slice(source.indexOf('const DriveSource={'),source.indexOf('\nconst Engine = {'));
   const context=vm.createContext({AbortController,AbortSignal,setTimeout,clearTimeout,document:{visibilityState:'visible',addEventListener(){}},SourceLibrary:{enabled:()=>true},sourceTrackEnabled:t=>!!t,MusicSources:{refresh(){}},LIB:{map:tracks},
-    allTracks:()=>[...tracks.values()],IDB:{async bulk(){}},persistTracks:async()=>{},libAdd:t=>tracks.set(t.id,t),
+    allTracks:()=>[...tracks.values()],IDB:{async bulk(){}},persistTracks:async()=>{writes++},libAdd:t=>tracks.set(t.id,t),
     async removeTracks(ids){removed.push(...ids);ids.forEach(id=>tracks.delete(id));},
     Engine:{queue:[],current:null,buildOrder(){this.order=this.queue.map((_,i)=>i);},saveState(){},stop(){}},
-    Views:{refreshAll(){}},UI:{renderNowPlaying(){},renderPlayState(){}},localStorage:{setItem(){},removeItem(){}},
+    Views:{refreshAll(){redraws++}},UI:{renderNowPlaying(){},renderPlayState(){}},localStorage:{setItem(){},removeItem(){}},
     toast(){},$:()=>null,Waveform:{load(){}}});
   const drive=vm.runInContext(component+'\nDriveSource;',context);
   let listCalls=0,manifestCalls=0;
@@ -120,7 +120,7 @@ function integration({fail=false,manifest=null,files=[song]}={}){
     async manifest(){manifestCalls++;if(manifest instanceof Error)throw manifest;if(manifest)return manifest;throw Error('Drive metadata manifest was not found.');},
     async list(){listCalls++;if(fail)throw Error('Network failure');return {id:root,name:'Music',files};}
   };
-  drive.helper={driveTrack,folderId};return {drive,tracks,removed,engine:context.Engine,get listCalls(){return listCalls;},get manifestCalls(){return manifestCalls;}};
+  drive.helper={driveTrack,folderId};return {drive,tracks,removed,engine:context.Engine,get listCalls(){return listCalls;},get manifestCalls(){return manifestCalls;},get writes(){return writes;},get redraws(){return redraws;}};
 }
 test('Drive startup opens its cached snapshot and automatically watches the prepared catalog',()=>{
   const driveStart=source.indexOf('const DriveSource={');
@@ -141,6 +141,13 @@ test('a newly updated manifest automatically triggers an authoritative backgroun
   const state=integration({manifest:prepared});state.drive.folder=root;
   assert.equal(await state.drive.checkManifest(),true);clearTimeout(state.drive.manifestTimer);
   assert.equal(state.listCalls,1);assert.ok(state.tracks.has('gd_'+file));
+});
+test('an unchanged Drive catalog poll does not rewrite songs or redraw the library',async()=>{
+  const prepared={[file]:{size:4000,md5:'one',title:'Manifest title'}};
+  const state=integration({manifest:prepared});state.drive.folder=root;state.drive.prepared=prepared;
+  state.tracks.set('gd_'+file,driveTrack(song,root,prepared));
+  assert.equal(await state.drive.checkManifest(),true);clearTimeout(state.drive.manifestTimer);
+  assert.equal(state.listCalls,0);assert.equal(state.writes,0);assert.equal(state.redraws,0);
 });
 test('Drive refresh lists the folder and applies manifest metadata only to matching files',async()=>{
   const prepared={[file]:{size:4000,md5:'one',title:'Manifest title',artist:'Manifest artist',dur:123},

@@ -10,7 +10,7 @@ function harness(){
     SET:{fadeOnPause:false},UI:{renderPlayState(){renders++;},startLoop(){}},toast(){}});
   const {Engine,PlaybackTransitions}=vm.runInContext(block('const Engine = {','function SET_shuffleOn()')+
     block('const PlaybackTransitions={','function installPlaybackRework()')+'\n({Engine,PlaybackTransitions})',context);
-  const audio=src=>({src,preload:'auto',paused:false,loads:0,pause(){this.paused=true;},removeAttribute(){this.src='';},load(){this.loads++;},play(){return {catch:fn=>{this.reject=fn;}};}});
+  const audio=src=>({src,preload:'auto',paused:false,loads:0,events:{},pause(){this.paused=true;},removeAttribute(){this.src='';},load(){this.loads++;},addEventListener(name,fn){this.events[name]=fn;},removeEventListener(name){delete this.events[name];},play(){return {catch:fn=>{this.reject=fn;}};}});
   Engine.els=[audio('http://music.example.test/audio/current'),audio('http://music.example.test/audio/next')];
   Engine.cur=0;Engine.setGain=()=>{};Engine.ensureCtx=()=>{};Engine.updateMediaSession=()=>{};Engine._playRequest=1;
   return {Engine,PlaybackTransitions,ctx:context,revoked,renders:()=>renders};
@@ -76,4 +76,85 @@ test('Drive metadata cannot reset the retry budget and an old timer cannot resta
   Engine._playRequest++; // The user selected this same song again before the old timer fired.
   timers[0]();
   assert.equal(plays,0,'a stale retry must not start the new selection');
+});
+
+test('a new selection stops the previous stream while its file is loading',async()=>{
+  const {Engine,ctx}=harness();let resolveFile,advances=0,starts=0;
+  ctx.sourceTrackEnabled=()=>true;
+  ctx.DriveSource={prioritize(){},playbackRetry:new Map()};
+  ctx.DrawerCast={canPlay:()=>true};
+  ctx.getFileFor=()=>new Promise(resolve=>{resolveFile=resolve});
+  ctx.audioSource=f=>f.__remoteURL;
+  ctx.UI.renderNowPlaying=()=>{};
+  Engine.queue=[{id:'old'},{id:'new'}];Engine.order=[0,1];Engine.current=Engine.queue[0];Engine.playing=true;
+  Engine.applySpeed=()=>{};Engine.rgGain=()=>1;Engine.saveState=()=>{};
+  Engine.next=()=>{advances++};Engine.play=()=>{starts++;Engine.playing=true};
+  const pending=Engine.playIndex(1,true);
+  assert.equal(Engine.els[0].paused,true);assert.equal(Engine.els[0].src,'');
+  assert.equal(Engine.playing,false);
+  Engine.onEnded(0);Engine.onError(0);
+  assert.equal(advances,0,'late events from the abandoned stream do not advance the new selection');
+  resolveFile({__remoteURL:'https://music.example.test/new'});await pending;
+  assert.equal(Engine.els[0].src,'https://music.example.test/new');assert.equal(starts,1);
+});
+
+test('play waits for a missing source to load before asking the audio element to play',()=>{
+  const {Engine}=harness();let selections=0,starts=0;
+  Engine.els[0].src='';Engine.els[0].play=()=>{starts++};
+  Engine.queue=[{id:'song'}];Engine.order=[0];Engine.pos=0;Engine.playIndex=()=>{selections++};
+  Engine.play();assert.equal(selections,1);assert.equal(starts,0);
+});
+
+test('A15 network failure retries once and then reports a durable error',()=>{
+  const {Engine,ctx}=harness(),timers=[],messages=[];let starts=0,errors=0;
+  ctx.setTimeout=fn=>{timers.push(fn);return timers.length};
+  ctx.toast=message=>messages.push(message);
+  ctx.DrawerCast={fileFor:()=>({__remoteURL:'http://192.168.4.1:8765/audio/song?k=key'}),markError:()=>{errors++}};
+  ctx.audioSource=file=>file.__remoteURL;
+  Engine.current={id:'dc_song',remote:true,source:'server'};Engine.playing=true;
+  Engine.els[0].currentTime=42;Engine.els[0].error={code:2};
+  Engine.els[0].play=()=>{starts++;return Promise.resolve()};
+  Engine.onError(0);
+  assert.equal(starts,0);assert.match(Engine.els[0].src,/retry=/);
+  Engine.els[0].duration=90;Engine.els[0].events.loadedmetadata();
+  assert.equal(Engine.els[0].currentTime,42,'the retry keeps the playhead when metadata arrives');
+  timers[0]();assert.equal(starts,1);
+  Engine.onError(0);Engine.onError(0);
+  assert.equal(errors,1);assert.equal(Engine.playing,false);
+  assert.equal(messages.filter(message=>message.includes('retrying once')).length,1);
+});
+
+test('A15 silent stall invokes the same bounded retry and a stale timer cannot play a new song',()=>{
+  const {Engine,ctx}=harness(),timers=[];let starts=0;
+  ctx.setTimeout=fn=>{timers.push(fn);return timers.length};
+  ctx.DrawerCast={fileFor:()=>({__remoteURL:'http://192.168.4.1:8765/audio/song?k=key'}),markError(){}};
+  ctx.audioSource=file=>file.__remoteURL;
+  Engine.current={id:'dc_song',remote:true,source:'server'};Engine.playing=true;Engine.els[0].currentTime=12;
+  Engine.els[0].play=()=>{starts++;return Promise.resolve()};
+  Engine.onBuffering(0);timers[0]();
+  assert.match(Engine.els[0].src,/retry=/);
+  Engine._playRequest++;timers[1]();assert.equal(starts,0);
+});
+
+test('saved queue rejects a damaged order rather than indexing outside the library',async()=>{
+  const {Engine,ctx}=harness();
+  const tracks=[{id:'one',remote:true},{id:'two',remote:true}];
+  ctx.SET.keepQueue=true;ctx.LIB={map:new Map(tracks.map(t=>[t.id,t]))};
+  ctx.sourceTrackEnabled=t=>!!t;
+  ctx.IDB={get:async()=>({ids:['one','two'],order:[99,99],curId:'one'})};
+  ctx.UI.renderNowPlaying=()=>{};ctx.UI.renderProgress=()=>{};
+  assert.equal(await Engine.restoreState(),true);
+  assert.deepEqual(Array.from(Engine.order),[0,1]);assert.equal(Engine.current.id,'one');
+});
+
+test('the installed end-of-track handler ignores old and delayed endings',()=>{
+  const {Engine,ctx}=harness(),timers=[];let advances=0;
+  ctx.setTimeout=fn=>{timers.push(fn);return timers.length};
+  ctx.nativeValues=()=>({track_end_silence_ms:50});ctx.persistTrack=()=>{};
+  vm.runInContext(block('  Engine.onEnded=function(i){','  Engine.startCrossfade=function()'),ctx);
+  Engine.current={id:'new'};Engine.countPlayed=()=>{};Engine.next=()=>{advances++};
+  Engine._loadingRequest=Engine._playRequest;
+  Engine.onEnded(0);assert.equal(timers.length,0);
+  Engine._loadingRequest=null;Engine.onEnded(0);assert.equal(timers.length,1);
+  Engine._playRequest++;timers[0]();assert.equal(advances,0);
 });
