@@ -2579,7 +2579,7 @@ const Engine = {
     this.playing=false;UI.renderPlayState();
     this.current=t;
     this.pos = Math.max(0, this.order.indexOf(qi));
-    UI.renderNowPlaying(t);
+    UI.renderNowPlaying(t);UI.renderProgress();
     let f;
     try{f=await getFileFor(t);}
     catch(e){if(request===this._playRequest){this._loadingRequest=null;UI.renderPlayState();toast('Could not read this song. Check its source and try again.',6000);}return;}
@@ -2747,7 +2747,7 @@ const Engine = {
   },
   seekBy:function(d){ this.seek(this.time()+d); },
   time:function(){return this._loadingRequest?(this._requestedSeek||0):this._pendingSeek?.time??this._resumePosition?.time??(this.el().currentTime||0);},
-  duration:function(){ const a=this.el(); return (isFinite(a.duration)&&a.duration>0)?a.duration:(this.dur||0); },
+  duration:function(){if(this._loadingRequest)return this.dur||0;const a=this.el(); return (isFinite(a.duration)&&a.duration>0)?a.duration:(this.dur||0); },
 
   onEnded:function(i){
     if(i!==this.cur||this._loadingRequest) return;
@@ -2860,6 +2860,7 @@ const Engine = {
   },
   onTime:function(i){
     if(i!==this.cur||this._loadingRequest) return;
+    if(this.playing&&Date.now()-(this._lastCheckpoint||0)>=10000)this.checkpoint();
     if(this._bufferAt!=null&&this.el().currentTime>this._bufferAt+0.05)this.clearBuffering();
     if(SET.gapless && !SET.crossfade && this.playing) this.preloadNext();
     if(SET.crossfade && this.playing){
@@ -2967,28 +2968,28 @@ const Engine = {
     UI.renderToggles();
     toast('Sleeping in ' + min + ' min');
   },
-  saveState:debounce(function(){
-    try{
-      IDB.set('kv','state',{
-        ids: Engine.queue.map(function(t){ return t.id; }),
-        pos: Engine.pos, order: Engine.order,
-        curId: Engine.current ? Engine.current.id : null,
-        time: Engine.time()
-      }).catch(function(){});
-    }catch(e){}
-  },700),
+  checkpoint:function(){
+    const state={ids:this.queue.map(t=>t.id),pos:this.pos,order:this.order.slice(),curId:this.current?.id||null,time:this.time(),savedAt:Date.now()};
+    if(typeof PlaybackQueue!=='undefined')state.explicitQueue={pending:PlaybackQueue.pending.slice(),active:PlaybackQueue.active,resume:PlaybackQueue.resume,forced:PlaybackQueue.forced};
+    // The synchronous copy survives a reload before an IndexedDB write commits.
+    try{localStorage.setItem('dc.playback-checkpoint',JSON.stringify(state));}catch(e){}
+    try{IDB.set('kv','state',state).catch(()=>{});}catch(e){}
+    this._lastCheckpoint=Date.now();
+  },
+  saveState:debounce(function(){Engine.checkpoint();},700),
   async restoreState(){
     if(!SET.keepQueue) return false;
     try{
       const request=this._playRequest;
-      const s = await IDB.get('kv','state');
+      let s=await IDB.get('kv','state').catch(()=>null);
+      try{const checkpoint=JSON.parse(localStorage.getItem('dc.playback-checkpoint')||'null');if(checkpoint&&Number.isFinite(checkpoint.savedAt)&&(!s||checkpoint.savedAt>(s.savedAt||0)))s=checkpoint;}catch(e){}
       if(request!==this._playRequest)return false;
       if(!s || !Array.isArray(s.ids) || !s.ids.length) return false;
       const q=[],remap=new Map();
       s.ids.slice(0,50000).forEach((id,i)=>{const t=typeof id==='string'?LIB.map.get(id):null;if(sourceTrackEnabled(t)){remap.set(i,q.length);q.push(t);}});
       if(!q.length) return false;
       if(request!==this._playRequest)return false;
-      this.queue=q;
+      this.queue=q;this._restoredQueueState=s.explicitQueue;
       const validOrder=Array.isArray(s.order)&&s.order.length===s.ids.length&&new Set(s.order).size===s.ids.length&&s.order.every(i=>Number.isInteger(i)&&i>=0&&i<s.ids.length);
       this.order=validOrder?s.order.filter(i=>remap.has(i)).map(i=>remap.get(i)):q.map((_,i)=>i);
       const savedIndex=validOrder?remap.get(s.order[s.pos]):-1;
@@ -7211,7 +7212,8 @@ function setupRework(){
   const sync=EQ.sync;EQ.sync=function(){sync.call(this);const v=nativeValues();if(v.eq_labels===2){$$('#bands [data-gain-label]').forEach(b=>b.textContent=Math.round((Math.pow(10,SET.eqGains[+b.dataset.gainLabel]/20)-1)*100)+'%');if($('#pv'))$('#pv').textContent=Math.round((Math.pow(10,SET.preamp/20)-1)*100)+'%';}if(v.tone_labels===1){$('#bass-v').textContent=(SET.bass*15).toFixed(1)+' dB';$('#treble-v').textContent=(SET.treble*15).toFixed(1)+' dB';}};
   const item=PAGES.skin.items.find(i=>i.key==='skin_seekbar');if(item)item.desc='Waveform scrolls beneath a fixed center marker. Drag left to seek forward, right to go back. Static mode shows the whole track.';
   const nav=Nav.go;Nav.go=function(...args){nav.apply(Nav,args);NativeSettings.apply();wakeLock(SET.keepScreenOn||Nav.cur==='lyrics'&&nativeValues().lyrics_keep_screen);};
-  document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden'&&nativeValues().pause_on_screen_off&&Engine.playing)Engine.pause();});
+  window.addEventListener('pagehide',()=>Engine.checkpoint());
+  document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden'){if(nativeValues().pause_on_screen_off&&Engine.wantsPlayback())Engine.pause();Engine.checkpoint();}});
   installPlaybackRework();installLyricsRework();installSearchPlayback();installSettingsShortcuts();NativeSettings.apply();measurePlayerLabels();
 }
 
@@ -7320,7 +7322,7 @@ function installPlaybackRework(){
     SET.crossfade=enabled&&mode!==0&&(mode!==3||SET.shuffleOn)&&(mode!==1||!sameAlbum);
     try{return time.call(this,i);}finally{SET.crossfade=enabled;}
   };
-  const restore=Engine.restoreState;Engine.restoreState=async function(){const result=await restore.call(this);try{const saved=JSON.parse(localStorage.getItem('dc.explicit-queue')||'null');if(saved&&Array.isArray(saved.pending)){PlaybackQueue.pending=saved.pending.filter(id=>LIB.map.has(id));PlaybackQueue.active=!!saved.active&&result;PlaybackQueue.resume=saved.resume&&Array.isArray(saved.resume.ids)&&Array.isArray(saved.resume.order)&&Number.isInteger(saved.resume.pos)&&saved.resume.pos>=0&&saved.resume.pos<=saved.resume.order.length&&saved.resume.order.every(i=>Number.isInteger(i)&&i>=0&&i<saved.resume.ids.length)?saved.resume:null;PlaybackQueue.forced=!!saved.forced;}}catch(e){}return result;};
+  const restore=Engine.restoreState;Engine.restoreState=async function(){const result=await restore.call(this);try{const saved=this._restoredQueueState||JSON.parse(localStorage.getItem('dc.explicit-queue')||'null');if(saved&&Array.isArray(saved.pending)){PlaybackQueue.pending=saved.pending.filter(id=>LIB.map.has(id));PlaybackQueue.active=!!saved.active&&result;PlaybackQueue.resume=saved.resume&&Array.isArray(saved.resume.ids)&&Array.isArray(saved.resume.order)&&Number.isInteger(saved.resume.pos)&&saved.resume.pos>=0&&saved.resume.pos<=saved.resume.order.length&&saved.resume.order.every(i=>Number.isInteger(i)&&i>=0&&i<saved.resume.ids.length)?saved.resume:null;PlaybackQueue.forced=!!saved.forced;}}catch(e){}return result;};
   const items=Views.buildItems;Views.buildItems=function(spec){if(spec.kind==='queue')return {type:'tracks',items:PlaybackQueue.tracks()};return items.call(this,spec);};
   const counts=Views.counts;Views.counts=function(){const result=counts.call(this);result.queue=PlaybackQueue.tracks().length;return result;};
   const fabs=Views.buildFabs;Views.buildFabs=function(data,spec){fabs.call(this,data,spec);if(spec.kind!=='queue')return;const buttons=$$('#list-fabs .fab');if(buttons[1])buttons[1].onclick=()=>PlaybackQueue.play(0);if(buttons[0])buttons[0].onclick=()=>{SET.shuffleOn=true;SET.shuffleMode=1;PlaybackQueue.play(0);Engine.buildOrder();Engine.saveState();saveSet();UI.renderToggles();};};

@@ -7,7 +7,7 @@ const block=(a,b)=>source.slice(source.indexOf(a),source.indexOf(b,source.indexO
 function harness(){
   const revoked=[];let renders=0;
   const context=vm.createContext({setTimeout,clearTimeout,debounce:fn=>fn,URL:{revokeObjectURL:u=>revoked.push(u)},
-    SET:{fadeOnPause:false},UI:{renderPlayState(){renders++;},startLoop(){}},toast(){}});
+    SET:{fadeOnPause:false},UI:{renderPlayState(){renders++;},renderProgress(){},startLoop(){}},toast(){}});
   const {Engine,PlaybackTransitions}=vm.runInContext(block('const Engine = {','function SET_shuffleOn()')+
     block('const PlaybackTransitions={','function installPlaybackRework()')+'\n({Engine,PlaybackTransitions})',context);
   const audio=src=>({src,preload:'auto',paused:false,loads:0,events:{},pause(){this.paused=true;},removeAttribute(){this.src='';},load(){this.loads++;},addEventListener(name,fn){this.events[name]=fn;},removeEventListener(name){delete this.events[name];},play(){return {catch:fn=>{this.reject=fn;}};}});
@@ -300,4 +300,16 @@ test('category skip retains loading playback intent',()=>{
   const {Engine,ctx}=installed();ctx.Views.stack=[];vm.runInContext(block('function proSkip(direction){','function setupRework(){'),ctx);
   Engine.queue=[{id:'a',album:'A'},{id:'b',album:'B'}];Engine.order=[0,1];Engine.pos=0;Engine.current=Engine.queue[0];Engine._loadingRequest=1;Engine._loadingAutoplay=true;
   let args;Engine.playIndex=(...value)=>args=value;vm.runInContext('proSkip(1)',ctx);assert.deepEqual(args,[1,true]);
+});
+test('reload uses the newer synchronous checkpoint when the database write is delayed',async()=>{
+  const {Engine,ctx}=installed(),stored=new Map(),track={id:'a',remote:true};ctx.SET.keepQueue=true;ctx.LIB.map.set('a',track);
+  ctx.localStorage={setItem:(key,value)=>stored.set(key,value),getItem:key=>stored.get(key)||null};
+  ctx.IDB={set:()=>new Promise(()=>{}),get:async()=>({ids:['a'],order:[0],pos:0,curId:'a',time:1,savedAt:1})};
+  Engine.queue=[track];Engine.order=[0];Engine.pos=0;Engine.current=track;Engine.el().currentTime=64;Engine.checkpoint();
+  Engine.el().src='';Engine.el().currentTime=0;await Engine.restoreState();assert.equal(Engine.time(),64);
+});
+test('periodic playback checkpoint captures playhead and explicit queue together',()=>{
+  const {Engine,Queue,ctx}=installed(),writes=[];ctx.IDB={set:async(a,b,value)=>writes.push(value)};ctx.SET.gapless=false;ctx.SET.crossfade=false;
+  Engine.queue=[{id:'a'}];Engine.order=[0];Engine.pos=0;Engine.current=Engine.queue[0];Engine.playing=true;Engine.el().currentTime=71;Queue.pending=['b'];
+  Engine.onTime(0);Engine.onTime(0);assert.equal(writes.length,1);assert.equal(writes[0].time,71);assert.deepEqual([...writes[0].explicitQueue.pending],['b']);
 });
