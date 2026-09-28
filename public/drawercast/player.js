@@ -2211,6 +2211,7 @@ const DriveSource={
     if(document.visibilityState!=='visible'){this.scheduleManifestCheck();return false;}
     if(Engine.current?.source==='drive'&&Engine.playing&&Engine.el().readyState<3){this.scheduleManifestCheck(5000);return false;}
     this.manifestChecking=true;
+    let nextDelay=60000;
     try{
       const prepared=await this.api.manifest(this.folder,AbortSignal.timeout(10000));
       const cached=allTracks(true).filter(t=>t.source==='drive'&&t.driveFolder===this.folder);
@@ -2219,6 +2220,13 @@ const DriveSource={
         return !old||old.driveFolder!==this.folder||old.md5!==meta.md5||old.size!==Number(meta.size);
       });
       const metadataChanged=JSON.stringify(prepared)!==JSON.stringify(this.prepared);
+      // A full folder walk and a 1,000-song library rewrite can compete with
+      // media ranges. Apply catalog changes after playback pauses instead.
+      if((changed||metadataChanged)&&Engine.current?.source==='drive'&&Engine.playing){
+        this.status='Drive catalog update pending · pause playback to sync';
+        nextDelay=30000;
+        return false;
+      }
       this.prepared=prepared;
       if(changed){
         this.status='Updated Drive catalog found · syncing…';MusicSources.refresh();
@@ -2245,7 +2253,7 @@ const DriveSource={
       if(cached.length)this.status='Saved library · '+cached.length+' songs · catalog check unavailable';
       return false;
     }
-    finally{this.manifestChecking=false;this.scheduleManifestCheck();MusicSources.refresh();}
+    finally{this.manifestChecking=false;this.scheduleManifestCheck(nextDelay);MusicSources.refresh();}
   },
   fileFor(t){
     if(!this.api)return null;
@@ -2273,8 +2281,10 @@ const DriveSource={
     clearTimeout(this.tagTimer);
     const delay=(this.tagNotBefore||0)-Date.now();if(delay>0){this.tagTimer=setTimeout(()=>this.pumpTags(),delay);return;}
     // Let audio acquire its first playable buffer before starting cover requests.
-    if(Engine.playing && Engine.el().readyState<3){this.tagTimer=setTimeout(()=>this.pumpTags(),500);return;}
     const current=this.tagQueue.findIndex(j=>j.t.id===Engine.current?.id);
+    if(Engine.playing && (Engine.el().readyState<3 || (Engine.current?.source==='drive'&&current<0))){
+      this.tagTimer=setTimeout(()=>this.pumpTags(),Engine.el().readyState<3?500:3000);return;
+    }
     const job=this.tagQueue.splice(current<0?0:current,1)[0];
     if(LIB.map.get(job.t.id)?.md5!==job.t.md5){this.tagJobs.delete(job.key);job.resolve();this.pumpTags();return;}
     this.tagActive=job;
@@ -2694,6 +2704,8 @@ const Engine = {
     clearTimeout(this._driveRetryTimer);
     clearTimeout(this._serverRetryTimer);
     this.playing=false;
+    DriveSource.pumpTags();
+    if(DriveSource.status.includes('catalog update pending'))DriveSource.scheduleManifestCheck(0);
     UI.renderPlayState();
     if(SET.fadeOnPause && this.ctx){
       this.setGain(this.cur, 0.0001, SET.fadeLen);
@@ -2708,6 +2720,8 @@ const Engine = {
     clearTimeout(this._driveRetryTimer);
     clearTimeout(this._serverRetryTimer);
     this.playing=false;
+    DriveSource.pumpTags();
+    if(DriveSource.status.includes('catalog update pending'))DriveSource.scheduleManifestCheck(0);
     this.els.forEach(function(a){ try{ a.pause(); a.removeAttribute('src'); a.load(); }catch(e){} });
     this.current=null; this.queue=[]; this.order=[]; this.pos=-1;
     UI.renderNowPlaying(null); UI.renderPlayState();

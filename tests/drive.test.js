@@ -153,6 +153,15 @@ test('Drive catalog polling waits for the selected stream to acquire a playable 
   assert.equal(await state.drive.checkManifest(),false);
   assert.equal(state.manifestCalls,0);assert.equal(nextCheck,5000);
 });
+test('a changed catalog defers its folder walk until Drive playback pauses',async()=>{
+  const state=integration({manifest:{[file]:{size:4000,md5:'one',title:'Updated'}}});state.drive.folder=root;
+  state.engine.current={id:'gd_current',source:'drive'};state.engine.playing=true;state.engine.el=()=>({readyState:4});
+  assert.equal(await state.drive.checkManifest(),false);clearTimeout(state.drive.manifestTimer);
+  assert.equal(state.listCalls,0);assert.match(state.drive.status,/update pending/);
+  state.engine.playing=false;
+  assert.equal(await state.drive.checkManifest(),true);clearTimeout(state.drive.manifestTimer);
+  assert.equal(state.listCalls,1);
+});
 test('an unchanged Drive catalog poll does not rewrite songs or redraw the library',async()=>{
   const prepared={[file]:{size:4000,md5:'one',title:'Manifest title'}};
   const state=integration({manifest:prepared});state.drive.folder=root;state.drive.prepared=prepared;
@@ -256,7 +265,9 @@ test('metadata waits during audio buffering and promotes the selected song',asyn
   tracks.set(a.id,a);tracks.set(b.id,b);engine.current=b;
   drive.readMetadata=async t=>{order.push(t.id);};
   const first=drive.ensureMetadata(a),second=drive.ensureMetadata(b);
-  assert.deepEqual(order,[]);engine.el=()=>({readyState:3});drive.pumpTags();await Promise.all([first,second]);
+  assert.deepEqual(order,[]);engine.el=()=>({readyState:3});drive.pumpTags();await second;
+  assert.deepEqual(order,['selected']);
+  engine.playing=false;drive.pumpTags();await first;
   clearTimeout(drive.tagTimer);assert.deepEqual(order,['selected','first']);
 });
 test('rapid track changes abort abandoned artwork reads',()=>{

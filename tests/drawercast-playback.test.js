@@ -112,7 +112,7 @@ test('pausing a pending Drive retry prevents its timer from starting audio',()=>
   const {Engine,ctx}=harness(),timers=[];let starts=0;
   ctx.setTimeout=fn=>{timers.push(fn);return timers.length};
   ctx.clearTimeout=id=>{if(id)timers[id-1]=()=>{}};
-  ctx.DriveSource={retryFileFor:()=>({__remoteURL:'https://drive.test/audio?retry=1'})};
+  ctx.DriveSource={retryFileFor:()=>({__remoteURL:'https://drive.test/audio?retry=1'}),pumpTags(){},status:''};
   ctx.audioSource=file=>file.__remoteURL;
   Engine.current={id:'gd_song',source:'drive',remote:true};Engine.playing=true;
   Engine.els[0].play=()=>{starts++};
