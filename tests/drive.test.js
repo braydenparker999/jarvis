@@ -108,8 +108,8 @@ const source=await readFile(new URL('../public/drawercast/player.js',import.meta
 function integration({fail=false,manifest=null,files=[song]}={}){
   const tracks=new Map([['a15',{id:'a15',remote:true}],['local',{id:'local'}],['gd_old12345678',{id:'gd_old12345678',source:'drive'}]]);
   const removed=[];const component=source.slice(source.indexOf('const DriveSource={'),source.indexOf('\nconst Engine = {'));
-  const context=vm.createContext({AbortController,setTimeout,clearTimeout,SourceLibrary:{enabled:()=>true},sourceTrackEnabled:t=>!!t,MusicSources:{refresh(){}},LIB:{map:tracks},
-    allTracks:()=>[...tracks.values()],IDB:{async bulk(){}},libAdd:t=>tracks.set(t.id,t),
+  const context=vm.createContext({AbortController,AbortSignal,setTimeout,clearTimeout,document:{visibilityState:'visible',addEventListener(){}},SourceLibrary:{enabled:()=>true},sourceTrackEnabled:t=>!!t,MusicSources:{refresh(){}},LIB:{map:tracks},
+    allTracks:()=>[...tracks.values()],IDB:{async bulk(){}},persistTracks:async()=>{},libAdd:t=>tracks.set(t.id,t),
     async removeTracks(ids){removed.push(...ids);ids.forEach(id=>tracks.delete(id));},
     Engine:{queue:[],current:null,buildOrder(){this.order=this.queue.map((_,i)=>i);},saveState(){},stop(){}},
     Views:{refreshAll(){}},UI:{renderNowPlaying(){},renderPlayState(){}},localStorage:{setItem(){},removeItem(){}},
@@ -122,12 +122,13 @@ function integration({fail=false,manifest=null,files=[song]}={}){
   };
   drive.helper={driveTrack,folderId};return {drive,tracks,removed,engine:context.Engine,get listCalls(){return listCalls;},get manifestCalls(){return manifestCalls;}};
 }
-test('Drive startup keeps a complete cached snapshot and makes recursive refresh on-demand',()=>{
+test('Drive startup opens its cached snapshot and automatically watches the prepared catalog',()=>{
   const driveStart=source.indexOf('const DriveSource={');
   const install=source.slice(source.indexOf('async install(){',driveStart),source.indexOf('fileFor(t){',driveStart));
-  assert.match(install,/Saved library · ['"]?\+fresh\.length\+['"]? songs · refresh on demand/);
-  assert.match(install,/if\(cached\.length\)/);
-  assert.match(install,/else\{\s*await this\.connect\(this\.folder,true\)/);
+  assert.match(install,/Saved library · ['"]?\+fresh\.length\+['"]? songs · catalog current/);
+  assert.match(install,/Object\.keys\(this\.prepared\).*manifestDelay=1000/s);
+  assert.match(source,/scheduleManifestCheck\(delay=60000\)/);
+  assert.match(source,/document\.visibilityState==='visible'.*scheduleManifestCheck\(0\)/s);
 });
 test('Drive playback retries one fresh URL and metadata work yields during a refresh',()=>{
   assert.match(source,/retryFileFor\(t\)/);
@@ -135,6 +136,12 @@ test('Drive playback retries one fresh URL and metadata work yields during a ref
   assert.match(source,/if\(this\.busy\).*setTimeout\(\(\)=>this\.pumpTags\(\),1000\)/s);
 });
 
+test('a newly updated manifest automatically triggers an authoritative background folder sync',async()=>{
+  const prepared={[file]:{size:4000,md5:'one',title:'Manifest title'}};
+  const state=integration({manifest:prepared});state.drive.folder=root;
+  assert.equal(await state.drive.checkManifest(),true);clearTimeout(state.drive.manifestTimer);
+  assert.equal(state.listCalls,1);assert.ok(state.tracks.has('gd_'+file));
+});
 test('Drive refresh lists the folder and applies manifest metadata only to matching files',async()=>{
   const prepared={[file]:{size:4000,md5:'one',title:'Manifest title',artist:'Manifest artist',dur:123},
     stale12345678901:{name:'Removed.opus',size:1,md5:'gone',title:'Removed song'}};
