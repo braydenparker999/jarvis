@@ -126,6 +126,7 @@ const IDB = (function(){
   function tx(store,mode){ return open().then(db=>db.transaction(store,mode).objectStore(store)); }
   function wrap(req){ return new Promise((res,rej)=>{ req.onsuccess=()=>res(req.result); req.onerror=()=>rej(req.error); }); }
   return {
+    catalog:(module,snapshot)=>open().then(db=>module.commitCatalog(db,snapshot)),
     get:(s,k)=>tx(s,'readonly').then(o=>wrap(o.get(k))),
     set:(s,k,v)=>tx(s,'readwrite').then(o=>wrap(o.put(v,k))),
     del:(s,k)=>tx(s,'readwrite').then(o=>wrap(o.delete(k))),
@@ -1141,6 +1142,7 @@ const MetadataRepair={
 async function getArtURL(t, small){
   if(t?.source==='drive') await DriveSource.ensureMetadata(t);
   else await MetadataRepair.ensure(t);
+  if(t?.source==='drive'&&t.coverURL&&!t.customArt)return t.coverURL;
   if(t && t.remote && !t.artKey) return t.source==='drive'?null:DrawerCast.artURL(t);
   if(!t || !t.artKey) return null;
   const key = small ? t.artKey+'_t' : t.artKey;
@@ -2172,7 +2174,7 @@ function audioSource(file){return file&&file.__remoteURL?file.__remoteURL:URL.cr
 /* Google Drive is a separate remote source. API credentials stay out of track
    metadata and exports; the deployment injects the owner-approved shared key. */
 const DriveSource={
-  api:null,helper:null,folder:'',prepared:{},busy:false,status:'Not connected',error:'',controller:null,playbackRetry:new Map(),
+  api:null,helper:null,catalog:null,generation:null,folder:'',prepared:{},busy:false,status:'Not connected',error:'',controller:null,playbackRetry:new Map(),
   manifestTimer:null,manifestChecking:false,manifestListener:false,
   async install(){
     let manifestDelay=60000;
@@ -2181,12 +2183,15 @@ const DriveSource={
       this.manifestListener=true;
     }
     try{
-      this.helper=await import('./drive-api.js?v=drive-qol-r22');
+      this.helper=await import('./drive-api.js?v=catalog-v2');
+      this.catalog=await import('./drive-catalog.js?v=catalog-v2');
       const response=await fetch('/assets/drive-config.json',{cache:'no-store',signal:AbortSignal.timeout(15000)});
       if(!response.ok)throw Error('Drive configuration could not be loaded.');
       const config=await response.json();this.api=this.helper.createDriveApi(config.apiKey);
       this.folder=this.helper.folderId(config.folderId);
-      try{const saved=localStorage.getItem('drawercast.drive.folder');if(saved)this.folder=this.helper.folderId(saved);}catch(e){}
+      // The managed publisher owns this root; old custom-folder preferences
+      // cannot redirect the authoritative catalog.
+      try{this.generation=await IDB.get('kv','drive.catalog.v2');}catch(e){}
       this.prepared={};
       if(!SourceLibrary.enabled('drive')){this.status='Disabled';MusicSources.refresh();return;}
       // The saved snapshot is already in the library. Catalog requests must not
@@ -2200,7 +2205,7 @@ const DriveSource={
       }
     }catch(e){this.error=e.message;this.status='Drive unavailable';}finally{MusicSources.refresh();this.scheduleManifestCheck(manifestDelay);}
   },
-  scheduleManifestCheck(delay=60000){
+  scheduleManifestCheck(delay=300000){
     clearTimeout(this.manifestTimer);
     if(!SourceLibrary.enabled('drive')||!this.api)return;
     this.manifestTimer=setTimeout(()=>this.checkManifest(),delay);
@@ -2208,55 +2213,17 @@ const DriveSource={
   },
   async checkManifest(){
     if(this.manifestChecking||this.busy||!this.api||!SourceLibrary.enabled('drive')){this.scheduleManifestCheck();return false;}
-    if(document.visibilityState!=='visible'){this.scheduleManifestCheck();return false;}
-    if(Engine.current?.source==='drive'&&Engine.playing&&Engine.el().readyState<3){this.scheduleManifestCheck(5000);return false;}
-    this.manifestChecking=true;
-    let nextDelay=60000;
-    try{
-      const prepared=await this.api.manifest(this.folder,AbortSignal.timeout(10000));
-      const cached=allTracks(true).filter(t=>t.source==='drive'&&t.driveFolder===this.folder);
-      const changed=Object.entries(prepared).some(([id,meta])=>{
-        const old=LIB.map.get('gd_'+id);
-        return !old||old.driveFolder!==this.folder||old.md5!==meta.md5||old.size!==Number(meta.size);
-      });
-      const metadataChanged=JSON.stringify(prepared)!==JSON.stringify(this.prepared);
-      // A full folder walk and a 1,000-song library rewrite can compete with
-      // media ranges. Apply catalog changes after playback pauses instead.
-      if((changed||metadataChanged)&&Engine.current?.source==='drive'&&Engine.playing){
-        this.status='Drive catalog update pending · pause playback to sync';
-        nextDelay=30000;
-        return false;
-      }
-      this.prepared=prepared;
-      if(changed){
-        this.status='Updated Drive catalog found · syncing…';MusicSources.refresh();
-        return await this.connect(this.folder,true);
-      }
-      // Most polls find the same manifest. Avoid rewriting the whole catalog
-      // and rebuilding a large song list every minute.
-      if(!metadataChanged){
-        if(this.status.includes('checking catalog'))this.status='Saved library · '+cached.length+' songs · catalog current';
-        return true;
-      }
-      const fresh=cached.map(old=>{
-        const name=baseName(old.path||old.title||'track.opus');
-        const folder=(old.path||'').split('/').slice(0,-1).join('/')||'Music';
-        const file={id:old.remoteId,name,mimeType:old.mimeType||'audio/'+(old.ext||'opus'),size:String(old.size||0),
-          modifiedTime:new Date(old.mtime||0).toISOString(),md5Checksum:old.md5||'',folder};
-        return this.helper.driveTrack(file,this.folder,prepared[old.remoteId],old);
-      });
-      await persistTracks(fresh);fresh.forEach(libAdd);Views.refreshAll();
-      this.status='Saved library · '+fresh.length+' songs · catalog current';
-      return true;
-    }catch(e){
-      const cached=allTracks(true).filter(t=>t.source==='drive'&&t.driveFolder===this.folder);
-      if(cached.length)this.status='Saved library · '+cached.length+' songs · catalog check unavailable';
-      return false;
+    if(document.visibilityState!=='visible'||navigator.onLine===false){this.scheduleManifestCheck();return false;}
+    if(Engine.current?.source==='drive'&&Engine.playing){
+      this.status='Saved library · catalog check after playback';this.scheduleManifestCheck(30000);return false;
     }
-    finally{this.manifestChecking=false;this.scheduleManifestCheck(nextDelay);MusicSources.refresh();}
+    this.manifestChecking=true;
+    try{return await this.connect(this.folder,true);}
+    finally{this.manifestChecking=false;this.scheduleManifestCheck();}
   },
   fileFor(t){
     if(!this.api)return null;
+    if(t.availability==='blocked')throw Error('This song is not downloadable. Check its Drive sharing settings.');
     const retry=this.playbackRetry.get(t.id)||0;
     const url=this.api.mediaURL({id:t.remoteId})+(retry?'&retry='+retry:'');
     return {__remoteURL:url,name:baseName(t.path),size:t.size,type:t.mimeType};
@@ -2269,7 +2236,7 @@ const DriveSource={
   tagJobs:new Map(),tagQueue:[],tagFailures:new Set(),tagActive:null,tagTimer:null,
   prioritize(t){this.tagNotBefore=Date.now()+1000;if(this.tagActive&&this.tagActive.t.id!==t?.id)this.tagActive.controller?.abort();},
   ensureMetadata(t){
-    if(!t||!sourceTrackEnabled(t)||t.source!=='drive'||t.driveTagVersion===1||!this.api)return Promise.resolve();
+    if(!t||t.catalogVersion===2||!sourceTrackEnabled(t)||t.source!=='drive'||t.driveTagVersion===1||!this.api)return Promise.resolve();
     const key=t.id+'|'+t.md5+'|'+t.size;
     if(this.tagFailures.has(key))return Promise.resolve();
     if(this.tagJobs.has(key))return this.tagJobs.get(key);
@@ -2321,57 +2288,60 @@ const DriveSource={
   },
   async connect(value,quiet=false){
     if(!SourceLibrary.enabled('drive')||this.busy)return false;
-    if(!this.api){this.error='Drive configuration is unavailable. Reload the page and try again.';return false;}
-    this.busy=true;this.error='';this.status='Checking Drive…';this.tagFailures.clear();
+    if(!this.api||!this.catalog){this.error='Drive configuration is unavailable. Reload the page and try again.';return false;}
+    if(Engine.current?.source==='drive'&&Engine.playing){
+      this.status='Drive catalog update pending · pause playback to sync';
+      if(!quiet)toast(this.status);return false;
+    }
+    this.busy=true;this.error='';this.status='Checking published catalog…';
     this.tagActive?.controller?.abort();clearTimeout(this.tagTimer);MusicSources.refresh();
     const controller=new AbortController();this.controller=controller;
-    const timeout=setTimeout(()=>controller.abort(),240000);
+    const timeout=setTimeout(()=>controller.abort(),45000);
     try{
       const folderId=this.helper.folderId(value);
-      const progress=state=>{
-        if(controller.signal.aborted)return;
-        this.status='Checking Drive… '+state.files+' songs · '+state.folders+' folders';
-        MusicSources.refresh();
-        if($('#drive-status'))$('#drive-status').textContent=this.status;
-      };
-      // The folder listing is authoritative; the manifest only supplies prepared
-      // metadata for files whose size and MD5 still match.
-      const [listing,prepared]=await Promise.all([
-        this.api.list(folderId,controller.signal,progress),
-        this.api.manifest(folderId,controller.signal).catch(()=>({}))
-      ]);
-      this.prepared=prepared;
+      if(folderId!==this.folder)throw Error('This folder needs a published catalog before it can be connected.');
+      const cached=allTracks(true).filter(t=>t.source==='drive'&&t.driveFolder===this.folder);
+      const generation=this.generation?.rootId===this.folder&&this.generation.count===cached.length?this.generation.generation:null;
+      const snapshot=await this.catalog.readCatalog({root:folderId,generation,signal:controller.signal});
       if(controller.signal.aborted||!SourceLibrary.enabled('drive'))return false;
-      const fresh=listing.files.map(f=>this.helper.driveTrack(f,listing.id,prepared[f.id],LIB.map.get('gd_'+f.id)));
-      // Commit only after every page succeeds. Failed reads keep the old library.
-      await IDB.bulk('tracks',fresh.map(t=>[t.id,t]));
-      const seen=new Set(fresh.map(t=>t.id));
-      const gone=allTracks(true).filter(t=>t.source==='drive'&&!seen.has(t.id)).map(t=>t.id);
-      if(gone.includes(Engine.current?.id))Engine.stop();
-      if(gone.length)await removeTracks(gone);
-      fresh.forEach(libAdd);this.folder=listing.id;
+      if(snapshot.unchanged){this.status='Saved library · '+cached.length+' songs · catalog current';return true;}
+      // A selection made during the fetch takes priority. Retry after pause.
+      if(Engine.current?.source==='drive'&&Engine.playing){this.status='Drive catalog update pending · pause playback to sync';return false;}
+      const {fresh,gone}=await IDB.catalog(this.catalog,snapshot);
+      // The committed database is the authority. Only now swap memory indexes.
+      for(const id of gone){LIB.map.delete(id);FILES.delete(id);const i=LIB.ids.indexOf(id);if(i>=0)LIB.ids.splice(i,1);}
+      fresh.forEach(libAdd);this.generation=snapshot.pointer;
       const currentId=Engine.current?.id;
-      Engine.queue=Engine.queue.map(t=>LIB.map.get(t.id)||t);
-      if(gone.length&&Engine.queue.length){Engine.buildOrder();const at=Engine.queue.findIndex(t=>t.id===currentId);if(at>=0)Engine.pos=Engine.order.indexOf(at);}
+      Engine.queue=Engine.queue.filter(t=>!gone.includes(t.id)||t.id===currentId).map(t=>LIB.map.get(t.id)||t);
+      if(Engine.queue.length){Engine.buildOrder();const at=Engine.queue.findIndex(t=>t.id===currentId);if(at>=0)Engine.pos=Engine.order.indexOf(at);}
       try{localStorage.setItem('drawercast.drive.folder',this.folder);localStorage.removeItem('drawercast.drive.disabled');}catch(e){}
-      this.status=listing.name+' · '+fresh.length+' songs';
+      this.status=snapshot.pointer.name+' · '+fresh.length+' songs · published '+new Date(snapshot.pointer.publishedAt).toLocaleString();
       Views.refreshAll();
-      if(!Engine.current&&fresh.length&&SourceLibrary.enabled('drive')){Engine.queue=allTracks();Engine.buildOrder();Engine.pos=0;Engine.current=Engine.queue[Engine.order[0]];UI.renderNowPlaying(Engine.current);UI.renderPlayState();Engine.saveState();}
-      else if(Engine.current?.source==='drive'){Engine.current=LIB.map.get(Engine.current.id)||Engine.current;UI.renderNowPlaying(Engine.current);Waveform.load(Engine.current);}
-      if(!quiet)toast('Drive library ready · '+fresh.length+' songs');
+      if(!Engine.current&&fresh.length){Engine.queue=allTracks();Engine.buildOrder();Engine.pos=0;Engine.current=Engine.queue[Engine.order[0]];UI.renderNowPlaying(Engine.current);UI.renderPlayState();Engine.saveState();}
+      else if(Engine.current?.source==='drive'){
+        const live=LIB.map.get(Engine.current.id);
+        if(live){Engine.current=live;UI.renderNowPlaying(live);}
+        else this.status+=' · selected song was removed from Drive';
+      }
+      if(!quiet)toast('Drive catalog ready · '+fresh.length+' songs');
       return true;
-    }catch(e){this.error=e.name==='AbortError'?'Drive scan exceeded four minutes. Refresh to retry; your saved library is unchanged.':e.message;this.status='Drive refresh failed';if(!quiet)toast(this.error,6500);return false;}
-    finally{clearTimeout(timeout);this.busy=false;this.controller=null;MusicSources.refresh();this.pumpTags();this.scheduleManifestCheck();if($('#drive-status'))$('#drive-status').textContent=this.error||this.status;}
+    }catch(e){
+      const cached=allTracks(true).filter(t=>t.source==='drive');
+      this.error=e.name==='AbortError'?'Catalog update timed out. Your saved library is unchanged.':e.message;
+      this.status=cached.length?'Saved catalog · '+cached.length+' songs · update delayed':'Catalog temporarily unavailable';
+      if(!quiet)toast(this.status+' — '+this.error,6500);return false;
+    }
+    finally{clearTimeout(timeout);this.busy=false;this.controller=null;MusicSources.refresh();this.scheduleManifestCheck();if($('#drive-status'))$('#drive-status').textContent=this.status+(this.error?' — '+this.error:'');}
   },
   show(){
     dialog('Google Drive Music',
       '<p>Streams directly from your shared Drive folder. No A15 or Google login needed. Internet is required.</p>'+
       '<p id="drive-status" role="status">'+esc(this.error||this.status)+'</p>'+
-      '<label for="drive-folder">Music folder link</label><input class="field" id="drive-folder" value="'+esc(this.folder?'https://drive.google.com/drive/folders/'+this.folder:'')+'" style="margin:8px 0 14px" autocomplete="off">'+
+      '<label for="drive-folder">Published music folder</label><input class="field" readonly id="drive-folder" value="'+esc(this.folder?'https://drive.google.com/drive/folders/'+this.folder:'')+'" style="margin:8px 0 14px" autocomplete="off">'+
       '<p class="note">Only folders shared as Anyone with the link → Viewer can be read.</p>'+
-      '<p class="note">Your saved library opens instantly. Refresh folder only when Drive music changes; playback stays available while the new snapshot is checked.</p>'+
+      '<p class="note">Your saved library opens instantly. The online publisher checks Drive hourly. Refresh catalog loads its latest complete snapshot.</p>'+
       '<p class="note">Turning this source off keeps its saved track information and playlist entries.</p>',
-      [{label:'Refresh folder',pri:true},{label:'Close'}]);
+      [{label:'Refresh catalog',pri:true},{label:'Close'}]);
     const refresh=$$('#sheet .actions .btn')[0];
     refresh.onclick=async()=>{const field=$('#drive-folder');if(!field)return;refresh.disabled=true;if(!SourceLibrary.enabled('drive'))MusicSources.setEnabled('drive',true,false);await this.connect(field.value);refresh.disabled=false;};
   },

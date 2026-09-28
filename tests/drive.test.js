@@ -105,95 +105,55 @@ test('prepared metadata is accepted only for the matching file revision and neve
   assert.equal(changed.dur,0);
 });
 const source=await readFile(new URL('../public/drawercast/player.js',import.meta.url),'utf8');
-function integration({fail=false,manifest=null,files=[song]}={}){
+function integration({fail=false,storageFail=false,unchanged=false,files=[song]}={}){
   const tracks=new Map([['a15',{id:'a15',remote:true}],['local',{id:'local'}],['gd_old12345678',{id:'gd_old12345678',source:'drive'}]]);
-  const removed=[];let writes=0,redraws=0;const component=source.slice(source.indexOf('const DriveSource={'),source.indexOf('\nconst Engine = {'));
-  const context=vm.createContext({AbortController,AbortSignal,setTimeout,clearTimeout,document:{visibilityState:'visible',addEventListener(){}},SourceLibrary:{enabled:()=>true},sourceTrackEnabled:t=>!!t,MusicSources:{refresh(){}},LIB:{map:tracks},
-    allTracks:()=>[...tracks.values()],IDB:{async bulk(){}},persistTracks:async()=>{writes++},libAdd:t=>tracks.set(t.id,t),
-    async removeTracks(ids){removed.push(...ids);ids.forEach(id=>tracks.delete(id));},
-    Engine:{queue:[],current:null,buildOrder(){this.order=this.queue.map((_,i)=>i);},saveState(){},stop(){}},
+  const removed=[];let writes=0,redraws=0,reads=0;
+  const component=source.slice(source.indexOf('const DriveSource={'),source.indexOf('\nconst Engine = {'));
+  const context=vm.createContext({AbortController,AbortSignal,setTimeout,clearTimeout,navigator:{onLine:true},document:{visibilityState:'visible',addEventListener(){}},SourceLibrary:{enabled:()=>true},sourceTrackEnabled:t=>!!t,MusicSources:{refresh(){}},LIB:{map:tracks,ids:[...tracks.keys()]},FILES:new Map(),
+    allTracks:()=>[...tracks.values()],IDB:{async catalog(module,snapshot){if(storageFail)throw Error('Storage full');writes++;const fresh=snapshot.records.map(f=>driveTrack(f,root));const ids=new Set(fresh.map(t=>t.id));const gone=[...tracks.values()].filter(t=>t.source==='drive'&&!ids.has(t.id)).map(t=>t.id);removed.push(...gone);return {fresh,gone};}},libAdd:t=>tracks.set(t.id,t),
+    Engine:{queue:[],current:null,buildOrder(){this.order=this.queue.map((_,i)=>i);},saveState(){},stop(){throw Error('Must not stop audio');}},
     Views:{refreshAll(){redraws++}},UI:{renderNowPlaying(){},renderPlayState(){}},localStorage:{setItem(){},removeItem(){}},
     toast(){},$:()=>null,Waveform:{load(){}}});
   const drive=vm.runInContext(component+'\nDriveSource;',context);
-  let listCalls=0,manifestCalls=0;
-  drive.api={
-    async manifest(){manifestCalls++;if(manifest instanceof Error)throw manifest;if(manifest)return manifest;throw Error('Drive metadata manifest was not found.');},
-    async list(){listCalls++;if(fail)throw Error('Network failure');return {id:root,name:'Music',files};}
-  };
-  drive.helper={driveTrack,folderId};return {drive,tracks,removed,engine:context.Engine,get listCalls(){return listCalls;},get manifestCalls(){return manifestCalls;},get writes(){return writes;},get redraws(){return redraws;}};
+  drive.api={async list(){throw Error('Phone scan forbidden');},async manifest(){throw Error('Manifest discovery forbidden');}};
+  drive.catalog={async readCatalog(){reads++;if(fail)throw Error('Network failure');return {unchanged,pointer:{rootId:root,count:files.length,name:'Music',generation:'new',publishedAt:new Date().toISOString()},records:files};}};
+  drive.helper={driveTrack,folderId};drive.folder=root;drive.scheduleManifestCheck=()=>{};
+  return {drive,tracks,removed,engine:context.Engine,get reads(){return reads;},get writes(){return writes;},get redraws(){return redraws;}};
 }
-test('Drive startup opens its cached snapshot and automatically watches the prepared catalog',()=>{
-  const driveStart=source.indexOf('const DriveSource={');
-  const install=source.slice(source.indexOf('async install(){',driveStart),source.indexOf('  scheduleManifestCheck(delay=',driveStart));
-  assert.match(install,/Saved library · ['"]?\+cached\.length\+['"]? songs · checking catalog/);
-  assert.match(install,/manifestDelay=0/);
-  assert.doesNotMatch(install,/await this\.api\.manifest/);
-  assert.doesNotMatch(install,/await persistTracks\(fresh\)/);
-  assert.match(source,/scheduleManifestCheck\(delay=60000\)/);
-  assert.match(source,/document\.visibilityState==='visible'.*scheduleManifestCheck\(0\)/s);
+test('Drive startup and refresh have no browser folder listing or v1 manifest discovery',()=>{
+  const component=source.slice(source.indexOf('const DriveSource={'),source.indexOf('\nconst Engine = {'));
+  assert.doesNotMatch(component,/this\.api\.(list|manifest)\(/);
+  assert.match(component,/scheduleManifestCheck\(delay=300000\)/);
+  assert.match(component,/manifestDelay=0/);
 });
-test('Drive playback retries one fresh URL and metadata work yields during a refresh',()=>{
-  assert.match(source,/retryFileFor\(t\)/);
-  assert.match(source,/Drive stream stalled · retrying once/);
-  assert.match(source,/if\(this\.busy\).*setTimeout\(\(\)=>this\.pumpTags\(\),1000\)/s);
+test('Drive catalog applies a complete snapshot without touching local and A15 sources',async()=>{
+  const state=integration();assert.equal(await state.drive.connect(root),true);
+  assert.equal(state.reads,1);assert.equal(state.writes,1);
+  assert.ok(state.tracks.has('a15'));assert.ok(state.tracks.has('local'));assert.ok(state.tracks.has('gd_'+file));
+  assert.equal(state.tracks.has('gd_old12345678'),false);
 });
-
-test('a newly updated manifest automatically triggers an authoritative background folder sync',async()=>{
-  const prepared={[file]:{size:4000,md5:'one',title:'Manifest title'}};
-  const state=integration({manifest:prepared});state.drive.folder=root;
-  assert.equal(await state.drive.checkManifest(),true);clearTimeout(state.drive.manifestTimer);
-  assert.equal(state.listCalls,1);assert.ok(state.tracks.has('gd_'+file));
+test('network and storage failures both leave all previous songs and UI untouched',async()=>{
+  for(const options of [{fail:true},{storageFail:true}]){
+    const state=integration(options);assert.equal(await state.drive.connect(root),false);
+    assert.equal(state.tracks.size,3);assert.equal(state.removed.length,0);assert.equal(state.redraws,0);assert.match(state.drive.status,/update delayed/);
+  }
 });
-test('Drive catalog polling waits for the selected stream to acquire a playable buffer',async()=>{
-  const state=integration({manifest:{}});state.drive.folder=root;
-  state.engine.current={id:'gd_song',source:'drive'};state.engine.playing=true;
-  state.engine.el=()=>({readyState:2});
-  let nextCheck;
-  state.drive.scheduleManifestCheck=delay=>{nextCheck=delay;};
-  assert.equal(await state.drive.checkManifest(),false);
-  assert.equal(state.manifestCalls,0);assert.equal(nextCheck,5000);
+test('unchanged generation causes no track writes or redraws',async()=>{
+  const state=integration({unchanged:true});assert.equal(await state.drive.checkManifest(),true);
+  assert.equal(state.writes,0);assert.equal(state.redraws,0);
 });
-test('a changed catalog defers its folder walk until Drive playback pauses',async()=>{
-  const state=integration({manifest:{[file]:{size:4000,md5:'one',title:'Updated'}}});state.drive.folder=root;
-  state.engine.current={id:'gd_current',source:'drive'};state.engine.playing=true;state.engine.el=()=>({readyState:4});
-  assert.equal(await state.drive.checkManifest(),false);clearTimeout(state.drive.manifestTimer);
-  assert.equal(state.listCalls,0);assert.match(state.drive.status,/update pending/);
-  state.engine.playing=false;
-  assert.equal(await state.drive.checkManifest(),true);clearTimeout(state.drive.manifestTimer);
-  assert.equal(state.listCalls,1);
+test('catalog work yields to playing Drive audio until pause',async()=>{
+  const state=integration();state.engine.current={id:'gd_current',source:'drive'};state.engine.playing=true;
+  assert.equal(await state.drive.checkManifest(),false);assert.equal(state.reads,0);
+  assert.equal(await state.drive.connect(root),false);assert.equal(state.reads,0);
+  state.engine.playing=false;assert.equal(await state.drive.checkManifest(),true);assert.equal(state.reads,1);
 });
-test('an unchanged Drive catalog poll does not rewrite songs or redraw the library',async()=>{
-  const prepared={[file]:{size:4000,md5:'one',title:'Manifest title'}};
-  const state=integration({manifest:prepared});state.drive.folder=root;state.drive.prepared=prepared;
-  state.tracks.set('gd_'+file,driveTrack(song,root,prepared));
-  assert.equal(await state.drive.checkManifest(),true);clearTimeout(state.drive.manifestTimer);
-  assert.equal(state.listCalls,0);assert.equal(state.writes,0);assert.equal(state.redraws,0);
+test('v2 records never start phone metadata range requests',async()=>{
+  const state=integration();await state.drive.ensureMetadata({id:'gd_track',source:'drive',catalogVersion:2});
+  assert.equal(state.drive.tagQueue.length,0);
 });
-test('Drive refresh lists the folder and applies manifest metadata only to matching files',async()=>{
-  const prepared={[file]:{size:4000,md5:'one',title:'Manifest title',artist:'Manifest artist',dur:123},
-    stale12345678901:{name:'Removed.opus',size:1,md5:'gone',title:'Removed song'}};
-  const state=integration({manifest:prepared});assert.equal(await state.drive.connect(root),true);
-  assert.equal(state.manifestCalls,1);assert.equal(state.listCalls,1);
-  const track=state.tracks.get('gd_'+file);assert.equal(track.title,'Manifest title');assert.equal(track.artist,'Manifest artist');assert.equal(track.dur,123);
-  assert.equal(track.waveformVersion,0);assert.equal(track.waveformFile,null);
-  assert.equal(state.tracks.has('gd_stale12345678901'),false);assert.match(state.drive.status,/Music · 1 songs/);
-});
-test('songs added after the manifest was written still appear',async()=>{
-  const state=integration({manifest:{},files:[song,{...song,id:'newsong12345678',name:'02 - New Artist - New Song.opus',md5Checksum:'new'}]});
-  assert.equal(await state.drive.connect(root),true);
-  const added=state.tracks.get('gd_newsong12345678');assert.equal(added.title,'New Song');assert.equal(added.artist,'New Artist');
-});
-test('Drive refresh still succeeds when the manifest is unavailable',async()=>{
-  const state=integration({manifest:new Error('Drive metadata manifest was not found.')});assert.equal(await state.drive.connect(root),true);
-  assert.equal(state.listCalls,1);assert.ok(state.tracks.has('gd_'+file));
-});
-test('Drive refresh removes only missing Drive tracks and preserves A15/local sources',async()=>{
-  const {drive,tracks,removed}=integration();assert.equal(await drive.connect(root),true);
-  assert.deepEqual(removed,['gd_old12345678']);assert.ok(tracks.has('a15'));assert.ok(tracks.has('local'));assert.ok(tracks.has('gd_'+file));
-});
-test('Drive read failure preserves the previous library',async()=>{
-  const {drive,tracks,removed}=integration({fail:true});assert.equal(await drive.connect(root),false);
-  assert.equal(tracks.size,3);assert.deepEqual(removed,[]);
+test('unmanaged roots fail without scanning or replacing the cached library',async()=>{
+  const state=integration();assert.equal(await state.drive.connect('anotherFolder123'),false);assert.equal(state.reads,0);assert.equal(state.tracks.size,3);
 });
 test('numbered Muse filenames provide immediate artist/title while embedded tags load',()=>{
   const t=driveTrack({...song,name:'10 - Alice In Chains - Nutshell (Unplugged).opus'},root);
@@ -281,4 +241,9 @@ test('Drive CORS may hide Content-Range; an exact bounded 206 body is still read
   const f=api.metadataFile({remoteId:file,size:500000});assert.equal((await f.slice(0,32768).arrayBuffer()).byteLength,32768);
   const bad=createDriveApi(key,async()=>new Response(new Uint8Array(131073),{status:206}));
   await assert.rejects(bad.metadataFile({remoteId:file,size:500000}).slice(0,32768).arrayBuffer(),/exceeded/);
+});
+
+test('publisher rejects an incompleteSearch response instead of publishing deletions',async()=>{
+  let calls=0;const api=createDriveApi(key,async()=>Response.json(calls++===0?folder:{incompleteSearch:true,files:[song]}));
+  await assert.rejects(api.list(root),/incomplete/);
 });

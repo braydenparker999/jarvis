@@ -57,12 +57,12 @@ export function createDriveApi(key, fetcher = fetch) {
       const children = [];
       let token = '', seen = new Set();
       do {
-        const page = await get('', {q:"'" + current.id + "' in parents and trashed = false", pageSize:'1000', fields:'nextPageToken,files(id,name,mimeType,size,modifiedTime,md5Checksum,capabilities(canDownload))', ...(token ? {pageToken:token} : {})}, signal);
-        if (!Array.isArray(page.files)) throw Error('Drive returned an incomplete folder listing. Your saved library is unchanged.');
+        const page = await get('', {q:"'" + current.id + "' in parents and trashed = false", pageSize:'1000', fields:'nextPageToken,incompleteSearch,files(id,name,mimeType,size,modifiedTime,md5Checksum,capabilities(canDownload))', ...(token ? {pageToken:token} : {})}, signal);
+        if (page.incompleteSearch || !Array.isArray(page.files)) throw Error('Drive returned an incomplete folder listing. Your saved library is unchanged.');
         for (const f of page.files) {
           if (!ID.test(f.id || '') || typeof f.name !== 'string') continue;
           if (f.mimeType === 'application/vnd.google-apps.folder') children.push({id:f.id,path:current.path+'/'+f.name});
-          else if (AUDIO.test(f.name) && f.capabilities?.canDownload !== false) files.set(f.id,{...f,folder:current.path});
+          else if (AUDIO.test(f.name)) files.set(f.id,{...f,folder:current.path,availability:f.capabilities?.canDownload===false?'blocked':'ready'});
         }
         if (files.size > 50000) throw Error('Choose a folder with fewer than 50,000 songs.');
         token = page.nextPageToken || '';
