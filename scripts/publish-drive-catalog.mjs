@@ -88,7 +88,8 @@ async function main(){
     const genDir=join(work,'g',catalog.pointer.generation);await mkdir(genDir);
     for(let i=0;i<catalog.shards.length;i++)await writeFile(join(genDir,i+'.json'),catalog.shards[i]);
     const pointerFile=join(work,'pointer.json');await writeFile(pointerFile,JSON.stringify(catalog.pointer)+'\n');
-    const az=async args=>exec('az',['storage','blob',...args,'--account-name','missionarytube','--auth-mode','login','--only-show-errors','--output','none'],{timeout:180000,maxBuffer:10000});
+    console.log('Catalog validated: '+catalog.shards.length+' shards. Uploading immutable files.');
+    const az=async args=>exec('az',['storage','blob',...args,'--account-name','missionarytube','--auth-mode','login','--only-show-errors','--no-progress','--output','none'],{timeout:180000,maxBuffer:2*1024*1024});
     // Cover and shard names are content addressed. Pointer is the sole mutable
     // commit marker and is uploaded only after all public reads verify.
     if(records.some(r=>r.cover)&&candidates.length)await az(['upload-batch','--destination','$web','--destination-path','assets/drive-catalog-v2/covers','--source',join(work,'covers'),'--overwrite','true','--content-type','image/jpeg','--content-cache-control','public,max-age=31536000,immutable']);
@@ -109,4 +110,4 @@ async function main(){
     console.log('Published verified catalog: '+records.length+' songs, '+catalog.shards.length+' shards, '+preparedCount+' metadata records prepared. Generation '+catalog.pointer.generation);
   }finally{await rm(work,{recursive:true,force:true});}
 }
-if(process.argv[1]===fileURLToPath(import.meta.url))main().catch(()=>{console.error('Catalog publication failed; inspect source availability, Azure permissions, or the large-removal guard. The previous pointer remains valid unless final verification alone failed.');process.exitCode=1;});
+if(process.argv[1]===fileURLToPath(import.meta.url))main().catch(error=>{const detail=String(error.stderr||error.message||'Unknown failure').replace(/AIza[A-Za-z0-9_-]+/g,'[redacted]').slice(-2000);console.error(detail);console.error('Catalog publication failed; inspect source availability, Azure permissions, or the large-removal guard. The previous pointer remains valid unless final verification alone failed.');process.exitCode=1;});
