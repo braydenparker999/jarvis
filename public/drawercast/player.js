@@ -2663,6 +2663,7 @@ const Engine = {
     this.ensureCtx();
     clearTimeout(this._driveRetryTimer);
     const a=this.el();
+    if(this.current?.source==='drive'&&this._driveErrorReportedId===this.current.id){this.playIndex(this.order[this.pos],true);return;}
     if(a.error && this.current && this.current.remote){this.playIndex(this.order[this.pos],true);return;}
     if(!a.src){
       if(this.queue.length){this.playIndex(this.order[Math.max(this.pos,0)]||0,true);return;}

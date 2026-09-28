@@ -120,6 +120,16 @@ test('pausing a pending Drive retry prevents its timer from starting audio',()=>
   assert.equal(starts,0);assert.equal(Engine.playing,false);
 });
 
+test('tapping Play after a terminal Drive rejection starts a fresh selection',()=>{
+  const {Engine}=harness();let selected=0,starts=0;
+  Engine.current={id:'gd_song',source:'drive',remote:true};
+  Engine.queue=[Engine.current];Engine.order=[0];Engine.pos=0;
+  Engine._driveErrorReportedId='gd_song';
+  Engine.playIndex=(index,autoplay)=>{selected++;assert.equal(index,0);assert.equal(autoplay,true)};
+  Engine.els[0].play=()=>{starts++};
+  Engine.play();assert.equal(selected,1);assert.equal(starts,0);
+});
+
 test('a new selection stops the previous stream while its file is loading',async()=>{
   const {Engine,ctx}=harness();let resolveFile,advances=0,starts=0;
   ctx.sourceTrackEnabled=()=>true;
