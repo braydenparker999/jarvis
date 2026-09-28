@@ -209,7 +209,7 @@ test('actual embedded Opus parser reads tags and artwork from a bounded head, wi
   assert.equal(calls.length,1);assert.equal(calls[0].start,0);assert.equal(calls[0].end,131071);
 });
 test('metadata scheduler deduplicates covers and caches completed jobs',async()=>{
-  const {drive,tracks}=integration();let release;const order=[];
+  const {drive,tracks}=integration();drive.catalog=null;let release;const order=[];
   const t1={id:'gd_one',source:'drive',md5:'one',size:1000},t2={id:'gd_two',source:'drive',md5:'two',size:1000};tracks.set(t1.id,t1);tracks.set(t2.id,t2);
   drive.readMetadata=async t=>{order.push(t.id);if(t===t1)await new Promise(r=>release=r);t.driveTagVersion=1;};
   const first=drive.ensureMetadata(t1);assert.equal(first,drive.ensureMetadata(t1));const second=drive.ensureMetadata(t2);
@@ -219,7 +219,7 @@ test('metadata scheduler deduplicates covers and caches completed jobs',async()=
 
 
 test('metadata waits during audio buffering and promotes the selected song',async()=>{
-  const {drive,tracks,engine}=integration();const order=[];
+  const {drive,tracks,engine}=integration();drive.catalog=null;const order=[];
   engine.playing=true;engine.el=()=>({readyState:0});
   const a={id:'first',source:'drive',md5:'a'},b={id:'selected',source:'drive',md5:'b'};
   tracks.set(a.id,a);tracks.set(b.id,b);engine.current=b;
@@ -246,4 +246,9 @@ test('Drive CORS may hide Content-Range; an exact bounded 206 body is still read
 test('publisher rejects an incompleteSearch response instead of publishing deletions',async()=>{
   let calls=0;const api=createDriveApi(key,async()=>Response.json(calls++===0?folder:{incompleteSearch:true,files:[song]}));
   await assert.rejects(api.list(root),/incomplete/);
+});
+
+test('migration never probes legacy cached tracks once the catalog reader is installed',async()=>{
+  const state=integration();await state.drive.ensureMetadata({id:'gd_legacy',source:'drive',md5:'old',size:4000});
+  assert.equal(state.drive.tagQueue.length,0);
 });

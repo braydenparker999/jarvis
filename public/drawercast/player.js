@@ -2215,7 +2215,7 @@ const DriveSource={
     if(this.manifestChecking||this.busy||!this.api||!SourceLibrary.enabled('drive')){this.scheduleManifestCheck();return false;}
     if(document.visibilityState!=='visible'||navigator.onLine===false){this.scheduleManifestCheck();return false;}
     if(Engine.current?.source==='drive'&&Engine.playing){
-      this.status='Saved library · catalog check after playback';this.scheduleManifestCheck(30000);return false;
+      this.status='Drive catalog update pending · pause playback to sync';this.scheduleManifestCheck(30000);return false;
     }
     this.manifestChecking=true;
     try{return await this.connect(this.folder,true);}
@@ -2236,7 +2236,7 @@ const DriveSource={
   tagJobs:new Map(),tagQueue:[],tagFailures:new Set(),tagActive:null,tagTimer:null,
   prioritize(t){this.tagNotBefore=Date.now()+1000;if(this.tagActive&&this.tagActive.t.id!==t?.id)this.tagActive.controller?.abort();},
   ensureMetadata(t){
-    if(!t||t.catalogVersion===2||!sourceTrackEnabled(t)||t.source!=='drive'||t.driveTagVersion===1||!this.api)return Promise.resolve();
+    if(!t||this.catalog||t.catalogVersion===2||!sourceTrackEnabled(t)||t.source!=='drive'||t.driveTagVersion===1||!this.api)return Promise.resolve();
     const key=t.id+'|'+t.md5+'|'+t.size;
     if(this.tagFailures.has(key))return Promise.resolve();
     if(this.tagJobs.has(key))return this.tagJobs.get(key);
