@@ -124,9 +124,11 @@ function integration({fail=false,manifest=null,files=[song]}={}){
 }
 test('Drive startup opens its cached snapshot and automatically watches the prepared catalog',()=>{
   const driveStart=source.indexOf('const DriveSource={');
-  const install=source.slice(source.indexOf('async install(){',driveStart),source.indexOf('fileFor(t){',driveStart));
-  assert.match(install,/Saved library · ['"]?\+fresh\.length\+['"]? songs · catalog current/);
-  assert.match(install,/Object\.keys\(this\.prepared\).*manifestDelay=1000/s);
+  const install=source.slice(source.indexOf('async install(){',driveStart),source.indexOf('  scheduleManifestCheck(delay=',driveStart));
+  assert.match(install,/Saved library · ['"]?\+cached\.length\+['"]? songs · checking catalog/);
+  assert.match(install,/manifestDelay=0/);
+  assert.doesNotMatch(install,/await this\.api\.manifest/);
+  assert.doesNotMatch(install,/await persistTracks\(fresh\)/);
   assert.match(source,/scheduleManifestCheck\(delay=60000\)/);
   assert.match(source,/document\.visibilityState==='visible'.*scheduleManifestCheck\(0\)/s);
 });
@@ -141,6 +143,15 @@ test('a newly updated manifest automatically triggers an authoritative backgroun
   const state=integration({manifest:prepared});state.drive.folder=root;
   assert.equal(await state.drive.checkManifest(),true);clearTimeout(state.drive.manifestTimer);
   assert.equal(state.listCalls,1);assert.ok(state.tracks.has('gd_'+file));
+});
+test('Drive catalog polling waits for the selected stream to acquire a playable buffer',async()=>{
+  const state=integration({manifest:{}});state.drive.folder=root;
+  state.engine.current={id:'gd_song',source:'drive'};state.engine.playing=true;
+  state.engine.el=()=>({readyState:2});
+  let nextCheck;
+  state.drive.scheduleManifestCheck=delay=>{nextCheck=delay;};
+  assert.equal(await state.drive.checkManifest(),false);
+  assert.equal(state.manifestCalls,0);assert.equal(nextCheck,5000);
 });
 test('an unchanged Drive catalog poll does not rewrite songs or redraw the library',async()=>{
   const prepared={[file]:{size:4000,md5:'one',title:'Manifest title'}};

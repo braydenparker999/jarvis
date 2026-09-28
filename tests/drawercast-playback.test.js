@@ -78,6 +78,48 @@ test('Drive metadata cannot reset the retry budget and an old timer cannot resta
   assert.equal(plays,0,'a stale retry must not start the new selection');
 });
 
+test('Drive retry resumes the interrupted position and reports only one terminal error',()=>{
+  const {Engine,ctx}=harness(),timers=[],messages=[];let starts=0;
+  ctx.setTimeout=fn=>{timers.push(fn);return timers.length};
+  ctx.toast=message=>messages.push(message);
+  ctx.DriveSource={retryFileFor:()=>({__remoteURL:'https://drive.test/audio?retry=1'})};
+  ctx.audioSource=file=>file.__remoteURL;
+  Engine.current={id:'gd_song',source:'drive',remote:true};Engine.playing=true;
+  Engine.els[0].currentTime=42;Engine.els[0].duration=100;
+  Engine.els[0].play=()=>{starts++;return Promise.resolve()};
+  Engine.onError(0);
+  Engine.els[0].currentTime=0;Engine.els[0].events.loadedmetadata();
+  assert.equal(Engine.els[0].currentTime,42);
+  timers[0]();assert.equal(starts,1);
+  Engine.onError(0);Engine.onError(0);
+  assert.equal(Engine.playing,false);
+  assert.equal(messages.filter(message=>message.includes('still could not play')).length,1);
+});
+
+test('Drive initial play rejection uses bounded retry, while a silent start arms the stall timer',()=>{
+  const {Engine,ctx}=harness(),timers=[];let retries=0;
+  ctx.setTimeout=fn=>{timers.push(fn);return timers.length};
+  ctx.DriveSource={retryFileFor:()=>({__remoteURL:'https://drive.test/audio?retry='+ ++retries})};
+  ctx.audioSource=file=>file.__remoteURL;
+  Engine.current={id:'gd_song',source:'drive',remote:true};
+  Engine.play();assert.equal(timers.length,1,'a pending initial play has a watchdog');
+  Engine.els[0].reject({name:'NotSupportedError'});
+  assert.equal(retries,1);
+  Engine._playRequest++;timers.at(-1)();assert.equal(Engine.playing,false,'an abandoned retry cannot restart playback');
+});
+
+test('pausing a pending Drive retry prevents its timer from starting audio',()=>{
+  const {Engine,ctx}=harness(),timers=[];let starts=0;
+  ctx.setTimeout=fn=>{timers.push(fn);return timers.length};
+  ctx.clearTimeout=id=>{if(id)timers[id-1]=()=>{}};
+  ctx.DriveSource={retryFileFor:()=>({__remoteURL:'https://drive.test/audio?retry=1'})};
+  ctx.audioSource=file=>file.__remoteURL;
+  Engine.current={id:'gd_song',source:'drive',remote:true};Engine.playing=true;
+  Engine.els[0].play=()=>{starts++};
+  Engine.onError(0);Engine.pause();timers[0]();
+  assert.equal(starts,0);assert.equal(Engine.playing,false);
+});
+
 test('a new selection stops the previous stream while its file is loading',async()=>{
   const {Engine,ctx}=harness();let resolveFile,advances=0,starts=0;
   ctx.sourceTrackEnabled=()=>true;

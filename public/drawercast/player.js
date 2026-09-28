@@ -2186,27 +2186,15 @@ const DriveSource={
       if(!response.ok)throw Error('Drive configuration could not be loaded.');
       const config=await response.json();this.api=this.helper.createDriveApi(config.apiKey);
       this.folder=this.helper.folderId(config.folderId);
-      try{this.folder=localStorage.getItem('drawercast.drive.folder')||this.folder;}catch(e){}
+      try{const saved=localStorage.getItem('drawercast.drive.folder');if(saved)this.folder=this.helper.folderId(saved);}catch(e){}
       this.prepared={};
-      try{this.prepared=await this.api.manifest(this.folder,AbortSignal.timeout(10000));}catch(e){}
       if(!SourceLibrary.enabled('drive')){this.status='Disabled';MusicSources.refresh();return;}
-      // Open instantly from the last complete snapshot. A recursive Drive walk is
-      // intentionally manual: doing 500+ folder requests at every launch competes
-      // with the first audio stream and was the main source of playback failures.
+      // The saved snapshot is already in the library. Catalog requests must not
+      // delay playback, even if the prepared manifest is slow or unavailable.
       const cached=allTracks(true).filter(t=>t.source==='drive'&&t.driveFolder===this.folder);
       if(cached.length){
-        const fresh=cached.map(old=>{
-          const name=baseName(old.path||old.title||'track.opus');
-          const folder=(old.path||'').split('/').slice(0,-1).join('/')||'Music';
-          const file={id:old.remoteId,name,mimeType:old.mimeType||'audio/'+(old.ext||'opus'),size:String(old.size||0),
-            modifiedTime:new Date(old.mtime||0).toISOString(),md5Checksum:old.md5||'',folder};
-          return this.helper.driveTrack(file,this.folder,this.prepared[old.remoteId],old);
-        });
-        await persistTracks(fresh);fresh.forEach(libAdd);
-        this.status='Saved library · '+fresh.length+' songs · catalog current';
-        Views.refreshAll();
-        const known=new Set(cached.map(t=>t.remoteId));
-        if(Object.keys(this.prepared).some(id=>!known.has(id)))manifestDelay=1000;
+        this.status='Saved library · '+cached.length+' songs · checking catalog…';
+        manifestDelay=0;
       }else{
         await this.connect(this.folder,true);
       }
@@ -2221,6 +2209,7 @@ const DriveSource={
   async checkManifest(){
     if(this.manifestChecking||this.busy||!this.api||!SourceLibrary.enabled('drive')){this.scheduleManifestCheck();return false;}
     if(document.visibilityState!=='visible'){this.scheduleManifestCheck();return false;}
+    if(Engine.current?.source==='drive'&&Engine.playing&&Engine.el().readyState<3){this.scheduleManifestCheck(5000);return false;}
     this.manifestChecking=true;
     try{
       const prepared=await this.api.manifest(this.folder,AbortSignal.timeout(10000));
@@ -2237,7 +2226,10 @@ const DriveSource={
       }
       // Most polls find the same manifest. Avoid rewriting the whole catalog
       // and rebuilding a large song list every minute.
-      if(!metadataChanged)return true;
+      if(!metadataChanged){
+        if(this.status.includes('checking catalog'))this.status='Saved library · '+cached.length+' songs · catalog current';
+        return true;
+      }
       const fresh=cached.map(old=>{
         const name=baseName(old.path||old.title||'track.opus');
         const folder=(old.path||'').split('/').slice(0,-1).join('/')||'Music';
@@ -2248,7 +2240,11 @@ const DriveSource={
       await persistTracks(fresh);fresh.forEach(libAdd);Views.refreshAll();
       this.status='Saved library · '+fresh.length+' songs · catalog current';
       return true;
-    }catch(e){return false;}
+    }catch(e){
+      const cached=allTracks(true).filter(t=>t.source==='drive'&&t.driveFolder===this.folder);
+      if(cached.length)this.status='Saved library · '+cached.length+' songs · catalog check unavailable';
+      return false;
+    }
     finally{this.manifestChecking=false;this.scheduleManifestCheck();MusicSources.refresh();}
   },
   fileFor(t){
@@ -2583,8 +2579,10 @@ const Engine = {
     // A deliberate new selection gets its own retry budget. Metadata from a
     // failed retry does not prove the audio ever became playable.
     this._driveRetryId=null;
+    this._driveErrorReportedId=null;
     this._serverRetryId=null;
     this._serverErrorReportedId=null;
+    clearTimeout(this._driveRetryTimer);
     clearTimeout(this._serverRetryTimer);
     this.clearBuffering();
     if(t.source==='drive')DriveSource.playbackRetry.delete(t.id);
@@ -2663,6 +2661,7 @@ const Engine = {
   },
   play:function(){
     this.ensureCtx();
+    clearTimeout(this._driveRetryTimer);
     const a=this.el();
     if(a.error && this.current && this.current.remote){this.playIndex(this.order[this.pos],true);return;}
     if(!a.src){
@@ -2674,6 +2673,10 @@ const Engine = {
     if(p&&p.catch) p.catch(function(e){
       if(request!==Engine._playRequest||a!==Engine.el()||source!==a.src)return;
       if(e && e.name==='AbortError') return;
+      if(!Engine.playing)return;
+      if(Engine.current?.source==='drive'&&e?.name!=='NotAllowedError'){
+        Engine.onError(Engine.cur);return;
+      }
       Engine.playing=false; UI.renderPlayState();
       if(e && e.name==='NotAllowedError') toast('Tap play again to start audio');
     });
@@ -2682,10 +2685,12 @@ const Engine = {
     UI.renderPlayState();
     UI.startLoop();
     this.updateMediaSession();
+    if(this.current?.source==='drive')this.onBuffering(this.cur);
   },
   pause:function(){
     const a=this.el(), self=this;
     this.clearBuffering();
+    clearTimeout(this._driveRetryTimer);
     clearTimeout(this._serverRetryTimer);
     this.playing=false;
     UI.renderPlayState();
@@ -2699,6 +2704,7 @@ const Engine = {
   toggle:function(){ this.playing ? this.pause() : this.play(); },
   stop:function(){
     this.clearBuffering();
+    clearTimeout(this._driveRetryTimer);
     clearTimeout(this._serverRetryTimer);
     this.playing=false;
     this.els.forEach(function(a){ try{ a.pause(); a.removeAttribute('src'); a.load(); }catch(e){} });
@@ -2751,18 +2757,32 @@ const Engine = {
       if(this._driveRetryId!==t.id){
         this._driveRetryId=t.id;this.playing=false;UI.renderPlayState();
         const f=DriveSource.retryFileFor(t);
-        a.pause();a.src=audioSource(f);a.currentTime=0;
+        const at=a.currentTime||0;
+        a.pause();a.src=audioSource(f);
         const request=this._playRequest,source=a.src;
+        if(at>0)a.addEventListener('loadedmetadata',function resume(){
+          a.removeEventListener('loadedmetadata',resume);
+          if(Engine._playRequest!==request||Engine.el()!==a||a.src!==source)return;
+          try{a.currentTime=Math.min(at,Number.isFinite(a.duration)?Math.max(0,a.duration-0.15):at);}catch(e){}
+        });
         toast('Drive stream stalled · retrying once…',2500);
-        setTimeout(()=>{
-          if(this.current?.id!==t.id||this._playRequest!==request||this.el()!==a||a.src!==source)return;
+        this._driveRetryTimer=setTimeout(()=>{
+          if(this.current?.id!==t.id||this._playRequest!==request||this.el()!==a||a.src!==source||this._driveErrorReportedId===t.id)return;
+          try{a.currentTime=at;}catch(e){}
           this.playing=true;UI.renderPlayState();
           const p=a.play();
           this.onBuffering(i);
-          if(p?.catch)p.catch(()=>{if(this.current?.id===t.id&&this._playRequest===request&&this.el()===a&&a.src===source){this.clearBuffering();this.playing=false;UI.renderPlayState();toast('Drive audio still could not play. Check internet and folder sharing, then try again.',7000);}});
+          if(p?.catch)p.catch(e=>{
+            if(this.current?.id!==t.id||this._playRequest!==request||this.el()!==a||a.src!==source)return;
+            if(e?.name==='AbortError')return;
+            if(e?.name==='NotAllowedError'){this.clearBuffering();this.playing=false;UI.renderPlayState();toast('Tap play to resume the Drive stream.');return;}
+            this.onError(i);
+          });
         },800);
         return;
       }
+      if(this._driveErrorReportedId===t.id)return;
+      this._driveErrorReportedId=t.id;clearTimeout(this._driveRetryTimer);
       this.playing=false;UI.renderPlayState();
       toast('Drive audio still could not play. Check internet and folder sharing, then try again.',7000);return;
     }
