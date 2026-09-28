@@ -2173,10 +2173,15 @@ function audioSource(file){return file&&file.__remoteURL?file.__remoteURL:URL.cr
    metadata and exports; the deployment injects the owner-approved shared key. */
 const DriveSource={
   api:null,helper:null,folder:'',prepared:{},busy:false,status:'Not connected',error:'',controller:null,playbackRetry:new Map(),
+  manifestTimer:null,manifestChecking:false,manifestListener:false,
   async install(){
-
+    let manifestDelay=60000;
+    if(!this.manifestListener){
+      document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')this.scheduleManifestCheck(0);});
+      this.manifestListener=true;
+    }
     try{
-      this.helper=await import('./drive-api.js?v=drive-qol-r21');
+      this.helper=await import('./drive-api.js?v=drive-qol-r22');
       const response=await fetch('/assets/drive-config.json',{cache:'no-store',signal:AbortSignal.timeout(15000)});
       if(!response.ok)throw Error('Drive configuration could not be loaded.');
       const config=await response.json();this.api=this.helper.createDriveApi(config.apiKey);
@@ -2198,12 +2203,48 @@ const DriveSource={
           return this.helper.driveTrack(file,this.folder,this.prepared[old.remoteId],old);
         });
         await persistTracks(fresh);fresh.forEach(libAdd);
-        this.status='Saved library · '+fresh.length+' songs · refresh on demand';
+        this.status='Saved library · '+fresh.length+' songs · catalog current';
         Views.refreshAll();
+        const known=new Set(cached.map(t=>t.remoteId));
+        if(Object.keys(this.prepared).some(id=>!known.has(id)))manifestDelay=1000;
       }else{
         await this.connect(this.folder,true);
       }
-    }catch(e){this.error=e.message;this.status='Drive unavailable';}finally{MusicSources.refresh();}
+    }catch(e){this.error=e.message;this.status='Drive unavailable';}finally{MusicSources.refresh();this.scheduleManifestCheck(manifestDelay);}
+  },
+  scheduleManifestCheck(delay=60000){
+    clearTimeout(this.manifestTimer);
+    if(!SourceLibrary.enabled('drive')||!this.api)return;
+    this.manifestTimer=setTimeout(()=>this.checkManifest(),delay);
+  },
+  async checkManifest(){
+    if(this.manifestChecking||this.busy||!this.api||!SourceLibrary.enabled('drive')){this.scheduleManifestCheck();return false;}
+    if(document.visibilityState!=='visible'){this.scheduleManifestCheck();return false;}
+    this.manifestChecking=true;
+    try{
+      const prepared=await this.api.manifest(this.folder,AbortSignal.timeout(10000));
+      this.prepared=prepared;
+      const cached=allTracks(true).filter(t=>t.source==='drive'&&t.driveFolder===this.folder);
+      const changed=Object.entries(prepared).some(([id,meta])=>{
+        const old=LIB.map.get('gd_'+id);
+        return !old||old.driveFolder!==this.folder||old.md5!==meta.md5||old.size!==Number(meta.size);
+      });
+      if(changed){
+        this.status='Updated Drive catalog found · syncing…';MusicSources.refresh();
+        return await this.connect(this.folder,true);
+      }
+      const fresh=cached.map(old=>{
+        const name=baseName(old.path||old.title||'track.opus');
+        const folder=(old.path||'').split('/').slice(0,-1).join('/')||'Music';
+        const file={id:old.remoteId,name,mimeType:old.mimeType||'audio/'+(old.ext||'opus'),size:String(old.size||0),
+          modifiedTime:new Date(old.mtime||0).toISOString(),md5Checksum:old.md5||'',folder};
+        return this.helper.driveTrack(file,this.folder,prepared[old.remoteId],old);
+      });
+      await persistTracks(fresh);fresh.forEach(libAdd);Views.refreshAll();
+      this.status='Saved library · '+fresh.length+' songs · catalog current';
+      return true;
+    }catch(e){return false;}
+    finally{this.manifestChecking=false;this.scheduleManifestCheck();MusicSources.refresh();}
   },
   fileFor(t){
     if(!this.api)return null;
@@ -2309,7 +2350,7 @@ const DriveSource={
       if(!quiet)toast('Drive library ready · '+fresh.length+' songs');
       return true;
     }catch(e){this.error=e.name==='AbortError'?'Drive scan exceeded four minutes. Refresh to retry; your saved library is unchanged.':e.message;this.status='Drive refresh failed';if(!quiet)toast(this.error,6500);return false;}
-    finally{clearTimeout(timeout);this.busy=false;this.controller=null;MusicSources.refresh();this.pumpTags();if($('#drive-status'))$('#drive-status').textContent=this.error||this.status;}
+    finally{clearTimeout(timeout);this.busy=false;this.controller=null;MusicSources.refresh();this.pumpTags();this.scheduleManifestCheck();if($('#drive-status'))$('#drive-status').textContent=this.error||this.status;}
   },
   show(){
     dialog('Google Drive Music',
