@@ -72,8 +72,12 @@ export async function buildCatalog(records,{root,name,publishedAt=new Date().toI
   const pointer={version:2,rootId:root,name,generation,publishedAt,complete:true,count:records.length,shards:descriptors};validatePointer(pointer,root);
   return {pointer,shards};
 }
-export function catalogTrack(record,root,old){
-  const track=driveTrack(record,root,record.prepared,old);
+export function catalogTrack(record,root,old={}){
+  // Initial publication may contain filename labels while optional preparation
+  // catches up. Keep richer cached tags for identical bytes during migration.
+  const same=record.md5Checksum&&old.md5===record.md5Checksum&&old.size===Number(record.size);
+  const prepared=same&&old.driveTagVersion===1?{...old,...record.prepared}:record.prepared;
+  const track=driveTrack(record,root,prepared,old);
   track.catalogVersion=2;track.availability=record.availability;
   track.coverURL=record.cover?BASE+'covers/'+record.cover+'.jpg':null;
   return track;

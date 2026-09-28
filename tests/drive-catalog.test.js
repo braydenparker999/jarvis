@@ -53,3 +53,10 @@ test('catalog commit waits for transaction completion and reports abort',async()
     if(abort){transaction.error=Error('Quota exceeded');transaction.onabort();await assert.rejects(result,/Quota/);}else{transaction.oncomplete();await result;}
   }
 });
+
+test('initial catalog metadata preserves richer cached tags only for the same revision',()=>{
+  const r=record(),old={md5:r.md5Checksum,size:r.size,driveTagVersion:1,title:'Embedded title',album:'Embedded album'};
+  const pending={...r,prepared:{md5:r.md5Checksum,size:r.size}};
+  const t=catalogTrack(pending,root,old);assert.equal(t.title,'Embedded title');assert.equal(t.album,'Embedded album');
+  const changed=catalogTrack({...pending,md5Checksum:'changed'},root,old);assert.equal(changed.album,'');assert.notEqual(changed.title,'Embedded title');
+});
