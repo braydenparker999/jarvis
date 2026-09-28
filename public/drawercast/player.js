@@ -2216,6 +2216,7 @@ const DriveSource={
     clearTimeout(this.manifestTimer);
     if(!SourceLibrary.enabled('drive')||!this.api)return;
     this.manifestTimer=setTimeout(()=>this.checkManifest(),delay);
+    this.manifestTimer?.unref?.();
   },
   async checkManifest(){
     if(this.manifestChecking||this.busy||!this.api||!SourceLibrary.enabled('drive')){this.scheduleManifestCheck();return false;}
