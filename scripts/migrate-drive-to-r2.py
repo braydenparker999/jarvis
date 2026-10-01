@@ -50,6 +50,7 @@ MAX_MANIFEST_BYTES = 32 * 1024 * 1024
 DOWNLOAD_INTERVAL = 0.0
 DOWNLOAD_LOCK = threading.Lock()
 NEXT_DOWNLOAD_AT = 0.0
+DRIVE_SECRETS = set()
 DRIVE_REASONS = {"rateLimitExceeded", "userRateLimitExceeded", "downloadQuotaExceeded", "dailyLimitExceeded", "dailyLimitExceededUnreg", "insufficientFilePermissions", "appNotAuthorizedToFile", "accessNotConfigured", "forbidden", "fileNotDownloadable", "cannotDownloadAbusiveFile", "domainPolicy", "authError", "notFound", "backendError"}
 RATE_REASONS = {"rateLimitExceeded", "userRateLimitExceeded"}
 
@@ -82,7 +83,11 @@ def drive_error_reason(error: urllib.error.HTTPError) -> str:
     secrets = urllib.parse.parse_qs(urllib.parse.urlsplit(error.url).query).get("key", [])
     if os.environ.get("GOOGLE_DRIVE_API_KEY"):
         secrets.append(os.environ["GOOGLE_DRIVE_API_KEY"])
-    for value in secrets:
+    secrets.extend(os.environ.get(name, "") for name in (
+        "GOOGLE_DRIVE_CLIENT_ID", "GOOGLE_DRIVE_CLIENT_SECRET", "GOOGLE_DRIVE_REFRESH_TOKEN"))
+    with LOG_LOCK:
+        secrets.extend(DRIVE_SECRETS)
+    for value in filter(None, secrets):
         raw = raw.replace(value, "[REDACTED]")
     raw = re.sub(r"<(script|style)\b[^>]*>.*?</\1>", " ", raw, flags=re.I | re.S)
     raw = html.unescape(re.sub(r"<[^>]*>", " ", raw))
@@ -154,15 +159,82 @@ def required_env(name: str) -> str:
     return value
 
 
+class DriveOAuth:
+    """A server-side grant; refreshing is serialized and never logged."""
+
+    def __init__(self, client_id: str, client_secret: str, refresh_token: str):
+        self.credentials = {"client_id": client_id, "client_secret": client_secret,
+                            "refresh_token": refresh_token, "grant_type": "refresh_token"}
+        self.lock = threading.Lock()
+        self.token = ""
+        self.expires_at = 0.0
+        self.failed = False
+
+    def __repr__(self):
+        return "DriveOAuth(credentials omitted)"
+
+    def headers(self) -> dict[str, str]:
+        with self.lock:
+            if self.failed:
+                raise DrivePauseError("Drive OAuth refresh previously failed; migration remains paused.")
+            if time.monotonic() >= self.expires_at:
+                request = urllib.request.Request(
+                    "https://oauth2.googleapis.com/token",
+                    data=urllib.parse.urlencode(self.credentials).encode(),
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    method="POST",
+                )
+                try:
+                    with urllib.request.urlopen(request, timeout=45) as response:
+                        data = json.loads(response.read(65536))
+                    token = data.get("access_token")
+                    expires_in = float(data.get("expires_in", 0))
+                    if not isinstance(token, str) or not token or any(c.isspace() for c in token):
+                        raise ValueError("Invalid access token")
+                    if not 120 <= expires_in <= 86400:
+                        raise ValueError("Invalid token lifetime")
+                except Exception:
+                    self.failed = True
+                    raise DrivePauseError("Drive OAuth refresh failed; check the owner grant and Actions secrets. Provider details omitted.") from None
+                self.token = token
+                self.expires_at = time.monotonic() + expires_in - 60
+                with LOG_LOCK:
+                    DRIVE_SECRETS.add(token)
+            return {"Authorization": "Bearer " + self.token}
+
+
+def drive_auth_from_env():
+    mode = os.environ.get("GOOGLE_DRIVE_AUTH_MODE", "public_api_key").strip()
+    if mode == "oauth":
+        return DriveOAuth(*(required_env(name) for name in (
+            "GOOGLE_DRIVE_CLIENT_ID", "GOOGLE_DRIVE_CLIENT_SECRET", "GOOGLE_DRIVE_REFRESH_TOKEN")))
+    if mode != "public_api_key":
+        raise MigrationError("Invalid Google Drive authentication mode.")
+    return required_env("GOOGLE_DRIVE_API_KEY")
+
+
+def drive_url(path: str, params: dict[str, str], auth) -> str:
+    query = dict(params)
+    if not isinstance(auth, DriveOAuth):
+        query["key"] = auth
+    return f"{DRIVE_ROOT}{path}?{urllib.parse.urlencode(query)}"
+
+
+def drive_headers(auth) -> dict[str, str]:
+    headers = {"User-Agent": "jarvis-r2-migrator/1.0", "Accept": "*/*"}
+    if isinstance(auth, DriveOAuth):
+        headers.update(auth.headers())
+    return headers
+
+
 def drive_request(path: str, params: dict[str, str], api_key: str, *, raw: bool = False):
-    query = urllib.parse.urlencode({**params, "key": api_key})
-    url = f"{DRIVE_ROOT}{path}?{query}"
+    url = drive_url(path, params, api_key)
     last = None
     for attempt in range(6):
         try:
             request = urllib.request.Request(
                 url,
-                headers={"User-Agent": "jarvis-r2-migrator/1.0", "Accept": "*/*"},
+                headers=drive_headers(api_key),
             )
             response = urllib.request.urlopen(request, timeout=45)
             if raw:
@@ -171,6 +243,8 @@ def drive_request(path: str, params: dict[str, str], api_key: str, *, raw: bool 
                 return json.load(response)
         except urllib.error.HTTPError as exc:
             last = exc
+            if exc.code == 403 and drive_error_reason(exc) not in RATE_REASONS:
+                raise DrivePauseError("Drive metadata returned HTTP 403; migration paused without repeated attempts.") from None
             if exc.code not in RETRYABLE and exc.code != 403:
                 raise
             if attempt >= 5:
@@ -397,7 +471,7 @@ def remote_hashes_if_verified(client, bucket: str, key: str, expected_size: int,
 
 def download_drive_file(file: dict, api_key: str, destination: Path) -> dict:
     params = {"alt": "media"}
-    url = f"{DRIVE_ROOT}/{file['id']}?{urllib.parse.urlencode({**params, 'key': api_key})}"
+    url = drive_url(f"/{file['id']}", params, api_key)
     expected_size = int(file["size"])
     expected_md5 = source_md5(file)
 
@@ -408,7 +482,7 @@ def download_drive_file(file: dict, api_key: str, destination: Path) -> dict:
         try:
             request = urllib.request.Request(
                 url,
-                headers={"User-Agent": "jarvis-r2-migrator/1.0", "Accept": "*/*"},
+                headers=drive_headers(api_key),
             )
             pace_download()
             with urllib.request.urlopen(request, timeout=90) as response, destination.open("wb") as out:
@@ -749,7 +823,7 @@ def main() -> int:
     if not 0 <= DOWNLOAD_INTERVAL <= 60:
         raise MigrationError("Invalid Drive download interval.")
 
-    api_key = required_env("GOOGLE_DRIVE_API_KEY")
+    api_key = drive_auth_from_env()
     account_id = required_env("R2_ACCOUNT_ID")
     access_key = required_env("R2_ACCESS_KEY_ID")
     secret_key = required_env("R2_SECRET_ACCESS_KEY")
