@@ -30,6 +30,7 @@ from pathlib import Path
 
 import boto3
 from botocore.config import Config
+from botocore.exceptions import ClientError
 
 DRIVE_ROOT = "https://www.googleapis.com/drive/v3/files"
 AUDIO_RE = re.compile(r"\.(mp3|m4a|m4b|aac|flac|wav|wave|ogg|oga|opus|weba|webm|mp4|aif|aiff|wma|mka)$", re.I)
@@ -204,7 +205,7 @@ def r2_client(account_id: str, access_key: str, secret_key: str):
 def remote_is_verified(client, bucket: str, key: str, file: dict) -> bool:
     try:
         head = client.head_object(Bucket=bucket, Key=key)
-    except client.exceptions.ClientError as exc:
+    except ClientError as exc:
         code = str(exc.response.get("Error", {}).get("Code", ""))
         status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
         if code in {"404", "NoSuchKey", "NotFound"} or status == 404:
