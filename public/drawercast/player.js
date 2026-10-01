@@ -2175,6 +2175,7 @@ function audioSource(file){return file&&file.__remoteURL?file.__remoteURL:URL.cr
    metadata and exports; the deployment injects the owner-approved shared key. */
 const DriveSource={
   api:null,helper:null,catalog:null,generation:null,folder:'',prepared:{},busy:false,status:'Not connected',error:'',controller:null,playbackRetry:new Map(),
+  r2:null,r2Helper:null,r2ManifestURL:'',r2Checking:false,r2Error:'',r2Failures:new Set(),
   manifestTimer:null,manifestChecking:false,manifestListener:false,
   async install(){
     let manifestDelay=60000;
@@ -2189,6 +2190,7 @@ const DriveSource={
       if(!response.ok)throw Error('Drive configuration could not be loaded.');
       const config=await response.json();this.api=this.helper.createDriveApi(config.apiKey);
       this.folder=this.helper.folderId(config.folderId);
+      this.r2=null;this.r2ManifestURL=typeof config.r2ManifestURL==='string'?config.r2ManifestURL:'';
       // The managed publisher owns this root; old custom-folder preferences
       // cannot redirect the authoritative catalog.
       try{this.generation=await IDB.get('kv','drive.catalog.v2');}catch(e){}
@@ -2203,7 +2205,7 @@ const DriveSource={
       }else{
         await this.connect(this.folder,true);
       }
-    }catch(e){this.error=e.message;this.status='Drive unavailable';}finally{MusicSources.refresh();this.scheduleManifestCheck(manifestDelay);}
+    }catch(e){this.error=e.message;this.status='Drive unavailable';}finally{MusicSources.refresh();this.scheduleManifestCheck(manifestDelay);void this.refreshR2();}
   },
   scheduleManifestCheck(delay=300000){
     clearTimeout(this.manifestTimer);
@@ -2221,16 +2223,41 @@ const DriveSource={
     try{return await this.connect(this.folder,true);}
     finally{this.manifestChecking=false;this.scheduleManifestCheck();}
   },
-  fileFor(t){
+  async refreshR2(){
+    // Optional, bounded and independent of the authoritative catalog. A bad
+    // endpoint or map must never delay startup or make Drive unavailable.
+    if(!this.r2ManifestURL){this.r2=null;this.r2Error='';return false;}
+    if(this.r2Checking||this.busy||!this.api||!SourceLibrary.enabled('drive')||(Engine.current?.source==='drive'&&Engine.playing))return false;
+    const tracks=allTracks(true).filter(t=>t.source==='drive'&&t.driveFolder===this.folder);
+    if(!tracks.length){this.r2=null;return false;}
+    this.r2Checking=true;
+    const root=this.folder,url=this.r2ManifestURL;
+    try{
+      this.r2Helper ||= await import('./r2-api.js?v=verified-v1');
+      const mapping=await this.r2Helper.readR2Manifest({url,root,tracks,signal:AbortSignal.timeout(15000)});
+      // Recheck after the fetch: a newer catalog, setting or selection may
+      // have arrived while the map was being downloaded.
+      if(root!==this.folder||url!==this.r2ManifestURL||!SourceLibrary.enabled('drive'))return false;
+      if(!mapping.matches(allTracks(true).filter(t=>t.source==='drive'&&t.driveFolder===root)))throw Error('R2 map is behind the current catalog.');
+      if(Engine.current?.source==='drive'&&Engine.playing)return false;
+      this.r2=mapping;this.r2Error='';return true;
+    }catch(e){this.r2=null;this.r2Error='R2 verification unavailable · using Google Drive';return false;}
+    finally{this.r2Checking=false;MusicSources.refresh();}
+  },
+  r2Revision(t){return t.id+'|'+t.md5+'|'+t.size;},
+  isR2Playback(t,url){return !!this.r2&&this.r2.mediaURL(t)===url;},
+  fileFor(t,driveOnly=false){
     if(!this.api)return null;
     if(t.availability==='blocked')throw Error('This song is not downloadable. Check its Drive sharing settings.');
     const retry=this.playbackRetry.get(t.id)||0;
-    const url=this.api.mediaURL({id:t.remoteId})+(retry?'&retry='+retry:'');
+    const r2URL=!driveOnly&&!retry&&!this.r2Failures.has(this.r2Revision(t))?this.r2?.mediaURL(t):null;
+    const url=r2URL||this.api.mediaURL({id:t.remoteId})+(retry?'&retry='+retry:'');
     return {__remoteURL:url,name:baseName(t.path),size:t.size,type:t.mimeType};
   },
-  retryFileFor(t){
+  retryFileFor(t,fromR2=false){
+    if(fromR2)this.r2Failures.add(this.r2Revision(t));
     this.playbackRetry.set(t.id,Date.now());
-    return this.fileFor(t);
+    return this.fileFor(t,true);
   },
   waveformURL(t){return t.waveformVersion===1?t.waveformFile:null;},
   tagJobs:new Map(),tagQueue:[],tagFailures:new Set(),tagActive:null,tagTimer:null,
@@ -2308,6 +2335,7 @@ const DriveSource={
       // A selection made during the fetch takes priority. Retry after pause.
       if(Engine.current?.source==='drive'&&Engine.playing){this.status='Drive catalog update pending · pause playback to sync';return false;}
       const {fresh,gone}=await IDB.catalog(this.catalog,snapshot);
+      this.r2=null; // A changed catalog requires a new complete-map check.
       // The committed database is the authority. Only now swap memory indexes.
       for(const id of gone){LIB.map.delete(id);FILES.delete(id);const i=LIB.ids.indexOf(id);if(i>=0)LIB.ids.splice(i,1);}
       fresh.forEach(libAdd);this.generation=snapshot.pointer;
@@ -2333,11 +2361,12 @@ const DriveSource={
       this.status=cached.length?'Saved catalog · '+cached.length+' songs · update delayed':'Catalog temporarily unavailable';
       if(!quiet)toast(this.status+' — '+this.error,6500);return false;
     }
-    finally{clearTimeout(timeout);this.busy=false;this.controller=null;MusicSources.refresh();this.scheduleManifestCheck();if($('#drive-status'))$('#drive-status').textContent=this.status+(this.error?' — '+this.error:'');}
+    finally{clearTimeout(timeout);this.busy=false;this.controller=null;MusicSources.refresh();this.scheduleManifestCheck();void this.refreshR2();if($('#drive-status'))$('#drive-status').textContent=this.status+(this.error?' — '+this.error:'');}
   },
   show(){
     dialog('Google Drive Music',
-      '<p>Streams directly from your shared Drive folder. No A15 or Google login needed. Internet is required.</p>'+
+      '<p>Streams from your shared Drive library. Verified R2 playback is used only when configured; Google Drive stays available as fallback. Internet is required.</p>'+
+      '<p class="note">'+esc(this.r2?'Verified R2 playback ready':this.r2Error||'Playback: Google Drive')+'</p>'+
       '<p id="drive-status" role="status">'+esc(this.error||this.status)+'</p>'+
       '<label for="drive-folder">Published music folder</label><input class="field" readonly id="drive-folder" value="'+esc(this.folder?'https://drive.google.com/drive/folders/'+this.folder:'')+'" style="margin:8px 0 14px" autocomplete="off">'+
       '<p class="note">Only folders shared as Anyone with the link → Viewer can be read.</p>'+
@@ -2609,6 +2638,7 @@ const Engine = {
     this._miss=0;
     t.missing=false;
     this.ensureCtx();
+    if(this.preloadId===t.id&&f.__remoteURL&&this.els[1-this.cur]?.src!==f.__remoteURL)this.releaseSlot(1-this.cur);
     if(this.preloadId===t.id && !this.xfading){
       /* the other element already holds this track - swap to it for a seamless start */
       const prev=this.el();
@@ -2763,7 +2793,8 @@ const Engine = {
       const a=this.el();
       if(this._driveRetryId!==t.id){
         this._driveRetryId=t.id;this.playing=false;UI.renderPlayState();
-        const f=DriveSource.retryFileFor(t);
+        const fromR2=DriveSource.isR2Playback?.(t,a.src)||false;
+        const f=DriveSource.retryFileFor(t,fromR2);
         const at=a.currentTime||0;
         a.pause();a.src=audioSource(f);
         const request=this._playRequest,source=a.src;
@@ -2772,7 +2803,7 @@ const Engine = {
           if(Engine._playRequest!==request||Engine.el()!==a||a.src!==source)return;
           try{a.currentTime=Math.min(at,Number.isFinite(a.duration)?Math.max(0,a.duration-0.15):at);}catch(e){}
         });
-        toast('Drive stream stalled · retrying once…',2500);
+        toast(fromR2?'R2 stream unavailable · trying Google Drive…':'Drive stream stalled · retrying once…',2500);
         this._driveRetryTimer=setTimeout(()=>{
           if(this.current?.id!==t.id||this._playRequest!==request||this.el()!==a||a.src!==source||this._driveErrorReportedId===t.id)return;
           try{a.currentTime=at;}catch(e){}
