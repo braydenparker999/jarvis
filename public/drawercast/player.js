@@ -7645,7 +7645,7 @@ const MusicSources={
       Engine.stop();Engine.queue=queue.length?queue:allTracks();Engine.buildOrder();Engine.pos=0;
       Engine.current=Engine.queue[Engine.order[0]]||null;Engine.dur=Engine.current?.dur||0;
       UI.renderNowPlaying(Engine.current);UI.renderPlayState();UI.renderProgress();Engine.updateMediaSession();
-    }else{Engine.queue=queue;Engine.buildOrder();}
+    }else{Engine.queue=queue;Engine.buildOrder();if(current){const i=Engine.queue.findIndex(t=>t.id===current.id);Engine.pos=Math.max(0,Engine.order.indexOf(i));}}
     if(!Engine.current&&allTracks().length){Engine.queue=allTracks();Engine.buildOrder();Engine.pos=0;Engine.current=Engine.queue[Engine.order[0]];UI.renderNowPlaying(Engine.current);}
     Engine.saveState();Views.refreshAll();this.refresh();
     if(on&&connect){if(kind==='drive'&&DriveSource.api)DriveSource.connect(DriveSource.folder,true);if(kind==='r2')R2Source.connect(true);if(kind==='server'&&DrawerCast.connection)DrawerCast.connect(DrawerCast.connection,true);}
