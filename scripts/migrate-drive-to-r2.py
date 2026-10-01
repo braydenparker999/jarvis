@@ -4,8 +4,9 @@
 Designed for resumable GitHub Actions runs. Object keys are immutable/content-versioned:
   audio/<drive-file-id>/<md5-or-downloaded-sha256>.<extension>
 
-A rerun downloads and hashes R2 objects before skipping them. The canonical
-mapping is only published after a complete, stable full-library run succeeds.
+By default, a rerun downloads and hashes R2 objects before skipping them.
+Opt-in incremental runs may retain prior full-GET proof after strict identity
+checks. The canonical mapping only publishes a complete, stable library.
 """
 from __future__ import annotations
 
@@ -34,9 +35,18 @@ DRIVE_ROOT = "https://www.googleapis.com/drive/v3/files"
 AUDIO_RE = re.compile(r"\.(mp3|m4a|m4b|aac|flac|wav|wave|ogg|oga|opus|weba|webm|mp4|aif|aiff|wma|mka)$", re.I)
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{10,200}$")
 EXT_RE = re.compile(r"^[a-z0-9]{1,8}$")
+AUDIO_MIME_BY_EXTENSION = {
+    "mp3": "audio/mpeg", "m4a": "audio/mp4", "m4b": "audio/mp4", "aac": "audio/aac",
+    "flac": "audio/flac", "wav": "audio/wav", "wave": "audio/wav", "ogg": "audio/ogg",
+    "oga": "audio/ogg", "opus": "audio/ogg", "weba": "audio/webm", "webm": "audio/webm",
+    "mp4": "audio/mp4", "aif": "audio/aiff", "aiff": "audio/aiff",
+    "wma": "audio/x-ms-wma", "mka": "audio/x-matroska",
+}
 RETRYABLE = {408, 429, 500, 502, 503, 504}
 LOG_LOCK = threading.Lock()
 CHUNK_SIZE = 1024 * 1024
+CANONICAL_KEY = "catalog/drive-r2-map-v1.json"
+MAX_MANIFEST_BYTES = 32 * 1024 * 1024
 DOWNLOAD_INTERVAL = 0.0
 DOWNLOAD_LOCK = threading.Lock()
 NEXT_DOWNLOAD_AT = 0.0
@@ -285,8 +295,11 @@ def content_type(file: dict) -> str:
     mime = (file.get("mimeType") or "").strip()
     if mime.startswith("audio/"):
         return mime
-    guessed = mimetypes.guess_type(file.get("name", ""))[0]
-    return guessed or "application/octet-stream"
+    name = file.get("name", "")
+    extension = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    # System MIME databases differ for supported audio containers such as M4B,
+    # WAVE and WEBA. Keep catalog delivery deterministic across runner images.
+    return AUDIO_MIME_BY_EXTENSION.get(extension) or mimetypes.guess_type(name)[0] or "application/octet-stream"
 
 
 def r2_client(account_id: str, access_key: str, secret_key: str):
@@ -310,19 +323,54 @@ def r2_client(account_id: str, access_key: str, secret_key: str):
     )
 
 
-def remote_hashes_if_verified(client, bucket: str, key: str, expected_size: int, *, md5: str = "", sha256: str = "") -> dict | None:
-    """Read the entire stored object. HEAD metadata and ETags are never evidence."""
+def missing_object(error: Exception) -> bool:
+    details = getattr(error, "response", {})
+    if not isinstance(details, dict):
+        return False
+    code = str(details.get("Error", {}).get("Code", ""))
+    return code in {"404", "NoSuchKey", "NotFound"} or details.get("ResponseMetadata", {}).get("HTTPStatusCode") == 404
+
+
+def r2_identity(response: dict) -> dict | None:
+    """Capture an object identity, never a substitute for initial byte hashing.
+
+    LastModified, ETag and checksum metadata must all exist. The identity stored
+    in a baseline comes from the SAME GET response whose entire body was hashed,
+    so a later HEAD cannot accidentally bless an overwrite after that GET.
+    """
+    modified = response.get("LastModified")
+    etag = response.get("ETag")
+    metadata = response.get("Metadata")
+    size = response.get("ContentLength")
+    if (not isinstance(modified, datetime) or modified.tzinfo is None
+            or not isinstance(etag, str) or not re.fullmatch(r'"?[a-fA-F0-9]{32}(?:-[0-9]+)?"?', etag)
+            or not isinstance(metadata, dict) or type(size) is not int or size <= 0):
+        return None
+    required = ("source-drive-id", "source-md5", "source-sha256", "source-size")
+    if not all(isinstance(metadata.get(key), str) for key in required):
+        return None
+    identity = {
+        "etag": etag,
+        "lastModified": modified.astimezone(timezone.utc).isoformat(),
+        "size": size,
+        "metadata": {key: metadata[key] for key in required},
+    }
+    version = response.get("VersionId")
+    if version is not None:
+        if not isinstance(version, str) or not version or len(version) > 1024:
+            return None
+        identity["versionId"] = version
+    return identity
+
+
+def remote_hashes_if_verified(client, bucket: str, key: str, expected_size: int, *, md5: str = "", sha256: str = "", include_identity: bool = False) -> dict | None:
+    """Read the entire stored object. HEAD metadata and ETags are not byte proof."""
     if not md5 and not sha256:
         raise MigrationError("R2 verification requires an expected content hash.")
     try:
         response = client.get_object(Bucket=bucket, Key=key)
     except Exception as exc:
-        details = getattr(exc, "response", {})
-        if not isinstance(details, dict):
-            raise
-        code = str(details.get("Error", {}).get("Code", ""))
-        status = details.get("ResponseMetadata", {}).get("HTTPStatusCode")
-        if code in {"404", "NoSuchKey", "NotFound"} or status == 404:
+        if missing_object(exc):
             return None
         raise
     body = response["Body"]
@@ -340,6 +388,8 @@ def remote_hashes_if_verified(client, bucket: str, key: str, expected_size: int,
         hashes = {"md5": digest_md5.hexdigest(), "sha256": digest_sha256.hexdigest(), "size": size}
         if size != expected_size or (md5 and hashes["md5"] != md5) or (sha256 and hashes["sha256"] != sha256):
             return None
+        if include_identity:
+            hashes["r2Identity"] = r2_identity(response)
         return hashes
     finally:
         body.close()
@@ -424,7 +474,7 @@ def migrate_one(client, bucket: str, api_key: str, public_base: str, temp_root: 
         key = object_key(file, sha256=downloaded["sha256"] if downloaded else "")
         hashes = remote_hashes_if_verified(
             client, bucket, key, size, md5=expected_md5,
-            sha256=downloaded["sha256"] if downloaded else "",
+            sha256=downloaded["sha256"] if downloaded else "", include_identity=True,
         )
         if hashes:
             status = "skipped"
@@ -444,7 +494,7 @@ def migrate_one(client, bucket: str, api_key: str, public_base: str, temp_root: 
                 },
             )
             hashes = remote_hashes_if_verified(
-                client, bucket, key, size, md5=downloaded["md5"], sha256=downloaded["sha256"],
+                client, bucket, key, size, md5=downloaded["md5"], sha256=downloaded["sha256"], include_identity=True,
             )
             if not hashes:
                 raise MigrationError("R2 downloaded-byte/hash verification failed.")
@@ -465,6 +515,10 @@ def migrate_one(client, bucket: str, api_key: str, public_base: str, temp_root: 
         "sha256": hashes["sha256"],
         "verifiedBytes": hashes["size"],
         "verification": "r2-get-hash-v1",
+        "verificationCheck": "get-hash-v1",
+        "byteVerifiedAt": datetime.now(timezone.utc).isoformat(),
+        "sourceRevision": inventory_revision([file]),
+        "r2Identity": hashes.get("r2Identity"),
         "mimeType": content_type(file),
         "modifiedTime": file.get("modifiedTime", ""),
         "status": status,
@@ -475,15 +529,26 @@ def json_bytes(payload: dict | list) -> bytes:
     return (json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
 
 
-def upload_json(client, bucket: str, key: str, payload: dict, *, cache_control: str) -> None:
+def upload_json(client, bucket: str, key: str, payload: dict, *, cache_control: str,
+                precondition: dict | None = None) -> None:
     body = json_bytes(payload)
-    client.put_object(
-        Bucket=bucket,
-        Key=key,
-        Body=body,
-        ContentType="application/json; charset=utf-8",
-        CacheControl=cache_control,
-    )
+    try:
+        client.put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=body,
+            ContentType="application/json; charset=utf-8",
+            CacheControl=cache_control,
+            **(precondition or {}),
+        )
+    except Exception as exc:
+        if precondition:
+            status = getattr(exc, "response", {}).get("ResponseMetadata", {}).get("HTTPStatusCode")
+            if status in {409, 412}:
+                raise MigrationError("Canonical R2 baseline changed at publication; conditional write refused.") from None
+            if type(exc).__name__ == "ParamValidationError":
+                raise MigrationError("R2 client lacks conditional publication support; refusing an unconditional write.") from None
+        raise
     if not remote_hashes_if_verified(client, bucket, key, len(body), sha256=hashlib.sha256(body).hexdigest()):
         raise MigrationError(f"R2 verification failed for {key}.")
 
@@ -493,6 +558,125 @@ def inventory_revision(inventory: list[dict]) -> str:
     fields = ("id", "name", "folder", "size", "md5Checksum", "modifiedTime", "mimeType", "availability")
     snapshot = [{field: file.get(field, "") for field in fields} for file in sorted(inventory, key=lambda item: item["id"])]
     return hashlib.sha256(json_bytes(snapshot)).hexdigest()
+
+
+def reusable_evidence(file: dict) -> bool:
+    """Require retained byte proof and checksum metadata tied to that proof."""
+    identity = file.get("r2Identity")
+    if not isinstance(identity, dict):
+        return False
+    try:
+        modified = datetime.fromisoformat(identity["lastModified"])
+        verified = datetime.fromisoformat(file["byteVerifiedAt"])
+        # Re-run the same identity parser for serialized baseline evidence.
+        response = {"ETag": identity["etag"], "LastModified": modified,
+                    "ContentLength": identity["size"], "Metadata": identity["metadata"]}
+        if "versionId" in identity:
+            response["VersionId"] = identity["versionId"]
+        return (verified.tzinfo is not None and r2_identity(response) == identity
+                and identity["size"] == file["size"]
+                and identity["metadata"] == {
+                    "source-drive-id": file["driveId"], "source-md5": file["md5"],
+                    "source-sha256": file["sha256"], "source-size": str(file["size"]),
+                }
+                and file.get("sourceMd5") == file["md5"]
+                and bool(re.fullmatch(r"[a-f0-9]{64}", file.get("sourceRevision", "")))
+                and file.get("verificationCheck") in {"get-hash-v1", "prior-get-head-v1"})
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+
+
+def read_canonical(client, bucket: str) -> tuple[bytes, str] | None:
+    """Read a bounded manifest; access/network failures must not become misses."""
+    try:
+        response = client.get_object(Bucket=bucket, Key=CANONICAL_KEY)
+    except Exception as exc:
+        if missing_object(exc):
+            return None
+        raise
+    body = response["Body"]
+    try:
+        declared = response.get("ContentLength")
+        if type(declared) is not int or not 0 <= declared <= MAX_MANIFEST_BYTES:
+            raise MigrationError("Invalid or oversized canonical R2 mapping; incremental run stopped.")
+        data = body.read(MAX_MANIFEST_BYTES + 1)
+        if len(data) != declared or len(data) > MAX_MANIFEST_BYTES:
+            raise MigrationError("Incomplete or oversized canonical R2 mapping; incremental run stopped.")
+        etag = response.get("ETag")
+        if not isinstance(etag, str) or not re.fullmatch(r'"?[a-fA-F0-9]{32}(?:-[0-9]+)?"?', etag):
+            raise MigrationError("Canonical R2 mapping lacks a conditional-write identity; incremental run stopped.")
+        return data, etag
+    finally:
+        body.close()
+
+
+def load_incremental_baseline(client, bucket: str, root_id: str) -> dict:
+    snapshot = read_canonical(client, bucket)
+    raw, etag = snapshot if snapshot is not None else (None, None)
+    baseline = {"sha256": hashlib.sha256(raw).hexdigest() if raw is not None else None,
+                "etag": etag, "files": {}}
+    if raw is not None:
+        try:
+            report = json.loads(raw)
+            validate_report(report)
+            if (report["mode"] == "full" and report["complete"] is True
+                    and report.get("driveRootId") == root_id and report.get("r2Bucket") == bucket):
+                baseline["files"] = {file["driveId"]: file for file in report["files"]}
+        except (MigrationError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
+            pass
+    if not baseline["files"]:
+        log("No valid complete canonical baseline; using full R2 GET verification for every file.")
+    return baseline
+
+
+def head_matches_evidence(client, bucket: str, file: dict) -> bool:
+    if not reusable_evidence(file):
+        return False
+    try:
+        response = client.head_object(Bucket=bucket, Key=file["key"])
+    except Exception as exc:
+        if missing_object(exc):
+            return False
+        raise
+    return r2_identity(response) == file["r2Identity"]
+
+
+def migrate_incremental_one(client, bucket: str, api_key: str, public_base: str,
+                            temp_root: Path, file: dict, baseline: dict) -> dict:
+    previous = baseline["files"].get(file["id"])
+    # A missing source checksum cannot establish unchanged content, even when
+    # size and modifiedTime match. Keep the original Drive-download path.
+    if (previous and file.get("availability") == "ready" and source_md5(file)
+            and previous.get("sourceRevision") == inventory_revision([file])
+            and previous.get("key") == object_key(file)
+            and head_matches_evidence(client, bucket, previous)):
+        return {
+            **previous,
+            "url": f"{public_base.rstrip('/')}/{previous['key']}" if public_base else "",
+            "status": "skipped",
+            "verificationCheck": "prior-get-head-v1",
+            "baselineSha256": baseline["sha256"],
+            "identityCheckedAt": datetime.now(timezone.utc).isoformat(),
+        }
+    return migrate_one(client, bucket, api_key, public_base, temp_root, file)
+
+
+def recheck_incremental_baseline(client, bucket: str, baseline: dict, results: list[dict]) -> None:
+    # Catch changes early, then also use a conditional canonical PUT so a
+    # publisher racing after this check cannot be overwritten silently.
+    snapshot = read_canonical(client, bucket)
+    raw, etag = snapshot if snapshot is not None else (None, None)
+    digest = hashlib.sha256(raw).hexdigest() if raw is not None else None
+    if digest != baseline["sha256"] or etag != baseline["etag"]:
+        raise MigrationError("Canonical R2 baseline changed during migration; refusing publication.")
+    for file in results:
+        if reusable_evidence(file):
+            unchanged = head_matches_evidence(client, bucket, file)
+        else:
+            unchanged = remote_hashes_if_verified(client, bucket, file["key"], file["size"],
+                                                  md5=file["md5"], sha256=file["sha256"])
+        if not unchanged:
+            raise MigrationError("An R2 object changed during migration; refusing publication.")
 
 
 def validate_report(report: dict) -> None:
@@ -521,17 +705,31 @@ def validate_report(report: dict) -> None:
         expected_key = object_key({"id": fid, "name": file["name"], "md5Checksum": file.get("sourceMd5", "")}, sha256=file["sha256"])
         if file.get("key") != expected_key:
             raise MigrationError("Refusing to publish a non-content-versioned R2 key.")
+        check = file.get("verificationCheck")
+        if check not in {None, "get-hash-v1", "prior-get-head-v1"}:
+            raise MigrationError("Unknown R2 verification check.")
+        if check == "prior-get-head-v1" and (
+                report.get("transferMode") != "incremental" or report.get("mode") != "full"
+                or not reusable_evidence(file)
+                or not re.fullmatch(r"[a-f0-9]{64}", file.get("baselineSha256", ""))
+                or file.get("baselineSha256") != report.get("baselineSha256")):
+            raise MigrationError("Refusing to publish unbound prior R2 byte verification evidence.")
         seen.add(fid)
 
 
-def publish_report(client, bucket: str, report: dict) -> str:
+def publish_report(client, bucket: str, report: dict, *, baseline: dict | None = None) -> str:
     validate_report(report)
+    precondition = None
+    if report.get("transferMode") == "incremental":
+        if baseline is None or baseline["sha256"] != report.get("baselineSha256"):
+            raise MigrationError("Incremental publication requires its original canonical baseline.")
+        precondition = {"IfMatch": baseline["etag"]} if baseline["etag"] else {"IfNoneMatch": "*"}
     # Validate the exact manifest bytes in R2 before making them discoverable at
     # the well-known URL. A smoke run never writes the canonical mapping.
     digest = hashlib.sha256(json_bytes(report)).hexdigest()
     upload_json(client, bucket, f"catalog/versions/{digest}.json", report, cache_control="public, max-age=31536000, immutable")
-    key = "catalog/drive-r2-map-v1.json" if report["mode"] == "full" else "catalog/drive-r2-smoke-v1.json"
-    upload_json(client, bucket, key, report, cache_control="no-cache")
+    key = CANONICAL_KEY if report["mode"] == "full" else "catalog/drive-r2-smoke-v1.json"
+    upload_json(client, bucket, key, report, cache_control="no-cache", precondition=precondition)
     return key
 
 
@@ -540,9 +738,13 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=5, help="0 means full library; positive values are smoke-test item counts")
     parser.add_argument("--concurrency", type=int, default=4)
+    parser.add_argument("--incremental", action="store_true",
+                        help="opt in to prior full-GET proof reuse after HEAD identity checks; requires --limit 0")
     args = parser.parse_args()
     if args.limit < 0 or args.concurrency < 1 or args.concurrency > 8:
         raise MigrationError("Invalid limit/concurrency.")
+    if args.incremental and args.limit != 0:
+        raise MigrationError("Incremental mode requires --limit 0; smoke runs always verify all bytes.")
     DOWNLOAD_INTERVAL = float(os.environ.get("DRIVE_DOWNLOAD_INTERVAL_SECONDS", "0"))
     if not 0 <= DOWNLOAD_INTERVAL <= 60:
         raise MigrationError("Invalid Drive download interval.")
@@ -574,6 +776,7 @@ def main() -> int:
     total_inventory_bytes = sum(int(item.get("size") or 0) for item in inventory)
     log(f"Authoritative Drive inventory: {len(inventory)} tracks, {total_inventory_bytes / 1_000_000_000:.2f} GB")
 
+    baseline = load_incremental_baseline(client, bucket, root_id) if args.incremental else None
     selected = inventory if args.limit == 0 else inventory[: args.limit]
     mode = "full" if args.limit == 0 else "smoke"
     log(f"Starting {mode} migration for {len(selected)} tracks with concurrency={args.concurrency}")
@@ -586,8 +789,10 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="drive-r2-") as tmp:
         temp_root = Path(tmp)
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as pool:
+            worker = migrate_incremental_one if args.incremental else migrate_one
+            extra = (baseline,) if args.incremental else ()
             future_map = {
-                pool.submit(migrate_one, client, bucket, api_key, public_base, temp_root, item): item
+                pool.submit(worker, client, bucket, api_key, public_base, temp_root, item, *extra): item
                 for item in selected
             }
             for future in concurrent.futures.as_completed(future_map):
@@ -616,6 +821,9 @@ def main() -> int:
         "complete": False,
         "verification": "r2-get-hash-v1",
         "sourceRevision": source_revision,
+        "transferMode": "incremental" if args.incremental else "full-verification",
+        "baselineSha256": baseline["sha256"] if baseline else None,
+        "reusedCount": sum(1 for r in results if r.get("verificationCheck") == "prior-get-head-v1"),
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "driveRootId": root_id,
         "driveRootName": root_name,
@@ -645,8 +853,10 @@ def main() -> int:
         _, final_inventory = list_music(root_id, api_key)
         if inventory_revision(final_inventory) != source_revision:
             raise MigrationError("Drive library changed during migration; rerun before publishing a canonical mapping.")
+        if args.incremental:
+            recheck_incremental_baseline(client, bucket, baseline, results)
         report["complete"] = True
-    catalog_key = publish_report(client, bucket, report)
+    catalog_key = publish_report(client, bucket, report, baseline=baseline)
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", "utf-8")
     log(f"Migration verified. Published {catalog_key} with {len(results)} objects.")
     return 0

@@ -135,6 +135,24 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(self.key, f"audio/{self.file['id']}/{hashes(CONTENT)['md5']}.mp3")
         self.assertEqual(self.key, migration.object_key(source(name='Song.MP3', md5Checksum=hashes(CONTENT)['md5'].upper())))
 
+    def test_supported_audio_extensions_have_deterministic_mime_fallbacks(self):
+        expected = {
+            'mp3': 'audio/mpeg', 'm4a': 'audio/mp4', 'm4b': 'audio/mp4', 'aac': 'audio/aac',
+            'flac': 'audio/flac', 'wav': 'audio/wav', 'wave': 'audio/wav', 'ogg': 'audio/ogg',
+            'oga': 'audio/ogg', 'opus': 'audio/ogg', 'weba': 'audio/webm', 'webm': 'audio/webm',
+            'mp4': 'audio/mp4', 'aif': 'audio/aiff', 'aiff': 'audio/aiff',
+            'wma': 'audio/x-ms-wma', 'mka': 'audio/x-matroska',
+        }
+        with patch.object(migration.mimetypes, 'guess_type', side_effect=AssertionError('host MIME database used')):
+            for extension, mime in expected.items():
+                for drive_mime in ['', 'application/octet-stream']:
+                    with self.subTest(extension=extension, drive_mime=drive_mime):
+                        file = source(name='Track.' + extension.upper(), mimeType=drive_mime)
+                        self.assertEqual(mime, migration.content_type(file))
+
+    def test_explicit_drive_audio_mime_takes_precedence(self):
+        self.assertEqual('audio/x-custom', migration.content_type(source(name='Track.m4b', mimeType='audio/x-custom')))
+
     def test_missing_md5_requires_actual_content_hash(self):
         file = source(md5Checksum='')
         with self.assertRaises(migration.MigrationError):

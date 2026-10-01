@@ -72,6 +72,98 @@ the downloaded content's SHA-256, not file name or modification time.
 Each verified file reports MD5, SHA-256, verified byte count and
 `verification: r2-get-hash-v1`. The full report carries the same marker.
 
+## Optional incremental mirroring (prepared, not activated)
+
+The migrator accepts `--incremental --limit 0`. This is opt-in code only:
+no cron, workflow dispatch, deployment, public access, or playback setting is
+changed by adding it. It does not resolve a Drive refusal or authorize another
+transfer attempt. Finish the initial clone and resolve source-access blockers
+before wiring recurring work.
+
+Default runs and all smoke runs retain full R2 GET hashing. An incremental run
+still recursively inventories all Drive tracks and rechecks that inventory
+before publication. Its complete canonical map may reuse a prior file's original
+GET-byte proof only when all of the following hold:
+
+- The previous canonical map is complete, valid, and bound to the same Drive
+  root and R2 bucket; partial reports and smoke maps cannot provide a baseline
+- The Drive file still has an MD5, and its full source-metadata fingerprint is
+  unchanged, including ID, checksum, size, name, folder, modification time,
+  MIME type, and download availability
+- The original fully hashed R2 GET recorded an ETag, last-modified timestamp,
+  size, and matching Drive ID / MD5 / SHA-256 / size metadata
+- A fresh HEAD matches that entire stored identity, including a version ID
+  when supplied by storage; ETag and metadata are identity guards, never
+  initial byte-integrity proof
+
+The original MD5, SHA-256, byte count, `byteVerifiedAt`, and `r2Identity` remain
+attached to reused records. `verification: r2-get-hash-v1` continues to describe
+that underlying byte proof for compatibility with the playback adapter. The
+additional `verificationCheck: prior-get-head-v1` explicitly means that this
+run retained prior proof rather than rereading the audio; normal full reads use
+`get-hash-v1`. Reports include `transferMode`, `baselineSha256`, and `reusedCount`.
+This is an object-identity optimization, not a fresh bit-rot scan; run without
+`--incremental` whenever a new full byte audit is required.
+
+Absent/invalid canonical baselines, older records without identity evidence,
+missing checksum metadata, and changed source/object identities all fall back
+to the original full verification/copy path. That path first hashes an existing
+R2 object, downloading Drive audio only if necessary. Missing Drive MD5s still
+require a source download to establish the immutable key. R2 access errors and
+unreadable/oversized canonical responses stop the run rather than masquerading
+as a missing file. No object or Drive original is deleted, including older
+content generations and files removed from the current Drive catalog.
+
+Immediately before publication, the run rechecks the source inventory, the
+exact original canonical bytes, and every resulting R2 identity. Results
+without usable identity evidence receive another full byte verification.
+A change fails closed without replacing the canonical map. Incremental
+publication also uses a conditional canonical PUT tied to the baseline GET's
+ETag (`IfMatch`), or `IfNoneMatch: *` if no canonical map existed. A concurrent
+publisher cannot silently be overwritten after the last check. Unsupported
+client/server conditional-write behavior fails closed; it never retries with
+an unconditional write. Live conditional-write compatibility still needs to
+be verified before activation.
+
+Retain single-writer coordination too: every migration and mirror publisher
+must share the existing `r2-music-migration` Actions concurrency group
+(`cancel-in-progress: false`). This also avoids racing object repairs; the
+ordinary non-incremental publisher does not use the new conditional-write gate.
+Do not run a separate uncoordinated publisher against the same bucket.
+
+### Wiring later, after separate authorization
+
+1. Publish/review this source revision and pin the orchestration repository's
+   `.github/workflows/migrate-music-r2.yml` validation checkout to that exact SHA.
+   Keep the transfer checkout bound to `needs.validate.outputs.source_sha`.
+2. Expand that workflow's Python test pattern from `test_r2_migration.py` to
+   `test_r2*.py` so the retry and incremental guards run too.
+3. After the initial clone completes and Drive access is healthy, add an
+   explicit, default-off incremental dispatch option. The opted-in invocation
+   is `python .jarvis-source/scripts/migrate-drive-to-r2.py --limit 0
+   --concurrency 1 --incremental` with the existing credentials, bucket, and
+   pacing configuration. Run it manually first and review its complete report.
+   An old complete baseline is safe: the first run reads all existing R2 bytes
+   once to capture identity evidence, without unnecessarily downloading Drive.
+4. Only after recurring mirroring is authorized, sequence the same pinned,
+   tested invocation after successful Drive catalog publication in
+   `.github/workflows/publish-drive-catalog.yml`. That existing publisher runs
+   hourly at minute 17; do not add a second schedule or modify Muse's uploader.
+   Give the mirror job the same `r2-music-migration` concurrency group as manual
+   clones, preserve the source-refusal stop behavior, and save its report.
+5. Muse continues uploading into the existing Drive library. A subsequent
+   successful catalog/mirror pass picks up new or changed files. Authenticated
+   R2 delivery, playback cutover, the Muse runner's current health, and physical
+   Android playback remain separate verification gates.
+
+Offline checks require no SDK, credentials, or network:
+
+```sh
+python -m py_compile scripts/migrate-drive-to-r2.py
+python -m unittest discover -s tests -p 'test_r2*.py' -v
+npm test
+```
+
 ## Playback cutover
 
 The browser keeps its Drive catalog, stable `gd_` track IDs, prepared artwork,
