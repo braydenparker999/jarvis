@@ -517,6 +517,8 @@ def download_drive_file(file: dict, api_key: str, destination: Path) -> dict:
             if exc.code == 403 and reason not in RATE_REASONS and reason != "unclassified":
                 raise MigrationError(f"Drive refused this download ({reason}); no access restriction was bypassed.") from None
             error = exc
+        except DrivePauseError:
+            raise
         except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException, MigrationError) as exc:
             error = exc
         destination.unlink(missing_ok=True)

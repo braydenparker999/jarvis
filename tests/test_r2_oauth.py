@@ -62,6 +62,14 @@ class OAuthTests(unittest.TestCase):
             with self.assertRaisesRegex(m.MigrationError, 'GOOGLE_DRIVE_CLIENT_ID'):
                 m.drive_auth_from_env()
 
+    def test_oauth_failure_in_media_path_does_not_enter_download_retry_loop(self):
+        file = {'id': 'test-drive-file-id', 'size': '1', 'md5Checksum': '0' * 32}
+        with tempfile.TemporaryDirectory() as directory, patch.object(m.urllib.request, 'urlopen', side_effect=OSError('test-refresh-token')) as send, patch.object(m.time, 'sleep') as sleep:
+            with self.assertRaises(m.DrivePauseError):
+                m.download_drive_file(file, self.auth, Path(directory) / 'probe')
+            send.assert_called_once()
+            sleep.assert_not_called()
+
     def test_explicit_public_key_mode_preserves_existing_urls(self):
         with patch.dict(os.environ, {'GOOGLE_DRIVE_AUTH_MODE': 'public_api_key', 'GOOGLE_DRIVE_API_KEY': 'test-public-key'}, clear=True):
             auth = m.drive_auth_from_env()
