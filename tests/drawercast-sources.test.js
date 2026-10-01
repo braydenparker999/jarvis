@@ -75,3 +75,12 @@ test('an A15 catalog refresh cannot remove Drive or R2 tracks',async()=>{
   assert.deepEqual(Array.from(removed),['server']);assert.equal(h.ctx.LIB.map.get(r2.id),r2);
   assert.equal(h.ctx.LIB.map.get('drive'),h.tracks[1]);
 });
+
+test('disabling Drive during R2 playback preserves the current position in the filtered queue',()=>{
+  const h=harness(),r2={id:'r2_song',source:'r2',remote:true,title:'R2'};
+  h.tracks.push(r2);h.ctx.LIB.ids.push(r2.id);h.ctx.LIB.map.set(r2.id,r2);
+  h.ctx.Engine.queue=h.tracks.slice();h.ctx.Engine.order=[0,1,2,3];h.ctx.Engine.pos=3;h.ctx.Engine.current=r2;
+  h.MusicSources.setEnabled('drive',false);
+  assert.equal(h.ctx.Engine.queue[h.ctx.Engine.order[h.ctx.Engine.pos]]?.id,r2.id);
+  assert.equal(h.ctx.Engine._playRequest,5);assert.equal(h.stops(),0);
+});
