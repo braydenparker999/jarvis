@@ -95,6 +95,15 @@ class OAuthTests(unittest.TestCase):
         self.assertNotIn('key=', media.full_url)
         self.assertNotIn('test-access-token', media.full_url)
 
+    def test_redirects_never_forward_owner_access_token(self):
+        with patch.object(m.urllib.request, 'urlopen', return_value=token_response()):
+            request = m.authorized_drive_request(m.drive_url('/test-drive-file-id', {'alt': 'media'}, self.auth), self.auth)
+        self.assertEqual('Bearer test-access-token', request.get_header('Authorization'))
+        for target in ['https://www.googleapis.com/redirected', 'https://other.example.test/audio']:
+            redirected = m.urllib.request.HTTPRedirectHandler().redirect_request(request, None, 302, 'Redirect', {}, target)
+            self.assertIsNone(redirected.get_header('Authorization'))
+            self.assertNotIn('test-access-token', redirected.full_url)
+
     def test_runtime_access_token_is_redacted_from_provider_diagnostic(self):
         with patch.object(m.urllib.request, 'urlopen', return_value=token_response('short-token')):
             self.auth.headers()
