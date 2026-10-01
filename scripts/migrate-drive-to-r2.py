@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import hashlib
+import html
 import http.client
 import json
 import mimetypes
@@ -36,6 +37,9 @@ EXT_RE = re.compile(r"^[a-z0-9]{1,8}$")
 RETRYABLE = {408, 429, 500, 502, 503, 504}
 LOG_LOCK = threading.Lock()
 CHUNK_SIZE = 1024 * 1024
+DOWNLOAD_INTERVAL = 0.0
+DOWNLOAD_LOCK = threading.Lock()
+NEXT_DOWNLOAD_AT = 0.0
 DRIVE_REASONS = {"rateLimitExceeded", "userRateLimitExceeded", "downloadQuotaExceeded", "dailyLimitExceeded", "dailyLimitExceededUnreg", "insufficientFilePermissions", "appNotAuthorizedToFile", "accessNotConfigured", "forbidden", "fileNotDownloadable", "cannotDownloadAbusiveFile", "domainPolicy", "authError", "notFound", "backendError"}
 RATE_REASONS = {"rateLimitExceeded", "userRateLimitExceeded"}
 
@@ -52,16 +56,45 @@ def drive_error_reason(error: urllib.error.HTTPError) -> str:
     if hasattr(error, "_safe_drive_reason"):
         return error._safe_drive_reason
     reason = "unclassified"
+    raw = ""
     try:
-        payload = json.loads(error.read(16384))
-        for entry in payload.get("error", {}).get("errors", []):
+        raw = error.read(16384).decode("utf-8", errors="replace")
+        payload = json.loads(raw)
+        data = payload.get("error", {})
+        for entry in data.get("errors", []) + data.get("details", []):
             if entry.get("reason") in DRIVE_REASONS:
                 reason = entry["reason"]
                 break
     except Exception:
         pass
+    # Redact the request's key and any URLs/identifiers before keeping a short
+    # provider-response diagnostic. This contains no SDK or request repr.
+    secrets = urllib.parse.parse_qs(urllib.parse.urlsplit(error.url).query).get("key", [])
+    if os.environ.get("GOOGLE_DRIVE_API_KEY"):
+        secrets.append(os.environ["GOOGLE_DRIVE_API_KEY"])
+    for value in secrets:
+        raw = raw.replace(value, "[REDACTED]")
+    raw = re.sub(r"<(script|style)\b[^>]*>.*?</\1>", " ", raw, flags=re.I | re.S)
+    raw = html.unescape(re.sub(r"<[^>]*>", " ", raw))
+    raw = re.sub(r'https?://[^\s"<>]+', "[URL]", raw)
+    raw = re.sub(r"[A-Za-z0-9_./+=-]{24,}", "[IDENTIFIER]", raw)
+    raw = re.sub(r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b", "[IP]", raw)
+    raw = re.sub(r"[^\s@]+@[^\s@]+", "[EMAIL]", raw)
+    error._safe_drive_summary = " ".join(raw.split())[:1000]
     error._safe_drive_reason = reason
     return reason
+
+
+def pace_download() -> None:
+    global NEXT_DOWNLOAD_AT
+    if DOWNLOAD_INTERVAL <= 0:
+        return
+    with DOWNLOAD_LOCK:
+        now = time.monotonic()
+        delay = max(0.0, NEXT_DOWNLOAD_AT - now)
+        NEXT_DOWNLOAD_AT = max(now, NEXT_DOWNLOAD_AT) + DOWNLOAD_INTERVAL
+    if delay:
+        time.sleep(delay)
 
 
 def retry_delay(error: Exception, attempt: int) -> float:
@@ -327,6 +360,7 @@ def download_drive_file(file: dict, api_key: str, destination: Path) -> dict:
                 url,
                 headers={"User-Agent": "jarvis-r2-migrator/1.0", "Accept": "*/*"},
             )
+            pace_download()
             with urllib.request.urlopen(request, timeout=90) as response, destination.open("wb") as out:
                 while True:
                     chunk = response.read(CHUNK_SIZE)
@@ -350,6 +384,10 @@ def download_drive_file(file: dict, api_key: str, destination: Path) -> dict:
             reason = drive_error_reason(exc)
             if attempt == 0:
                 log(f"Drive download response: HTTP {exc.code}; reason={reason}. Request details omitted.")
+                if exc.code == 403:
+                    log("Sanitized Drive response: " + getattr(exc, "_safe_drive_summary", "No readable body"))
+            if exc.code == 403 and reason == "unclassified":
+                raise DrivePauseError("Drive returned an unclassified HTTP 403; paused for diagnosis without repeated attempts.") from None
             if reason in {"downloadQuotaExceeded", "dailyLimitExceeded", "dailyLimitExceededUnreg"}:
                 raise DrivePauseError(f"Drive source quota reached ({reason}); migration paused without further downloads.") from None
             if exc.code == 403 and reason not in RATE_REASONS and reason != "unclassified":
@@ -498,12 +536,16 @@ def publish_report(client, bucket: str, report: dict) -> str:
 
 
 def main() -> int:
+    global DOWNLOAD_INTERVAL
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=5, help="0 means full library; positive values are smoke-test item counts")
     parser.add_argument("--concurrency", type=int, default=4)
     args = parser.parse_args()
     if args.limit < 0 or args.concurrency < 1 or args.concurrency > 8:
         raise MigrationError("Invalid limit/concurrency.")
+    DOWNLOAD_INTERVAL = float(os.environ.get("DRIVE_DOWNLOAD_INTERVAL_SECONDS", "0"))
+    if not 0 <= DOWNLOAD_INTERVAL <= 60:
+        raise MigrationError("Invalid Drive download interval.")
 
     api_key = required_env("GOOGLE_DRIVE_API_KEY")
     account_id = required_env("R2_ACCOUNT_ID")
@@ -535,6 +577,8 @@ def main() -> int:
     selected = inventory if args.limit == 0 else inventory[: args.limit]
     mode = "full" if args.limit == 0 else "smoke"
     log(f"Starting {mode} migration for {len(selected)} tracks with concurrency={args.concurrency}")
+    if DOWNLOAD_INTERVAL:
+        log(f"Drive download pacing: at least {DOWNLOAD_INTERVAL:g} seconds between new requests")
 
     results: list[dict] = []
     failures: list[dict] = []
