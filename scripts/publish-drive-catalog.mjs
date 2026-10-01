@@ -1,4 +1,4 @@
-// Runs in Actions with the existing public Drive key and Azure OIDC identity.
+// Runs in Actions with owner Drive OAuth (or explicit public-key mode) and Azure OIDC.
 // No credentials or catalog contents are printed or committed to git.
 import {readFile,writeFile,mkdir,mkdtemp,rm,readdir} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
@@ -8,6 +8,7 @@ import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import vm from 'node:vm';
 import {createDriveApi} from '../public/drawercast/drive-api.js';
+import {drivePublisherAuth,DrivePublisherStopped} from './drive-publisher-auth.mjs';
 import {buildCatalog,readCatalog,sha256,BASE,POINTER} from '../public/drawercast/drive-catalog.js';
 const exec=promisify(execFile);
 const ORIGIN='https://missionarytube.z13.web.core.windows.net';
@@ -18,7 +19,6 @@ export async function retryFetch(url,options={}){
     try{
       response=await fetch(url,{...options,signal:AbortSignal.any([options.signal||runSignal,runSignal,AbortSignal.timeout(30000)])});
       let transient=response.status===429||response.status>=500;
-      if(response.status===403){const data=await response.clone().json().catch(()=>({}));transient=/rateLimit|quota/i.test(data.error?.errors?.[0]?.reason||'');}
       if(!transient||attempt>=3)return response;
     }catch(e){if(options.signal?.aborted||runSignal.aborted||attempt>=3)throw Error('Catalog network request failed.');}
     await response?.body?.cancel();
@@ -34,14 +34,15 @@ function metadata(raw,file){
 async function main(){
   if(process.env.AZURE_STORAGE_ACCOUNT!=='missionarytube')throw Error('Unexpected Azure account.');
   const config=JSON.parse(await readFile(new URL('../public/assets/drive-config.json',import.meta.url),'utf8'));
-  const api=createDriveApi(process.env.GOOGLE_DRIVE_API_KEY,retryFetch);
+  const auth=drivePublisherAuth({fetcher:retryFetch});
+  const api=createDriveApi(auth.key,auth.fetcher,{authenticated:auth.authenticated});
   let previous=null;
   // A missing pointer is a first enrollment. Other failures must not silently
   // discard prior metadata or publish over an unreadable last generation.
   const probe=await retryFetch(ORIGIN+POINTER,{signal:runSignal});const missing=probe.status===404;await probe.body?.cancel();
   if(!missing)previous=await readCatalog({root:config.folderId,fetcher:retryFetch,signal:runSignal,pointerURL:ORIGIN+POINTER,baseURL:ORIGIN+BASE});
   console.log('Reconciling the complete Drive inventory in the publisher.');
-  const [listing,prepared]=await Promise.all([api.list(config.folderId,runSignal),api.manifest(config.folderId,runSignal).catch(()=>({}))]);
+  const [listing,prepared]=await Promise.all([api.list(config.folderId,runSignal),api.manifest(config.folderId,runSignal).catch(error=>{if(error instanceof DrivePublisherStopped)throw error;return {};} )]);
   console.log('Inventory complete: '+listing.files.length+' songs.');
   const old=new Map(previous?.records.map(r=>[r.id,r])||[]);
   const records=listing.files.map(file=>{
@@ -79,7 +80,7 @@ async function main(){
           r.cover=await sha256(bytes);await writeFile(join(work,'covers',r.cover+'.jpg'),bytes);await rm(input);await rm(output);
         }
         r.metadataReady=true;preparedCount++;
-      }catch{/* Optional tags retry later; the complete file inventory remains valid. */}
+      }catch(error){if(error instanceof DrivePublisherStopped)throw error;/* Optional tags retry later; the complete file inventory remains valid. */}
     }));}
     console.log('Metadata preparation complete. Building verified shards.');
     const catalog=await buildCatalog(records,{root:listing.id,name:listing.name});

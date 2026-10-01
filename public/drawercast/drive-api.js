@@ -9,11 +9,11 @@ export function folderId(value) {
   if (!id || !ID.test(id)) throw Error('Paste a Google Drive folder link.');
   return id;
 }
-export function createDriveApi(key, fetcher = fetch) {
-  if (!/^AIza[A-Za-z0-9_-]{30,}$/.test(key || '')) throw Error('The shared Drive API key is not configured.');
+export function createDriveApi(key, fetcher = fetch, {authenticated = false} = {}) {
+  if (!authenticated && !/^AIza[A-Za-z0-9_-]{30,}$/.test(key || '')) throw Error('The shared Drive API key is not configured.');
   async function get(path, params, signal) {
     const url = new URL(ROOT + path);
-    for (const [name, value] of Object.entries({...params, key})) url.searchParams.set(name, value);
+    for (const [name, value] of Object.entries(authenticated ? params : {...params, key})) url.searchParams.set(name, value);
     const response = await fetcher(url.href, {signal, credentials:'omit', cache:'no-store'});
     const data = await response.json();
     if (!response.ok) {
@@ -28,7 +28,7 @@ export function createDriveApi(key, fetcher = fetch) {
   function mediaURL(file) {
     if (!ID.test(file.id || '')) throw Error('Invalid Drive file ID.');
     const url = new URL(ROOT + '/' + file.id);
-    url.searchParams.set('alt','media'); url.searchParams.set('key', key);
+    url.searchParams.set('alt','media'); if (!authenticated) url.searchParams.set('key', key);
     return url.href;
   }
   async function manifest(folder, signal) {
