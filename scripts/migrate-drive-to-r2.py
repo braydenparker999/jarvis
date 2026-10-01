@@ -2,22 +2,22 @@
 """Clone the public Google Drive music library into Cloudflare R2.
 
 Designed for resumable GitHub Actions runs. Object keys are immutable/content-versioned:
-  audio/<drive-file-id>/<md5-or-revision-hash>.<extension>
+  audio/<drive-file-id>/<md5-or-downloaded-sha256>.<extension>
 
-A rerun HEAD-checks R2 and skips verified objects. The canonical mapping is only
-published after a complete full-library run succeeds.
+A rerun downloads and hashes R2 objects before skipping them. The canonical
+mapping is only published after a complete, stable full-library run succeeds.
 """
 from __future__ import annotations
 
 import argparse
 import concurrent.futures
 import hashlib
+import http.client
 import json
 import mimetypes
 import os
 import random
 import re
-import shutil
 import sys
 import tempfile
 import threading
@@ -28,16 +28,31 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-import boto3
-from botocore.config import Config
-from botocore.exceptions import ClientError
-
 DRIVE_ROOT = "https://www.googleapis.com/drive/v3/files"
 AUDIO_RE = re.compile(r"\.(mp3|m4a|m4b|aac|flac|wav|wave|ogg|oga|opus|weba|webm|mp4|aif|aiff|wma|mka)$", re.I)
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{10,200}$")
 EXT_RE = re.compile(r"^[a-z0-9]{1,8}$")
 RETRYABLE = {408, 429, 500, 502, 503, 504}
 LOG_LOCK = threading.Lock()
+CHUNK_SIZE = 1024 * 1024
+
+
+class MigrationError(RuntimeError):
+    """An error with a controlled message that is safe for public CI logs."""
+
+
+def safe_error(error: Exception) -> str:
+    # SDK/network exceptions can contain signed request URLs and credentials.
+    # Never copy their messages, repr, response bodies, or tracebacks to reports.
+    if isinstance(error, MigrationError):
+        return str(error)
+    if isinstance(error, urllib.error.HTTPError):
+        return f"HTTP {error.code} (request details omitted)"
+    response = getattr(error, "response", {})
+    status = response.get("ResponseMetadata", {}).get("HTTPStatusCode") if isinstance(response, dict) else None
+    if isinstance(status, int):
+        return f"R2 HTTP {status} (request details omitted)"
+    return f"{type(error).__name__} (details omitted to protect credentials)"
 
 
 def log(message: str) -> None:
@@ -48,7 +63,7 @@ def log(message: str) -> None:
 def required_env(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if not value:
-        raise RuntimeError(f"Missing required environment variable: {name}")
+        raise MigrationError(f"Missing required environment variable: {name}")
     return value
 
 
@@ -86,7 +101,7 @@ def drive_request(path: str, params: dict[str, str], api_key: str, *, raw: bool 
         if delay is None:
             delay = min(20.0, 0.8 * (2**attempt)) + random.random() * 0.5
         time.sleep(delay)
-    raise RuntimeError(f"Drive request failed: {last}")
+    raise MigrationError(f"Drive request failed: {safe_error(last)}")
 
 
 def list_music(root_id: str, api_key: str) -> tuple[str, list[dict]]:
@@ -96,7 +111,7 @@ def list_music(root_id: str, api_key: str) -> tuple[str, list[dict]]:
         api_key,
     )
     if info.get("mimeType") != "application/vnd.google-apps.folder":
-        raise RuntimeError("Configured music root is not a Drive folder.")
+        raise MigrationError("Configured music root is not a Drive folder.")
 
     visited: set[str] = set()
     files: dict[str, dict] = {}
@@ -116,12 +131,14 @@ def list_music(root_id: str, api_key: str) -> tuple[str, list[dict]]:
                 params["pageToken"] = token
             page = drive_request("", params, api_key)
             if page.get("incompleteSearch") or not isinstance(page.get("files"), list):
-                raise RuntimeError("Drive returned an incomplete listing; migration stopped.")
+                raise MigrationError("Drive returned an incomplete listing; migration stopped.")
             for item in page["files"]:
+                if not isinstance(item, dict):
+                    raise MigrationError("Drive returned invalid file metadata; migration stopped.")
                 fid = item.get("id", "")
                 name = item.get("name", "")
-                if not ID_RE.match(fid) or not isinstance(name, str):
-                    continue
+                if not isinstance(fid, str) or not ID_RE.fullmatch(fid) or not isinstance(name, str):
+                    raise MigrationError("Drive returned invalid file metadata; migration stopped.")
                 if item.get("mimeType") == "application/vnd.google-apps.folder":
                     children.append({"id": fid, "path": f"{current['path']}/{name}"})
                 elif AUDIO_RE.search(name):
@@ -138,7 +155,7 @@ def list_music(root_id: str, api_key: str) -> tuple[str, list[dict]]:
             if not token:
                 break
             if token in seen_tokens:
-                raise RuntimeError("Drive pagination repeated; migration stopped.")
+                raise MigrationError("Drive pagination repeated; migration stopped.")
             seen_tokens.add(token)
         return children
 
@@ -148,7 +165,7 @@ def list_music(root_id: str, api_key: str) -> tuple[str, list[dict]]:
             if current["id"] in visited:
                 continue
             if len(visited) >= 5000:
-                raise RuntimeError("Music root contains more than 5,000 folders.")
+                raise MigrationError("Music root contains more than 5,000 folders.")
             visited.add(current["id"])
             level.append(current)
         frontier = []
@@ -163,17 +180,27 @@ def list_music(root_id: str, api_key: str) -> tuple[str, list[dict]]:
     return info.get("name") or "Music", result
 
 
-def object_key(file: dict) -> str:
+def source_md5(file: dict) -> str:
+    value = file.get("md5Checksum") or ""
+    if not isinstance(value, str) or (value and not re.fullmatch(r"[a-fA-F0-9]{32}", value)):
+        raise MigrationError("Drive returned an invalid MD5 checksum.")
+    return value.lower()
+
+
+def object_key(file: dict, *, sha256: str = "") -> str:
+    if not ID_RE.fullmatch(file.get("id", "")):
+        raise MigrationError("Invalid Drive file ID.")
     name = file.get("name", "")
     ext = name.rsplit(".", 1)[-1].lower() if "." in name else "bin"
     if not EXT_RE.match(ext):
         ext = "bin"
-    md5 = (file.get("md5Checksum") or "").lower()
-    if re.fullmatch(r"[a-f0-9]{32}", md5):
+    md5 = source_md5(file)
+    if md5:
         version = md5
     else:
-        fallback = f"{file.get('size','')}|{file.get('modifiedTime','')}|{name}".encode()
-        version = hashlib.sha256(fallback).hexdigest()[:32]
+        if not re.fullmatch(r"[a-f0-9]{64}", sha256):
+            raise MigrationError("A downloaded content hash is required when Drive has no MD5.")
+        version = sha256
     return f"audio/{file['id']}/{version}.{ext}"
 
 
@@ -186,6 +213,10 @@ def content_type(file: dict) -> str:
 
 
 def r2_client(account_id: str, access_key: str, secret_key: str):
+    # Keep local unit tests and --help dependency-free; only live transfer needs boto3.
+    import boto3
+    from botocore.config import Config
+
     return boto3.client(
         "s3",
         endpoint_url=f"https://{account_id}.r2.cloudflarestorage.com",
@@ -202,30 +233,50 @@ def r2_client(account_id: str, access_key: str, secret_key: str):
     )
 
 
-def remote_is_verified(client, bucket: str, key: str, file: dict) -> bool:
+def remote_hashes_if_verified(client, bucket: str, key: str, expected_size: int, *, md5: str = "", sha256: str = "") -> dict | None:
+    """Read the entire stored object. HEAD metadata and ETags are never evidence."""
+    if not md5 and not sha256:
+        raise MigrationError("R2 verification requires an expected content hash.")
     try:
-        head = client.head_object(Bucket=bucket, Key=key)
-    except ClientError as exc:
-        code = str(exc.response.get("Error", {}).get("Code", ""))
-        status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        response = client.get_object(Bucket=bucket, Key=key)
+    except Exception as exc:
+        details = getattr(exc, "response", {})
+        if not isinstance(details, dict):
+            raise
+        code = str(details.get("Error", {}).get("Code", ""))
+        status = details.get("ResponseMetadata", {}).get("HTTPStatusCode")
         if code in {"404", "NoSuchKey", "NotFound"} or status == 404:
-            return False
+            return None
         raise
-    if int(head.get("ContentLength", -1)) != int(file.get("size", -2)):
-        return False
-    expected_md5 = (file.get("md5Checksum") or "").lower()
-    stored_md5 = (head.get("Metadata") or {}).get("source-md5", "").lower()
-    return not expected_md5 or stored_md5 == expected_md5
+    body = response["Body"]
+    try:
+        if int(response.get("ContentLength", -1)) != expected_size:
+            return None
+        digest_md5, digest_sha256 = hashlib.md5(), hashlib.sha256()
+        size = 0
+        while chunk := body.read(CHUNK_SIZE):
+            size += len(chunk)
+            if size > expected_size:
+                return None
+            digest_md5.update(chunk)
+            digest_sha256.update(chunk)
+        hashes = {"md5": digest_md5.hexdigest(), "sha256": digest_sha256.hexdigest(), "size": size}
+        if size != expected_size or (md5 and hashes["md5"] != md5) or (sha256 and hashes["sha256"] != sha256):
+            return None
+        return hashes
+    finally:
+        body.close()
 
 
-def download_drive_file(file: dict, api_key: str, destination: Path) -> tuple[int, str]:
+def download_drive_file(file: dict, api_key: str, destination: Path) -> dict:
     params = {"alt": "media"}
     url = f"{DRIVE_ROOT}/{file['id']}?{urllib.parse.urlencode({**params, 'key': api_key})}"
     expected_size = int(file["size"])
-    expected_md5 = (file.get("md5Checksum") or "").lower()
+    expected_md5 = source_md5(file)
 
     for attempt in range(6):
         md5 = hashlib.md5()
+        sha256 = hashlib.sha256()
         total = 0
         try:
             request = urllib.request.Request(
@@ -234,66 +285,81 @@ def download_drive_file(file: dict, api_key: str, destination: Path) -> tuple[in
             )
             with urllib.request.urlopen(request, timeout=90) as response, destination.open("wb") as out:
                 while True:
-                    chunk = response.read(1024 * 1024)
+                    chunk = response.read(CHUNK_SIZE)
                     if not chunk:
                         break
                     total += len(chunk)
                     if total > expected_size:
-                        raise RuntimeError("Drive response exceeded expected file size.")
+                        raise MigrationError("Drive response exceeded expected file size.")
                     md5.update(chunk)
+                    sha256.update(chunk)
                     out.write(chunk)
             digest = md5.hexdigest()
             if total != expected_size:
-                raise RuntimeError(f"Drive response was incomplete ({total}/{expected_size} bytes).")
+                raise MigrationError(f"Drive response was incomplete ({total}/{expected_size} bytes).")
             if expected_md5 and digest != expected_md5:
-                raise RuntimeError("Drive MD5 verification failed.")
-            return total, digest
+                raise MigrationError("Drive MD5 verification failed.")
+            return {"size": total, "md5": digest, "sha256": sha256.hexdigest()}
         except urllib.error.HTTPError as exc:
             if exc.code not in RETRYABLE and exc.code != 403:
                 raise
             error = exc
-        except (urllib.error.URLError, TimeoutError, ConnectionError, RuntimeError) as exc:
+        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException, MigrationError) as exc:
             error = exc
         destination.unlink(missing_ok=True)
         if attempt >= 5:
-            raise RuntimeError(f"Download failed after retries: {error}") from error
+            raise MigrationError(f"Download failed after retries: {safe_error(error)}") from None
         time.sleep(min(20.0, 1.0 * (2**attempt)) + random.random() * 0.5)
-    raise RuntimeError("Unreachable download failure.")
+    raise MigrationError("Unreachable download failure.")
 
 
 def migrate_one(client, bucket: str, api_key: str, public_base: str, temp_root: Path, file: dict) -> dict:
     if file.get("availability") != "ready":
-        raise RuntimeError("Drive reports this file as non-downloadable.")
+        raise MigrationError("Drive reports this file as non-downloadable.")
     size = int(file.get("size") or 0)
     if size <= 0:
-        raise RuntimeError("Invalid Drive file size.")
+        raise MigrationError("Invalid Drive file size.")
 
-    key = object_key(file)
-    if remote_is_verified(client, bucket, key, file):
-        status = "skipped"
-    else:
-        suffix = key.rsplit(".", 1)[-1]
-        tmp = temp_root / f"{file['id']}.{suffix}.part"
-        download_drive_file(file, api_key, tmp)
-        metadata = {
-            "source-drive-id": file["id"],
-            "source-md5": (file.get("md5Checksum") or "").lower(),
-            "source-size": str(size),
-        }
-        client.upload_file(
-            str(tmp),
-            bucket,
-            key,
-            ExtraArgs={
-                "ContentType": content_type(file),
-                "CacheControl": "public, max-age=31536000, immutable",
-                "Metadata": metadata,
-            },
+    if not ID_RE.fullmatch(file.get("id", "")):
+        raise MigrationError("Invalid Drive file ID.")
+    expected_md5 = source_md5(file)
+    tmp = temp_root / f"{file['id']}.part"
+    downloaded = None
+    try:
+        # A metadata revision is not a content hash. Missing-MD5 sources must be
+        # downloaded again on resume to establish the actual immutable key.
+        if not expected_md5:
+            downloaded = download_drive_file(file, api_key, tmp)
+        key = object_key(file, sha256=downloaded["sha256"] if downloaded else "")
+        hashes = remote_hashes_if_verified(
+            client, bucket, key, size, md5=expected_md5,
+            sha256=downloaded["sha256"] if downloaded else "",
         )
+        if hashes:
+            status = "skipped"
+        else:
+            downloaded = downloaded or download_drive_file(file, api_key, tmp)
+            client.upload_file(
+                str(tmp), bucket, key,
+                ExtraArgs={
+                    "ContentType": content_type(file),
+                    "CacheControl": "public, max-age=31536000, immutable",
+                    "Metadata": {
+                        "source-drive-id": file["id"],
+                        "source-md5": downloaded["md5"],
+                        "source-sha256": downloaded["sha256"],
+                        "source-size": str(size),
+                    },
+                },
+            )
+            hashes = remote_hashes_if_verified(
+                client, bucket, key, size, md5=downloaded["md5"], sha256=downloaded["sha256"],
+            )
+            if not hashes:
+                raise MigrationError("R2 downloaded-byte/hash verification failed.")
+            status = "copied"
+    finally:
         tmp.unlink(missing_ok=True)
-        if not remote_is_verified(client, bucket, key, file):
-            raise RuntimeError("R2 verification HEAD did not match uploaded object.")
-        status = "copied"
 
     url = f"{public_base.rstrip('/')}/{key}" if public_base else ""
     return {
@@ -303,15 +369,23 @@ def migrate_one(client, bucket: str, api_key: str, public_base: str, temp_root: 
         "name": file.get("name", ""),
         "folder": file.get("folder", ""),
         "size": size,
-        "md5": (file.get("md5Checksum") or "").lower(),
+        "md5": hashes["md5"],
+        "sourceMd5": expected_md5,
+        "sha256": hashes["sha256"],
+        "verifiedBytes": hashes["size"],
+        "verification": "r2-get-hash-v1",
         "mimeType": content_type(file),
         "modifiedTime": file.get("modifiedTime", ""),
         "status": status,
     }
 
 
+def json_bytes(payload: dict | list) -> bytes:
+    return (json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
+
+
 def upload_json(client, bucket: str, key: str, payload: dict, *, cache_control: str) -> None:
-    body = (json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
+    body = json_bytes(payload)
     client.put_object(
         Bucket=bucket,
         Key=key,
@@ -319,9 +393,55 @@ def upload_json(client, bucket: str, key: str, payload: dict, *, cache_control: 
         ContentType="application/json; charset=utf-8",
         CacheControl=cache_control,
     )
-    head = client.head_object(Bucket=bucket, Key=key)
-    if int(head.get("ContentLength", -1)) != len(body):
-        raise RuntimeError(f"R2 verification failed for {key}.")
+    if not remote_hashes_if_verified(client, bucket, key, len(body), sha256=hashlib.sha256(body).hexdigest()):
+        raise MigrationError(f"R2 verification failed for {key}.")
+
+
+def inventory_revision(inventory: list[dict]) -> str:
+    """Reject a library that changed during transfer, including renames/removals."""
+    fields = ("id", "name", "folder", "size", "md5Checksum", "modifiedTime", "mimeType", "availability")
+    snapshot = [{field: file.get(field, "") for field in fields} for file in sorted(inventory, key=lambda item: item["id"])]
+    return hashlib.sha256(json_bytes(snapshot)).hexdigest()
+
+
+def validate_report(report: dict) -> None:
+    """All guards run before writing either staging or the canonical mapping."""
+    files = report.get("files", [])
+    if (report.get("version") != 1 or report.get("verification") != "r2-get-hash-v1"
+            or report.get("mode") not in {"full", "smoke"} or not files
+            or report.get("failures") or report.get("failedCount") != 0
+            or report.get("verifiedCount") != len(files) or report.get("selectedCount") != len(files)):
+        raise MigrationError("Refusing to publish an incomplete or unverified R2 mapping.")
+    if report["mode"] == "full" and (report.get("complete") is not True
+            or len(files) != report.get("inventoryCount")
+            or sum(file["size"] for file in files) != report.get("inventoryBytes")):
+        raise MigrationError("Refusing to publish incomplete canonical R2 mapping.")
+    if report["mode"] == "smoke" and report.get("complete") is not False:
+        raise MigrationError("Smoke mappings must never be marked complete.")
+    seen = set()
+    for file in files:
+        fid = file.get("driveId", "")
+        if (not ID_RE.fullmatch(fid) or fid in seen or file.get("verification") != "r2-get-hash-v1"
+                or file.get("size", 0) <= 0 or file.get("verifiedBytes") != file.get("size")
+                or not re.fullmatch(r"[a-f0-9]{32}", file.get("md5", ""))
+                or not re.fullmatch(r"[a-f0-9]{64}", file.get("sha256", ""))
+                or (file.get("sourceMd5") and file["sourceMd5"] != file["md5"])):
+            raise MigrationError("Refusing to publish invalid R2 file verification evidence.")
+        expected_key = object_key({"id": fid, "name": file["name"], "md5Checksum": file.get("sourceMd5", "")}, sha256=file["sha256"])
+        if file.get("key") != expected_key:
+            raise MigrationError("Refusing to publish a non-content-versioned R2 key.")
+        seen.add(fid)
+
+
+def publish_report(client, bucket: str, report: dict) -> str:
+    validate_report(report)
+    # Validate the exact manifest bytes in R2 before making them discoverable at
+    # the well-known URL. A smoke run never writes the canonical mapping.
+    digest = hashlib.sha256(json_bytes(report)).hexdigest()
+    upload_json(client, bucket, f"catalog/versions/{digest}.json", report, cache_control="public, max-age=31536000, immutable")
+    key = "catalog/drive-r2-map-v1.json" if report["mode"] == "full" else "catalog/drive-r2-smoke-v1.json"
+    upload_json(client, bucket, key, report, cache_control="no-cache")
+    return key
 
 
 def main() -> int:
@@ -330,7 +450,7 @@ def main() -> int:
     parser.add_argument("--concurrency", type=int, default=4)
     args = parser.parse_args()
     if args.limit < 0 or args.concurrency < 1 or args.concurrency > 8:
-        raise RuntimeError("Invalid limit/concurrency.")
+        raise MigrationError("Invalid limit/concurrency.")
 
     api_key = required_env("GOOGLE_DRIVE_API_KEY")
     account_id = required_env("R2_ACCOUNT_ID")
@@ -338,17 +458,24 @@ def main() -> int:
     secret_key = required_env("R2_SECRET_ACCESS_KEY")
     bucket = required_env("R2_BUCKET")
     public_base = os.environ.get("R2_PUBLIC_BASE_URL", "").strip()
+    if public_base:
+        parsed = urllib.parse.urlsplit(public_base)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise MigrationError("R2 public base must be an HTTPS URL without credentials, query, or fragment.")
 
     repo_root = Path(__file__).resolve().parents[1]
     config = json.loads((repo_root / "public/assets/drive-config.json").read_text("utf-8"))
     root_id = os.environ.get("MUSIC_ROOT_ID", config.get("folderId", "")).strip()
-    if not ID_RE.match(root_id):
-        raise RuntimeError("Invalid Drive music root ID.")
+    if not ID_RE.fullmatch(root_id):
+        raise MigrationError("Invalid Drive music root ID.")
 
     client = r2_client(account_id, access_key, secret_key)
     client.head_bucket(Bucket=bucket)
     log(f"R2 destination verified: bucket={bucket}")
     root_name, inventory = list_music(root_id, api_key)
+    if not inventory:
+        raise MigrationError("Drive music inventory is empty; existing R2 mapping will not be replaced.")
+    source_revision = inventory_revision(inventory)
     total_inventory_bytes = sum(int(item.get("size") or 0) for item in inventory)
     log(f"Authoritative Drive inventory: {len(inventory)} tracks, {total_inventory_bytes / 1_000_000_000:.2f} GB")
 
@@ -371,8 +498,9 @@ def main() -> int:
                 try:
                     results.append(future.result())
                 except Exception as exc:
-                    failures.append({"driveId": item.get("id"), "name": item.get("name"), "error": str(exc)[:500]})
-                    log(f"FAILED {item.get('id')}: {str(exc)[:200]}")
+                    error = safe_error(exc)
+                    failures.append({"driveId": item.get("id"), "name": item.get("name"), "error": error[:500]})
+                    log(f"FAILED {item.get('id')}: {error[:200]}")
                 completed += 1
                 if completed % 25 == 0 or completed == len(selected):
                     copied = sum(1 for r in results if r["status"] == "copied")
@@ -383,6 +511,9 @@ def main() -> int:
     report = {
         "version": 1,
         "mode": mode,
+        "complete": False,
+        "verification": "r2-get-hash-v1",
+        "sourceRevision": source_revision,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "driveRootId": root_id,
         "driveRootName": root_name,
@@ -405,10 +536,16 @@ def main() -> int:
         log(f"Migration incomplete: {len(failures)} files failed. Safe to rerun; verified R2 objects will be skipped.")
         return 2
 
-    catalog_key = "catalog/drive-r2-map-v1.json" if mode == "full" else "catalog/drive-r2-smoke-v1.json"
-    upload_json(client, bucket, catalog_key, report, cache_control="no-cache")
-    if mode == "full" and len(results) != len(inventory):
-        raise RuntimeError("Refusing to publish incomplete canonical R2 mapping.")
+    if {file["driveId"] for file in results} != {file["id"] for file in selected} or len(results) != len(selected):
+        raise MigrationError("Refusing to publish a mapping that differs from the selected Drive inventory.")
+    if mode == "full":
+        log("Rechecking the complete Drive inventory before publishing the canonical mapping")
+        _, final_inventory = list_music(root_id, api_key)
+        if inventory_revision(final_inventory) != source_revision:
+            raise MigrationError("Drive library changed during migration; rerun before publishing a canonical mapping.")
+        report["complete"] = True
+    catalog_key = publish_report(client, bucket, report)
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", "utf-8")
     log(f"Migration verified. Published {catalog_key} with {len(results)} objects.")
     return 0
 
@@ -419,5 +556,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         raise
     except Exception as exc:
-        print(f"Migration failed: {exc}", file=sys.stderr, flush=True)
+        print(f"Migration failed: {safe_error(exc)}", file=sys.stderr, flush=True)
         raise SystemExit(1)
