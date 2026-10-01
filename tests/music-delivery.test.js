@@ -28,7 +28,7 @@ function fixture(mapping=report()) {
     async head(k) { calls.push(['head',k]); return k===key ? audioMetadata() : null; },
     async get(k, options) {
       calls.push(['get',k,options]);
-      if(k==='catalog/drive-r2-map-v1.json') {
+      if(k==='catalog/drive-r2-map-v1.json'||k==='catalog/drive-r2-partial-v1.json') {
         const body=new TextEncoder().encode(JSON.stringify(mapping));
         return {size:body.length, body:new Response(body).body};
       }
@@ -177,4 +177,28 @@ test('replacement since byte verification fails despite same size and copied met
   assert.equal((await call(fixture(missing).e,key)).status,503);
   const newer=fixture();newer.e.MUSIC_R2.head=async()=>({...audioMetadata(),uploaded:new Date('2026-10-01T06:00:00Z')});
   assert.equal((await call(newer.e,key)).status,503);
+});
+
+function partialReport(){
+  const map=report();
+  return {...map,mode:'partial',complete:false,inventoryCount:3,inventoryBytes:100,verifiedBytesTotal:10};
+}
+test('partial route exposes only verified copied songs and never claims a complete library',async()=>{
+  const {e}=fixture(partialReport());
+  const response=await call(e,'partial/manifest.json');
+  assert.equal(response.status,200);
+  const map=await response.json();
+  assert.equal(map.mode,'partial');assert.equal(map.complete,false);
+  assert.equal(map.inventoryCount,3);assert.equal(map.verifiedCount,1);
+  assert.equal(map.files[0].url,api+'/music/partial/'+key);
+  const media=await call(e,'partial/'+key,{Range:'bytes=2-5'});
+  assert.equal(media.status,206);assert.equal(await media.text(),'2345');
+  assert.equal((await call(e,'manifest.json')).status,503);
+});
+test('partial route rejects full/smoke maps, wrong totals and missing original object identity',async()=>{
+  const invalid=[report(),{...report(),mode:'smoke',complete:false},
+    {...partialReport(),complete:true},{...partialReport(),verifiedBytesTotal:9},
+    {...partialReport(),inventoryCount:0}];
+  const missing=partialReport();delete missing.files[0].r2Identity;invalid.push(missing);
+  for(const map of invalid)assert.equal((await call(fixture(map).e,'partial/'+key)).status,503);
 });

@@ -5,7 +5,9 @@ const ID = /^[A-Za-z0-9_-]{10,200}$/;
 const MD5 = /^[a-f0-9]{32}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const VERIFICATION = 'r2-get-hash-v1';
-const fail = () => { throw Error('R2 playback requires a complete, verified mapping of the current Drive library.'); };
+const PARTIAL_MANIFEST_PATH = '/music/partial/manifest.json';
+const PARTIAL_MEDIA_PATH = '/music/partial';
+const fail = () => { throw Error('R2 playback requires a complete, verified mapping or an explicitly configured verified partial mapping of the current Drive library.'); };
 const count = n => Number.isSafeInteger(n) && n >= 0;
 
 function httpsURL(value) {
@@ -25,18 +27,25 @@ function trackMatches(track, file, root) {
 
 export function validateR2Manifest(data, {root, manifestURL, tracks}) {
   const endpoint = httpsURL(manifestURL);
-  if (typeof root !== 'string' || !ID.test(root) || data?.version !== 1 || data.mode !== 'full' || data.complete !== true ||
+  // Partial playback is an explicit endpoint opt-in, never a relaxation of
+  // the full manifest contract or acceptance of an unfinished migration run.
+  const partial = endpoint.pathname === PARTIAL_MANIFEST_PATH;
+  if (typeof root !== 'string' || !ID.test(root) || data?.version !== 1 ||
+      data.mode !== (partial ? 'partial' : 'full') || data.complete !== !partial ||
       data.verification !== VERIFICATION || data.driveRootId !== root ||
       typeof data.generatedAt !== 'string' || !Number.isFinite(Date.parse(data.generatedAt)) ||
       !Array.isArray(data.files) || !data.files.length || data.files.length > 50000 ||
-      !Array.isArray(tracks) || tracks.length !== data.files.length ||
+      !Array.isArray(tracks) || (partial ? tracks.length < data.files.length : tracks.length !== data.files.length) ||
       !count(data.inventoryBytes) || data.failedCount !== 0 || !Array.isArray(data.failures) || data.failures.length ||
-      ![data.inventoryCount, data.selectedCount, data.verifiedCount].every(n => n === data.files.length) ||
+      ![data.selectedCount, data.verifiedCount].every(n => n === data.files.length) ||
       !count(data.copiedCount) || !count(data.skippedCount)) fail();
+  if (partial ? !count(data.inventoryCount) || data.inventoryCount < data.files.length || data.inventoryCount > 50000 ||
+      !SHA256.test(data.sourceRevision) || !count(data.verifiedBytesTotal) : data.inventoryCount !== data.files.length) fail();
   const base = httpsURL(data.publicBaseUrl);
   // One explicitly configured endpoint is the trust boundary. Supporting a
   // different media origin or cookie/token authentication needs separate setup.
   if (base.origin !== endpoint.origin || !/^\/[A-Za-z0-9_/-]*$/.test(base.pathname)) fail();
+  if (partial && base.pathname !== PARTIAL_MEDIA_PATH) fail();
   const baseURL = base.href.replace(/\/+$/, '');
   const files = new Map(); let bytes = 0, copied = 0, skipped = 0;
   for (const file of data.files) {
@@ -57,19 +66,27 @@ export function validateR2Manifest(data, {root, manifestURL, tracks}) {
     bytes += file.size; if (!Number.isSafeInteger(bytes)) fail();
     if (file.status === 'copied') copied++; else skipped++;
   }
-  if (bytes !== data.inventoryBytes || copied !== data.copiedCount || skipped !== data.skippedCount) fail();
+  if ((partial ? bytes !== data.verifiedBytesTotal || bytes > data.inventoryBytes : bytes !== data.inventoryBytes) ||
+      copied !== data.copiedCount || skipped !== data.skippedCount) fail();
   function matches(library) {
-    if (!Array.isArray(library) || library.length !== files.size) return false;
-    const seen = new Set();
-    return library.every(track => {
+    if (!Array.isArray(library) || (partial ? library.length < files.size : library.length !== files.size)) return false;
+    const seen = new Set(); let matched = 0;
+    const valid = library.every(track => {
+      if (!track || seen.has(track.remoteId)) return false;
+      seen.add(track.remoteId);
       const file = files.get(track?.remoteId);
-      if (!file || seen.has(track.remoteId) || !trackMatches(track, file, root)) return false;
-      seen.add(track.remoteId); return true;
+      if (!file) return partial && track.source === 'drive' && track.driveFolder === root &&
+        ID.test(track.remoteId) && track.id === 'gd_' + track.remoteId;
+      if (!trackMatches(track, file, root)) return false;
+      matched++; return true;
     });
+    return valid && matched === files.size;
   }
   if (!matches(tracks)) fail();
   return Object.freeze({
     count:files.size,
+    mode:data.mode,
+    complete:data.complete,
     matches,
     mediaURL(track) {
       const file = files.get(track?.remoteId);

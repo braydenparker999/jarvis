@@ -24,6 +24,16 @@ function fixture() {
   return {data, tracks, options:{root, manifestURL:url, tracks}};
 }
 const validate = f => validateR2Manifest(f.data, f.options);
+const partialURL = 'https://music.example.test/music/partial/manifest.json';
+function partialFixture() {
+  const f = fixture();
+  Object.assign(f.data, {mode:'partial', complete:false, sourceRevision:'a'.repeat(64),
+    publicBaseUrl:'https://music.example.test/music/partial', selectedCount:1, verifiedCount:1,
+    copiedCount:1, skippedCount:0, verifiedBytesTotal:320, files:f.data.files.slice(0, 1)});
+  f.data.files[0].url = f.data.publicBaseUrl + '/' + f.data.files[0].key;
+  f.options.manifestURL = partialURL;
+  return f;
+}
 
 test('complete content-verified R2 maps overlay playback without changing any track data', () => {
   const f = fixture(), before = structuredClone(f.tracks), map = validate(f);
@@ -35,7 +45,7 @@ test('complete content-verified R2 maps overlay playback without changing any tr
 
 test('smoke, partial, failed, unverified and wrong-root manifests cannot activate R2', () => {
   for (const change of [
-    d => {d.mode = 'smoke';}, d => {delete d.complete;}, d => {d.version = 2;},
+    d => {d.mode = 'smoke';}, d => {d.mode = 'partial';d.complete = false;}, d => {delete d.complete;}, d => {d.version = 2;},
     d => {d.driveRootId = 'anotherFolder123';}, d => {d.verification = 'head-only';},
     d => {d.inventoryCount++;}, d => {d.selectedCount--;}, d => {d.verifiedCount--;},
     d => {d.inventoryBytes--;}, d => {d.failedCount = 1;}, d => {d.failures = [{}];},
@@ -44,6 +54,79 @@ test('smoke, partial, failed, unverified and wrong-root manifests cannot activat
   ]) {
     const f = fixture(); change(f.data); assert.throws(() => validate(f), /complete, verified/);
   }
+});
+
+test('explicit partial manifests keep the full catalog and expose only verified playback URLs', () => {
+  const f = partialFixture(), before = structuredClone(f.tracks), map = validate(f);
+  assert.equal(map.count, 1); assert.equal(map.mode, 'partial'); assert.equal(map.complete, false);
+  assert.equal(map.matches(f.tracks), true);
+  assert.equal(map.mediaURL(f.tracks[0]), f.data.files[0].url);
+  assert.equal(map.mediaURL(f.tracks[1]), null, 'unmapped catalog songs retain Drive playback');
+  assert.deepEqual(f.tracks, before);
+  f.data.complete = true; f.data.mode = 'full'; f.data.files[0].url = 'https://other.test/injected';
+  assert.equal(map.complete, false); assert.equal(map.mode, 'partial');
+  assert.notEqual(map.mediaURL(f.tracks[0]), f.data.files[0].url);
+});
+
+test('partial playback requires its dedicated configured endpoint, exact media prefix and explicit mode', () => {
+  for (const endpoint of [url, 'https://music.example.test/music/manifest.json',
+    partialURL + '/', partialURL + '?partial=true', 'https://music.example.test/music/smoke/manifest.json']) {
+    const f = partialFixture(); f.options.manifestURL = endpoint; assert.throws(() => validate(f));
+  }
+  for (const change of [
+    d => {d.mode = 'full';d.complete = true;}, d => {d.mode = 'smoke';},
+    d => {d.complete = true;}, d => {delete d.complete;},
+    d => {d.publicBaseUrl = 'https://music.example.test/music';},
+    d => {d.publicBaseUrl += '/';}, d => {d.files[0].url = d.files[0].url.replace('/partial/', '/');}
+  ]) {const f = partialFixture(); change(f.data); assert.throws(() => validate(f));}
+});
+
+test('partial manifests require successful counts, inventory bounds and actual verified byte totals', () => {
+  for (const change of [
+    d => {d.inventoryCount = 0;}, d => {d.inventoryCount = 1.5;}, d => {d.inventoryCount = 50001;},
+    d => {d.selectedCount++;}, d => {d.verifiedCount++;}, d => {d.copiedCount++;}, d => {d.skippedCount++;},
+    d => {d.failedCount = 1;}, d => {d.failures = [{}];}, d => {d.files = [];},
+    d => {d.inventoryBytes = 319;}, d => {d.inventoryBytes = '960';},
+    d => {delete d.verifiedBytesTotal;}, d => {d.verifiedBytesTotal--;}, d => {d.verifiedBytesTotal++;},
+    d => {delete d.sourceRevision;}, d => {d.sourceRevision = 'unverified';},
+    d => {d.files.push({...d.files[0]});d.selectedCount++;d.verifiedCount++;d.copiedCount++;d.verifiedBytesTotal *= 2;}
+  ]) {const f = partialFixture(); change(f.data); assert.throws(() => validate(f));}
+});
+
+test('partial file proofs and source identity remain as strict as full manifests', () => {
+  for (const change of [
+    file => {file.sourceMd5 = '9'.repeat(32);}, file => {file.sha256 = '';},
+    file => {file.verification = 'head-only';}, file => {file.verifiedBytes--;},
+    file => {file.status = 'failed';}, file => {file.key = file.key.replace(file.md5, '9'.repeat(32));},
+    file => {file.url += '?key=secret';}, file => {file.url = file.url.replace('music.example.test', 'other.test');}
+  ]) {const f = partialFixture(); change(f.data.files[0]); assert.throws(() => validate(f));}
+  for (const change of [
+    t => {t.id = 'other_id';}, t => {t.remoteId = 'otherSong12345';}, t => {t.size++;},
+    t => {t.md5 = '9'.repeat(32);}, t => {t.driveFolder = 'anotherFolder123';}, t => {t.source = 'server';}
+  ]) {const f = partialFixture(); change(f.tracks[0]); assert.throws(() => validate(f));}
+});
+
+test('partial libraries allow new unmapped tracks but reject removed, duplicated or changed mapped tracks', () => {
+  const f = partialFixture(), map = validate(f);
+  const added = {...f.tracks[1], id:'gd_newSong12345', remoteId:'newSong12345'};
+  assert.equal(map.matches([...f.tracks, added]), true);
+  assert.equal(map.mediaURL(added), null);
+  assert.equal(map.matches([f.tracks[0]]), true, 'removing an unmapped song does not invalidate verified bytes');
+  assert.equal(map.matches([f.tracks[1]]), false, 'mapped songs must still exist');
+  assert.equal(map.matches([...f.tracks, {...f.tracks[0]}]), false);
+  assert.equal(map.matches([...f.tracks, {...f.tracks[1]}]), false);
+  f.tracks[0].md5 = '9'.repeat(32);
+  assert.equal(map.matches(f.tracks), false); assert.equal(map.mediaURL(f.tracks[0]), null);
+  const duplicate = partialFixture(); duplicate.tracks.push({...duplicate.tracks[0]});
+  assert.throws(() => validate(duplicate));
+});
+
+test('a full manifest cannot become partial by supplying partial byte totals or extra catalog tracks', () => {
+  const f = fixture(); f.data.verifiedBytesTotal = 320; f.data.files.pop();
+  f.data.selectedCount = f.data.verifiedCount = 1; f.data.skippedCount = 0;
+  assert.throws(() => validate(f));
+  const full = validate(fixture());
+  assert.equal(full.mode, 'full'); assert.equal(full.complete, true);
 });
 
 test('file identity, actual body hashes, byte counts and content-addressed keys are required', () => {
@@ -120,6 +203,16 @@ test('manifest reads omit credentials and referrers, refuse redirects and use a 
   assert.deepEqual(call.options, {signal:controller.signal, credentials:'omit', cache:'no-store', mode:'cors', redirect:'error', referrerPolicy:'no-referrer'});
 });
 
+test('partial manifest reads use only the configured endpoint and retain partial completion state', async () => {
+  const f = partialFixture(); let call;
+  const map = await readR2Manifest({url:partialURL, root, tracks:f.tracks,
+    fetcher:async (endpoint, options) => {call = {endpoint, options}; return Response.json(f.data);}});
+  assert.equal(call.endpoint, partialURL); assert.equal(call.options.credentials, 'omit');
+  assert.equal(call.options.redirect, 'error'); assert.equal(map.mode, 'partial');
+  assert.equal(map.complete, false); assert.equal(map.count, 1);
+  assert.equal(map.mediaURL(f.tracks[1]), null);
+});
+
 test('invalid URLs never reach fetch; redirects, non-JSON, errors and corrupt responses reject', async () => {
   const f = fixture(); let calls = 0;
   await assert.rejects(readR2Manifest({url:'http://music.example.test/map', root, tracks:f.tracks, fetcher:async () => {calls++;}}));
@@ -160,15 +253,15 @@ test('oversized headers and chunked streams are cancelled before parsing', async
 
 const source = await readFile(new URL('../public/drawercast/player.js', import.meta.url), 'utf8');
 const block = (a,b) => source.slice(source.indexOf(a), source.indexOf(b, source.indexOf(a)));
-function integration() {
-  const f = fixture(), tracks = f.tracks, timers = [], messages = [];
+function integration(f = fixture()) {
+  const tracks = f.tracks, timers = [], messages = [];
   const ctx = vm.createContext({AbortSignal, setTimeout:fn => {timers.push(fn); return timers.length;}, clearTimeout(){},
     debounce:fn => fn, baseName:s => s.split('/').at(-1), MusicSources:{refresh(){}}, SourceLibrary:{enabled:() => true},
     allTracks:() => tracks, toast:s => messages.push(s), audioSource:f => f.__remoteURL,
     UI:{renderPlayState(){}, renderProgress(){}, renderMeta(){}, renderNowPlaying(){}, startLoop(){}},
     URL:{revokeObjectURL(){}}, sourceTrackEnabled:() => true});
   const {drive, engine} = vm.runInContext(block('const DriveSource={', 'function SET_repeat()') + '\n({drive:DriveSource,engine:Engine})', ctx);
-  drive.folder = root; drive.r2ManifestURL = url; drive.r2Helper = {readR2Manifest:async () => validate(f)};
+  drive.folder = root; drive.r2ManifestURL = f.options.manifestURL; drive.r2Helper = {readR2Manifest:async () => validate(f)};
   drive.api = {mediaURL:({id}) => 'https://www.googleapis.com/drive/v3/files/' + id + '?alt=media&key=test'};
   const audio = src => ({src, currentTime:42, duration:100, events:{}, paused:false, plays:0,
     pause(){this.paused=true;}, play(){this.plays++; return Promise.resolve();}, load(){}, removeAttribute(){this.src='';},
@@ -198,6 +291,31 @@ test('R2 read/schema failure retains Drive playback and all ratings, artwork and
   assert.equal(await h.drive.refreshR2(), false); assert.equal(h.drive.r2, null);
   assert.match(h.drive.fileFor(h.tracks[0]).__remoteURL, /^https:\/\/www.googleapis.com/);
   assert.deepEqual(h.tracks, before); assert.deepEqual(h.tracks.map(t => t.id), playlist);
+});
+
+test('partial activation serves verified songs from R2 and all unmatched songs from Drive without catalog changes', async () => {
+  const h = integration(partialFixture()), before = structuredClone(h.tracks);
+  assert.equal(await h.drive.refreshR2(), true);
+  assert.equal(h.drive.r2.complete, false); assert.equal(h.drive.r2.mode, 'partial');
+  assert.equal(h.drive.fileFor(h.tracks[0]).__remoteURL, h.data.files[0].url);
+  assert.match(h.drive.fileFor(h.tracks[1]).__remoteURL, /^https:\/\/www.googleapis.com/);
+  assert.deepEqual(h.tracks, before);
+  h.drive.playbackRetry.clear(); h.engine.onError(0);
+  assert.match(h.engine.el().src, /^https:\/\/www.googleapis.com/);
+  assert.deepEqual(h.tracks, before, 'partial R2 fallback also preserves IDs, ratings and artwork');
+});
+
+test('partial activation rechecks mapped revisions and permits newly discovered unmapped songs during download', async () => {
+  for (const changedMapped of [false, true]) {
+    const h = integration(partialFixture()), map = validate(h); let resolve;
+    h.drive.r2Helper.readR2Manifest = () => new Promise(r => {resolve = r;});
+    const pending = h.drive.refreshR2();
+    if (changedMapped) h.tracks[0].size++;
+    else h.tracks.push({...h.tracks[1], id:'gd_newSong12345', remoteId:'newSong12345'});
+    resolve(map); assert.equal(await pending, !changedMapped);
+    if (changedMapped) assert.equal(h.drive.r2, null);
+    else assert.match(h.drive.fileFor(h.tracks[2]).__remoteURL, /^https:\/\/www.googleapis.com/);
+  }
 });
 
 test('a catalog revision arriving during map download prevents stale activation', async () => {

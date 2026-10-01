@@ -4,6 +4,7 @@ import {FRONTEND_ORIGINS} from './origins.js';
 
 const PREFIX = '/music/';
 const CATALOG = 'catalog/drive-r2-map-v1.json';
+const PARTIAL_CATALOG = 'catalog/drive-r2-partial-v1.json';
 const ID = /^[A-Za-z0-9_-]{10,200}$/;
 const MD5 = /^[a-f0-9]{32}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -24,19 +25,20 @@ function verifiedIdentity(file) {
 
 // Do not infer a successful clone from a key existing or from object metadata.
 // Only the full, stable, byte-verified canonical report can expose audio.
-export function deliveryManifest(data, root, origin) {
-  if (typeof root !== 'string' || !ID.test(root) || data?.version !== 1 || data.mode !== 'full' ||
-      data.complete !== true || data.verification !== PROOF || data.driveRootId !== root ||
+export function deliveryManifest(data, root, origin, {partial = false} = {}) {
+  if (typeof root !== 'string' || !ID.test(root) || data?.version !== 1 || data.mode !== (partial ? 'partial' : 'full') ||
+      data.complete !== !partial || data.verification !== PROOF || data.driveRootId !== root ||
       typeof data.sourceRevision !== 'string' || !SHA256.test(data.sourceRevision) ||
       typeof data.generatedAt !== 'string' || !Number.isFinite(Date.parse(data.generatedAt)) ||
       !Array.isArray(data.files) || !data.files.length || data.files.length > 50000 ||
-      ![data.inventoryCount, data.selectedCount, data.verifiedCount].every(n => n === data.files.length) ||
+      ![data.selectedCount, data.verifiedCount].every(n => n === data.files.length) ||
+      !integer(data.inventoryCount) || (partial ? data.inventoryCount < data.files.length : data.inventoryCount !== data.files.length) ||
       !integer(data.inventoryBytes) || data.failedCount !== 0 ||
       !Array.isArray(data.failures) || data.failures.length ||
       !integer(data.copiedCount) || !integer(data.skippedCount)) fail();
   const base = new URL(origin);
   if (base.protocol !== 'https:' || base.username || base.password || base.search || base.hash || base.pathname !== '/') fail();
-  const publicBaseUrl = base.origin + '/music';
+  const publicBaseUrl = base.origin + (partial ? '/music/partial' : '/music');
   const seen = new Set();
   let bytes = 0, copied = 0, skipped = 0;
   const files = data.files.map(file => {
@@ -60,19 +62,21 @@ export function deliveryManifest(data, root, origin) {
       r2Identity: file.r2Identity,
     };
   });
-  if (bytes !== data.inventoryBytes || copied !== data.copiedCount || skipped !== data.skippedCount) fail();
+  if ((partial ? bytes !== data.verifiedBytesTotal || bytes > data.inventoryBytes : bytes !== data.inventoryBytes) ||
+      copied !== data.copiedCount || skipped !== data.skippedCount) fail();
   return {
-    version: 1, mode: 'full', complete: true, verification: PROOF,
+    version: 1, mode: partial ? 'partial' : 'full', complete: !partial, verification: PROOF,
     sourceRevision: data.sourceRevision, generatedAt: data.generatedAt,
     driveRootId: root, publicBaseUrl,
-    inventoryCount: files.length, inventoryBytes: bytes,
+    inventoryCount: data.inventoryCount, inventoryBytes: data.inventoryBytes,
+    ...(partial ? {verifiedBytesTotal: bytes} : {}),
     selectedCount: files.length, verifiedCount: files.length,
     copiedCount: copied, skippedCount: skipped, failedCount: 0, failures: [], files,
   };
 }
 
-async function readManifest(bucket, root, origin) {
-  const object = await bucket.get(CATALOG);
+async function readManifest(bucket, root, origin, partial) {
+  const object = await bucket.get(partial ? PARTIAL_CATALOG : CATALOG);
   if (!object || !integer(object.size) || object.size > MAX_MANIFEST || !object.body) {
     await object?.body?.cancel();
     fail();
@@ -91,7 +95,7 @@ async function readManifest(bucket, root, origin) {
   if (length !== object.size) fail();
   const bytes = new Uint8Array(length); let at = 0;
   for (const part of parts) { bytes.set(part, at); at += part.byteLength; }
-  return deliveryManifest(JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(bytes)), root, origin);
+  return deliveryManifest(JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(bytes)), root, origin, {partial});
 }
 
 // Multiple ranges are deliberately rejected rather than constructing multipart
@@ -162,12 +166,14 @@ export async function handleMusic(request, env, {authorize = async () => false} 
     // No R2 operation before policy approval. Missing policy/binding fails closed.
     if (!await authorize(request, env)) return error('Music delivery is not enabled', 403);
     if (!env.MUSIC_R2 || !ID.test(env.MUSIC_ROOT_ID || '')) return error('Music delivery is not configured', 503);
-    const manifest = await readManifest(env.MUSIC_R2, env.MUSIC_ROOT_ID, url.origin);
-    if (url.pathname === PREFIX + 'manifest.json') {
+    const partial = url.pathname.startsWith(PREFIX + 'partial/');
+    const routePrefix = partial ? PREFIX + 'partial/' : PREFIX;
+    const manifest = await readManifest(env.MUSIC_R2, env.MUSIC_ROOT_ID, url.origin, partial);
+    if (url.pathname === routePrefix + 'manifest.json') {
       const body = JSON.stringify(manifest);
       return response(body, 200, {'Content-Type': 'application/json; charset=utf-8', 'Content-Length': String(new TextEncoder().encode(body).length)});
     }
-    const key = url.pathname.slice(PREFIX.length);
+    const key = url.pathname.slice(routePrefix.length);
     if (!KEY.test(key)) return error('Not found', 404);
     const file = manifest.files.find(item => item.key === key);
     if (!file) return error('Not found', 404);
