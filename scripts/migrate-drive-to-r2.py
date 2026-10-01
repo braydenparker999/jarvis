@@ -227,15 +227,23 @@ def drive_headers(auth) -> dict[str, str]:
     return headers
 
 
+def authorized_drive_request(url: str, auth):
+    headers = drive_headers(auth)
+    authorization = headers.pop("Authorization", None)
+    request = urllib.request.Request(url, headers=headers)
+    if authorization:
+        # urllib copies ordinary headers to redirects, including other hosts.
+        # Send the owner token only on this original Drive API request.
+        request.add_unredirected_header("Authorization", authorization)
+    return request
+
+
 def drive_request(path: str, params: dict[str, str], api_key: str, *, raw: bool = False):
     url = drive_url(path, params, api_key)
     last = None
     for attempt in range(6):
         try:
-            request = urllib.request.Request(
-                url,
-                headers=drive_headers(api_key),
-            )
+            request = authorized_drive_request(url, api_key)
             response = urllib.request.urlopen(request, timeout=45)
             if raw:
                 return response
@@ -480,10 +488,7 @@ def download_drive_file(file: dict, api_key: str, destination: Path) -> dict:
         sha256 = hashlib.sha256()
         total = 0
         try:
-            request = urllib.request.Request(
-                url,
-                headers=drive_headers(api_key),
-            )
+            request = authorized_drive_request(url, api_key)
             pace_download()
             with urllib.request.urlopen(request, timeout=90) as response, destination.open("wb") as out:
                 while True:
