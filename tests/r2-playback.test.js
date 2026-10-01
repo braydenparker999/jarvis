@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {readFile} from 'node:fs/promises';
-import {MAX_R2_MANIFEST_BYTES, readR2Manifest, validateR2Manifest} from '../public/drawercast/r2-api.js';
+import {MAX_R2_MANIFEST_BYTES, readR2Manifest, validateR2Manifest, r2Tracks, commitR2Catalog} from '../public/drawercast/r2-api.js';
 import {catalogTrack} from '../public/drawercast/drive-catalog.js';
 
 const root = 'musicFolder12345', url = 'https://music.example.test/catalog/drive-r2-map-v1.json';
@@ -35,7 +35,7 @@ function partialFixture() {
   return f;
 }
 
-test('complete content-verified R2 maps overlay playback without changing any track data', () => {
+test('complete content-verified maps validate playback without changing catalog metadata', () => {
   const f = fixture(), before = structuredClone(f.tracks), map = validate(f);
   assert.equal(map.count, 2); assert.equal(map.mediaURL(f.tracks[0]), f.data.files[0].url);
   assert.deepEqual(f.tracks, before); assert.equal(Object.isFrozen(map), true);
@@ -61,7 +61,7 @@ test('explicit partial manifests keep the full catalog and expose only verified 
   assert.equal(map.count, 1); assert.equal(map.mode, 'partial'); assert.equal(map.complete, false);
   assert.equal(map.matches(f.tracks), true);
   assert.equal(map.mediaURL(f.tracks[0]), f.data.files[0].url);
-  assert.equal(map.mediaURL(f.tracks[1]), null, 'unmapped catalog songs retain Drive playback');
+  assert.equal(map.mediaURL(f.tracks[1]), null, 'unmapped catalog songs are excluded from R2');
   assert.deepEqual(f.tracks, before);
   f.data.complete = true; f.data.mode = 'full'; f.data.files[0].url = 'https://other.test/injected';
   assert.equal(map.complete, false); assert.equal(map.mode, 'partial');
@@ -253,115 +253,114 @@ test('oversized headers and chunked streams are cancelled before parsing', async
 
 const source = await readFile(new URL('../public/drawercast/player.js', import.meta.url), 'utf8');
 const block = (a,b) => source.slice(source.indexOf(a), source.indexOf(b, source.indexOf(a)));
-function integration(f = fixture()) {
-  const tracks = f.tracks, timers = [], messages = [];
-  const ctx = vm.createContext({AbortSignal, setTimeout:fn => {timers.push(fn); return timers.length;}, clearTimeout(){},
-    debounce:fn => fn, baseName:s => s.split('/').at(-1), MusicSources:{refresh(){}}, SourceLibrary:{enabled:() => true},
+function integration(f = partialFixture()) {
+  const tracks = f.tracks.slice(), timers = [], messages = [], flags={drive:true,r2:true};
+  const ctx = vm.createContext({AbortController, AbortSignal, setTimeout:fn => {timers.push(fn); return timers.length;}, clearTimeout(){},
+    debounce:fn => fn, baseName:s => s.split('/').at(-1), MusicSources:{refresh(){}},
+    SourceLibrary:{enabled:k => flags[k]!==false,kind:t => t?.source || (t?.remote?'server':'local')},
     allTracks:() => tracks, toast:s => messages.push(s), audioSource:f => f.__remoteURL,
     UI:{renderPlayState(){}, renderProgress(){}, renderMeta(){}, renderNowPlaying(){}, startLoop(){}},
-    URL:{revokeObjectURL(){}}, sourceTrackEnabled:() => true});
-  const {drive, engine} = vm.runInContext(block('const DriveSource={', 'function SET_repeat()') + '\n({drive:DriveSource,engine:Engine})', ctx);
-  drive.folder = root; drive.r2ManifestURL = f.options.manifestURL; drive.r2Helper = {readR2Manifest:async () => validate(f)};
-  drive.api = {mediaURL:({id}) => 'https://www.googleapis.com/drive/v3/files/' + id + '?alt=media&key=test'};
+    Views:{refreshAll(){}},LIB:{ids:tracks.map(t=>t.id),map:new Map(tracks.map(t=>[t.id,t]))},FILES:new Map(),
+    URL:{revokeObjectURL(){}}, sourceTrackEnabled:t => flags[t.source]!==false,
+    libAdd:t => {const i=tracks.findIndex(v=>v.id===t.id);if(i<0)tracks.push(t);else tracks[i]=t;ctx.LIB.map.set(t.id,t);},
+    IDB:{r2Catalog:async (helper,map,catalog) => ({fresh:r2Tracks(map,catalog,tracks),gone:[]})}});
+  const {drive,r2,engine} = vm.runInContext(block('const DriveSource={', 'function SET_repeat()') + '\n({drive:DriveSource,r2:R2Source,engine:Engine})', ctx);
+  drive.folder=root;drive.api={mediaURL:({id})=>'https://www.googleapis.com/drive/v3/files/'+id+'?alt=media&key=test'};
+  r2.root=root;r2.manifestURL=f.options.manifestURL;r2.helper={readR2Manifest:async()=>validate(f)};
+  r2.catalog={readCatalog:async()=>({records:f.tracks}),catalogTrack:r=>r};
   const audio = src => ({src, currentTime:42, duration:100, events:{}, paused:false, plays:0,
     pause(){this.paused=true;}, play(){this.plays++; return Promise.resolve();}, load(){}, removeAttribute(){this.src='';},
     addEventListener(n,fn){this.events[n]=fn;}, removeEventListener(n){delete this.events[n];}});
-  engine.els = [audio(f.data.files[0].url), audio('')]; engine.cur = 0; engine.current = tracks[0]; engine._playRequest = 1;
-  engine.queue = tracks.slice(); engine.order = [0,1]; engine.pos = 0;
-  engine.ensureCtx = engine.setGain = engine.updateMediaSession = engine.applySpeed = engine.seekWhenReady = engine.saveState = () => {};
-  engine.rgGain = () => 1;
-  ctx.getFileFor = async t => drive.fileFor(t);
-  return {...f, drive, engine, ctx, timers, messages};
+  engine.els=[audio(''),audio('')];engine.cur=0;engine._playRequest=1;
+  engine.queue=f.tracks.slice();engine.order=[0,1];engine.pos=0;engine.current=f.tracks[0];
+  engine.ensureCtx=engine.setGain=engine.updateMediaSession=engine.applySpeed=engine.seekWhenReady=engine.saveState=()=>{};
+  engine.rgGain=()=>1;
+  ctx.getFileFor=async t=>t.source==='r2'?r2.fileFor(t):drive.fileFor(t);
+  return {...f,tracks,drive,r2,engine,ctx,timers,messages,flags};
 }
 
-test('optional R2 remains off without configuration and all legacy Drive fields are unchanged', async () => {
-  const h = integration(), before = structuredClone(h.tracks); h.drive.r2ManifestURL = '';
-  h.drive.r2Helper.readR2Manifest = () => {throw Error('should not fetch');};
-  assert.equal(await h.drive.refreshR2(), false);
-  assert.match(h.drive.fileFor(h.tracks[0]).__remoteURL, /^https:\/\/www.googleapis.com/);
-  assert.deepEqual(h.tracks, before);
-  const config = JSON.parse(await readFile(new URL('../public/assets/drive-config.json', import.meta.url), 'utf8'));
-  assert.equal(config.r2ManifestURL, '');
+test('R2 has distinct track IDs, metadata and its own user state; unmapped songs are absent',()=>{
+  const f=partialFixture(),before=structuredClone(f.tracks),mapping=validate(f);
+  const tracks=r2Tracks(mapping,f.tracks);
+  assert.equal(tracks.length,1);assert.equal(tracks[0].id,'r2_'+f.tracks[0].remoteId);
+  assert.equal(tracks[0].source,'r2');assert.equal(tracks[0].rating,0);assert.equal(tracks[0].plays,0);
+  assert.equal(tracks[0].artKey,null);assert.equal(tracks[0].coverURL,before[0].coverURL);
+  assert.equal(mapping.mediaURL(tracks[0]),f.data.files[0].url);
+  const saved={...tracks[0],rating:3,plays:4,artKey:'r2-user-cover',customArt:true};
+  const refreshed=r2Tracks(mapping,f.tracks,[saved])[0];
+  assert.equal(refreshed.rating,3);assert.equal(refreshed.plays,4);assert.equal(refreshed.artKey,'r2-user-cover');
+  assert.deepEqual(f.tracks,before);assert.equal(mapping.complete,false);
 });
 
-test('R2 read/schema failure retains Drive playback and all ratings, artwork and playlist IDs', async () => {
-  const h = integration(), before = structuredClone(h.tracks), playlist = h.tracks.map(t => t.id);
-  assert.equal(await h.drive.refreshR2(), true); assert.equal(h.drive.fileFor(h.tracks[0]).__remoteURL, h.data.files[0].url);
-  h.drive.r2Helper.readR2Manifest = async () => {throw Error('invalid or unavailable map');};
-  assert.equal(await h.drive.refreshR2(), false); assert.equal(h.drive.r2, null);
-  assert.match(h.drive.fileFor(h.tracks[0]).__remoteURL, /^https:\/\/www.googleapis.com/);
-  assert.deepEqual(h.tracks, before); assert.deepEqual(h.tracks.map(t => t.id), playlist);
+test('R2 loads and plays without a Drive API or enabled Drive source',async()=>{
+  const h=integration(),before=structuredClone(h.tracks);h.drive.api=null;h.flags.drive=false;
+  assert.equal(await h.r2.connect(true),true);
+  const r2=h.tracks.find(t=>t.source==='r2');
+  assert.equal(h.r2.fileFor(r2).__remoteURL,h.data.files[0].url);
+  assert.equal(h.drive.fileFor(r2),null);assert.deepEqual(h.tracks.filter(t=>t.source==='drive'),before);
 });
 
-test('partial activation serves verified songs from R2 and all unmatched songs from Drive without catalog changes', async () => {
-  const h = integration(partialFixture()), before = structuredClone(h.tracks);
-  assert.equal(await h.drive.refreshR2(), true);
-  assert.equal(h.drive.r2.complete, false); assert.equal(h.drive.r2.mode, 'partial');
-  assert.equal(h.drive.fileFor(h.tracks[0]).__remoteURL, h.data.files[0].url);
-  assert.match(h.drive.fileFor(h.tracks[1]).__remoteURL, /^https:\/\/www.googleapis.com/);
-  assert.deepEqual(h.tracks, before);
-  h.drive.playbackRetry.clear(); h.engine.onError(0);
-  assert.match(h.engine.el().src, /^https:\/\/www.googleapis.com/);
-  assert.deepEqual(h.tracks, before, 'partial R2 fallback also preserves IDs, ratings and artwork');
+test('Drive always uses Google even for a verified copied song and refuses R2 entries',async()=>{
+  const h=integration();await h.r2.connect(true);h.flags.r2=false;
+  assert.match(h.drive.fileFor(h.tracks[0]).__remoteURL,/^https:\/\/www.googleapis.com/);
+  assert.equal(h.drive.fileFor(h.tracks.find(t=>t.source==='r2')),null);
+  assert.equal(h.r2.fileFor(h.tracks[0]),null);
 });
 
-test('partial activation rechecks mapped revisions and permits newly discovered unmapped songs during download', async () => {
-  for (const changedMapped of [false, true]) {
-    const h = integration(partialFixture()), map = validate(h); let resolve;
-    h.drive.r2Helper.readR2Manifest = () => new Promise(r => {resolve = r;});
-    const pending = h.drive.refreshR2();
-    if (changedMapped) h.tracks[0].size++;
-    else h.tracks.push({...h.tracks[1], id:'gd_newSong12345', remoteId:'newSong12345'});
-    resolve(map); assert.equal(await pending, !changedMapped);
-    if (changedMapped) assert.equal(h.drive.r2, null);
-    else assert.match(h.drive.fileFor(h.tracks[2]).__remoteURL, /^https:\/\/www.googleapis.com/);
-  }
+test('an unavailable R2 map does not rewrite the Drive library or select Drive playback',async()=>{
+  const h=integration(),before=structuredClone(h.tracks);h.r2.helper.readR2Manifest=async()=>{throw Error('unavailable');};
+  assert.equal(await h.r2.connect(true),false);assert.equal(h.r2.mapping,null);
+  assert.deepEqual(h.tracks,before);assert.match(h.drive.fileFor(h.tracks[0]).__remoteURL,/^https:\/\/www.googleapis.com/);
+  assert.doesNotMatch(h.r2.status,/Google|Drive/);
 });
 
-test('a catalog revision arriving during map download prevents stale activation', async () => {
-  const h = integration(), map = validate(h); let resolve;
-  h.drive.r2Helper.readR2Manifest = () => new Promise(r => {resolve=r;});
-  const pending = h.drive.refreshR2(); h.tracks[0].md5 = 'a'.repeat(32); resolve(map);
-  assert.equal(await pending, false); assert.equal(h.drive.r2, null);
-  assert.match(h.drive.fileFor(h.tracks[0]).__remoteURL, /^https:\/\/www.googleapis.com/);
+test('disabling R2 during map download prevents activation',async()=>{
+  const h=integration(),map=validate(h);let resolve,started;const ready=new Promise(r=>{started=r;});
+  h.r2.helper.readR2Manifest=()=>{started();return new Promise(r=>{resolve=r;});};
+  const pending=h.r2.connect(true);await ready;
+  h.flags.r2=false;resolve(map);assert.equal(await pending,false);assert.equal(h.r2.mapping,null);
+  assert.ok(h.tracks.every(t=>t.source==='drive'));
 });
 
-test('R2 checks yield to active playback and do not switch a newly started selection', async () => {
-  const h = integration(); let calls = 0, resolve;
-  h.drive.r2Helper.readR2Manifest = () => {calls++; return new Promise(r => {resolve=r;});};
-  h.engine.playing = true; assert.equal(await h.drive.refreshR2(), false); assert.equal(calls, 0);
-  h.engine.playing = false; const pending = h.drive.refreshR2();
-  h.engine.playing = true; resolve(validate(h)); assert.equal(await pending, false); assert.equal(h.drive.r2, null);
+test('R2 refresh yields to its own playback while unrelated Drive playback can continue',async()=>{
+  const h=integration();await h.r2.connect(true);h.engine.current=h.tracks.find(t=>t.source==='r2');h.engine.playing=true;
+  let calls=0;h.r2.helper.readR2Manifest=async()=>{calls++;return validate(h);};
+  assert.equal(await h.r2.connect(true),false);assert.equal(calls,0);
+  h.engine.current=h.tracks[0];assert.equal(await h.r2.connect(true),true);assert.equal(calls,1);assert.equal(h.engine.playing,true);
 });
 
-test('R2 error retries Drive once at the interrupted position and suppresses the failed revision', async () => {
-  const h = integration(); await h.drive.refreshR2(); h.engine.playing = true;
-  const selected = h.engine.current, before = structuredClone(selected);
-  h.engine.onError(0);
-  assert.match(h.engine.el().src, /^https:\/\/www.googleapis.com/); assert.match(h.messages[0], /R2 stream unavailable/);
-  h.engine.el().currentTime = 0; h.engine.el().events.loadedmetadata(); assert.equal(h.engine.el().currentTime, 42);
-  h.timers[0](); assert.equal(h.engine.el().plays, 1);
-  h.engine.onError(0); h.engine.onError(0);
-  assert.equal(h.messages.filter(s => s.includes('still could not play')).length, 1);
-  assert.equal(h.engine.current, selected); assert.deepEqual(selected, before);
-  h.drive.playbackRetry.delete(selected.id);
-  assert.match(h.drive.fileFor(selected).__remoteURL, /^https:\/\/www.googleapis.com/, 'a new selection does not repeat a known-bad R2 revision');
-  assert.equal(h.drive.fileFor(h.tracks[1]).__remoteURL, h.data.files[1].url, 'other verified songs remain usable');
+test('R2 audio errors stop on the same source and never invoke Drive or server retries',async()=>{
+  const h=integration();await h.r2.connect(true);const selected=h.tracks.find(t=>t.source==='r2');
+  h.engine.current=selected;h.engine.el().src=h.r2.fileFor(selected).__remoteURL;h.engine.playing=true;
+  h.drive.retryFileFor=()=>{throw Error('must never switch to Drive');};
+  const before=h.engine.el().src;h.engine.onError(0);
+  assert.equal(h.engine.playing,false);assert.equal(h.engine.current,selected);assert.equal(h.engine.el().src,before);
+  assert.equal(h.engine.el().paused,true);assert.match(h.messages.at(-1),/R2 audio could not play/);
+  assert.equal(h.drive.playbackRetry.size,0);
 });
 
-test('late R2 fallback timers cannot restart playback after selecting another song', async () => {
-  const h = integration(); await h.drive.refreshR2(); h.engine.onError(0);
-  h.engine._playRequest++; h.engine.current = h.tracks[1]; h.timers[0]();
-  assert.equal(h.engine.el().plays, 0);
+test('Drive still retries Google once at the interrupted position',()=>{
+  const h=integration();h.engine.el().src=h.drive.fileFor(h.tracks[0]).__remoteURL;h.engine.playing=true;
+  h.engine.onError(0);assert.match(h.engine.el().src,/^https:\/\/www.googleapis.com/);
+  h.engine.el().currentTime=0;h.engine.el().events.loadedmetadata();assert.equal(h.engine.el().currentTime,42);
+  h.timers.at(-1)();assert.equal(h.engine.el().plays,1);
+  h.engine.onError(0);h.engine.onError(0);assert.equal(h.messages.filter(s=>s.includes('still could not play')).length,1);
 });
 
-test('a stale preloaded R2 URL cannot override a new Drive-only selection', async () => {
-  const h = integration(); await h.drive.refreshR2();
-  h.drive.r2Failures.add(h.drive.r2Revision(h.tracks[0]));
-  h.engine.preloadId = h.tracks[0].id; h.engine.els[1].src = h.data.files[0].url;
-  await h.engine.playIndex(0, false);
-  assert.match(h.engine.el().src, /^https:\/\/www.googleapis.com/);
-  assert.equal(h.engine.els[1].src, ''); assert.equal(h.engine.preloadId, null);
+test('R2 database commit retains every other source and preserves its own saved state',async()=>{
+  const f=partialFixture(),map=validate(f),r2=r2Tracks(map,f.tracks)[0];
+  const rows=new Map([...f.tracks,{...r2,rating:4,plays:9},{id:'r2_removed',source:'r2'},
+    {id:'local',rating:3},{id:'server',remote:true}].map(t=>[t.id,t]));
+  const before=structuredClone(rows);let tx,request;
+  const db={transaction(name,mode){assert.equal(name,'tracks');assert.equal(mode,'readwrite');
+    tx={objectStore(){return {openCursor(){request={};return request;},put(t,id){rows.set(id,t);}}}};return tx;}};
+  const pending=commitR2Catalog(db,map,f.tracks);let settled=false;pending.then(()=>settled=true);
+  const entries=[...rows.entries()];let i=0;
+  function next(){const entry=entries[i++];request.result=entry?{key:entry[0],value:entry[1],update:t=>rows.set(entry[0],t),delete:()=>rows.delete(entry[0]),continue:next}:null;request.onsuccess();}
+  next();await Promise.resolve();assert.equal(settled,false);tx.oncomplete();const result=await pending;
+  assert.equal(rows.get(r2.id).rating,4);assert.equal(rows.get(r2.id).plays,9);assert.equal(rows.has('r2_removed'),false);
+  for(const [id,t] of before)if(t.source!=='r2')assert.deepEqual(rows.get(id),t);
+  assert.deepEqual(result.gone,['r2_removed']);assert.equal(result.fresh.length,1);
 });
 
 test('catalog refresh still preserves stable IDs, prepared artwork and user state independently of R2', () => {
@@ -374,4 +373,12 @@ test('catalog refresh still preserves stable IDs, prepared artwork and user stat
   assert.equal(updated.artKey, old.artKey); assert.equal(updated.customArt, true); assert.match(updated.coverURL, /covers\/c+\.jpg$/);
   assert.equal(updated.title, 'Prepared title'); assert.equal(updated.album, 'Prepared album');
   assert.doesNotMatch(JSON.stringify(updated), /music\.example\.test|r2-get-hash-v1/);
+});
+
+test('R2 database abort never reports a successfully saved library',async()=>{
+  const f=partialFixture();let tx;
+  const db={transaction(){tx={objectStore(){return {openCursor(){return {};}}}};return tx;}};
+  let settled=false;const pending=commitR2Catalog(db,validate(f),f.tracks).then(()=>settled=true);
+  await Promise.resolve();assert.equal(settled,false);tx.error=Error('Quota exceeded');tx.onabort();
+  await assert.rejects(pending,/Quota/);assert.equal(settled,false);
 });

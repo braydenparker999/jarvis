@@ -12,6 +12,7 @@ function harness(saved={}){
     localStorage:{getItem:k=>data.get(k)||null,setItem:(k,v)=>data.set(k,v),removeItem:k=>data.delete(k)},toast(){},clearTimeout,
     $:()=>null,UI:{renderNowPlaying(){},renderPlayState(){},renderProgress(){}},Views:{refreshAll(){}},
     Engine:{current:tracks[1],queue:tracks.slice(),_playRequest:5,buildOrder(){this.order=this.queue.map((_,i)=>i);},stop(){stops++;this.current=null;this.queue=[];},saveState(){},updateMediaSession(){}},
+    R2Source:{status:'Ready',connect(){connections++;},suspend(){aborts++;}},
     DriveSource:{api:{},folder:'folder',tagQueue:[],tagJobs:new Map(),controller:{abort(){aborts++;}},connect(){connections++;}},
     DrawerCast:{suspend(){},connection:{},connect(){connections++;}},PlaybackTransitions:{cancel(){}},
     Playlists:{get:()=>playlist},Bookmarks:{all:()=>playlist.ids},SET:{},trackAlbum:t=>t.album||'Album',trackArtist:t=>t.artist||'Artist',sortNat:(a,b)=>a.localeCompare(b)});
@@ -49,4 +50,28 @@ test('queue selection filters disabled sources while retaining the selected enab
   const queue=vm.runInContext('({'+body+'}).setQueue',h.ctx);
   const engine={buildOrder(){this.order=this.queue.map((_,i)=>i);},playIndex(i){this.selected=this.queue[i].id;},saveState(){}};
   queue.call(engine,h.tracks,2,true);assert.equal(engine.selected,'server');assert.deepEqual(Array.from(engine.queue,t=>t.id),['local','server']);
+});
+
+test('Drive and R2 switches persist and filter independently, with source-specific playlist IDs',()=>{
+  const h=harness({'drawercast.sources.v1':JSON.stringify({drive:false,r2:true,local:false,server:false})});
+  h.SourceLibrary.load();const r2={id:'r2_song',source:'r2',remote:true,title:'R2',rating:2};
+  h.tracks.push(r2);h.ctx.LIB.ids.push(r2.id);h.ctx.LIB.map.set(r2.id,r2);h.playlist.ids.push(r2.id);
+  assert.deepEqual(Array.from(h.allTracks(),t=>t.id),['r2_song']);assert.equal(h.SourceLibrary.kind(r2),'r2');
+  h.ctx.Engine.current=r2;h.ctx.Engine.queue=[r2];
+  h.MusicSources.setEnabled('drive',true,false);assert.equal(h.ctx.Engine.current,r2);assert.equal(h.stops(),0);
+  h.MusicSources.setEnabled('r2',false);assert.equal(h.stops(),1);assert.equal(h.ctx.LIB.map.get(r2.id).rating,2);
+  assert.deepEqual(Array.from(h.allTracks(),t=>t.id),['drive']);assert.ok(h.playlist.ids.includes(r2.id));
+  const restored=harness(Object.fromEntries(h.data));restored.SourceLibrary.load();
+  assert.equal(restored.SourceLibrary.enabled('drive'),true);assert.equal(restored.SourceLibrary.enabled('r2'),false);
+});
+
+test('an A15 catalog refresh cannot remove Drive or R2 tracks',async()=>{
+  const h=harness(),r2={id:'r2_song',source:'r2',remote:true,title:'R2'};
+  h.tracks.push(r2);h.ctx.LIB.ids.push(r2.id);h.ctx.LIB.map.set(r2.id,r2);
+  const removed=[];Object.assign(h.ctx,{validId:()=>true,save(){},persistTracks:async()=>{},
+    removeTracks:async ids=>{removed.push(...ids);},Nav:{go(){}},cfg:null});
+  const ingest=vm.runInContext(block('  async function ingest(data,c){','  function scheduleRetry()')+'\ningest',h.ctx);
+  await ingest({apiVersion:1,serverId:'serverID',tracks:[]},{});
+  assert.deepEqual(Array.from(removed),['server']);assert.equal(h.ctx.LIB.map.get(r2.id),r2);
+  assert.equal(h.ctx.LIB.map.get('drive'),h.tracks[1]);
 });
