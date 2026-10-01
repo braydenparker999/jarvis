@@ -26,6 +26,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 DRIVE_ROOT = "https://www.googleapis.com/drive/v3/files"
@@ -35,10 +36,53 @@ EXT_RE = re.compile(r"^[a-z0-9]{1,8}$")
 RETRYABLE = {408, 429, 500, 502, 503, 504}
 LOG_LOCK = threading.Lock()
 CHUNK_SIZE = 1024 * 1024
+DRIVE_REASONS = {"rateLimitExceeded", "userRateLimitExceeded", "downloadQuotaExceeded", "dailyLimitExceeded", "dailyLimitExceededUnreg", "insufficientFilePermissions", "appNotAuthorizedToFile", "accessNotConfigured", "forbidden", "fileNotDownloadable", "cannotDownloadAbusiveFile", "domainPolicy", "authError", "notFound", "backendError"}
+RATE_REASONS = {"rateLimitExceeded", "userRateLimitExceeded"}
 
 
 class MigrationError(RuntimeError):
     """An error with a controlled message that is safe for public CI logs."""
+
+
+class DrivePauseError(MigrationError):
+    """A source-wide limit means queued downloads should not keep retrying."""
+
+
+def drive_error_reason(error: urllib.error.HTTPError) -> str:
+    if hasattr(error, "_safe_drive_reason"):
+        return error._safe_drive_reason
+    reason = "unclassified"
+    try:
+        payload = json.loads(error.read(16384))
+        for entry in payload.get("error", {}).get("errors", []):
+            if entry.get("reason") in DRIVE_REASONS:
+                reason = entry["reason"]
+                break
+    except Exception:
+        pass
+    error._safe_drive_reason = reason
+    return reason
+
+
+def retry_delay(error: Exception, attempt: int) -> float:
+    requested = None
+    if isinstance(error, urllib.error.HTTPError):
+        value = error.headers.get("Retry-After") if error.headers else None
+        if value:
+            try:
+                requested = float(value)
+            except ValueError:
+                try:
+                    requested = (parsedate_to_datetime(value) - datetime.now(timezone.utc)).total_seconds()
+                except (ValueError, TypeError, OverflowError):
+                    pass
+        rate_limited = error.code == 429 or drive_error_reason(error) in RATE_REASONS
+    else:
+        rate_limited = False
+    fallback = min(64.0 if rate_limited else 20.0, (4.0 if rate_limited else 1.0) * (2**attempt)) + random.random() * 0.5
+    if requested is not None and requested > 3600:
+        raise DrivePauseError("Drive requested a retry delay over one hour; migration paused without further requests.")
+    return max(fallback, requested) if requested is not None and 0 <= requested <= 3600 else fallback
 
 
 def safe_error(error: Exception) -> str:
@@ -47,7 +91,7 @@ def safe_error(error: Exception) -> str:
     if isinstance(error, MigrationError):
         return str(error)
     if isinstance(error, urllib.error.HTTPError):
-        return f"HTTP {error.code} (request details omitted)"
+        return f"HTTP {error.code} ({drive_error_reason(error)}; request details omitted)"
     response = getattr(error, "response", {})
     status = response.get("ResponseMetadata", {}).get("HTTPStatusCode") if isinstance(response, dict) else None
     if isinstance(status, int):
@@ -303,13 +347,22 @@ def download_drive_file(file: dict, api_key: str, destination: Path) -> dict:
         except urllib.error.HTTPError as exc:
             if exc.code not in RETRYABLE and exc.code != 403:
                 raise
+            reason = drive_error_reason(exc)
+            if attempt == 0:
+                log(f"Drive download response: HTTP {exc.code}; reason={reason}. Request details omitted.")
+            if reason in {"downloadQuotaExceeded", "dailyLimitExceeded", "dailyLimitExceededUnreg"}:
+                raise DrivePauseError(f"Drive source quota reached ({reason}); migration paused without further downloads.") from None
+            if exc.code == 403 and reason not in RATE_REASONS and reason != "unclassified":
+                raise MigrationError(f"Drive refused this download ({reason}); no access restriction was bypassed.") from None
             error = exc
         except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException, MigrationError) as exc:
             error = exc
         destination.unlink(missing_ok=True)
         if attempt >= 5:
+            if isinstance(error, urllib.error.HTTPError) and (error.code == 429 or drive_error_reason(error) in RATE_REASONS):
+                raise DrivePauseError(f"Drive rate limit persisted after backoff: {safe_error(error)}") from None
             raise MigrationError(f"Download failed after retries: {safe_error(error)}") from None
-        time.sleep(min(20.0, 1.0 * (2**attempt)) + random.random() * 0.5)
+        time.sleep(retry_delay(error, attempt))
     raise MigrationError("Unreachable download failure.")
 
 
@@ -501,6 +554,11 @@ def main() -> int:
                     error = safe_error(exc)
                     failures.append({"driveId": item.get("id"), "name": item.get("name"), "error": error[:500]})
                     log(f"FAILED {item.get('id')}: {error[:200]}")
+                    if isinstance(exc, DrivePauseError):
+                        for pending in future_map:
+                            pending.cancel()
+                        log("Source-wide limit: queued downloads cancelled. Verified R2 objects are preserved.")
+                        break
                 completed += 1
                 if completed % 25 == 0 or completed == len(selected):
                     copied = sum(1 for r in results if r["status"] == "copied")
