@@ -164,44 +164,54 @@ python -m unittest discover -s tests -p 'test_r2*.py' -v
 npm test
 ```
 
-## Playback cutover
+## Independent playback sources
 
-The browser keeps its Drive catalog, stable `gd_` track IDs, prepared artwork,
-ratings, play counts, playlists and local/server sources. R2 changes only the
-audio delivery URL. `r2ManifestURL` in `drive-config.json` defaults to an empty
-string, so merely deploying this code cannot switch the live library.
+Google Drive and Cloudflare R2 are separate Music Sources, with separate IDs,
+source switches, catalog state, ratings and playlists. Drive uses its own
+`drive-config.json` and Google media URLs. R2 uses `r2-config.json`, the published
+static metadata/artwork catalog and the Worker partial manifest. R2 never
+requests a Drive media fallback. Only verified matching objects enter its library;
+a partial map remains `complete=false` and stays separate from the full canonical
+map. Uncopied tracks are available when the user enables the Drive source.
 
-Choose the delivery/privacy model with the owner before publishing files. An
-R2 public development URL is public access and is not an authenticated private
-delivery solution. Private playback needs a separately implemented authorized
-delivery endpoint. The current optional adapter accepts credential-free HTTPS
-manifest/media URLs; it does not add authentication, signed-URL refresh, or a
-Worker by itself. Do not put R2 S3 keys in the frontend.
+Verify each source with the other disabled: actual advancing audio, seeking,
+artwork, source counts and media origin. Check GET/HEAD/Range/CORS separately.
+Cloud-browser verification does not establish physical Android screen-lock or
+background playback.
 
-Before filling `r2ManifestURL`:
+## Authenticated transfer preparation
 
-- Require a complete current-library map; no smoke, partial, stale, private,
-  malformed or unverified map may switch playback
-- Verify `GET`, `HEAD`, and byte `Range` reads, including a seek near the middle
-  and end; require correct 206/Content-Range behavior and byte counts
-- Configure/verify CORS for the exact Azure frontend origin, GET/HEAD, and
-  `Range`; expose `Content-Length`, `Content-Range`, `Accept-Ranges`, and `ETag`
-- Verify MIME types and existing catalog metadata/covers in Poweramp
-- Verify repeat, shuffle, previous/next, pause/resume, seek, track switching,
-  slow/failed R2 media, and recovery to Drive without losing position
-- Verify the deployed source commit and CI before claiming a release
-- Verify actual restricted Android/network and screen-lock/background behavior
-  on the physical device; cloud-browser results do not establish that
+The migrator supports `GOOGLE_DRIVE_AUTH_MODE=oauth`. Supply the owner-authorized
+`GOOGLE_DRIVE_CLIENT_ID`, `GOOGLE_DRIVE_CLIENT_SECRET` and
+`GOOGLE_DRIVE_REFRESH_TOKEN` only as Actions secrets. Obtain the grant using the
+supported Google OAuth flow, with `https://www.googleapis.com/auth/drive.readonly`
+for this reader. Refresh tokens remain server-side; bearer tokens use request
+headers, never query strings or reports. Refresh is serialized and access tokens
+are renewed before expiry. Missing/invalid OAuth credentials stop the run;
+there is no automatic fallback to anonymous/public API-key requests.
 
-The map is loaded in memory and does not rewrite exported track records. An
-R2 media failure uses one bounded fallback to Drive and suppresses that failed
-R2 revision for the current session. All library records must match Drive
-ID, size and source MD5; records without source MD5 remain on Drive.
+The explicit `public_api_key` mode retains the existing public-file path for
+supported diagnostics. Neither mode bypasses download restrictions or quotas.
+An unclassified/refusal 403 stops downloads, and metadata 403 also stops without
+repeated attempts. OAuth is a supported authenticated path, not proof that the
+observed automated-query refusal has cleared. Do not resume bulk transfer until
+the owner grant exists and one controlled authenticated test succeeds.
+
+After that, use one transfer at a time, concurrency 1 and pacing. Existing R2
+objects are read and hashed before skipping; Drive originals are never changed.
+A full canonical baseline is published only after every file and the final Drive
+inventory agree. Then run one manual incremental reconciliation and review its
+report before activating recurrence. No recurring R2 mirror is enabled by this
+code. Muse continues uploading to its existing Drive folders unless the owner
+separately changes that intake pipeline.
+
+References: [Google downloads](https://developers.google.com/workspace/drive/api/guides/manage-downloads)
+and [Drive scopes](https://developers.google.com/workspace/drive/api/guides/api-specific-auth).
 
 ## Rollback and continuing work
 
-Set `r2ManifestURL` back to empty and redeploy the previous known-good release
-pin to return to Drive delivery. Azure's deployment workflow preserves existing
+Disable Cloudflare R2 in Music Sources or clear its manifest setting and
+redeploy the previous known-good release pin. Google Drive remains independent. Azure's deployment workflow preserves existing
 website bytes/properties before overwrites. Keep the prior Drive catalog,
 source files and R2 generations until the owner explicitly approves cleanup.
 
