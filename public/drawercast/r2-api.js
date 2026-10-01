@@ -1,5 +1,5 @@
-// Optional playback-only overlay. The Drive catalog remains the authority for
-// identity, user data, tags and artwork. Nothing from this map is persisted.
+// Verified R2 source. Published catalog metadata validates the copied objects;
+// R2 tracks have their own identities and never fall back to another source.
 export const MAX_R2_MANIFEST_BYTES = 32 * 1024 * 1024;
 const ID = /^[A-Za-z0-9_-]{10,200}$/;
 const MD5 = /^[a-f0-9]{32}$/;
@@ -20,9 +20,52 @@ function httpsURL(value) {
 }
 
 function trackMatches(track, file, root) {
-  return track?.source === 'drive' && track.id === 'gd_' + file.driveId &&
+  return ['drive', 'r2'].includes(track?.source) &&
+    track.id === (track.source === 'r2' ? 'r2_' : 'gd_') + file.driveId &&
     track.remoteId === file.driveId && track.driveFolder === root &&
     track.size === file.size && MD5.test(track.md5) && track.md5 === file.md5;
+}
+
+export function r2Tracks(mapping, tracks, existing = []) {
+  if (!mapping.matches(tracks)) fail();
+  const saved = new Map(existing.filter(t => t.source === 'r2').map(t => [t.id, t]));
+  return tracks.filter(t => mapping.mediaURL(t)).map(t => {
+    const id = 'r2_' + t.remoteId, old = saved.get(id) || {};
+    const same = old.md5 === t.md5 && old.size === t.size;
+    return {...t, id, source:'r2', folder:t.folder?.replace(/^Google Drive\//, 'Cloudflare R2/'),
+      rating:old.rating || 0, plays:old.plays || 0, lastPlayed:old.lastPlayed || 0, resumeAt:old.resumeAt || 0,
+      dur:t.dur || (same ? old.dur || 0 : 0), added:old.added || Date.now(), artKey:same ? old.artKey || null : null,
+      customArt:same ? old.customArt || false : false};
+  });
+}
+
+// Commit only R2 records in one transaction. Drive, local files and server
+// records, and their playlist identities, remain independent.
+export function commitR2Catalog(db, mapping, tracks) {
+  if (!mapping.matches(tracks)) fail();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('tracks', 'readwrite'), store = tx.objectStore('tracks');
+    const pending = new Map(r2Tracks(mapping, tracks).map(t => [t.id, t]));
+    const fresh = [], gone = [], request = store.openCursor();
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (cursor) {
+        const next = pending.get(cursor.key), old = cursor.value;
+        if (next) {
+          // The full map was checked above; preserve only this source's state.
+          const same = old.md5 === next.md5 && old.size === next.size;
+          const t = {...next, rating:old.rating || 0, plays:old.plays || 0,
+            lastPlayed:old.lastPlayed || 0, resumeAt:old.resumeAt || 0,
+            dur:next.dur || (same ? old.dur || 0 : 0), added:old.added || next.added,
+            artKey:same ? old.artKey || null : null, customArt:same ? old.customArt || false : false};
+          cursor.update(t); fresh.push(t); pending.delete(cursor.key);
+        } else if (old.source === 'r2') { cursor.delete(); gone.push(cursor.key); }
+        cursor.continue();
+      } else for (const t of pending.values()) { store.put(t, t.id); fresh.push(t); }
+    };
+    tx.oncomplete = () => resolve({fresh, gone});
+    tx.onabort = tx.onerror = () => reject(tx.error || Error('R2 library could not be saved.'));
+  });
 }
 
 export function validateR2Manifest(data, {root, manifestURL, tracks}) {

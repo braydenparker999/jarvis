@@ -127,6 +127,7 @@ const IDB = (function(){
   function wrap(req){ return new Promise((res,rej)=>{ req.onsuccess=()=>res(req.result); req.onerror=()=>rej(req.error); }); }
   return {
     catalog:(module,snapshot)=>open().then(db=>module.commitCatalog(db,snapshot)),
+    r2Catalog:(module,mapping,tracks)=>open().then(db=>module.commitR2Catalog(db,mapping,tracks)),
     get:(s,k)=>tx(s,'readonly').then(o=>wrap(o.get(k))),
     set:(s,k,v)=>tx(s,'readwrite').then(o=>wrap(o.put(v,k))),
     del:(s,k)=>tx(s,'readwrite').then(o=>wrap(o.delete(k))),
@@ -1142,8 +1143,8 @@ const MetadataRepair={
 async function getArtURL(t, small){
   if(t?.source==='drive') await DriveSource.ensureMetadata(t);
   else await MetadataRepair.ensure(t);
-  if(t?.source==='drive'&&t.coverURL&&!t.customArt)return t.coverURL;
-  if(t && t.remote && !t.artKey) return t.source==='drive'?null:DrawerCast.artURL(t);
+  if(['drive','r2'].includes(t?.source)&&t.coverURL&&!t.customArt)return t.coverURL;
+  if(t && t.remote && !t.artKey) return SourceLibrary.kind(t)==='server'?DrawerCast.artURL(t):null;
   if(!t || !t.artKey) return null;
   const key = small ? t.artKey+'_t' : t.artKey;
   if(artURLs.has(key)) return artURLs.get(key) || (small ? getArtURL(t,false) : null);
@@ -1325,6 +1326,7 @@ function promptReconnect(){
 
 async function getFileFor(t){
   if(t?.source==='drive') return DriveSource.fileFor(t);
+  if(t?.source==='r2') return R2Source.fileFor(t);
   if(t && t.remote) return DrawerCast.fileFor(t);
   if(FILES.has(t.id)) return FILES.get(t.id);
   /* a linked folder is always the freshest source, and costs no storage */
@@ -1364,12 +1366,12 @@ function libAdd(t){
 }
 // Keep the stored registry intact when a source is hidden from the music library.
 const SourceLibrary={
-  flags:{local:true,drive:true,server:true},
-  kind(t){return t?.source==='drive'?'drive':t?.remote?'server':'local';},
+  flags:{local:true,drive:true,r2:true,server:true},
+  kind(t){return ['drive','r2'].includes(t?.source)?t.source:t?.remote?'server':'local';},
   enabled(kind){return this.flags[kind]!==false;},
   load(){
     try{const saved=JSON.parse(localStorage.getItem('drawercast.sources.v1')||'null');
-      for(const kind of ['local','drive','server'])if(typeof saved?.[kind]==='boolean')this.flags[kind]=saved[kind];
+      for(const kind of ['local','drive','r2','server'])if(typeof saved?.[kind]==='boolean')this.flags[kind]=saved[kind];
       if(!saved&&localStorage.getItem('drawercast.drive.disabled')==='1')this.flags.drive=false;
     }catch(e){}
   },
@@ -2017,7 +2019,7 @@ const DrawerCast = (function(){
       defaults.waveformVersion=data.waveformVersion===1?1:0;defaults.hasArt=!!raw.hasArt;defaults.artKey=old?old.artKey||null:null;defaults.rgTrack=null;defaults.rgAlbum=null;
       Object.assign(t,defaults);libAdd(t);fresh.push(t);
     }
-    const gone=allTracks(true).filter(t=>t.remote&&t.source!=='drive'&&!seen.has(t.id)).map(t=>t.id);
+    const gone=allTracks(true).filter(t=>SourceLibrary.kind(t)==='server'&&!seen.has(t.id)).map(t=>t.id);
     if(gone.length){if(Engine.current&&gone.includes(Engine.current.id))Engine.stop();await removeTracks(gone);}
     await persistTracks(fresh);
     LIB.ids.sort((a,b)=>sortNat((LIB.map.get(a)||{}).title,(LIB.map.get(b)||{}).title));
@@ -2038,7 +2040,7 @@ const DrawerCast = (function(){
     let c;try{c=validateProfile(candidate);}catch(e){lastError=e.message;if(!quiet)show();return false;}
     if(!c.serverId&&cfg&&cfg.base===c.base)c.serverId=cfg.serverId;
     const changed=cfg&&(cfg.base!==c.base||cfg.key!==c.key||cfg.serverId!==c.serverId);
-    if(changed&&Engine.current&&Engine.current.remote&&Engine.current.source!=='drive'){Engine.pause();Engine.els.forEach(a=>{a.removeAttribute('src');a.load();});Engine.preloadId=null;}
+    if(changed&&Engine.current&&SourceLibrary.kind(Engine.current)==='server'){Engine.pause();Engine.els.forEach(a=>{a.removeAttribute('src');a.load();});Engine.preloadId=null;}
     cfg=c;save();clearDefaultsBlock();connecting=true;connected=false;lastError='';retryable=false;clearTimeout(timer);clearTimeout(retryTimer);
     const version=++epoch;statusText='Connecting to A15…';banner();
     try{
@@ -2129,15 +2131,15 @@ const DrawerCast = (function(){
   async function forget(){
     epoch++;clearTimeout(timer);clearTimeout(retryTimer);if(activeRequest)activeRequest.abort();connecting=false;connected=false;cfg=null;save();
     try{localStorage.setItem(FORGOT,'1');}catch(e){}
-    if(Engine.current&&Engine.current.remote&&Engine.current.source!=='drive')Engine.stop();
-    await removeTracks(allTracks(true).filter(t=>t.remote&&t.source!=='drive').map(t=>t.id));statusText='Connect your A15';lastError='';banner();closeSheet();toast('Connection forgotten on this browser. Songs on the A15 are unchanged.');
+    if(Engine.current&&SourceLibrary.kind(Engine.current)==='server')Engine.stop();
+    await removeTracks(allTracks(true).filter(t=>SourceLibrary.kind(t)==='server').map(t=>t.id));statusText='Connect your A15';lastError='';banner();closeSheet();toast('Connection forgotten on this browser. Songs on the A15 are unchanged.');
   }
   function markError(message,retry=false){connected=false;lastError=message;statusText='Stream interrupted · reconnect A15';retryable=retry;banner();if(retry){automaticAttempts=0;scheduleRetry();}}
   function install(){
     PAGES.root.items.unshift(S_act('Jarvis Home','Return to your personal hub',()=>{location.href='/';},'back'));
 
     const cta=$('#cta-add');cta.textContent='Music Sources';cta.onclick=e=>{e.stopPropagation();Settings.open('sources');};
-    const hint=$('#art-cta .ctahint');if(hint)hint.textContent='Choose local files, Google Drive, or your music server.';
+    const hint=$('#art-cta .ctahint');if(hint)hint.textContent='Choose local files, Google Drive, Cloudflare R2, or your music server.';
     const first=$('#art-cta .ctatext');if(first)first.textContent='Your music, together';banner();
   }
   function returnToPlayer(){
@@ -2175,7 +2177,6 @@ function audioSource(file){return file&&file.__remoteURL?file.__remoteURL:URL.cr
    metadata and exports; the deployment injects the owner-approved shared key. */
 const DriveSource={
   api:null,helper:null,catalog:null,generation:null,folder:'',prepared:{},busy:false,status:'Not connected',error:'',controller:null,playbackRetry:new Map(),
-  r2:null,r2Helper:null,r2ManifestURL:'',r2Checking:false,r2Error:'',r2Failures:new Set(),
   manifestTimer:null,manifestChecking:false,manifestListener:false,
   async install(){
     let manifestDelay=60000;
@@ -2190,7 +2191,6 @@ const DriveSource={
       if(!response.ok)throw Error('Drive configuration could not be loaded.');
       const config=await response.json();this.api=this.helper.createDriveApi(config.apiKey);
       this.folder=this.helper.folderId(config.folderId);
-      this.r2=null;this.r2ManifestURL=typeof config.r2ManifestURL==='string'?config.r2ManifestURL:'';
       // The managed publisher owns this root; old custom-folder preferences
       // cannot redirect the authoritative catalog.
       try{this.generation=await IDB.get('kv','drive.catalog.v2');}catch(e){}
@@ -2205,7 +2205,7 @@ const DriveSource={
       }else{
         await this.connect(this.folder,true);
       }
-    }catch(e){this.error=e.message;this.status='Drive unavailable';}finally{MusicSources.refresh();this.scheduleManifestCheck(manifestDelay);void this.refreshR2();}
+    }catch(e){this.error=e.message;this.status='Drive unavailable';}finally{MusicSources.refresh();this.scheduleManifestCheck(manifestDelay);}
   },
   scheduleManifestCheck(delay=300000){
     clearTimeout(this.manifestTimer);
@@ -2223,41 +2223,16 @@ const DriveSource={
     try{return await this.connect(this.folder,true);}
     finally{this.manifestChecking=false;this.scheduleManifestCheck();}
   },
-  async refreshR2(){
-    // Optional, bounded and independent of the authoritative catalog. A bad
-    // endpoint or map must never delay startup or make Drive unavailable.
-    if(!this.r2ManifestURL){this.r2=null;this.r2Error='';return false;}
-    if(this.r2Checking||this.busy||!this.api||!SourceLibrary.enabled('drive')||(Engine.current?.source==='drive'&&Engine.playing))return false;
-    const tracks=allTracks(true).filter(t=>t.source==='drive'&&t.driveFolder===this.folder);
-    if(!tracks.length){this.r2=null;return false;}
-    this.r2Checking=true;
-    const root=this.folder,url=this.r2ManifestURL;
-    try{
-      this.r2Helper ||= await import('./r2-api.js?v=verified-v1');
-      const mapping=await this.r2Helper.readR2Manifest({url,root,tracks,signal:AbortSignal.timeout(15000)});
-      // Recheck after the fetch: a newer catalog, setting or selection may
-      // have arrived while the map was being downloaded.
-      if(root!==this.folder||url!==this.r2ManifestURL||!SourceLibrary.enabled('drive'))return false;
-      if(!mapping.matches(allTracks(true).filter(t=>t.source==='drive'&&t.driveFolder===root)))throw Error('R2 map is behind the current catalog.');
-      if(Engine.current?.source==='drive'&&Engine.playing)return false;
-      this.r2=mapping;this.r2Error='';return true;
-    }catch(e){this.r2=null;this.r2Error='R2 verification unavailable · using Google Drive';return false;}
-    finally{this.r2Checking=false;MusicSources.refresh();}
-  },
-  r2Revision(t){return t.id+'|'+t.md5+'|'+t.size;},
-  isR2Playback(t,url){return !!this.r2&&this.r2.mediaURL(t)===url;},
-  fileFor(t,driveOnly=false){
-    if(!this.api)return null;
+  fileFor(t){
+    if(!this.api||t?.source!=='drive')return null;
     if(t.availability==='blocked')throw Error('This song is not downloadable. Check its Drive sharing settings.');
     const retry=this.playbackRetry.get(t.id)||0;
-    const r2URL=!driveOnly&&!retry&&!this.r2Failures.has(this.r2Revision(t))?this.r2?.mediaURL(t):null;
-    const url=r2URL||this.api.mediaURL({id:t.remoteId})+(retry?'&retry='+retry:'');
+    const url=this.api.mediaURL({id:t.remoteId})+(retry?'&retry='+retry:'');
     return {__remoteURL:url,name:baseName(t.path),size:t.size,type:t.mimeType};
   },
-  retryFileFor(t,fromR2=false){
-    if(fromR2)this.r2Failures.add(this.r2Revision(t));
+  retryFileFor(t){
     this.playbackRetry.set(t.id,Date.now());
-    return this.fileFor(t,true);
+    return this.fileFor(t);
   },
   waveformURL(t){return t.waveformVersion===1?t.waveformFile:null;},
   tagJobs:new Map(),tagQueue:[],tagFailures:new Set(),tagActive:null,tagTimer:null,
@@ -2335,7 +2310,6 @@ const DriveSource={
       // A selection made during the fetch takes priority. Retry after pause.
       if(Engine.current?.source==='drive'&&Engine.playing){this.status='Drive catalog update pending · pause playback to sync';return false;}
       const {fresh,gone}=await IDB.catalog(this.catalog,snapshot);
-      this.r2=null; // A changed catalog requires a new complete-map check.
       // The committed database is the authority. Only now swap memory indexes.
       for(const id of gone){LIB.map.delete(id);FILES.delete(id);const i=LIB.ids.indexOf(id);if(i>=0)LIB.ids.splice(i,1);}
       fresh.forEach(libAdd);this.generation=snapshot.pointer;
@@ -2361,12 +2335,11 @@ const DriveSource={
       this.status=cached.length?'Saved catalog · '+cached.length+' songs · update delayed':'Catalog temporarily unavailable';
       if(!quiet)toast(this.status+' — '+this.error,6500);return false;
     }
-    finally{clearTimeout(timeout);this.busy=false;this.controller=null;MusicSources.refresh();this.scheduleManifestCheck();void this.refreshR2();if($('#drive-status'))$('#drive-status').textContent=this.status+(this.error?' — '+this.error:'');}
+    finally{clearTimeout(timeout);this.busy=false;this.controller=null;MusicSources.refresh();this.scheduleManifestCheck();if($('#drive-status'))$('#drive-status').textContent=this.status+(this.error?' — '+this.error:'');}
   },
   show(){
     dialog('Google Drive Music',
-      '<p>Streams from your shared Drive library. Verified R2 playback is used only when configured; Google Drive stays available as fallback. Internet is required.</p>'+
-      '<p class="note">'+esc(this.r2?'Verified R2 playback ready':this.r2Error||'Playback: Google Drive')+'</p>'+
+      '<p>Streams directly from your shared Google Drive library. Internet is required.</p>'+
       '<p id="drive-status" role="status">'+esc(this.error||this.status)+'</p>'+
       '<label for="drive-folder">Published music folder</label><input class="field" readonly id="drive-folder" value="'+esc(this.folder?'https://drive.google.com/drive/folders/'+this.folder:'')+'" style="margin:8px 0 14px" autocomplete="off">'+
       '<p class="note">Only folders shared as Anyone with the link → Viewer can be read.</p>'+
@@ -2377,6 +2350,87 @@ const DriveSource={
     refresh.onclick=async()=>{const field=$('#drive-folder');if(!field)return;refresh.disabled=true;if(!SourceLibrary.enabled('drive'))MusicSources.setEnabled('drive',true,false);await this.connect(field.value);refresh.disabled=false;};
   },
 
+  exportRemote(t){
+    const file=this.fileFor(t);if(!file)return this.show();
+    const a=document.createElement('a');a.href=file.__remoteURL;a.target='_blank';a.rel='noopener';a.download=baseName(t.path);a.click();
+  }
+};
+
+/* R2 loads its own verified subset from published metadata. It never calls
+   Google, reads a Drive credential, or changes a Drive source record. */
+const R2Source={
+  helper:null,catalog:null,mapping:null,root:'',manifestURL:'',busy:false,
+  status:'Not configured',error:'',controller:null,timer:null,
+  async install(){
+    try{
+      const response=await fetch('/assets/r2-config.json',{credentials:'omit',cache:'no-store',signal:AbortSignal.timeout(15000)});
+      if(!response.ok)throw Error('R2 configuration could not be loaded.');
+      const config=await response.json();
+      this.root=typeof config.rootId==='string'?config.rootId:'';
+      this.manifestURL=typeof config.manifestURL==='string'?config.manifestURL:'';
+      if(!this.root||!this.manifestURL){this.status='Not configured';return;}
+      this.helper=await import('./r2-api.js?v=separate-source-v1');
+      this.catalog=await import('./drive-catalog.js?v=catalog-v2');
+      await this.connect(true);
+    }catch(e){this.error=e.message;this.status='R2 unavailable';}
+    finally{MusicSources.refresh();}
+  },
+  suspend(){this.controller?.abort();clearTimeout(this.timer);},
+  schedule(){
+    clearTimeout(this.timer);
+    if(!SourceLibrary.enabled('r2')||!this.helper)return;
+    this.timer=setTimeout(()=>this.connect(true),300000);this.timer?.unref?.();
+  },
+  async connect(quiet=false){
+    if(this.busy||!SourceLibrary.enabled('r2')||!this.helper||!this.catalog)return false;
+    if(Engine.current?.source==='r2'&&Engine.playing){this.status='R2 update pending · pause playback to sync';this.schedule();return false;}
+    this.busy=true;this.error='';this.status='Checking verified R2 library…';MusicSources.refresh();
+    const root=this.root,url=this.manifestURL,controller=new AbortController();this.controller=controller;
+    const timeout=setTimeout(()=>controller.abort(),30000);
+    try{
+      // Read the static, hashed metadata snapshot independently of DriveSource.
+      // No Google API request or media download is needed to build this library.
+      const snapshot=await this.catalog.readCatalog({root,signal:controller.signal});
+      const tracks=snapshot.records.map(record=>this.catalog.catalogTrack(record,root));
+      const mapping=await this.helper.readR2Manifest({url,root,tracks,signal:controller.signal});
+      if(controller.signal.aborted||!SourceLibrary.enabled('r2')||root!==this.root||url!==this.manifestURL)return false;
+      if(Engine.current?.source==='r2'&&Engine.playing){this.status='R2 update pending · pause playback to sync';return false;}
+      const {fresh,gone}=await IDB.r2Catalog(this.helper,mapping,tracks);
+      for(const id of gone){LIB.map.delete(id);FILES.delete(id);const i=LIB.ids.indexOf(id);if(i>=0)LIB.ids.splice(i,1);}
+      fresh.forEach(libAdd);
+      this.mapping=mapping;this.status='Verified R2 library ready';this.error='';
+      const selected=Engine.current?.id;
+      if(selected&&gone.includes(selected))Engine.stop();
+      const order=Engine.order.map(i=>Engine.queue[i]?.id),currentOrder=Engine.order[Engine.pos];
+      const position=Engine.queue[currentOrder]?.id;
+      Engine.queue=Engine.queue.filter(t=>!gone.includes(t.id)).map(t=>LIB.map.get(t.id)||t);
+      Engine.order=order.map(id=>Engine.queue.findIndex(t=>t.id===id)).filter(i=>i>=0);
+      Engine.pos=Math.max(0,Engine.order.findIndex(i=>Engine.queue[i]?.id===position));
+      if(Engine.current?.source==='r2')Engine.current=LIB.map.get(selected)||null;
+      if(!Engine.current&&allTracks().length){Engine.queue=allTracks();Engine.buildOrder();Engine.pos=0;Engine.current=Engine.queue[Engine.order[0]];}
+      Engine.saveState();UI.renderNowPlaying(Engine.current);UI.renderPlayState();Views.refreshAll();
+      if(!quiet)toast('Cloudflare R2 ready · '+fresh.length+' songs');return true;
+    }catch(e){
+      this.error=e.name==='AbortError'?'R2 refresh canceled or timed out.':e.message;
+      this.status=allTracks(true).some(t=>t.source==='r2')?'Saved R2 library · refresh delayed':'R2 temporarily unavailable';
+      if(!quiet)toast(this.error,6000);return false;
+    }finally{clearTimeout(timeout);this.busy=false;this.controller=null;this.schedule();MusicSources.refresh();}
+  },
+  fileFor(t){
+    if(t?.source!=='r2')return null;
+    const url=this.mapping?.mediaURL(t);
+    return url?{__remoteURL:url,name:baseName(t.path),size:t.size,type:t.mimeType}:null;
+  },
+  show(){
+    dialog('Cloudflare R2 Music',
+      '<p>Streams only the songs verified in your R2 bucket. Internet is required.</p>'+
+      '<p role="status">'+esc(this.error||this.status)+'</p>'+
+      '<p class="note">'+allTracks(true).filter(t=>t.source==='r2').length+' songs copied and verified. More songs appear after their transfer is verified.</p>'+
+      '<p class="note">This source has its own track entries, ratings and playlists. Turning it off keeps its saved library.</p>',
+      [{label:'Refresh R2',pri:true},{label:'Close'}]);
+    const refresh=$$('#sheet .actions .btn')[0];
+    refresh.onclick=async()=>{refresh.disabled=true;if(!SourceLibrary.enabled('r2'))MusicSources.setEnabled('r2',true,false);await this.connect();refresh.disabled=false;};
+  },
   exportRemote(t){
     const file=this.fileFor(t);if(!file)return this.show();
     const a=document.createElement('a');a.href=file.__remoteURL;a.target='_blank';a.rel='noopener';a.download=baseName(t.path);a.click();
@@ -2587,7 +2641,8 @@ const Engine = {
     if(!t) return;
     if(!sourceTrackEnabled(t))return;
     if(t.source==='drive'&&!DriveSource.api){toast('Google Drive is unavailable. Check Music Sources in Library settings.');return;}
-    if(t.remote && t.source!=='drive' && !DrawerCast.canPlay(t)){toast('Music server is unavailable. Reconnect in Music Sources.');return;}
+    if(t.source==='r2'&&!R2Source.fileFor(t)){toast('Cloudflare R2 is unavailable. Refresh its source in Music Sources.');return;}
+    if(SourceLibrary.kind(t)==='server' && !DrawerCast.canPlay(t)){toast('Music server is unavailable. Reconnect in Music Sources.');return;}
     // A deliberate new selection gets its own retry budget. Metadata from a
     // failed retry does not prove the audio ever became playable.
     this._driveRetryId=null;
@@ -2713,6 +2768,7 @@ const Engine = {
     this.playing=false;
     DriveSource.pumpTags();
     if(DriveSource.status.includes('catalog update pending'))DriveSource.scheduleManifestCheck(0);
+    if(R2Source.status.includes('update pending'))void R2Source.connect(true);
     UI.renderPlayState();
     if(SET.fadeOnPause && this.ctx){
       this.setGain(this.cur, 0.0001, SET.fadeLen);
@@ -2793,8 +2849,7 @@ const Engine = {
       const a=this.el();
       if(this._driveRetryId!==t.id){
         this._driveRetryId=t.id;this.playing=false;UI.renderPlayState();
-        const fromR2=DriveSource.isR2Playback?.(t,a.src)||false;
-        const f=DriveSource.retryFileFor(t,fromR2);
+        const f=DriveSource.retryFileFor(t);
         const at=a.currentTime||0;
         a.pause();a.src=audioSource(f);
         const request=this._playRequest,source=a.src;
@@ -2803,7 +2858,7 @@ const Engine = {
           if(Engine._playRequest!==request||Engine.el()!==a||a.src!==source)return;
           try{a.currentTime=Math.min(at,Number.isFinite(a.duration)?Math.max(0,a.duration-0.15):at);}catch(e){}
         });
-        toast(fromR2?'R2 stream unavailable · trying Google Drive…':'Drive stream stalled · retrying once…',2500);
+        toast('Drive stream stalled · retrying once…',2500);
         this._driveRetryTimer=setTimeout(()=>{
           if(this.current?.id!==t.id||this._playRequest!==request||this.el()!==a||a.src!==source||this._driveErrorReportedId===t.id)return;
           try{a.currentTime=at;}catch(e){}
@@ -2824,7 +2879,11 @@ const Engine = {
       this.playing=false;UI.renderPlayState();
       toast('Drive audio still could not play. Check internet and folder sharing, then try again.',7000);return;
     }
-    if(t && t.remote){
+    if(t?.source==='r2'){
+      this.playing=false;this.el().pause();UI.renderPlayState();
+      toast('R2 audio could not play. Check internet or refresh Cloudflare R2 in Music Sources, then try again.',7000);return;
+    }
+    if(SourceLibrary.kind(t)==='server'){
       const a=this.el(),error=a.error?.code;
       if((error===2||cause==='stall')&&this._serverRetryId!==t.id){
         const f=DrawerCast.fileFor(t);
@@ -3194,7 +3253,7 @@ const UI = {
     const t=Engine.current;
     if(!t){ $('#outinfo-txt').textContent='NO OUTPUT'; return; }
     const bits=[];
-    bits.push(t.source==='drive'?'GOOGLE DRIVE':t.remote?'WI-FI STREAM':'BROWSER AUDIO');
+    bits.push(t.source==='r2'?'CLOUDFLARE R2':t.source==='drive'?'GOOGLE DRIVE':t.remote?'WI-FI STREAM':'BROWSER AUDIO');
     if(t.bits) bits.push(t.bits+' BIT');
     // Unknown source bit depth is not guessed.
     if(t.sr) bits.push(Math.round(t.sr/100)/10+' KHZ');
@@ -3688,7 +3747,7 @@ const Views={
   buildItems:function(spec){
     const T=allTracks();
     const k=spec.kind;
-    if(k==='drive') return {type:'tracks',items:T.filter(t=>t.source==='drive').sort(Views.trackSorter())};
+    if(k==='drive'||k==='r2') return {type:'tracks',items:T.filter(t=>t.source===k).sort(Views.trackSorter())};
     if(k==='all') return {type:'tracks', items:T.slice().sort(Views.trackSorter())};
     if(k==='queue') return {type:'tracks', items:Engine.queue.slice(), queue:true};
     if(k==='recent') return {type:'tracks', items:T.slice().sort(function(a,b){ return (b.added||0)-(a.added||0); })};
@@ -4147,6 +4206,7 @@ function trackAction(a,t,items,i){
 }
 async function exportTrack(t){
   if(t?.source==='drive') return DriveSource.exportRemote(t);
+  if(t?.source==='r2') return R2Source.exportRemote(t);
   if(t && t.remote) return DrawerCast.exportRemote(t);
   const f=await getFileFor(t);
   if(!f){ toast('File not available'); return; }
@@ -7323,10 +7383,10 @@ function installPlaybackRework(){
     const t=this.queue[index];if(!sourceTrackEnabled(t))return;
     const outgoing=this.current;if(outgoing&&!this._autoAdvance&&!this.el().ended&&nativeValues().restore_pos){outgoing.resumeAt=this.time();persistTrack(outgoing);}
     const mode=nativeValues().fade_manual_advance||0;
-    // Cloud media can take seconds to become playable. Manual Drive selection
+    // Cloud media can take seconds to become playable. Manual cloud selection
     // must update immediately, rather than leaving the old song on screen.
-    const driveSwitch=t.source==='drive'||outgoing?.source==='drive';
-    if(position==null&&!driveSwitch&&autoplay!==false&&this.playing&&outgoing?.id!==t.id&&mode&&!this._autoAdvance)return PlaybackTransitions.to(index,mode===1?nativeValues().fade_short_xfade_ms||400:SET.crossfadeLen*1000);
+    const cloudSwitch=['drive','r2'].includes(t.source)||['drive','r2'].includes(outgoing?.source);
+    if(position==null&&!cloudSwitch&&autoplay!==false&&this.playing&&outgoing?.id!==t.id&&mode&&!this._autoAdvance)return PlaybackTransitions.to(index,mode===1?nativeValues().fade_short_xfade_ms||400:SET.crossfadeLen*1000);
     PlaybackTransitions.cancel(true,t.id);this.listened=0;this.listenedLast=0;this.counted=false;clearTimeout(this.silenceTimer);clearTimeout(this.fadeTimer);
     if(position==null&&nativeValues().restore_pos&&t.resumeAt>0&&t.resumeAt<(t.dur||0)-3&&(t.dur||0)>=(nativeValues().restore_pos_min_dur||45)*60)position=t.resumeAt;
     return playIndex.call(this,index,autoplay,position||0);
@@ -7424,7 +7484,7 @@ const Waveform={
       // Only ask capable servers for their compact prepared peaks. Never fetch audio.
       if(t.remote){
         if(t.waveformVersion!==1)return;
-        const url=t.source==='drive'?DriveSource.waveformURL(t):DrawerCast.waveformURL(t);if(!url)return;
+        const url=t.source==='drive'?DriveSource.waveformURL(t):t.source==='r2'?null:DrawerCast.waveformURL(t);if(!url)return;
         const controller=new AbortController();this.abort=controller;
         const timeout=setTimeout(()=>controller.abort(),3000);
         try{
@@ -7541,14 +7601,14 @@ EQ.presetMenu=function(initial){
 
 /* Source management lives under Settings → Library. No media is copied here. */
 const MusicSources={
-  names:{local:'On this device',drive:'Google Drive',server:'DrawerCast server'},
+  names:{local:'On this device',drive:'Google Drive',r2:'Cloudflare R2',server:'DrawerCast server'},
   install(){
     PAGES.sources={title:'Music Sources',items:[]};
     PAGES['source-local']={title:'On this device',items:[]};
     const library=PAGES.library.items;
     // Replace the old scanner preamble; retain supported library/playback options.
     const advanced=library.findIndex(it=>it.t==='head'&&it.text==='Advanced');
-    PAGES.library.items=[{t:'native',kind:'nav',title:'Music Sources',desc:'Local files, Google Drive, and your music server',page:'sources'},
+    PAGES.library.items=[{t:'native',kind:'nav',title:'Music Sources',desc:'Local files, Google Drive, Cloudflare R2, and your music server',page:'sources'},
       S_note('Enabled sources appear together throughout your library.')].concat(advanced>=0?library.slice(advanced):library);
     for(const it of PAGES.root.items)if(it.page==='library')it.desc='Music sources, playlists, search, and queue';
     PAGES.about.items=PAGES.about.items.filter(it=>it.key!=='drawercast_server');
@@ -7558,12 +7618,13 @@ const MusicSources={
     let status='';
     if(!SourceLibrary.enabled(kind))status='Disabled · saved music retained';
     else if(kind==='drive')status=DriveSource.error?'Refresh unavailable · saved library retained':DriveSource.status.replace(/ · \d+ songs$/, '');
+    else if(kind==='r2')status=R2Source.error?'Refresh unavailable · saved library retained':R2Source.status;
     else if(kind==='server')status=DrawerCast.connecting?'Connecting…':DrawerCast.connected?'Connected':DrawerCast.connection?'Connection saved · '+DrawerCast.status:'Not connected';
     else status=tracks.some(t=>t.needsPerm)?'Folder permission needed':count?'Files saved on this browser':'No files added';
     return count+' song'+(count===1?'':'s')+' · '+status;
   },
   refresh(){
-    for(const kind of ['local','drive','server']){
+    for(const kind of ['local','drive','r2','server']){
       const status=$('[data-source-status="'+kind+'"]');if(status)status.textContent=this.status(kind);
       const toggle=$('[data-source-toggle="'+kind+'"]');if(toggle){const on=SourceLibrary.enabled(kind);toggle.setAttribute('aria-checked',String(on));toggle.querySelector('.native-switch').classList.toggle('on',on);}
     }
@@ -7575,6 +7636,7 @@ const MusicSources={
       try{on?localStorage.removeItem('drawercast.drive.disabled'):localStorage.setItem('drawercast.drive.disabled','1');}catch(e){}
       if(!on){DriveSource.controller?.abort();DriveSource.tagActive?.controller?.abort();clearTimeout(DriveSource.tagTimer);for(const job of DriveSource.tagQueue.splice(0)){DriveSource.tagJobs.delete(job.key);job.resolve();}}
     }
+    if(kind==='r2'&&!on)R2Source.suspend();
     if(kind==='server'&&!on)DrawerCast.suspend();
     const current=Engine.current,queue=Engine.queue.filter(sourceTrackEnabled);
     // Invalidate asynchronous file loads and release a spare song from a hidden source.
@@ -7586,15 +7648,15 @@ const MusicSources={
     }else{Engine.queue=queue;Engine.buildOrder();}
     if(!Engine.current&&allTracks().length){Engine.queue=allTracks();Engine.buildOrder();Engine.pos=0;Engine.current=Engine.queue[Engine.order[0]];UI.renderNowPlaying(Engine.current);}
     Engine.saveState();Views.refreshAll();this.refresh();
-    if(on&&connect){if(kind==='drive'&&DriveSource.api)DriveSource.connect(DriveSource.folder,true);if(kind==='server'&&DrawerCast.connection)DrawerCast.connect(DrawerCast.connection,true);}
+    if(on&&connect){if(kind==='drive'&&DriveSource.api)DriveSource.connect(DriveSource.folder,true);if(kind==='r2')R2Source.connect(true);if(kind==='server'&&DrawerCast.connection)DrawerCast.connect(DrawerCast.connection,true);}
   },
   render(body){
     body.appendChild(el('div','native-note','Choose what appears in your library. Disabling a source keeps its playlists, ratings, and saved track information. Choices apply to this browser.'));
-    for(const kind of ['local','drive','server']){
+    for(const kind of ['local','drive','r2','server']){
       const row=el('div','native-setting setrow source-row');
       const manage=el('button','source-manage','<span class="n">'+esc(this.names[kind])+'</span><span class="d" data-source-status="'+kind+'"></span>');
       manage.setAttribute('aria-label','Manage '+this.names[kind]);
-      manage.onclick=()=>kind==='local'?Settings.open('source-local'):kind==='drive'?DriveSource.show():DrawerCast.show();
+      manage.onclick=()=>kind==='local'?Settings.open('source-local'):kind==='drive'?DriveSource.show():kind==='r2'?R2Source.show():DrawerCast.show();
       const toggle=el('button','source-switch','<span class="native-switch" aria-hidden="true"><i></i></span>');toggle.dataset.sourceToggle=kind;toggle.setAttribute('role','switch');toggle.setAttribute('aria-label','Enable '+this.names[kind]);
       toggle.onclick=()=>this.setEnabled(kind,!SourceLibrary.enabled(kind));
       row.append(manage,toggle);body.append(row);
@@ -7673,6 +7735,7 @@ async function boot(){
   UI.drawViz();
   UI.startLoop();
   DriveSource.install();
+  R2Source.install();
   if(serverConnection) DrawerCast.connect(serverConnection,true);
 }
 
@@ -7680,6 +7743,6 @@ if(document.readyState==='loading') document.addEventListener('DOMContentLoaded'
 else boot();
 
 /* expose a little for debugging */
-window.PA = {Selection,Visualization, AudioDSP,SamplePeakLimiter,AudioQuality,ConfigIO,BackupSQLite,AutoEqCatalog,SyncedLyrics,Waveform,PlaybackQueue,PlaybackTransitions,PlaylistFiles,proSkip, ListZoom:ListZoom, NativeSettings:NativeSettings, EqMath:EqMath, Search:Search, Sheets:Sheets, PAGES:PAGES, setupParity:setupParity, DrawerCast:DrawerCast, setVal:setVal, DUR:DUR, queueDurations:queueDurations, applySettings:applySettings, CAP:CAP, ROOTS:ROOTS, BG:BG, TagPool:TagPool, IOSTAT:IOSTAT, linkFolder:linkFolder, rescanRoot:rescanRoot, unlinkRoot:unlinkRoot, loadRoots:loadRoots, Engine:Engine, LIB:LIB, SET:SET, UI:UI, Views:Views, Nav:Nav, Settings:Settings, EQ:EQ, Playlists:Playlists, Bookmarks:Bookmarks, addFiles:addFiles, IDB:IDB, readTags:readTags, closeSheet:closeSheet };
+window.PA = {Selection,Visualization, AudioDSP,SamplePeakLimiter,AudioQuality,ConfigIO,BackupSQLite,AutoEqCatalog,SyncedLyrics,Waveform,PlaybackQueue,PlaybackTransitions,PlaylistFiles,proSkip, ListZoom:ListZoom, NativeSettings:NativeSettings, EqMath:EqMath, Search:Search, Sheets:Sheets, PAGES:PAGES, setupParity:setupParity, DrawerCast:DrawerCast, DriveSource,R2Source,SourceLibrary,MusicSources, setVal:setVal, DUR:DUR, queueDurations:queueDurations, applySettings:applySettings, CAP:CAP, ROOTS:ROOTS, BG:BG, TagPool:TagPool, IOSTAT:IOSTAT, linkFolder:linkFolder, rescanRoot:rescanRoot, unlinkRoot:unlinkRoot, loadRoots:loadRoots, Engine:Engine, LIB:LIB, SET:SET, UI:UI, Views:Views, Nav:Nav, Settings:Settings, EQ:EQ, Playlists:Playlists, Bookmarks:Bookmarks, addFiles:addFiles, IDB:IDB, readTags:readTags, closeSheet:closeSheet };
 
 })();

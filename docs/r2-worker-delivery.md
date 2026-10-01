@@ -5,22 +5,24 @@
 The owner approved playback by anyone with a music link on 2026-10-01.
 `backend/music.js` implements the delivery endpoint; it is disabled unless
 `MUSIC_PUBLIC_READ` is exactly `true`, `MUSIC_ROOT_ID` is configured and the
-`MUSIC_R2` bucket binding exists. This commit does not add the binding, deploy
-the Worker, turn on bucket public access, or update the live frontend.
+`MUSIC_R2` bucket binding exists. The existing Worker is deployed with the binding; bucket public access remains
+disabled and delivery uses the Worker.
 
-The transfer remains incomplete: the last saved report verified 270 of 1,287
-tracks (1,079,269,863 of 4,989,786,207 bytes). Google explicitly refused further
+The transfer remains incomplete: the saved report verified 314 of 1,287
+tracks (1,256,156,900 of 4,989,786,207 bytes). Google explicitly refused further
 automated downloads. No full canonical mapping was published. Neither this
 endpoint nor Poweramp treats that partial report as a complete library.
 
 ## Endpoint contract
 
 - Worker: `jarvis-hub-api`
-- Manifest: `/music/manifest.json`
+- Full manifest: `/music/manifest.json`
+- Verified partial manifest: `/music/partial/manifest.json`
+- Partial audio: `/music/partial/audio/<Drive ID>/<content hash>.<extension>`
 - Audio: `/music/audio/<Drive ID>/<content hash>.<extension>`
 - `GET`, `HEAD` and `OPTIONS` only; no upload, deletion, bucket listing or
   administration endpoints
-- Only objects listed in the complete byte-verified canonical map can be read
+- Only objects listed in the respective byte-verified full or partial map can be read; partial maps remain `complete=false`
 - Manifest URLs are generated on the Worker origin; stored blank/private URLs
   do not need to be rewritten in R2
 - Exact Azure-origin CORS; middle, suffix, open-ended and bounded byte ranges;
@@ -56,13 +58,14 @@ also permits people to open audio links directly outside the Azure player.
    inventory before publication.
 5. Verify the deployed endpoint's 200/206/416/HEAD/CORS behavior and sampled
    bytes against the saved SHA-256 hashes. Verify existing Worker inbox routes.
-6. Set the Azure frontend's `r2ManifestURL` to
-   `https://jarvis-hub-api.braydenparker999.workers.dev/music/manifest.json`,
-   deploy the tested source pin and test playback/seek/fallback. Keep the
+6. Set the release's `r2ManifestURL` to the partial endpoint and `r2RootId` to
+   the verified root. The Azure build writes a separate `assets/r2-config.json`.
+   Deploy the tested source pin and verify each source with the other disabled. Keep the
    frontend at `https://missionarytube.z13.web.core.windows.net/drawercast/`.
    Actual Android/background behavior still requires a physical-device check.
 
-Rollback: clear `r2ManifestURL` to use Drive again. Disable `MUSIC_PUBLIC_READ`
+Rollback: disable Cloudflare R2 in Music Sources or clear `r2ManifestURL` in the
+release and deploy. Google Drive remains a separate source. Disable `MUSIC_PUBLIC_READ`
 to stop Worker delivery. Preserve original Drive files and R2 objects.
 
 ## Muse continuity

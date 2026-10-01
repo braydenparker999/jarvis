@@ -6,7 +6,8 @@ const source=await readFile(new URL('../public/drawercast/player.js',import.meta
 const block=(a,b)=>source.slice(source.indexOf(a),source.indexOf(b,source.indexOf(a)));
 function harness(){
   const revoked=[];let renders=0;
-  const context=vm.createContext({setTimeout,clearTimeout,debounce:fn=>fn,URL:{revokeObjectURL:u=>revoked.push(u)},
+  const context=vm.createContext({setTimeout,clearTimeout,debounce:fn=>fn,
+    SourceLibrary:{kind:t=>t?.source||(t?.remote?'server':'local')},R2Source:{status:''},URL:{revokeObjectURL:u=>revoked.push(u)},
     SET:{fadeOnPause:false},UI:{renderPlayState(){renders++;},renderProgress(){},startLoop(){}},toast(){}});
   const {Engine,PlaybackTransitions}=vm.runInContext(block('const Engine = {','function SET_shuffleOn()')+
     block('const PlaybackTransitions={','function installPlaybackRework()')+'\n({Engine,PlaybackTransitions})',context);
@@ -35,9 +36,9 @@ test('late failure of an abandoned play attempt cannot pause the new track',()=>
   assert.equal(Engine.playing,true);assert.equal(renders(),before);
 });
 
-test('rapid manual Drive skips select immediately without awaiting cloud crossfade readiness',async()=>{
+for(const cloud of ['drive','r2'])test('rapid manual '+cloud+' skips select immediately without awaiting cloud crossfade readiness',async()=>{
   const calls=[],fades=[];
-  const Engine={queue:[{id:'one',source:'drive'},{id:'two',source:'drive'},{id:'three',source:'drive'}],current:{id:'one',source:'drive'},playing:true,
+  const Engine={queue:[{id:'one',source:cloud},{id:'two',source:cloud},{id:'three',source:cloud}],current:{id:'one',source:cloud},playing:true,
     el:()=>({ended:false}),async playIndex(index){this.current=this.queue[index];calls.push(index);}};
   const ctx=vm.createContext({sourceTrackEnabled:t=>!!t,Engine,PlaybackTransitions:{cancel(){},to(index){fades.push(index);return new Promise(()=>{});}},
     nativeValues:()=>({fade_manual_advance:1}),clearTimeout,SET:{crossfadeLen:2}});
