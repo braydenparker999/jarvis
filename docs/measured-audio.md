@@ -284,3 +284,23 @@ audio identities remain unchanged despite concurrent uploads. Coverage is
 120 measured tracks, not the whole growing library. Twelve additional tracks
 exceeded the +3 dBTP unknown-file assumption; they now receive measured
 fixed protection. Run/artifact/digest evidence is in `followup-metadata.json`.
+
+The three highest measured peaks in that independent batch were also rendered
+in full at 48 and 96 kHz: all six renders have zero guard reduction
+(`followup-additional-files.json`). An initial download returned a transient
+503; subsequent Range and full hash-checked requests succeeded. Reproduce with
+`python scripts/audio/additional-files.py /path/to/reviewed/report.json`.
+`followup-reset.json` verifies hard resets during a curve fade at all three
+processing rates: a deliberately excited shelf has a nonzero tail before the
+reset and exactly zero output after the declared guard delay. Reproduce with
+`node scripts/audio/reset-curves.mjs`.
+
+The follow-up 30-minute run (`followup-endurance.json`) passed all 180 actual
+non-silent samples with no unexpected backend changes. Worst unreset interval
+drift was 19.647 ms; sampled heap ranged 7.0–13.1 MiB, ending at 7.7 MiB below
+its 13.1 MiB start. Injected callback failure then recovered to non-silent
+degraded playback. Production file hashes match candidate `710e95d`; later
+commits only add evidence. The built static site, including its production
+content policy, passed the full streaming/recovery check after one initial
+R2 discovery timeout; that superseded check is retained in `followup-review.json`.
+Physical-device limitations remain unchanged.

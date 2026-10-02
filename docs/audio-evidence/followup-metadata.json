@@ -15,5 +15,7 @@
   "analyzedTrackCount": 120,
   "audioWrites": 0,
   "googleRequests": 0,
-  "scope": "Bounded one-time R2 metadata analysis; source originals unchanged; no schedule"
+  "scope": "Bounded one-time R2 metadata analysis; source originals unchanged; no schedule",
+  "applyArtifact": 11211705301,
+  "applyArtifactGitHubSha256": "d6f4f11da9dd881b1826f6d58b1de65ac7cd7600022f3ba00945110e56ea917a"
 }
