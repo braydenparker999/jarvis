@@ -1387,7 +1387,13 @@ const SourceLibrary={
   save(){try{localStorage.setItem('drawercast.sources.v1',JSON.stringify(this.flags));}catch(e){toast('Source choices could not be saved on this browser.');}},
 };
 function sourceTrackEnabled(t){return !!t&&SourceLibrary.enabled(SourceLibrary.kind(t));}
-function allTracks(includeDisabled=false){return LIB.ids.map(id=>LIB.map.get(id)).filter(t=>t&&(includeDisabled||sourceTrackEnabled(t)));}
+function allTracks(includeDisabled=false){
+  const tracks=LIB.ids.map(id=>LIB.map.get(id)).filter(t=>t&&(includeDisabled||sourceTrackEnabled(t)));
+  if(includeDisabled)return tracks;
+  // Hide only verified Drive/R2 migration copies. Source preferences and files remain intact.
+  const copies=new Map(tracks.filter(t=>t.source==='r2'&&t.remoteId&&t.md5&&t.size>0).map(t=>[t.remoteId,t]));
+  return tracks.filter(t=>{if(t.source!=='drive'||!t.md5)return true;const copy=copies.get(t.remoteId||t.id.replace(/^drive[:\-]/,''));return !copy||copy.size!==t.size||copy.md5!==t.md5;});
+}
 
 async function loadLibrary(){
   try{
@@ -3239,6 +3245,7 @@ const UI = {
     document.title = t.title + ' - ' + trackArtist(t);
     UI.renderRating();
     UI.renderMeta();
+    Views.refreshQueueOrder();
     const [url,thumb] = await Promise.all([getArtURL(t),getArtURL(t,true)]);
     if(Engine.current?.id!==t.id)return;
     title.innerHTML='<span>'+esc(t.title)+'</span>';sub.innerHTML='<span>'+esc(trackSub(t))+'</span>';
@@ -3315,11 +3322,11 @@ const UI = {
     const cur=Engine.time(), dur=Engine.duration();
     const pct = dur>0 ? clamp(cur/dur*100,0,100) : 0;
     if(!UI.seekDragging){
-      $('#seek-fill').style.width=pct+'%';
-      $('#seek-knob').style.left=pct+'%';
+      paintSeekFraction(pct/100);
     }
     $('#mini-fill').style.width=pct+'%';
     $('#mini-seek').style.setProperty('--mini-progress',String(pct/100));
+    $('#mini-seek').setAttribute('aria-valuemax',String(Math.round(dur||0)));$('#mini-seek').setAttribute('aria-valuenow',String(Math.round(cur||0)));$('#mini-seek').setAttribute('aria-valuetext',fmtTime(cur)+' of '+fmtTime(dur));
     if(!UI.seekDragging)$('#t-cur').textContent=fmtTime(cur);
     $('#t-dur').textContent=fmtTime(dur);
   },
@@ -3330,6 +3337,7 @@ const UI = {
       UI.loopId=0;
       const onPlayer = Nav.cur==='player';
       const visible = document.visibilityState==='visible';
+      if(visible&&onPlayer&&!UI.seekDragging)paintSeekFraction(Engine.duration()>0?clamp(Engine.time()/Engine.duration(),0,1):0);
       /* full rate only where it shows: progress elsewhere ticks a few times a second */
       if(ts-UI.lastProg>(onPlayer?100:240)||UI.seekDragging){ UI.lastProg=ts; UI.renderProgress(); }
       if(visible && (UI.vizFull || onPlayer) && (UI.vizFull || ts-(UI.lastViz||0)>=1000/30)){UI.lastViz=ts;UI.drawViz();}
@@ -3573,15 +3581,41 @@ const VIZ_PRESETS = [
    NAVIGATION
    ===================================================================== */
 const SCREENS={player:'#sc-player',library:'#sc-library',list:'#sc-list',eq:'#sc-eq',search:'#sc-search',settings:'#sc-settings'};
+/* Input belongs to a contact and to the currently active screen. */
+const InputLifecycle={
+  resets:new Map(),contacts:new Set(),version:0,
+  register(reset,node){this.resets.set(reset,node);return reset;},
+  cancel(){this.version++;this.contacts.clear();for(const [reset,node] of this.resets){reset();if(node?.isConnected===false)this.resets.delete(reset);}},
+  active(node){const screen=node.closest?.('.screen');return !screen||(!screen.hidden&&!screen.inert&&SCREENS[Nav.cur]==='#'+screen.id);},
+  clickGuard(node){
+    let blocked=null;
+    node.addEventListener('pointerdown',()=>{blocked=null;},true);
+    node.addEventListener('click',e=>{
+      if(e.detail===0||!blocked)return;
+      if(performance.now()-blocked.at>800){blocked=null;return;}
+      if(e.pointerId!=null&&e.pointerId>0&&e.pointerId!==blocked.id)return;
+      blocked=null;e.preventDefault();e.stopImmediatePropagation();
+    },true);
+    return e=>{blocked={id:e.pointerId,at:performance.now()};};
+  }
+};
+window.addEventListener('blur',()=>InputLifecycle.cancel());
+document.addEventListener('visibilitychange',()=>{if(document.hidden)InputLifecycle.cancel();});
+document.addEventListener('pointerdown',e=>InputLifecycle.contacts.add(e.pointerId),true);
+for(const type of ['pointerup','pointercancel'])document.addEventListener(type,e=>InputLifecycle.contacts.delete(e.pointerId),true);
 const Nav={
   cur:'player',
   go:function(name, push){
+    if(!SCREENS[name])return;
+    if(name!==this.cur){InputLifecycle.cancel();ScreenDrag.abort();Sheets.request++;}
     if(name!==this.cur&&Selection.mode)Selection.exit();
     if(name===this.cur){
       $('#mini').hidden = (name==='player' || !Engine.current);
       return;
     }
     const from=$(SCREENS[this.cur]), to=$(SCREENS[name]);
+    from.inert=true;from.setAttribute('aria-hidden','true');
+    to.inert=false;to.setAttribute('aria-hidden','false');
     const up = name!=='player';
     to.hidden=false;
     if(UI.instantNav){from.hidden=true;}else{
@@ -3623,8 +3657,9 @@ window.addEventListener('popstate',function(){
    SHEETS
    ===================================================================== */
 const Sheets={
-  open:null,returnFocus:null,
+  open:null,returnFocus:null,request:0,
   show:function(id){
+    this.request++;
     if(!this.open)this.returnFocus=document.activeElement;
     for(const key of ['sheet','bsheet']){const other=$('#'+key);other.inert=key!==id;other.setAttribute('aria-hidden',String(key!==id));if(key!==id)other.classList.remove('on');}
     this.open=id;
@@ -3638,6 +3673,7 @@ const Sheets={
     panel.onkeydown=e=>{if(e.key!=='Tab')return;const controls=[...panel.querySelectorAll('button,input,select,textarea,[tabindex="0"]')].filter(n=>!n.disabled&&n.getClientRects().length);const first=controls[0]||panel,last=controls.at(-1)||panel;if(e.shiftKey&&document.activeElement===first){e.preventDefault();last.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus();}};
   },
   close:function(){
+    this.request++;
     this.open=null;
     document.body.classList.remove('main-menu-open');
     $('#scrim').classList.remove('on');
@@ -3702,7 +3738,7 @@ const Views={
     const counts=Views.counts();
     box.innerHTML = CATS.map(function(c){
       const cnt = counts[c.k];
-      return '<div class="catrow" data-k="'+c.k+'">'+
+      return '<div class="catrow" role="button" tabindex="0" data-k="'+c.k+'" aria-label="'+esc(c.n)+'">'+
         '<div class="catico'+(c.ic.startsWith('cat-')?' native-category':'')+'" style="background:'+c.c+';--category-color:'+c.c+'">'+icoHTML(c.ic)+'</div>'+
         '<div class="lbl">'+c.n+'</div>'+
         (cnt!=null?'<div class="cnt">'+cnt+'</div>':'')+
@@ -3712,12 +3748,14 @@ const Views={
     $$('.catico svg[fill]',box).forEach(function(sv){ sv.setAttribute('fill','rgba(0,0,0,.86)'); });
     $$('.catrow',box).forEach(function(r){
       r.onclick=function(){
+        if(!InputLifecycle.active(r))return;
         const k=r.dataset.k;
         if(k==='server'){ DrawerCast.show(); return; }
         if(k==='drive'){ DriveSource.show(); return; }
         if(k==='add'){ MainMenu.addMusic(); return; }
         Views.push({kind:k});
       };
+      r.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();r.click();}};
     });
   },
   counts:function(){
@@ -3832,6 +3870,7 @@ const Views={
     return {type:'tree', dirs:Array.from(dirs).sort(sortNat), counts:counts, items:files.sort(function(a,b){ return (a.track-b.track)||sortNat(a.title,b.title); }), path:path};
   },
   render:function(spec, keepScroll){
+    InputLifecycle.cancel();
     if(Selection.mode)Selection.exit();
     const body=$('#list-body');
     const st=keepScroll?body.scrollTop:0;
@@ -3841,8 +3880,13 @@ const Views={
     Views.currentData=data;
     Views.currentSpec=spec;
     if(data.type==='tracks'){
-      if(!data.items.length) body.appendChild(Views.emptyEl());
-      else body.appendChild(Views.trackList(data.items, spec));
+      if(spec.kind==='queue'){
+        const tabs=el('div','queue-tabs');tabs.setAttribute('role','group');tabs.setAttribute('aria-label','Queue view');
+        for(const [key,label] of [['added','Added queue'],['upcoming','Playback order']]){const b=el('button','btn'+((spec.queueView||'added')===key?' pri':''),label);b.setAttribute('aria-pressed',String((spec.queueView||'added')===key));b.onclick=()=>{spec.queueView=key;Views.render(spec);};tabs.appendChild(b);}body.appendChild(tabs);
+        if(spec.queueView==='upcoming'&&(PlaybackQueue.active||PlaybackQueue.pending.length))body.appendChild(el('p','note',PlaybackQueue.active?'When the added queue ends, playback follows your Queue settings.':'Added queue songs can interrupt this order according to Queue settings.'));
+      }
+      if(!data.items.length) body.appendChild(Views.emptyEl(spec));
+      else {const list=Views.trackList(data.items, spec);list.__playbackIndices=data.indices;body.appendChild(list);}
     } else if(data.type==='groups'){
       body.appendChild(Views.groupList(data));
     } else if(data.type==='playlists'){
@@ -3855,7 +3899,11 @@ const Views={
     Views.markPlaying();
     body.scrollTop=st;
   },
-  emptyEl:function(){
+  emptyEl:function(spec){
+    if(spec?.kind==='queue'){
+      const upcoming=spec.queueView==='upcoming',d=el('div','empty',icoHTML('queue')+'<div>'+(upcoming?'No upcoming tracks.':'No songs added to the queue.')+'</div><p>'+(upcoming?'Choose a song from your library to start a playback order.':'Use Play Next or Enqueue in a song menu.')+'</p>');
+      const b=el('button','btn','Browse library');b.onclick=()=>Nav.go('library');d.appendChild(b);return d;
+    }
     const d=el('div','empty', icoHTML('note') + '<div>Nothing here yet.</div>' +
       '<button class="btn pri" id="empty-add">Add music</button>');
     setTimeout(function(){ const b=$('#empty-add'); if(b) b.onclick=function(){ MainMenu.addMusic(); }; },0);
@@ -3867,7 +3915,7 @@ const Views={
     if(SET.showFileType) meta.push(t.ext);
     if(SET.showBitrate && t.dur) meta.push(Math.round(t.size*8/t.dur/1000)+' kbps');
     const playing = Engine.current && Engine.current.id===t.id;
-    return '<div class="trow'+(playing?' playing':'')+'" data-id="'+t.id+'" data-i="'+i+'">'+
+    return '<div class="trow'+(playing?' playing':'')+'" role="button" tabindex="0" aria-label="'+esc(t.title+' — '+trackSub(t))+'" data-id="'+t.id+'" data-i="'+i+'">'+
       '<span class="selection-check" aria-hidden="true"></span><div class="art'+(SET.bigAlbumArtList?'':' sm')+'" data-art="'+t.id+'"><div class="ph">'+icoHTML('note')+'</div></div>'+
       '<div class="tmeta">'+
         '<div class="t1">'+ (SET.showTrackNumber&&t.track?('<span style="opacity:.5">'+t.track+'. </span>'):'') +
@@ -3887,7 +3935,7 @@ const Views={
     wrap.__spec=spec;
     const job=++Views.job;
     const FIRST=36, CHUNK=120;
-    let i=0;
+    let i=0,pendingJump=null;
     const paint=function(n){
       const end=Math.min(i+n, items.length);
       let html='';
@@ -3900,10 +3948,14 @@ const Views={
       i=end;
     };
     paint(FIRST);
+    wrap.__ensureRow=(index,onReady)=>{const row=wrap.querySelector('[data-i="'+index+'"]');pendingJump=row?null:{index,onReady};return row;};
     if(i<items.length){
       const step=function(){
         if(job!==Views.job || !wrap.isConnected) return;
-        paint(CHUNK);
+        if(InputLifecycle.contacts.size&&!pendingJump){requestAnimationFrame(step);return;}
+        const started=performance.now();
+        do{paint(12);}while(i<items.length&&performance.now()-started<4&&i%CHUNK!==0);
+        if(pendingJump&&pendingJump.index<i){const jump=pendingJump;pendingJump=null;jump.onReady(wrap.querySelector('[data-i="'+jump.index+'"]'));}
         if(i<items.length) requestAnimationFrame(step);
       };
       requestAnimationFrame(step);
@@ -3921,11 +3973,11 @@ const Views={
       const label=data.open==='folder'?(baseName(g.key)||g.key):g.key;
       const sub=(g.sub?g.sub+'  |  ':'') + g.tracks.length + ' track' + (g.tracks.length===1?'':'s');
       if(grid){
-        html+='<div class="gcard" data-g="'+i+'">'+
+        html+='<div class="gcard" role="button" tabindex="0" aria-label="'+esc(label)+'" data-g="'+i+'">'+
           '<div class="art" data-art="'+(first?first.id:'')+'"><div class="ph">'+icoHTML(data.icon||'album')+'</div></div>'+
           '<div class="t1">'+esc(label)+'</div><div class="t2">'+esc(sub)+'</div></div>';
       } else {
-        html+='<div class="trow" data-g="'+i+'">'+
+        html+='<div class="trow" role="button" tabindex="0" aria-label="'+esc(label)+'" data-g="'+i+'">'+
           '<div class="art'+(data.art?'':' sm')+'" data-art="'+(first?first.id:'')+'"><div class="ph">'+icoHTML(data.icon||'folder')+'</div></div>'+
           '<div class="tmeta"><div class="t1">'+esc(label)+'</div><div class="t2">'+esc(sub)+'</div></div></div>';
       }
@@ -3939,11 +3991,11 @@ const Views={
     wrap.__tree=data;
     let html='';
     if(data.path){
-      html+='<div class="trow" data-up="1"><div class="art sm"><div class="ph">'+icoHTML('back')+'</div></div>'+
+      html+='<div class="trow" role="button" tabindex="0" aria-label="Parent folder" data-up="1"><div class="art sm"><div class="ph">'+icoHTML('back')+'</div></div>'+
         '<div class="tmeta"><div class="t1">..</div><div class="t2">'+esc(data.path)+'</div></div></div>';
     }
     data.dirs.forEach(function(d,i){
-      html+='<div class="trow" data-dir="'+i+'"><div class="art sm"><div class="ph">'+icoHTML('folder')+'</div></div>'+
+      html+='<div class="trow" role="button" tabindex="0" aria-label="'+esc(d)+'" data-dir="'+i+'"><div class="art sm"><div class="ph">'+icoHTML('folder')+'</div></div>'+
         '<div class="tmeta"><div class="t1">'+esc(d)+'</div><div class="t2">'+esc(data.counts[d]||'')+'</div></div></div>';
     });
     wrap.innerHTML=html;
@@ -3955,17 +4007,21 @@ const Views={
     wrap.__pls=pls;
     if(!pls.length){ wrap.appendChild(Views.emptyEl()); return wrap; }
     wrap.innerHTML=pls.map(function(p,i){
-      return '<div class="trow" data-pl="'+i+'"><div class="art sm"><div class="ph">'+icoHTML('playlist')+'</div></div>'+
+      return '<div class="trow" role="button" tabindex="0" aria-label="'+esc(p.name)+'" data-pl="'+i+'"><div class="art sm"><div class="ph">'+icoHTML('playlist')+'</div></div>'+
         '<div class="tmeta"><div class="t1">'+esc(p.name)+'</div><div class="t2">'+p.ids.length+' tracks</div></div></div>';
     }).join('');
     return wrap;
   },
   buildAlpha:function(data){
     const a=$('#alpha');
+    a.__anchors=new Map();
     const showIt = (data.type==='tracks'&&data.items.length>28) || (data.type==='groups'&&data.items.length>28);
     a.style.display = showIt ? 'flex' : 'none';
     if(!showIt) return;
     const letters='#ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
+    const initials=data.items.map(item=>String(data.type==='tracks'?(SET.listUiFilenameAsTitle?baseName(item.path||item.title):item.title):(data.open==='folder'?baseName(item.key)||item.key:item.key)).trim().toUpperCase().charAt(0));
+    a.__anchors.set(String.fromCharCode(94),0);
+    for(const letter of letters){const index=initials.findIndex(first=>letter==='#'?!/[A-Z]/.test(first):first>=letter);if(index>=0)a.__anchors.set(letter,index);}
     a.innerHTML='<span>'+String.fromCharCode(94)+'</span>'+letters.map(function(l){ return '<span>'+l+'</span>'; }).join('');
   },
   buildFabs:function(data, spec){
@@ -3975,6 +4031,7 @@ const Views={
     if(data.type==='groups'||data.type==='playlists') { f.innerHTML=''; return; }
     const mk=function(icon,label,fn,cls){
       const b=el('button','fab '+(cls||''), icoHTML(icon)+(label?'<span>'+label+'</span>':''));
+      b.setAttribute('aria-label',label||({shuffle:'Shuffle songs',play:'Play songs',search:'Search library',more:'List actions'})[icon]||icon);
       b.onclick=fn;
       f.appendChild(b);
       return b;
@@ -3998,6 +4055,9 @@ const Views={
       const bars=r.querySelector('.eqbars');
       if(bars) bars.classList.toggle('hidden', !on);
     });
+  },
+  refreshQueueOrder:function(){
+    if(Nav.cur==='list'&&Views.currentSpec?.kind==='queue'&&Views.currentSpec.queueView==='upcoming')Views.render(Views.currentSpec,true);
   }
 };
 
@@ -4066,6 +4126,7 @@ function installListDelegation(root){
   };
   const rowOf=function(target){ return target.closest ? target.closest('.trow,.gcard') : null; };
   const act=function(row, long){
+    if(!row||!InputLifecycle.active(root)||row.isConnected===false||!root.contains(row))return;
     const box=ctxOf(row);
     if(!box) return;
     if(box.__items && row.dataset.i!=null){
@@ -4075,7 +4136,11 @@ function installListDelegation(root){
       if(Selection.mode&&Selection.box===box){ Selection.toggle(t.id); return; }
       if(NativeSettings.values.list_item_action===3){ PlaybackQueue.add([t]);return; }
       if(NativeSettings.values.list_action_resets && Engine.current?.id===t.id){Engine.seek(0);return;}
-      if(box.__spec?.kind==='queue'){PlaybackQueue.play(i);Nav.go('player');return;}
+      if(box.__spec?.kind==='queue'){
+        if(box.__spec.queueView==='upcoming'){const index=box.__playbackIndices?.[i];if(Engine.queue[index]?.id===t.id)Engine.playIndex(index,true);}
+        else PlaybackQueue.play(i);
+        Nav.go('player');return;
+      }
       Engine.categoryKind=box.__spec?.kind;Engine.setQueue(box.__items, i, true);
       if((NativeSettings.values.list_item_action??1)===1) Nav.go('player');
       return;
@@ -4128,10 +4193,13 @@ function installListDelegation(root){
     if(e.detail!==0&&performance.now()<suppressUntil){e.preventDefault();return;}
     act(row,false);
   });
+  root.addEventListener('keydown',e=>{const row=rowOf(e.target);if(row&&e.target===row&&(e.key==='Enter'||e.key===' ')){e.preventDefault();act(row,false);}});
+  root.addEventListener('pointerdown',()=>{suppressUntil=0;},true);
   root.addEventListener('touchstart',function(e){
     if(e.touches.length!==1){clearTimeout(lpTimer);moved=true;suppressUntil=performance.now()+700;return;}
     const row=rowOf(e.target);
     if(!row) return;
+    if(!InputLifecycle.active(root))return;
     lpRow=row; lpFired=false;moved=false;suppressUntil=0;
     const t=e.touches[0]; sx=t.clientX; sy=t.clientY;
     clearTimeout(lpTimer);
@@ -4155,6 +4223,7 @@ function installListDelegation(root){
     e.preventDefault();
     act(row,true);
   });
+  InputLifecycle.register(()=>{clearTimeout(lpTimer);lpTimer=null;lpRow=null;lpFired=false;moved=false;suppressUntil=0;});
 }
 
 /* =====================================================================
@@ -4162,7 +4231,7 @@ function installListDelegation(root){
    ===================================================================== */
 async function ctxMenuTrack(t, items, i, spec){
   const s=$('#sheet');
-  const art = await getArtURL(t);
+  const art=null;
   const mi=function(ic,label,cls){ return '<div class="mi '+(cls||'')+'" data-a="'+label+'">'+icoHTML(ic)+'<span>'+label+'</span></div>'; };
   const inPlayer=Nav.cur==='player';
   s.innerHTML =
@@ -4190,6 +4259,8 @@ async function ctxMenuTrack(t, items, i, spec){
       (!inPlayer?mi('download','Export','full'):'')+
     '</div></div>';
   openSheet('sheet');
+  const request=Sheets.request,head=s.querySelector('.sheet-head .art');
+  getArtURL(t).then(url=>{if(Sheets.open==='sheet'&&Sheets.request===request&&head?.isConnected)UI.setArtEl(head,url);}).catch(()=>{});
   $('#cm-up').onclick=function(){ t.rating = t.rating>0?0:1; persistTrack(t); UI.renderRating(); closeSheet(); Views.refreshAll(); };
   $('#cm-down').onclick=function(){ t.rating = t.rating<0?0:-1; persistTrack(t); UI.renderRating(); closeSheet(); Views.refreshAll(); };
   $$('.mi',s).forEach(function(m){
@@ -5267,23 +5338,27 @@ function fmtFreq(f){ return f>=1000 ? (f/1000).toFixed(f>=10000?0:1)+'k' : Strin
 /* generic drag controller (pointer based) */
 function dragCtl(node, onMove, initFn, onEnd){
   let st=null;
+  const reset=()=>{if(!st)return;const id=st.id;st=null;try{if(node.hasPointerCapture?.(id))node.releasePointerCapture(id);}catch(_){};};
+  InputLifecycle.register(reset,node);
   node.addEventListener('pointerdown',function(e){
+    if(st||e.isPrimary===false||e.button>0||!InputLifecycle.active(node))return;
     e.preventDefault();
     node.setPointerCapture(e.pointerId);
-    st=Object.assign({x:e.clientX,y:e.clientY}, initFn?initFn():{});
+    st=Object.assign({id:e.pointerId,x:e.clientX,y:e.clientY}, initFn?initFn():{});
     vibrate(6);
   });
   node.addEventListener('pointermove',function(e){
-    if(!st) return;
+    if(!st||st.id!==e.pointerId) return;
     onMove(e.clientX-st.x, e.clientY-st.y, st, e);
   });
   const up=function(e){
-    if(!st) return;
-    if(onEnd) onEnd(e.clientX-st.x, e.clientY-st.y, st);
-    st=null;
+    if(!st||st.id!==e.pointerId) return;
+    const done=st;reset();
+    if(e.type==='pointerup'&&onEnd) onEnd(e.clientX-done.x, e.clientY-done.y, done);
   };
   node.addEventListener('pointerup',up);
   node.addEventListener('pointercancel',up);
+  node.addEventListener('lostpointercapture',up);
 }
 
 /* =====================================================================
@@ -5430,20 +5505,22 @@ const GestureMotion={
   duration(distance,velocity){return this.reduced()?0:clamp(Math.abs(distance)/Math.max(.9,Math.abs(velocity)),120,260);},
   bind(node,handlers){
     let state=null,frame=0,longTimer=0,blocked=false;const pointers=new Set();
+    const blockClick=InputLifecycle.clickGuard(node);
     const paint=()=>{frame=0;if(state)handlers.move?.(state);};
     const cancel=()=>{clearTimeout(longTimer);cancelAnimationFrame(frame);frame=0;if(state){handlers.cancel?.(state);state=null;}};
     node.addEventListener('pointerdown',e=>{
       pointers.add(e.pointerId);
-      if(pointers.size>1||e.isPrimary===false){blocked=true;cancel();return;}
-      if(blocked||e.button>0||handlers.ignore?.(e))return;
+      if(pointers.size>1||e.isPrimary===false){blocked=true;if(state)blockClick({pointerId:state.id});cancel();return;}
+      if(blocked||e.button>0||!InputLifecycle.active(node)||handlers.ignore?.(e))return;
       const now=performance.now();
-      state={id:e.pointerId,x:e.clientX,y:e.clientY,dx:0,dy:0,vx:0,vy:0,axis:'',started:now,samples:[{x:e.clientX,y:e.clientY,t:now}]};
+      state={id:e.pointerId,x:e.clientX,y:e.clientY,dx:0,dy:0,travel:0,vx:0,vy:0,axis:'',started:now,samples:[{x:e.clientX,y:e.clientY,t:now}]};
       handlers.start?.(state,e);node.setPointerCapture?.(e.pointerId);
-      if(handlers.long&&SET.longPressMenu)longTimer=setTimeout(()=>{if(state&&!state.axis){handlers.long(state);state=null;}},SET.longPressMs||480);
+      if(handlers.long&&SET.longPressMenu)longTimer=setTimeout(()=>{if(state&&state.travel<=7){blockClick(e);const done=state;state=null;handlers.long(done);}},SET.longPressMs||480);
     });
     node.addEventListener('pointermove',e=>{
       if(!state||state.id!==e.pointerId)return;
       const now=performance.now();state.dx=e.clientX-state.x;state.dy=e.clientY-state.y;
+      state.travel=Math.max(state.travel,Math.hypot(state.dx,state.dy));
       if(Math.hypot(state.dx,state.dy)>7)clearTimeout(longTimer);
       if(!state.axis&&Math.max(Math.abs(state.dx),Math.abs(state.dy))>9){if(Math.abs(state.dx)>Math.abs(state.dy)*1.15)state.axis='x';else if(Math.abs(state.dy)>Math.abs(state.dx)*1.15)state.axis='y';}
       state.samples.push({x:e.clientX,y:e.clientY,t:now});while(state.samples.length>2&&state.samples[0].t<now-90)state.samples.shift();
@@ -5456,11 +5533,14 @@ const GestureMotion={
       clearTimeout(longTimer);cancelAnimationFrame(frame);frame=0;
       if(e.type==='pointercancel'||e.type==='lostpointercapture'){cancel();return;}
       const done=state;done.dx=e.clientX-done.x;done.dy=e.clientY-done.y;
+      done.travel=Math.max(done.travel,Math.hypot(done.dx,done.dy));
+      if(done.travel>7)blockClick(e);
       if(performance.now()-done.samples.at(-1).t>100){done.vx=0;done.vy=0;}
       handlers.move?.(done);state=null;handlers.end?.(done,e);
     };
     ['pointerup','pointercancel','lostpointercapture'].forEach(type=>node.addEventListener(type,end));
     const reset=()=>{cancel();pointers.clear();blocked=false;};
+    InputLifecycle.register(reset,node);
     window.addEventListener('blur',reset);document.addEventListener('visibilitychange',()=>{if(document.hidden)reset();});
     return reset;
   },
@@ -5470,6 +5550,7 @@ const GestureMotion={
     nodes[0]?.addEventListener('transitionend',onEnd);
     nodes.forEach((n,i)=>{n.style.transition=ms?'transform '+ms+'ms cubic-bezier(.2,.8,.2,1)':'none';n.style.transform=targets[i];});
     if(ms)timer=setTimeout(finish,ms+40);else finish();
+    finish.cancel=()=>{if(ended)return;ended=true;clearTimeout(timer);nodes[0]?.removeEventListener('transitionend',onEnd);};
     return finish;
   }
 };
@@ -5483,28 +5564,32 @@ const SwipeArt={
   neighbors(){this.warm(peekTrack(-1));this.warm(peekTrack(1));}
 };
 const ScreenDrag={
-  state:null,finish:null,
+  state:null,finish:null,settling:null,
+  clean(s){if(!s)return;delete s.to.dataset.gesturePreview;for(const n of [s.from,s.to]){n.style.transition='';n.style.transform='';n.style.zIndex='';}s.to.hidden=s.target!==Nav.cur;s.to.inert=s.target!==Nav.cur;},
+  abort(){this.finish?.cancel?.();this.finish=null;const s=this.state||this.settling;this.state=null;this.settling=null;this.clean(s);},
   begin(target,direction){
-    if(this.state)return;this.finish?.();
+    if(this.state)return;this.abort();
     if(!SCREENS[target]||target===Nav.cur)return;
     const from=$(SCREENS[Nav.cur]),to=$(SCREENS[target]),height=from.clientHeight||innerHeight;
-    to.hidden=false;to.dataset.gesturePreview='1';from.style.transition='none';to.style.transition='none';to.style.zIndex='3';
+    to.hidden=false;to.inert=true;to.dataset.gesturePreview='1';from.style.transition='none';to.style.transition='none';to.style.zIndex='3';
     this.state={from,to,target,direction,height};this.move(0);
   },
-  move(dy){const s=this.state;if(!s)return;const distance=s.direction*Math.max(0,Math.min(s.height,s.direction*dy));s.from.style.transform=`translateY(${distance*.18}px)`;s.to.style.transform=`translateY(${distance-s.direction*s.height}px)`;},
+  move(dy){const s=this.state;if(!s)return;s.progress=Math.max(0,Math.min(s.height,s.direction*dy));const distance=s.direction*s.progress;s.from.style.transform=`translateY(${distance*.18}px)`;s.to.style.transform=`translateY(${distance-s.direction*s.height}px)`;},
   end(commit,velocity=0){
-    const s=this.state;if(!s)return;this.state=null;
+    const s=this.state;if(!s)return;this.state=null;this.settling=s;commit=commit&&s.progress>0;
     const y=s.to.getBoundingClientRect().top,ms=GestureMotion.duration(commit?y:s.height-Math.abs(y),velocity);
     this.finish=GestureMotion.settle([s.to,s.from],[commit?'translateY(0)':`translateY(${-s.direction*s.height}px)`,commit?`translateY(${s.direction*s.height*.18}px)`:'translateY(0)'],ms,()=>{
       this.finish=null;
-      if(commit){UI.instantNav=true;try{Nav.go(s.target);}finally{UI.instantNav=false;}}
-      else s.to.hidden=true;
+      this.settling=null;
       delete s.to.dataset.gesturePreview;
       for(const n of [s.from,s.to]){n.style.transition='';n.style.transform='';n.style.zIndex='';}
+      if(commit){UI.instantNav=true;try{Nav.go(s.target);}finally{UI.instantNav=false;}}
+      else s.to.hidden=true;
     });
   },
-  cancel(){this.end(false);}
+  cancel(){this.abort();}
 };
+InputLifecycle.register(()=>ScreenDrag.abort());
 function libraryDestination(){return ['list','search'].includes(Nav.lastLibrary)?Nav.lastLibrary:'library';}
 function swipeDestination(dy){const v=NativeSettings.values.main_lyrics_swipe;return dy<0&&(v===2||(v===1&&Engine.current?.lyrics))?'lyrics':libraryDestination();}
 function setupArtGestures(){
@@ -5517,7 +5602,7 @@ function setupArtGestures(){
   };
   GestureMotion.bind(stage,{
     ignore:e=>!!e.target.closest('button'),
-    start(){finish?.();finish=null;ScreenDrag.finish?.();width=stage.clientWidth||1;neighbor=null;fromId=Engine.current?.id;A.style.transition='none';B.style.transition='none';SwipeArt.neighbors();},
+    start(){finish?.cancel?.();finish=null;ScreenDrag.abort();clear();width=stage.clientWidth||1;neighbor=null;fromId=Engine.current?.id;A.style.transition='none';B.style.transition='none';SwipeArt.neighbors();},
     move(s){
       if(s.axis==='x'&&SET.swipeToChange){preview(s.dx<0?1:-1);const dx=neighbor?s.dx:s.dx*.25;A.style.transform=`translateX(${dx}px)`;B.style.opacity=neighbor?'1':'0';B.style.transform=`translateX(${dx+(s.dx<0?width:-width)}px)`;}
       else if(s.axis==='y'&&swipeDestination(s.dy)!=='lyrics'){ScreenDrag.begin(swipeDestination(s.dy),s.dy<0?-1:1);ScreenDrag.move(s.dy);}
@@ -5535,12 +5620,13 @@ function setupArtGestures(){
         const commit=GestureMotion.commits(s.dy,s.vy,Math.min(innerHeight,400));
         if(ScreenDrag.state)ScreenDrag.end(commit,s.vy);else if(commit&&s.dy<0)playerSwipeUp();clear();return;
       }
-      if(performance.now()-s.started<280){const now=performance.now();if(SET.doubleTapPause&&now-lastTap<300){Engine.toggle();lastTap=0;}else{lastTap=now;if(SET.vizOnPlayer)document.body.classList.toggle('fadedctrls');}}
+      if(s.travel<=7&&performance.now()-s.started<280){const now=performance.now();if(SET.doubleTapPause&&now-lastTap<300){Engine.toggle();lastTap=0;}else{lastTap=now;if(SET.vizOnPlayer)document.body.classList.toggle('fadedctrls');}}else lastTap=-Infinity;
       clear();
     },
     cancel(){serial++;clear();ScreenDrag.cancel();},
     long(){clear();if(Engine.current)ctxMenuTrack(Engine.current,Engine.queue,Engine.pos);}
   });
+  InputLifecycle.register(()=>{finish?.cancel?.();finish=null;lastTap=-Infinity;serial++;clear();});
 }
 function setupMiniGestures(){
   const mini=$('#mini'),slide=el('div','mini-swipe-content');
@@ -5549,7 +5635,7 @@ function setupMiniGestures(){
   const clear=()=>{slide.style.transition='';slide.style.transform='';ghost?.remove();ghost=null;serial++;};
   GestureMotion.bind(mini,{
     ignore:e=>!!e.target.closest('#mini-play,.mini-seek'),
-    start(){finish?.();finish=null;ScreenDrag.finish?.();width=mini.clientWidth||1;fromId=Engine.current?.id;target=null;},
+    start(){finish?.cancel?.();finish=null;ScreenDrag.abort();clear();width=mini.clientWidth||1;fromId=Engine.current?.id;target=null;},
     move(s){
       if(s.axis==='y'&&s.dy<0){ScreenDrag.begin('player',-1);ScreenDrag.move(s.dy);return;}
       if(s.axis!=='x')return;
@@ -5568,10 +5654,13 @@ function setupMiniGestures(){
           if(commit&&Engine.current?.id===fromId){UI.setArtEl($('#mini-art'),SwipeArt.ready.get(target.id)||null);direction>0?Engine.next():Engine.prev();vibrate(10);}clear();
         });return;
       }
-      if(!s.axis&&performance.now()-s.started<280)Nav.go('player');clear();
+      if(!s.axis&&s.travel<=7&&performance.now()-s.started<280)Nav.go('player');clear();
     },
     cancel(){clear();ScreenDrag.cancel();}
   });
+  mini.tabIndex=0;mini.setAttribute('role','group');mini.setAttribute('aria-label','Now playing; open player');
+  mini.addEventListener('keydown',e=>{if(e.target===mini&&(e.key==='Enter'||e.key===' ')){e.preventDefault();Nav.go('player');}});
+  InputLifecycle.register(()=>{finish?.cancel?.();finish=null;clear();});
 }
 function setupPlayerSwipeDown(){
   GestureMotion.bind($('#sc-player'),{
@@ -5607,6 +5696,13 @@ function bindTransportButton(button){
   document.addEventListener('visibilitychange',()=>{if(document.hidden)stop();});
 }
 
+function paintSeekFraction(fraction){
+  const fill=$('#seek-fill'),knob=$('#seek-knob');
+  if(!UI.seekWidth)UI.seekWidth=$('#seek').clientWidth||1;
+  if(fill.style.width!=='100%')fill.style.width='100%';
+  if(knob.style.left!=='0%')knob.style.left='0%';
+  fill.style.transform='scaleX('+fraction+')';knob.style.transform='translateX('+(fraction*UI.seekWidth)+'px) translateX(-50%) scale('+($('#seek').classList.contains('drag')?1.5:1)+')';
+}
 function setupSeekGestures(){
   const seek=$('#seek');
   let W=1;
@@ -5617,8 +5713,7 @@ function setupSeekGestures(){
   };
   let drag=null;
   const apply=function(frac){
-    $('#seek-fill').style.width=(frac*100)+'%';
-    $('#seek-knob').style.left=(frac*100)+'%';
+    paintSeekFraction(frac);
     $('#t-cur').textContent=fmtTime(frac*Engine.duration());
   };
   const finish=(e,cancel=false)=>{
@@ -5639,14 +5734,15 @@ function setupSeekGestures(){
   seek.addEventListener('pointerup',e=>finish(e));
   seek.addEventListener('pointercancel',e=>finish(e,true));
   seek.addEventListener('lostpointercapture',e=>finish(e,true));
+  InputLifecycle.register(()=>{if(drag)finish({pointerId:drag.pointer},true);});
 
   /* Moving timeline: the time at the center follows relative finger travel. */
-  const tr=$('#transport');let ts=null,frame=0,suppressClickUntil=0;
+  const tr=$('#transport'),blockTimelineClick=InputLifecycle.clickGuard(tr);let ts=null,frame=0;
   const paint=()=>{
     frame=0;if(!ts||!ts.active)return;
     const fraction=ts.d?ts.preview/ts.d:0;UI.seekPreview=fraction;
     $('#t-cur').textContent=fmtTime(ts.preview);
-    $('#seek-fill').style.width=(fraction*100)+'%';$('#seek-knob').style.left=(fraction*100)+'%';UI.drawViz();
+    paintSeekFraction(fraction);UI.drawViz();
   };
   const begin=e=>{
     ts.active=true;UI.seekDragging=true;document.body.classList.add('scrubbing');
@@ -5674,7 +5770,7 @@ function setupSeekGestures(){
     if(frame){cancelAnimationFrame(frame);frame=0;}
     const state=ts;ts=null;
     if(state.active){
-      if(state.moved)suppressClickUntil=performance.now()+400;
+      if(state.moved)blockTimelineClick(e);
       if(!cancel&&state.moved&&state.id===Engine.current?.id&&state.request===Engine._playRequest){Engine.seek(state.preview);vibrate(8);}
       UI.seekPreview=null;UI.seekDragging=false;document.body.classList.remove('scrubbing');
       UI.renderProgress();UI.drawViz();
@@ -5684,26 +5780,52 @@ function setupSeekGestures(){
   tr.addEventListener('pointerup',e=>finishTimeline(e));
   tr.addEventListener('pointercancel',e=>finishTimeline(e,true));
   tr.addEventListener('lostpointercapture',e=>finishTimeline(e,true));
-  tr.addEventListener('click',e=>{if(performance.now()<suppressClickUntil){e.preventDefault();e.stopImmediatePropagation();}},true);
+  InputLifecycle.register(()=>{if(ts)finishTimeline({pointerId:ts.pointer},true);});
+
+  const miniSeek=$('#mini-seek'),miniFill=$('#mini-fill'),mini=$('#mini');let miniDrag=null;
+  const blockMiniClick=InputLifecycle.clickGuard(miniSeek);
+  const miniFraction=x=>{const r=miniSeek.getBoundingClientRect();return clamp((x-r.left)/(r.width||1),0,1);};
+  const paintMini=x=>{const fraction=miniFraction(x);miniFill.style.width=(fraction*100)+'%';miniSeek.style.setProperty('--mini-progress',String(fraction));miniSeek.setAttribute('aria-valuenow',String(Math.round(fraction*Engine.duration())));return fraction;};
+  const endMini=(e,cancel=false)=>{
+    if(!miniDrag||miniDrag.pointer!==e.pointerId)return;
+    const state=miniDrag;miniDrag=null;UI.seekDragging=false;document.body.classList.remove('scrubbing');
+    blockMiniClick(e);
+    if(!cancel&&state.id===Engine.current?.id&&state.request===Engine._playRequest)Engine.seek(miniFraction(e.clientX)*Engine.duration());
+    try{if(miniSeek.hasPointerCapture?.(e.pointerId))miniSeek.releasePointerCapture(e.pointerId);}catch(_){}
+    UI.renderProgress();
+  };
+  miniSeek.tabIndex=0;miniSeek.setAttribute('role','slider');miniSeek.setAttribute('aria-label','Seek current track');miniSeek.setAttribute('aria-valuemin','0');
+  miniSeek.addEventListener('pointerdown',e=>{
+    if(miniDrag||e.isPrimary===false||e.button>0||!(Engine.duration()>0)||mini.hidden)return;
+    e.preventDefault();e.stopPropagation();miniDrag={pointer:e.pointerId,id:Engine.current?.id,request:Engine._playRequest};UI.seekDragging=true;document.body.classList.add('scrubbing');
+    try{miniSeek.setPointerCapture(e.pointerId);}catch(_){}paintMini(e.clientX);
+  });
+  miniSeek.addEventListener('pointermove',e=>{if(miniDrag&&miniDrag.pointer===e.pointerId)paintMini(e.clientX);});
+  miniSeek.addEventListener('pointerup',e=>endMini(e));
+  miniSeek.addEventListener('pointercancel',e=>endMini(e,true));miniSeek.addEventListener('lostpointercapture',e=>endMini(e,true));
+  miniSeek.addEventListener('keydown',e=>{if(!['ArrowLeft','ArrowRight','Home','End'].includes(e.key))return;e.preventDefault();e.stopPropagation();const t=Engine.time(),d=Engine.duration();Engine.seek(e.key==='Home'?0:e.key==='End'?d:clamp(t+(e.key==='ArrowRight'?5:-5),0,d));UI.renderProgress();});
+  InputLifecycle.register(()=>{if(miniDrag)endMini({pointerId:miniDrag.pointer},true);});
 
 }
 function setupVizGestures(){
   const v=$('#vizfull');
-  let sy=0,sx=0,t0=0;
-  v.addEventListener('pointerdown',function(e){ Visualization.reveal(); sy=e.clientY; sx=e.clientX; t0=Date.now(); });
-  v.addEventListener('pointerup',function(e){
-    const dy=e.clientY-sy, dx=e.clientX-sx, dt=Date.now()-t0;
+  GestureMotion.bind(v,{
+    ignore:e=>!!e.target.closest('button'),
+    start(){Visualization.reveal();},
+    end(s){
+    const dy=s.dy,dx=s.dx,dt=performance.now()-s.started;
     if(dy>90){ toggleVizFull(false); return; }
     if(Math.abs(dx)>80){ dx<0?Engine.next():Engine.prev(); return; }
-    if(dt<280&&Math.abs(dx)<12&&Math.abs(dy)<12){
+    if(dt<280&&s.travel<=7){
       UI.vizPresetIdx=(UI.vizPresetIdx+1)%VIZ_PRESETS.length;
       $('#vizhud').textContent=VIZ_PRESETS[UI.vizPresetIdx].name;
+    }
     }
   });
 }
 function setupAlphaScrub(){
   const a=$('#alpha'), bubble=$('#alphabubble'), body=$('#list-body');
-  let active=false;
+  let pointer=null,lastLetter=null,jumpVersion=0;
   const pick=function(y){
     const r=a.getBoundingClientRect();
     const spans=$$('span',a);
@@ -5712,6 +5834,13 @@ function setupAlphaScrub(){
     const ch=spans[i].textContent;
     bubble.textContent=ch;
     bubble.style.top=clamp(y-r.top-33,0,r.height-66)+'px';
+    if(ch===lastLetter)return;lastLetter=ch;
+    const index=a.__anchors?.get(ch),box=body.querySelector('.zoom-list');
+    if(index!=null&&box){
+      const version=++jumpVersion,lifecycle=InputLifecycle.version;
+      const scroll=row=>{if(row&&version===jumpVersion&&lifecycle===InputLifecycle.version&&InputLifecycle.active(a)&&box.isConnected)body.scrollTop=row.offsetTop-60;};
+      scroll(box.__ensureRow?box.__ensureRow(index,scroll):box.children[index]);return;
+    }
     const rows=$$('#list-body .trow');
     let target=null;
     for(let k=0;k<rows.length;k++){
@@ -5726,13 +5855,16 @@ function setupAlphaScrub(){
     if(target) body.scrollTop = target.offsetTop - 60;
   };
   a.addEventListener('pointerdown',function(e){
-    active=true; a.classList.add('active'); bubble.classList.add('on');
+    if(pointer!==null||e.isPrimary===false||e.button>0||!InputLifecycle.active(a))return;
+    pointer=e.pointerId;lastLetter=null;a.classList.add('active'); bubble.classList.add('on');
     a.setPointerCapture(e.pointerId); pick(e.clientY); vibrate(6);
   });
-  a.addEventListener('pointermove',function(e){ if(active) pick(e.clientY); });
-  const up=function(){ active=false; a.classList.remove('active'); bubble.classList.remove('on'); };
+  a.addEventListener('pointermove',function(e){ if(pointer===e.pointerId) pick(e.clientY); });
+  const reset=()=>{const id=pointer;pointer=null;lastLetter=null;a.classList.remove('active');bubble.classList.remove('on');try{if(a.hasPointerCapture?.(id))a.releasePointerCapture(id);}catch(_){};};
+  const up=function(e){if(pointer===e.pointerId)reset();};
   a.addEventListener('pointerup',up);
   a.addEventListener('pointercancel',up);
+  a.addEventListener('lostpointercapture',up);InputLifecycle.register(reset);
 }
 /* =====================================================================
    INIT
@@ -6507,7 +6639,6 @@ const ListZoom={
     {id:5,name:'Large grid · 2 columns',mode:'grid',cols:2,lines:3}
   ],
   keys:{all:'files',search:'search',albums:'albums',album:'album_files',folders:'folders',folder:'folder_files',tree:'folders_hier',artists:'artists',artist:'artist_files',aartists:'album_artists',aartist:'album_artists_files',genres:'genres',genre:'genres_files',years:'years',year:'years_files',composers:'composers',composer:'composers_files',playlists:'playlists',playlist:'playlists_files',queue:'queue',recent:'recently_added_files',history:'recently_played_files',played:'most_played_files',rated:'top_rated_files',disliked:'low_rated_files',bookmarks:'bookmarks'},
-  blockedUntil:0,
   key(spec){return this.keys[spec.kind]||spec.kind||'files';},
   get(key){const v=Number(SET.listZoom?.[key]??ZoomProfile[key]??3);return Number.isFinite(v)?clamp(Math.round(v),-4,5):3;},
   apply(box,key,id){
@@ -6561,9 +6692,10 @@ const ListZoom={
   install(){
     ['#list-body','#q-body'].forEach(sel=>{
       const container=$(sel);if(container.__listTouchInstalled)return;container.__listTouchInstalled=true;
-      let gesture=null,pan=null,frame=0,fling=0,locked=false;
+      let gesture=null,pan=null,frame=0,fling=0,locked=false,suppressClick=false;
       const stopFling=()=>{cancelAnimationFrame(fling);fling=0;};
-      const block=()=>{this.blockedUntil=Date.now()+500;};
+      const block=()=>{suppressClick=true;};
+      container.addEventListener('pointerdown',()=>{suppressClick=false;},true);
       const distance=e=>Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY);
       const paint=()=>{frame=0;if(gesture)this.set(gesture.box,gesture.target,gesture.anchor,gesture.focus);else if(pan?.moved){container.scrollTop+=pan.lastPaintY-pan.lastY;pan.lastPaintY=pan.lastY;}};
       const schedule=()=>{if(!frame)frame=requestAnimationFrame(paint);};
@@ -6581,8 +6713,10 @@ const ListZoom={
         fling=requestAnimationFrame(tick);
       };
       container.addEventListener('touchstart',e=>{
+        if(!InputLifecycle.active(container))return;
         stopFling();
         if(e.touches.length===1&&!locked){
+          suppressClick=false;
           const t=e.touches[0];pan={id:t.identifier,x:t.clientX,y:t.clientY,lastY:t.clientY,lastPaintY:t.clientY,scroll:container.scrollTop,moved:false,samples:[{y:t.clientY,t:performance.now()}]};return;
         }
         if(e.touches.length<2)return;
@@ -6631,7 +6765,8 @@ const ListZoom={
       };
       container.addEventListener('touchend',finish,{passive:false,capture:true});
       container.addEventListener('touchcancel',finish,{passive:false,capture:true});
-      for(const type of ['click','contextmenu'])container.addEventListener(type,e=>{if(gesture||locked||Date.now()<this.blockedUntil){e.preventDefault();e.stopImmediatePropagation();}},{capture:true});
+      for(const type of ['click','contextmenu'])container.addEventListener(type,e=>{if(!InputLifecycle.active(container)||gesture||locked||(suppressClick&&(type==='contextmenu'||e.detail!==0))){e.preventDefault();e.stopImmediatePropagation();if(type==='click')suppressClick=false;}},{capture:true});
+      InputLifecycle.register(()=>{stopFling();cancelAnimationFrame(frame);frame=0;gesture=null;pan=null;locked=false;suppressClick=false;container.classList.remove('pinching');});
       container.addEventListener('wheel',e=>{stopFling();if(!e.ctrlKey)return;const box=e.target.closest('.zoom-list')||container.querySelector('.zoom-list');if(!box)return;e.preventDefault();this.set(box,+box.dataset.zoom+(e.deltaY<0?1:-1),e.target.closest('.trow'),e.clientY);},{passive:false});
     });
   }
@@ -6830,6 +6965,7 @@ const NativeSettings={
 const DockLayout={frame:0,
   schedule(){if(!this.frame)this.frame=requestAnimationFrame(()=>{this.frame=0;this.measure();UI.fitPlayer();if(Nav.cur==='player')UI.drawViz();});},
   measure(){
+    UI.seekWidth=$('#seek').clientWidth||UI.seekWidth||0;
     const nav=$('#nav'),mini=$('#mini'),list=$('#sc-list'),fabs=$('#list-fabs');
     const visible=e=>e&&!e.hidden&&getComputedStyle(e).display!=='none'&&e.getBoundingClientRect().height>0;
     const dock=visible(mini)?mini:nav;if(!visible(dock))return;
@@ -6858,14 +6994,13 @@ UI.fitPlayer=function(){
   const px=(style,key)=>parseFloat(style[key])||0;
   const width=wrap.clientWidth||window.innerWidth,u=Math.min(width/393,1.6),nav=$('#nav');
   const navRect=nav.getBoundingClientRect(),wrapRect=wrap.getBoundingClientRect();
-  if(navRect.height&&getComputedStyle(nav).display!=='none')wrap.style.setProperty('padding-bottom',Math.max(0,wrapRect.bottom-navRect.top+10*u)+'px','important');
+  if(navRect.height&&getComputedStyle(nav).display!=='none'){const padding=Math.max(0,wrapRect.bottom-navRect.top+10*u)+'px';if(wrap.style.getPropertyValue('padding-bottom')!==padding)wrap.style.setProperty('padding-bottom',padding,'important');}
   const height=wrap.clientHeight,landscape=width>height&&width>600;
   const priority=document.body.classList.contains('layout-classic')&&!landscape;
   if(priority!==wrap.hasAttribute('data-cover-priority'))wrap.toggleAttribute('data-cover-priority',priority);
   // One source for the flexible spaces. Keep artwork and button sizes out of this budget.
   const gaps=[['--cover-gap',20,8],['--artist-gap',20,8],['--toggle-gap',10,4],['--info-gap',8,4],['--transport-space',26,12]];
-  const setGaps=fraction=>{for(const [name,preferred,minimum] of gaps)wrap.style.setProperty(name,((preferred-(preferred-minimum)*fraction)*u).toFixed(3)+'px');};
-  if(priority)setGaps(0);
+  const setGaps=fraction=>{for(const [name,preferred,minimum] of gaps){const value=((preferred-(preferred-minimum)*fraction)*u).toFixed(3)+'px';if(wrap.style.getPropertyValue(name)!==value)wrap.style.setProperty(name,value);}};
   const ws=getComputedStyle(wrap),art=$('#artstage'),transport=$('#transport'),stack=$('.ctrlstack');
   const wanted=width-px(ws,'paddingLeft')-px(ws,'paddingRight');
   const room=()=>{
@@ -6879,10 +7014,11 @@ UI.fitPlayer=function(){
   if(landscape)available=Math.min(height-92*u,width*.45);
   else{
     let capacity=room();
-    if(priority&&capacity<wanted){
+    if(priority){
       const recoverable=gaps.reduce((sum,gap)=>sum+(gap[1]-gap[2])*u,0);
-      setGaps(Math.min(1,(wanted-capacity+1)/recoverable));
-      capacity=room();
+      const current=Number(wrap.dataset.gapFraction)||0;
+      const fraction=clamp(current+(wanted-capacity)/recoverable,0,1);
+      if(Math.abs(fraction-current)>.005||wrap.dataset.gapScale!==String(u)){setGaps(fraction);wrap.dataset.gapFraction=String(fraction);wrap.dataset.gapScale=String(u);capacity=room();}
     }
     available=Math.min(wanted,capacity);
   }
@@ -7297,16 +7433,16 @@ Views.rowHTML=function(t,i,spec){
   const title=(kind===3&&t.track?t.track+'. ':'')+(SET.listUiFilenameAsTitle?baseName(t.path||t.title):t.title),playing=Engine.current?.id===t.id;
   const artist=v.use_albumartist?(t.albumArtist||trackArtist(t)):trackArtist(t);
   const stars=(SET.ratingType===2||SET.ratingType===3)&&t.rating>0?' <span class="list-stars">'+'★'.repeat(Math.min(5,t.rating))+'</span>':'';
-  return '<div class="trow'+(playing?' playing':'')+'" data-id="'+esc(t.id)+'" data-i="'+i+'"><span class="selection-check" aria-hidden="true"></span><div class="art" data-art="'+esc(t.id)+'"><div class="ph">'+icoHTML('note')+'</div></div>'+(kind===1&&numbered&&t.track?'<span class="row-track-number">'+t.track+'</span>':'')+'<div class="tmeta"><div class="t1">'+esc(title)+stars+'</div><div class="t2">'+esc(artist+' — '+trackAlbum(t))+'</div>'+(meta.length&&SET.showMetaLine?'<div class="t3">'+esc(meta.join(' · '))+'</div>':'')+'</div></div>';
+  return '<div class="trow'+(playing?' playing':'')+'" role="button" tabindex="0" aria-label="'+esc(title+' — '+artist+' — '+trackAlbum(t))+'" data-id="'+esc(t.id)+'" data-i="'+i+'"><span class="selection-check" aria-hidden="true"></span><div class="art" data-art="'+esc(t.id)+'"><div class="ph">'+icoHTML('note')+'</div></div>'+(kind===1&&numbered&&t.track?'<span class="row-track-number">'+t.track+'</span>':'')+'<div class="tmeta"><div class="t1">'+esc(title)+stars+'</div><div class="t2">'+esc(artist+' — '+trackAlbum(t))+'</div>'+(meta.length&&SET.showMetaLine?'<div class="t3">'+esc(meta.join(' · '))+'</div>':'')+'</div></div>';
 };
 const groupsBeforeRework=Views.groupList;
 Views.groupList=function(data){const v=nativeValues();if(data.open==='album'&&v.hide_unknown_album)data=Object.assign({},data,{items:data.items.filter(i=>i.key!=='Unknown album')});if(data.open==='artist'&&v.hide_unknown_artist)data=Object.assign({},data,{items:data.items.filter(i=>i.key!=='Unknown artist')});return groupsBeforeRework.call(this,data);};
 const trackActionBeforeRework=trackAction;
 trackAction=function(action,t,items,i){if(action==='Like'||action==='Unlike'){t.rating=action==='Like'?1:-1;persistTrack(t);UI.renderRating();Views.refreshAll();return;}if(action==='Share'){exportTrack(t);return;}if(action==='Delete'&&nativeValues().enable_deletion===false)return;if(action==='Play Next'||action==='Enqueue'){PlaybackQueue.add([t],action==='Play Next');return;}return trackActionBeforeRework(action,t,items,i);};
 const menuTrackBeforeRework=ctxMenuTrack;
-ctxMenuTrack=async function(...args){await menuTrackBeforeRework(...args);if(nativeValues().enable_deletion===false)$('#sheet [data-a="Delete"]')?.remove();};
+ctxMenuTrack=async function(...args){const opened=menuTrackBeforeRework(...args),request=Sheets.request;await opened;if(Sheets.open==='sheet'&&Sheets.request===request&&nativeValues().enable_deletion===false)$('#sheet [data-a="Delete"]')?.remove();};
 const renderListBeforeRework=Views.render;
-Views.render=function(spec,keep){renderListBeforeRework.call(this,spec,keep);const data=this.currentData,items=data.type==='tracks'?data.items:[];if(!items.length)return;const summary=el('div','list-summary');summary.innerHTML='<span class="list-summary-meta">'+items.length+' songs · '+fmtTime(items.reduce((n,t)=>n+(t.dur||0),0))+'</span><div class="list-summary-buttons"><button class="btn" data-header-play>'+icoHTML('play')+'Play</button><button class="btn" data-header-shuffle>'+icoHTML('shuffle')+'Shuffle</button></div>';$('#list-body').prepend(summary);summary.querySelector('[data-header-play]').onclick=()=>{Engine.categoryKind=spec.kind;if(spec.kind==='queue')PlaybackQueue.play(0);else Engine.setQueue(items,0,true);};summary.querySelector('[data-header-shuffle]').onclick=()=>{SET.shuffleOn=true;SET.shuffleMode=1;Engine.categoryKind=spec.kind;if(spec.kind==='queue')PlaybackQueue.play(0);else Engine.setQueue(items,0,true);saveSet();UI.renderToggles();};};
+Views.render=function(spec,keep){renderListBeforeRework.call(this,spec,keep);const data=this.currentData,items=data.type==='tracks'?data.items:[];if(!items.length)return;const upcoming=spec.kind==='queue'&&spec.queueView==='upcoming',summary=el('div','list-summary');summary.innerHTML='<span class="list-summary-meta">'+items.length+' songs · '+fmtTime(items.reduce((n,t)=>n+(t.dur||0),0))+'</span><div class="list-summary-buttons"><button class="btn" data-header-play>'+icoHTML('play')+'Play</button>'+(!upcoming?'<button class="btn" data-header-shuffle>'+icoHTML('shuffle')+'Shuffle</button>':'')+'</div>';$('#list-body').prepend(summary);summary.querySelector('[data-header-play]').onclick=()=>{Engine.categoryKind=spec.kind;if(upcoming){const index=data.indices[0];if(Engine.queue[index]?.id===items[0].id)Engine.playIndex(index,true);}else if(spec.kind==='queue')PlaybackQueue.play(0);else Engine.setQueue(items,0,true);};const shuffle=summary.querySelector('[data-header-shuffle]');if(shuffle)shuffle.onclick=()=>{SET.shuffleOn=true;SET.shuffleMode=1;Engine.categoryKind=spec.kind;if(spec.kind==='queue')PlaybackQueue.play(0);else Engine.setQueue(items,0,true);saveSet();UI.renderToggles();};};
 
 const PlaylistFiles={
   export(){downloadText('DrawerCast-playlists.json',JSON.stringify({format:'DrawerCast-playlists',playlists:Playlists.data.map(p=>({name:p.name,tracks:p.ids.map(id=>LIB.map.get(id)).filter(Boolean).map(t=>({id:t.id,path:t.path,title:t.title,artist:trackArtist(t)}))}))},null,2),'application/json');},
@@ -7421,6 +7557,16 @@ const PlaybackTransitions={token:0,finish:null,pending:false,
     if(oldURL?.startsWith('blob:'))URL.revokeObjectURL(oldURL);
   }
 };
+function upcomingTracks(){
+  return upcomingIndices().map(i=>Engine.queue[i]);
+}
+function upcomingIndices(){
+  if(SET.repeatMode==='one')return Engine.current?[Engine.order[Engine.pos]]:[];
+  const order=Engine.order.slice(Engine.current?Engine.pos+1:0);
+  const loops=PlaybackQueue.active?nativeValues().queue_end===0:SET.repeatMode==='all';
+  if(loops&&Engine.current)order.push(...Engine.order.slice(0,Engine.pos+1));
+  return order.filter(i=>sourceTrackEnabled(Engine.queue[i]));
+}
 function installPlaybackRework(){
   Engine.buildOrder=function(anchor){
     const mode=SET.shuffleOn?(SET.shuffleMode||1):0;
@@ -7472,13 +7618,14 @@ function installPlaybackRework(){
     try{return time.call(this,i);}finally{SET.crossfade=enabled;}
   };
   const restore=Engine.restoreState;Engine.restoreState=async function(){const result=await restore.call(this);try{const saved=this._restoredQueueState||JSON.parse(localStorage.getItem('dc.explicit-queue')||'null');if(saved&&Array.isArray(saved.pending)){PlaybackQueue.pending=saved.pending.filter(id=>LIB.map.has(id));PlaybackQueue.active=!!saved.active&&result;PlaybackQueue.resume=saved.resume&&Array.isArray(saved.resume.ids)&&Array.isArray(saved.resume.order)&&Number.isInteger(saved.resume.pos)&&saved.resume.pos>=0&&saved.resume.pos<=saved.resume.order.length&&saved.resume.order.every(i=>Number.isInteger(i)&&i>=0&&i<saved.resume.ids.length)?saved.resume:null;PlaybackQueue.forced=!!saved.forced;}}catch(e){}return result;};
-  const items=Views.buildItems;Views.buildItems=function(spec){if(spec.kind==='queue')return {type:'tracks',items:PlaybackQueue.tracks()};return items.call(this,spec);};
+  const items=Views.buildItems;Views.buildItems=function(spec){if(spec.kind==='queue'){const indices=spec.queueView==='upcoming'?upcomingIndices():null;return {type:'tracks',items:indices?indices.map(i=>Engine.queue[i]):PlaybackQueue.tracks(),indices};}return items.call(this,spec);};
   const counts=Views.counts;Views.counts=function(){const result=counts.call(this);result.queue=PlaybackQueue.tracks().length;return result;};
-  const fabs=Views.buildFabs;Views.buildFabs=function(data,spec){fabs.call(this,data,spec);if(spec.kind!=='queue')return;const buttons=$$('#list-fabs .fab');if(buttons[1])buttons[1].onclick=()=>PlaybackQueue.play(0);if(buttons[0])buttons[0].onclick=()=>{SET.shuffleOn=true;SET.shuffleMode=1;PlaybackQueue.play(0);Engine.buildOrder();Engine.saveState();saveSet();UI.renderToggles();};};
-  const context=ctxMenuList;ctxMenuList=function(data,spec){context(data,spec);if(spec.kind!=='queue')return;const button=el('button','btn','Clear Queue');button.onclick=()=>{closeSheet();dialog('Clear Queue','Remove all queued songs?',[{label:'Clear Queue',fn:()=>PlaybackQueue.clear()},{label:'Cancel'}]);};$('#sheet').append(button);};
-  const toggles=UI.renderToggles;UI.renderToggles=function(){toggles.call(UI);const mode=SET.shuffleOn?(SET.shuffleMode||1):0;$('#t-shuffle').innerHTML=icoHTML(['shuffle','shuffle','shuffle-songs','shuffle-cats','shuffle-both'][mode]);$('#t-shuffle').setAttribute('aria-label',['Shuffle off','Shuffle all songs','Shuffle songs within categories','Shuffle categories','Shuffle songs and categories'][mode]);};
+  const playFirstUpcoming=data=>{const index=data.indices?.[0];if(Engine.queue[index]?.id===data.items[0]?.id&&index!=null)Engine.playIndex(index,true);};
+  const fabs=Views.buildFabs;Views.buildFabs=function(data,spec){fabs.call(this,data,spec);if(spec.kind!=='queue')return;const buttons=$$('#list-fabs .fab');if(spec.queueView==='upcoming'){buttons[0]?.remove();if(buttons[1]){buttons[1].setAttribute('aria-label','Play first upcoming track');buttons[1].onclick=()=>playFirstUpcoming(data);}return;}if(buttons[1])buttons[1].onclick=()=>PlaybackQueue.play(0);if(buttons[0])buttons[0].onclick=()=>{SET.shuffleOn=true;SET.shuffleMode=1;PlaybackQueue.play(0);Engine.buildOrder();Engine.saveState();saveSet();UI.renderToggles();};};
+  const context=ctxMenuList;ctxMenuList=function(data,spec){context(data,spec);if(spec.kind!=='queue')return;const play=$('#sheet [data-a="play"]');if(play)play.onclick=()=>{closeSheet();spec.queueView==='upcoming'?playFirstUpcoming(data):PlaybackQueue.play(0);};if(spec.queueView==='upcoming'){$$('#sheet [data-a^="sort-"],#sheet [data-a="shuffle"]').forEach(b=>b.remove());return;}const button=el('button','btn','Clear Queue');button.onclick=()=>{closeSheet();dialog('Clear Queue','Remove all queued songs?',[{label:'Clear Queue',fn:()=>PlaybackQueue.clear()},{label:'Cancel'}]);};$('#sheet').append(button);};
+  const toggles=UI.renderToggles;UI.renderToggles=function(){toggles.call(UI);const mode=SET.shuffleOn?(SET.shuffleMode||1):0;$('#t-shuffle').innerHTML=icoHTML(['shuffle','shuffle','shuffle-songs','shuffle-cats','shuffle-both'][mode]);$('#t-shuffle').setAttribute('aria-label',['Shuffle off','Shuffle all songs','Shuffle songs within categories','Shuffle categories','Shuffle songs and categories'][mode]);Views.refreshQueueOrder();};
   $('#t-shuffle').onclick=()=>{SET.shuffleMode=((SET.shuffleOn?(SET.shuffleMode||1):0)+1)%5;SET.shuffleOn=SET.shuffleMode!==0;Engine.buildOrder();Engine.saveState();saveSet();UI.renderToggles();toast($('#t-shuffle').getAttribute('aria-label'));};
-  $('#t-shuffle').oncontextmenu=e=>{e.preventDefault();dialog('Shuffle','', ['Off','All songs','Songs within categories','Categories','Songs and categories'].map((label,mode)=>({label,fn:()=>{SET.shuffleMode=mode;SET.shuffleOn=mode!==0;Engine.buildOrder();Engine.saveState();saveSet();UI.renderToggles();}})));};
+  $('#t-shuffle').oncontextmenu=e=>{e.preventDefault();e.stopPropagation();dialog('Shuffle','', ['Off','All songs','Songs within categories','Categories','Songs and categories'].map((label,mode)=>({label,fn:()=>{SET.shuffleMode=mode;SET.shuffleOn=mode!==0;Engine.buildOrder();Engine.saveState();saveSet();UI.renderToggles();}})));};
   UI.renderToggles();
 }
 
