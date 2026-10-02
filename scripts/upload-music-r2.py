@@ -40,7 +40,8 @@ def upload_request(method, path, body, mime, key, public):
         signature = subprocess.run(['openssl', 'pkeyutl', '-sign', '-rawin',
                                     '-inkey', str(key), '-in', signed_input.name],
                                    check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.hex()
-    headers = {'Content-Type': mime, 'X-Music-Public-Key': public,
+    headers = {'User-Agent': 'JarvisMusicUploader/1.0', 'Accept': 'application/json',
+               'Content-Type': mime, 'X-Music-Public-Key': public,
                'X-Music-Timestamp': str(timestamp), 'X-Music-Size': str(len(body)),
                'X-Music-Sha256': digest, 'X-Music-Signature': signature}
     request = urllib.request.Request(ORIGIN + path, data=body, headers=headers, method=method)
