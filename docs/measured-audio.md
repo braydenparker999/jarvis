@@ -71,6 +71,10 @@ steady-state estimate, not a transient bound. Reverb receives an additional
 3 dB reserve. Coherent crossfade reserve is 6.0206 dB while two tracks overlap.
 The implementation uses linear fades, not an allegedly peak-safe equal-power mix.
 
+FFmpeg's summary true peaks are rounded to 0.1 dB. Tiny residual guard action
+in some full-volume fixed-gain corpus cases is retained in the evidence, rather
+than claimed to be absent. At 50% pre-guard volume, all six files had zero action.
+
 ## Guard and numerical limits
 
 The original sample-only guard was compared with FFmpeg 7.1's `alimiter` and
@@ -134,7 +138,9 @@ is intentional processing, not labeled transparent. Reset discards prior tails.
 - `transitions.json`: rapid peak/shelf/mode edits through the production graph, independently scanned at 32× with long-tail checks.
 - `browser.json`: real R2 streaming, seek/resume, Range/CORS, artwork, media session, natural next, hard switch and controlled callback failure.
 - `transport-latency.json`: cloud transport-clock startup/seek observations against the previous live source; network and polling included, audible latency unmeasured.
-- Final endurance and release evidence is added before promotion.
+- `worker-release.json`: actual backend revision, Actions run, rollback version and locally verified checkpoint ZIP digest; unsigned corrections rejected.
+- `endurance.json`: final 30-minute original-R2 run, real output RMS, clock progress and heap samples.
+- Frontend release evidence is recorded in deployment status after live verification.
 
 Run `npm test`; `python -m unittest discover -s tests -p 'test_r2*.py'`;
 `python scripts/audio/verify-guard.py --output report.json` (NumPy/SciPy);
@@ -163,6 +169,21 @@ successful run artifact, verifies the source SHA, audio proofs and prior analysi
 then conditionally updates the catalog. Concurrent uploads are preserved. There
 is no schedule, Google request, library mirroring or audio-object write. Repeat
 only as an explicit one-time bounded backfill using the reported `lastId`.
+
+## Acceptance evidence
+
+![Full-file protection activity at 50% player volume](audio-evidence/protection-activity.svg)
+
+| Criterion | Evidence and practical limit |
+| --- | --- |
+| Transparent graph | Six production-graph cases: exact float null at 44.1/48/96 kHz, unity and 50% volume; downstream hardware is unknown. |
+| Gain metadata | Parser/schema/security fixtures and eight Chromium Opus gain/seek captures; header gain is applied once. |
+| Loudness and peaks | Six hashed originals, FFmpeg 7.1.5 and separately built libebur128 1.2.6; official EBU vectors unavailable (403). |
+| Protection | 297 stress cases pass the independent long 32× output oracle; worst −1.658 dBTP against −0.9. |
+| EQ | Independent coefficient algebra, 108 rendered extreme cases and rapid production-graph edits; edit output peaks around −4.915 dBTP. |
+| Full pipeline | Actual R2 decode/Range/CORS, artwork, media session, two-slot transitions, real callback failure and measured non-silent recovery. Drive/local/server regression tests remain separate; no Google audio was fetched. |
+| Endurance | Final 30-minute run passed 180 actual-PCM samples, advancing clocks, alternating volume, seeks and mode edits, followed by non-silent recovery from a real callback exception. See `endurance.json`; cloud behavior does not certify the phone. |
+| Regression/release | 249 source JavaScript / 93 Python / 530 deployment tests and the exact pinned build. Live pin and rollback evidence are recorded after promotion. |
 
 ## Small owner comparison protocol (hardware unverified)
 

@@ -1,13 +1,13 @@
 {
-  "startedAt": "2026-10-02T03:28:25.842Z",
+  "startedAt": "2026-10-02T04:33:56.699Z",
   "captures": [
     {
       "file": "gain0.opus",
       "seek": 0,
       "processingRate": 44100,
-      "rmsDbfs": -32.10648860356911,
-      "samplePeakDbfs": -29.055092769877593,
-      "backend": "4× FIR true-peak guard · 6 ms lookahead + 24 samples · 2 dB detector margin",
+      "rmsDbfs": -32.10601032231983,
+      "samplePeakDbfs": -29.05142158855252,
+      "backend": "4× FIR true-peak guard · 6 ms lookahead + 64 samples · 2 dB detector margin",
       "ledger": {
         "db": 0,
         "reason": "Off",
@@ -24,16 +24,17 @@
         "detectorMarginDb": 2,
         "degraded": false,
         "trackGain": 1,
-        "finalGain": 0.5011872336272722
+        "finalGain": 0.5011872336272722,
+        "stereoReserveDb": 0
       }
     },
     {
       "file": "gain0.opus",
       "seek": 1,
       "processingRate": 44100,
-      "rmsDbfs": -32.106525890816705,
-      "samplePeakDbfs": -29.052439013750462,
-      "backend": "4× FIR true-peak guard · 6 ms lookahead + 24 samples · 2 dB detector margin",
+      "rmsDbfs": -32.106525787942516,
+      "samplePeakDbfs": -29.05521483279884,
+      "backend": "4× FIR true-peak guard · 6 ms lookahead + 64 samples · 2 dB detector margin",
       "ledger": {
         "db": 0,
         "reason": "Off",
@@ -50,16 +51,17 @@
         "detectorMarginDb": 2,
         "degraded": false,
         "trackGain": 1,
-        "finalGain": 0.5011872336272722
+        "finalGain": 0.5011872336272722,
+        "stereoReserveDb": 0
       }
     },
     {
       "file": "gain6.opus",
       "seek": 0,
       "processingRate": 44100,
-      "rmsDbfs": -26.107089146537366,
-      "samplePeakDbfs": -23.055133000716435,
-      "backend": "4× FIR true-peak guard · 6 ms lookahead + 24 samples · 2 dB detector margin",
+      "rmsDbfs": -26.1070749908665,
+      "samplePeakDbfs": -23.05314155172212,
+      "backend": "4× FIR true-peak guard · 6 ms lookahead + 64 samples · 2 dB detector margin",
       "ledger": {
         "db": 0,
         "reason": "Off",
@@ -76,17 +78,18 @@
         "detectorMarginDb": 2,
         "degraded": false,
         "trackGain": 1,
-        "finalGain": 0.5011872336272722
+        "finalGain": 0.5011872336272722,
+        "stereoReserveDb": 0
       },
-      "measuredGainDb": 5.999399457031746
+      "measuredGainDb": 5.998935331453332
     },
     {
       "file": "gain6.opus",
       "seek": 1,
       "processingRate": 44100,
-      "rmsDbfs": -26.107114788569298,
-      "samplePeakDbfs": -23.055183597746854,
-      "backend": "4× FIR true-peak guard · 6 ms lookahead + 24 samples · 2 dB detector margin",
+      "rmsDbfs": -26.107114542807473,
+      "samplePeakDbfs": -23.055181757849674,
+      "backend": "4× FIR true-peak guard · 6 ms lookahead + 64 samples · 2 dB detector margin",
       "ledger": {
         "db": 0,
         "reason": "Off",
@@ -103,17 +106,18 @@
         "detectorMarginDb": 2,
         "degraded": false,
         "trackGain": 1,
-        "finalGain": 0.5011872336272722
+        "finalGain": 0.5011872336272722,
+        "stereoReserveDb": 0
       },
-      "measuredGainDb": 5.999411102247407
+      "measuredGainDb": 5.999411245135043
     },
     {
       "file": "gain-6.opus",
       "seek": 0,
       "processingRate": 44100,
-      "rmsDbfs": -38.10706989354913,
+      "rmsDbfs": -38.10706987923314,
       "samplePeakDbfs": -35.05044238279192,
-      "backend": "4× FIR true-peak guard · 6 ms lookahead + 24 samples · 2 dB detector margin",
+      "backend": "4× FIR true-peak guard · 6 ms lookahead + 64 samples · 2 dB detector margin",
       "ledger": {
         "db": 0,
         "reason": "Off",
@@ -130,17 +134,18 @@
         "detectorMarginDb": 2,
         "degraded": false,
         "trackGain": 1,
-        "finalGain": 0.5011872336272722
+        "finalGain": 0.5011872336272722,
+        "stereoReserveDb": 0
       },
-      "measuredGainDb": -6.000581289980019
+      "measuredGainDb": -6.0010595569133045
     },
     {
       "file": "gain-6.opus",
       "seek": 1,
       "processingRate": 44100,
-      "rmsDbfs": -38.10709561449491,
-      "samplePeakDbfs": -35.055516240348815,
-      "backend": "4× FIR true-peak guard · 6 ms lookahead + 24 samples · 2 dB detector margin",
+      "rmsDbfs": -38.10709553271013,
+      "samplePeakDbfs": -35.05528733574325,
+      "backend": "4× FIR true-peak guard · 6 ms lookahead + 64 samples · 2 dB detector margin",
       "ledger": {
         "db": 0,
         "reason": "Off",
@@ -157,9 +162,10 @@
         "detectorMarginDb": 2,
         "degraded": false,
         "trackGain": 1,
-        "finalGain": 0.5011872336272722
+        "finalGain": 0.5011872336272722,
+        "stereoReserveDb": 0
       },
-      "measuredGainDb": -6.000569723678204
+      "measuredGainDb": -6.000569744767617
     },
     {
       "file": "rate44100.wav",
@@ -167,7 +173,7 @@
       "processingRate": 44100,
       "rmsDbfs": -32.10833964352784,
       "samplePeakDbfs": -29.09803980106772,
-      "backend": "4× FIR true-peak guard · 6 ms lookahead + 24 samples · 2 dB detector margin",
+      "backend": "4× FIR true-peak guard · 6 ms lookahead + 64 samples · 2 dB detector margin",
       "ledger": {
         "db": 0,
         "reason": "Off",
@@ -184,7 +190,8 @@
         "detectorMarginDb": 2,
         "degraded": false,
         "trackGain": 1,
-        "finalGain": 0.5011872336272722
+        "finalGain": 0.5011872336272722,
+        "stereoReserveDb": 0
       }
     },
     {
@@ -193,7 +200,7 @@
       "processingRate": 44100,
       "rmsDbfs": -32.10833964352784,
       "samplePeakDbfs": -29.09803980106772,
-      "backend": "4× FIR true-peak guard · 6 ms lookahead + 24 samples · 2 dB detector margin",
+      "backend": "4× FIR true-peak guard · 6 ms lookahead + 64 samples · 2 dB detector margin",
       "ledger": {
         "db": 0,
         "reason": "Off",
@@ -210,7 +217,8 @@
         "detectorMarginDb": 2,
         "degraded": false,
         "trackGain": 1,
-        "finalGain": 0.5011872336272722
+        "finalGain": 0.5011872336272722,
+        "stereoReserveDb": 0
       }
     }
   ],
