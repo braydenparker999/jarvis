@@ -8,3 +8,6 @@ Concrete review findings and fixes during this task:
 - Missing album evidence must not silently receive per-track gain.
 - Source catalog count changed during work, requiring conditional metadata writes.
 - Complete album claims require exact snapshot membership and invalidate on additions.
+
+- Natural entry/return through the explicit queue also needed to preserve delayed output at an automatic boundary. Manual changes still reset stale samples.
+- Chromium 151 stopped the deliberately failed callback without delivering processorerror. Event listeners plus a bounded heartbeat watchdog now recover; the actual exception fixture passed.

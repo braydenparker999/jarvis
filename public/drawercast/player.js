@@ -6975,6 +6975,7 @@ const AudioQuality={
     this.fallback(n,c);this.worklet(c,n);
   },
   fallback(n,c){
+    clearInterval(n.guardWatchdog);n.guardWatchdog=null;
     if(n.peakLimiter){try{n.protectionGain.disconnect(n.peakLimiter);n.peakLimiter.disconnect();}catch(e){}n.peakLimiter=null;
       n.protectionGain.connect(n.limiter);n.protectionGain.connect(n.bypass);
       n.limiter.connect(n.limited);n.limited.connect(n.analyser);n.bypass.connect(n.analyser);
@@ -7031,10 +7032,18 @@ const AudioQuality={
     const url=URL.createObjectURL(new Blob([guardWorkletSource()],{type:'application/javascript'}));
     try{await c.audioWorklet.addModule(url);if(Engine.ctx!==c||Engine.nodes!==n)return;
       const node=new AudioWorkletNode(c,'jarvis-true-peak',{numberOfInputs:1,numberOfOutputs:1,outputChannelCount:[2]});
-      node.port.postMessage({enabled:this.protected()});node.port.onmessage=e=>{this.recent=e.data;this.reduction=e.data.reduction;this.maxReductionDb=Math.max(this.maxReductionDb,-decibels(this.reduction));};
-      node.onprocessorerror=()=>{if(Engine.nodes===n&&n.peakLimiter===node){this.fallback(n,c);toast('Audio protection switched to the degraded browser compressor');}};
+      let heartbeat=performance.now();
+      node.port.postMessage({enabled:this.protected()});node.port.onmessage=e=>{heartbeat=performance.now();this.recent=e.data;this.reduction=e.data.reduction;this.maxReductionDb=Math.max(this.maxReductionDb,-decibels(this.reduction));};
+      node.addEventListener('processorerror',()=>{if(Engine.nodes===n&&n.peakLimiter===node){this.fallback(n,c);toast('Audio protection switched to the degraded browser compressor');}});
       n.protectionGain.disconnect(n.limiter);n.protectionGain.disconnect(n.bypass);n.limiter.disconnect();n.limited.disconnect();n.bypass.disconnect();
       n.protectionGain.connect(node);node.connect(n.analyser);n.peakLimiter=node;this.limiter='4× FIR true-peak guard · 6 ms lookahead + 64 samples · 2 dB detector margin';this.refreshGain();
+      // Some Chromium runtimes stop the processor without delivering its error
+      // event. The existing 4 Hz telemetry is also a rendering heartbeat.
+      n.guardWatchdog=setInterval(()=>{
+        if(Engine.ctx!==c||Engine.nodes!==n||n.peakLimiter!==node){clearInterval(n.guardWatchdog);n.guardWatchdog=null;return;}
+        const now=performance.now();if(c.state!=='running'||!Engine.playing){heartbeat=now;return;}
+        if(now-heartbeat>3000){this.fallback(n,c);toast('Audio protection stopped responding; using the degraded browser compressor');}
+      },500);
     }catch(e){this.workletFailure=e.name+': '+e.message;this.fallback(n,c);}finally{URL.revokeObjectURL(url);}
   }
 };
@@ -7435,10 +7444,13 @@ function installPlaybackRework(){
   const seek=Engine.seek;Engine.seek=function(seconds){PlaybackTransitions.cancel();AudioQuality.reset();const result=seek.call(this,seconds);this.listenedLast=this.time();if(this.playing&&SET.audioMode!=='transparent'&&nativeValues().fade_seek){this.setGain(this.cur,0,0);this.setGain(this.cur,this.rgGain(this.current),nativeValues().fade_seek_ms||100);}return result;};
   const next=Engine.next;
   Engine.next=function(auto){
-    if(auto&&SET.repeatMode==='one')return next.call(this,true);
-    if(PlaybackQueue.shouldStart()){PlaybackQueue.begin(false,0,!!auto||this.wantsPlayback());return;}
-    if(PlaybackQueue.active&&this.pos+1>=this.order.length){PlaybackQueue.finish(!!auto||this.wantsPlayback());return;}
-    this._autoAdvance=!!auto;try{return next.call(this,auto);}finally{this._autoAdvance=false;}
+    const previous=this._autoAdvance;this._autoAdvance=!!auto;
+    try{
+      if(auto&&SET.repeatMode==='one')return next.call(this,true);
+      if(PlaybackQueue.shouldStart()){PlaybackQueue.begin(false,0,!!auto||this.wantsPlayback());return;}
+      if(PlaybackQueue.active&&this.pos+1>=this.order.length){PlaybackQueue.finish(!!auto||this.wantsPlayback());return;}
+      return next.call(this,auto);
+    }finally{this._autoAdvance=previous;}
   };
   Engine.countPlayed=function(){if(!this.current||this.counted)return;this.counted=true;this.current.plays=(this.current.plays||0)+1;this.current.lastPlayed=Date.now();persistTrack(this.current);};
   Engine.onEnded=function(i){if(i!==this.cur||this._loadingRequest||!this.playing||this._endedRequest===this._playRequest)return;this._endedRequest=this._playRequest;if(this.current){this.current.resumeAt=0;this.countPlayed();persistTrack(this.current);}const request=this._playRequest;const advance=()=>{if(request!==this._playRequest||!this.playing)return;this.listened=0;this.counted=false;this.next(true);};const gap=nativeValues().track_end_silence_ms||0;if(gap){clearTimeout(this.silenceTimer);this.silenceTimer=setTimeout(advance,gap);}else advance();};

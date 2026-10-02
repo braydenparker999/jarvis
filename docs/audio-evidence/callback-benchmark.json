@@ -3,33 +3,69 @@
   "host": "Managed Linux desktop Node; excludes browser/Android scheduler and is not an underrun measurement",
   "rows": [
     {
+      "backend": "previous sample-only limiter",
       "rate": 44100,
       "framesPerBlock": 128,
       "deadlineMs": 2.9024943310657596,
-      "p50Ms": 0.07829499999999712,
-      "p95Ms": 0.12964099999999235,
-      "p99Ms": 0.3257300000000214,
-      "maxMs": 1.7275889999999947,
-      "allocatedTypedBufferBytes": 14136
+      "p50Ms": 0.15012100000001283,
+      "p95Ms": 0.2127039999999738,
+      "p99Ms": 0.3441569999999956,
+      "maxMs": 6.884054999999989,
+      "allocatedTypedBufferBytes": 6408
     },
     {
+      "backend": "previous sample-only limiter",
       "rate": 48000,
       "framesPerBlock": 128,
       "deadlineMs": 2.6666666666666665,
-      "p50Ms": 0.07835499999998774,
-      "p95Ms": 0.16014699999999493,
-      "p99Ms": 0.3260209999999688,
-      "maxMs": 1.5505880000000047,
-      "allocatedTypedBufferBytes": 14688
+      "p50Ms": 0.14766799999995328,
+      "p95Ms": 0.22178700000000617,
+      "p99Ms": 0.28583100000003014,
+      "maxMs": 1.5490550000000667,
+      "allocatedTypedBufferBytes": 6960
     },
     {
+      "backend": "previous sample-only limiter",
       "rate": 96000,
       "framesPerBlock": 128,
       "deadlineMs": 1.3333333333333333,
-      "p50Ms": 0.07709299999999075,
-      "p95Ms": 0.15032200000007379,
-      "p99Ms": 0.2767780000000357,
-      "maxMs": 0.523302000000001,
+      "p50Ms": 0.14357199999994918,
+      "p95Ms": 0.24187700000004497,
+      "p99Ms": 0.43176600000003873,
+      "maxMs": 2.2223670000000766,
+      "allocatedTypedBufferBytes": 13872
+    },
+    {
+      "backend": "new true-peak guard",
+      "rate": 44100,
+      "framesPerBlock": 128,
+      "deadlineMs": 2.9024943310657596,
+      "p50Ms": 0.07980799999995725,
+      "p95Ms": 0.1671960000001036,
+      "p99Ms": 0.22097499999995307,
+      "maxMs": 0.921188999999913,
+      "allocatedTypedBufferBytes": 14136
+    },
+    {
+      "backend": "new true-peak guard",
+      "rate": 48000,
+      "framesPerBlock": 128,
+      "deadlineMs": 2.6666666666666665,
+      "p50Ms": 0.07983800000010888,
+      "p95Ms": 0.16886899999985872,
+      "p99Ms": 0.2730830000000424,
+      "maxMs": 2.0897509999999784,
+      "allocatedTypedBufferBytes": 14688
+    },
+    {
+      "backend": "new true-peak guard",
+      "rate": 96000,
+      "framesPerBlock": 128,
+      "deadlineMs": 1.3333333333333333,
+      "p50Ms": 0.07864599999993516,
+      "p95Ms": 0.1531959999999799,
+      "p99Ms": 0.33924000000001797,
+      "maxMs": 2.133786999999984,
       "allocatedTypedBufferBytes": 21600
     }
   ]

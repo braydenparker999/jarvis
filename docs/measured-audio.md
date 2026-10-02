@@ -92,7 +92,7 @@ A disabled/inactive guard retains the same delay and exact float identity at
 unity. Seeking, stopping and hard source switches reset delayed samples and
 replace filter state. Natural advances retain the guard delay/tail so queued final samples are delivered; they are not hard discontinuities. A processor failure reconnects one degraded compressor
 path, with extra fixed headroom. It is explicitly labeled true-peak unverified.
-The native browser compressor is never presented as the validated guard. Its
+The native browser compressor is never presented as the validated guard. A 3-second telemetry heartbeat timeout also recovers rendering failure when Chromium omits the processorerror event; it is suspended while the context or playback is inactive. The controlled callback-exception fixture reproduced that event omission in Chromium 151 and verified continued decoded playback through the single fallback path. Its
 absence/error paths keep playback running; worklet state is not reused across
 contexts.
 
@@ -110,6 +110,9 @@ or native-player correction.
 Peak filters use linear Q. Shelves use `alpha=sin(w)/(2Q)`, not Q-as-slope:
 `1/Q²=(A+1/A)*(1/S−1)+2`. Frequencies clamp at the actual processing rate.
 Zero gain bypasses exactly. Jury pole checks reject unstable coefficients.
+The existing browser EQ supports 20–20,000 Hz, ±15 dB and Q 0.1–12;
+imported values outside those control ranges are clamped when a curve is applied.
+Native backup settings outside supported browser processing are skipped.
 Curve transitions use complementary 25 ms linear fades and apply attenuation
 before a boost; concurrent curves can alter phase during edits, so the transition
 is intentional processing, not labeled transparent. Reset discards prior tails.
@@ -125,7 +128,10 @@ is intentional processing, not labeled transparent. Reset discards prior tails.
   float identity and rendered IIR/reference comparisons.
 - `opus-browser.json`: synthetic positive/negative OpusHead gains, seeks and
   44.1 kHz input through actual HTMLMediaElement + production graph.
-- Browser/endurance and deployment evidence records are added after completion.
+- `eq-extremes.json`: 108 rendered impulse cases at exposed frequency/Q/gain extremes, phase checks and 24-second decay tails. This compares the rendered transfer to a separate complex evaluation of the supplied coefficients; `graph.json` separately checks the coefficient algebra.
+- `browser.json`: real R2 streaming, seek/resume, Range/CORS, artwork, media session, natural next, hard switch and controlled callback failure.
+- `transport-latency.json`: cloud transport-clock startup/seek observations against the previous live source; network and polling included, audible latency unmeasured.
+- Final endurance and release evidence is added before promotion.
 
 Run `npm test`; `python -m unittest discover -s tests -p 'test_r2*.py'`;
 `python scripts/audio/verify-guard.py --output report.json` (NumPy/SciPy);

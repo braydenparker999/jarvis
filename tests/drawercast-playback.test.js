@@ -321,3 +321,15 @@ test('natural advance retains delayed output; manual changes reset the guard/fil
   Engine._autoAdvance=true;await Engine.playIndex(1,false);assert.equal(resets,0,'last queued samples must drain at a natural boundary');
   Engine._autoAdvance=false;await Engine.playIndex(0,false);assert.equal(resets,1,'manual source changes cannot emit stale delayed audio');
 });
+
+test('automatic entry to and return from the explicit queue also retains the output tail',async()=>{
+  const {Engine,Queue,ctx}=installed();let resets=0;ctx.AudioQuality.reset=()=>resets++;
+  const a={id:'a'},b={id:'b'},queued={id:'queued'};
+  for(const t of [a,b,queued])ctx.LIB.map.set(t.id,t);
+  Engine.queue=[a,b];Engine.order=[0,1];Engine.current=a;Engine.pos=0;Queue.pending=['queued'];
+  Engine.next(true);await new Promise(setImmediate);
+  assert.equal(Engine.current.id,'queued');assert.equal(resets,0);
+  Engine.next(true);await new Promise(setImmediate);
+  assert.equal(Engine.current.id,'b');assert.equal(resets,0);
+  Engine.next(false);await new Promise(setImmediate);assert.equal(resets,1);
+});
