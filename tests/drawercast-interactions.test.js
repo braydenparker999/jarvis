@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {readFile} from 'node:fs/promises';
 const source=await readFile(new URL('../public/drawercast/player.js',import.meta.url),'utf8');
-function node(){const handlers={};return {handlers,style:{},classList:{add(){},remove(){}},dataset:{},addEventListener(n,fn){(handlers[n]??=[]).push(fn)},setPointerCapture(){},hasPointerCapture:()=>false,getBoundingClientRect:()=>({left:0,width:100}),fire(type,event={}){const e={type,pointerId:1,isPrimary:true,button:0,clientX:20,clientY:20,target:this,preventDefault(){},...event};for(const fn of handlers[type]||[])fn(e);return e;}};}
+function node(){const handlers={};return {handlers,style:{setProperty(){}},hidden:false,clientWidth:100,classList:{add(){},remove(){},contains:()=>false},dataset:{},setAttribute(){},closest:()=>null,addEventListener(n,fn){(handlers[n]??=[]).push(fn)},setPointerCapture(){},hasPointerCapture:()=>false,getBoundingClientRect:()=>({left:0,width:100}),fire(type,event={}){const e={type,pointerId:1,isPrimary:true,button:0,clientX:20,clientY:20,target:this,preventDefault(){},...event};for(const fn of handlers[type]||[])fn(e);return e;}};}
 function harness(){
   let now=1000,sequence=0;const timers=new Map(),intervals=new Map(),nodes=new Map(),seeks=[],skips=[];
   const Engine={current:{id:'one'},_playRequest:1,duration:()=>100,time:()=>20,seek:v=>seeks.push(v),seekBy:v=>seeks.push(v)};
@@ -12,6 +12,8 @@ function harness(){
     requestAnimationFrame:fn=>{timers.set(++sequence,fn);return sequence},cancelAnimationFrame:id=>timers.delete(id),
     $:id=>{if(!nodes.has(id))nodes.set(id,node());return nodes.get(id)},document:{body:node(),addEventListener(){}},window:{addEventListener(){}},
     vibrate(){},proSkip:d=>skips.push(d),clamp:(v,l,h)=>Math.max(l,Math.min(h,v)),fmtTime:String,Waveform:{span:()=>100}});
+  vm.runInContext(source.slice(source.indexOf('const InputLifecycle='),source.indexOf('const Nav=')),context);
+  vm.runInContext(source.slice(source.indexOf('function paintSeekFraction('),source.indexOf('function setupSeekGestures(')),context);
   return {context,Engine,seeks,skips,nodes,timers,intervals,advance:ms=>now+=ms,flush(){for(const [id,fn] of [...timers]){timers.delete(id);fn()}}};
 }
 test('a short category tap skips once; a held seek never also skips',()=>{

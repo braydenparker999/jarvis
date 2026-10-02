@@ -438,6 +438,17 @@ body.layout-minimal .timepill{background:transparent}
   will-change:transform;touch-action:none;
 }
 #mini[hidden]{display:none}
+/* Preserve the reference appearance while isolating outgoing input and cheap motion. */
+.screen[inert]{pointer-events:none}
+#seek-fill{transform-origin:left center}
+#seek-knob{will-change:transform;transition:none}
+#seek-fill{transition:none}
+.queue-tabs{display:flex;gap:8px;padding:8px 14px;position:sticky;top:0;background:var(--bg0);z-index:2}
+.queue-tabs .btn{flex:1}
+.trow:focus-visible,.gcard:focus-visible,.catrow:focus-visible,#mini:focus-visible,.mini-seek:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.trow:active,.gcard:active,.catrow:active{background:rgba(255,255,255,.06)}
+.mini-seek{touch-action:none;overflow:visible!important}
+.mini-seek::before{content:'';position:absolute;inset:-8px 0}
 #mini.down{transform:translateY(140%);opacity:0}
 .mini-main{display:flex;align-items:center;gap:12px}
 .mini-main .tmeta{overflow:hidden}

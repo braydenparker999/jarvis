@@ -227,7 +227,7 @@ function installed(){
   const nodes=new Map();
   Object.assign(ctx,{sourceTrackEnabled:t=>!!t&&!t.disabled,LIB:{map:new Map()},nativeValues:()=>values,
     trackAlbum:t=>t?.album||'',trackArtist:t=>t?.artist||'',shuffleArray:a=>a.slice().reverse(),
-    Views:{buildItems(){},counts:()=>({}),buildFabs(){},refreshAll(){}},ctxMenuList(){},
+    Views:{buildItems(){},counts:()=>({}),buildFabs(){},refreshAll(){},refreshQueueOrder(){}},ctxMenuList(){},
     $:id=>{if(!nodes.has(id))nodes.set(id,{setAttribute(){},getAttribute(){}});return nodes.get(id);},$$:()=>[],icoHTML:()=>'',saveSet(){},
     localStorage:{getItem:()=>null,setItem(){}},persistTrack(){},clamp:(x,l,h)=>Math.max(l,Math.min(h,x)),
     DriveSource:{prioritize(){},api:{},playbackRetry:new Map(),pumpTags(){},status:''},DrawerCast:{canPlay:()=>true},
