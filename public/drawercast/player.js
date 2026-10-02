@@ -6338,7 +6338,7 @@ EQ.rebuild=function(){rebuildEq.call(EQ);SET.eqTypes=SET.eqFreqs.map(()=> 'peaki
 UI.drawCurve=function(){
   const c=$('#curve');if(!c||Nav.cur!=='eq')return;const dpr=UI.fitCanvas(c),g=c.getContext('2d');if(!g)return;
   const p=eqSnapshot();if(!SET.eqEnabled){p.gains=p.gains.map(()=>0);p.preamp=0;}
-  if(SET.toneEnabled){p.freqs.push(200,4000);p.gains.push(SET.bass*15,SET.treble*15);p.q.push(.7,.7);p.types.push('lowshelf','highshelf');}
+  if(SET.toneEnabled){p.freqs.push(SET.bassFreq||100,SET.trebleFreq||10000);p.gains.push(bound(SET.bass,-1,1,0)*15,bound(SET.treble,-1,1,0)*15);p.q.push(SET.bassQ,SET.trebleQ);p.types.push('lowshelf','highshelf');}
   const points=EqMath.curve(p,180,Engine.ctx?Engine.ctx.sampleRate:48000),W=c.width,H=c.height;
   g.clearRect(0,0,W,H);g.strokeStyle='#ffffff28';g.lineWidth=dpr;g.beginPath();g.moveTo(0,H/2);g.lineTo(W,H/2);g.stroke();
   g.strokeStyle='#76ed49';g.lineWidth=1.6*dpr;g.beginPath();points.forEach((v,i)=>{const x=i*W/(points.length-1),y=H/2-clamp(v,-20,20)*(H/2-4*dpr)/20;i?g.lineTo(x,y):g.moveTo(x,y);});g.stroke();
@@ -7006,18 +7006,23 @@ const AudioQuality={
   },
   update(force=false){
     const n=Engine.nodes,c=Engine.ctx;if(!n)return;this.attach();
-    const filters=this.filters(),signature=JSON.stringify(filters),now=c.currentTime;
+    const filters=this.filters(),now=c.currentTime;
     const preamp=this.transparent()?0:SET.eqEnabled?bound(SET.preamp,-15,15,0):0;
-    const estimate=DSP.headroom(filters,preamp,c.sampleRate);
-    this.effectPeakDb=filters.length?Math.max(0,-estimate-.5-preamp):0;
-    this.headroom=!this.transparent()&&SET.autoHeadroom!==false?estimate:0;
-    const target=linear(this.headroom),old=n.headroom.gain.value;n.headroom.gain.cancelScheduledValues(now);n.headroom.gain.setValueAtTime(Math.min(old,target),now);if(target>old)n.headroom.gain.setTargetAtTime(target,now+.03,.04);
-    n.preamp.gain.setTargetAtTime(linear(preamp),now,.01);
+    const plan=DSP.cascadePlan(filters,preamp,c.sampleRate,SET.autoHeadroom!==false),estimate=plan.estimate;
+    const signature=JSON.stringify([preamp+plan.inputDb,plan.filters]);
+    this.effectPeakDb=Math.max(0,plan.responsePeakDb);
+    this.headroom=this.transparent()?0:plan.headroomDb;this.distributedHeadroom=plan.distributed;
+    // Headroom belongs to each curve branch. Keeping it upstream of both
+    // branches lets a new curve's gain expose the fading old curve's boost.
+    n.headroom.gain.cancelScheduledValues(now);n.headroom.gain.setValueAtTime(1,now);
+    // The fading curve keeps its own preamp too; raising a shared preamp
+    // would transiently overdrive an outgoing curve with less headroom.
+    n.preamp.gain.cancelScheduledValues(now);n.preamp.gain.setValueAtTime(1,now);
     n.transparent.gain.setTargetAtTime(this.transparent()?1:0,now,.01);n.effects.gain.setTargetAtTime(this.transparent()?0:1,now,.01);
     this.refreshGain();
     if(force||signature!==n.filterSignature){
-      n.filterSignature=signature;const branch={input:c.createGain(),output:c.createGain(),nodes:[]};
-      let tail=branch.input;for(const coeff of filters){const f=c.createIIRFilter(coeff.slice(0,3),coeff.slice(3));tail.connect(f);tail=f;branch.nodes.push(f);}
+      n.filterSignature=signature;const branch={input:c.createGain(),output:c.createGain(),nodes:[]};branch.input.gain.value=linear(preamp+plan.inputDb);
+      let tail=branch.input;for(const coeff of plan.filters){const f=c.createIIRFilter(coeff.slice(0,3),coeff.slice(3));tail.connect(f);tail=f;branch.nodes.push(f);}
       tail.connect(branch.output);branch.output.connect(n.qualityOut);n.qualityIn.connect(branch.input);
       const old=n.qualityBranch;branch.output.gain.value=old?0:1;n.qualityBranch=branch;
       if(old){const seconds=.025;branch.output.gain.setValueAtTime(0,now);branch.output.gain.linearRampToValueAtTime(1,now+seconds);old.output.gain.cancelScheduledValues(now);old.output.gain.setValueAtTime(old.output.gain.value,now);old.output.gain.linearRampToValueAtTime(0,now+seconds);setTimeout(()=>{try{n.qualityIn.disconnect(old.input);old.input.disconnect();old.nodes.forEach(x=>x.disconnect());old.output.disconnect();}catch(e){}},seconds*1000+50);}
@@ -7059,7 +7064,7 @@ const speedBeforeQuality=Engine.applySpeed;
 Engine.applySpeed=function(){if(AudioQuality.transparent()){this.els.forEach(a=>{a.playbackRate=1;a.preservesPitch=true;});}else speedBeforeQuality.call(this);};
 function qualityInfo(){
   const t=Engine.current,c=Engine.ctx,l=AudioQuality.ledger||gainLedger(t,SET),a=t?.audioAnalysis;
-  const rows=[['Source',t?(t.source+' · '+(t.codec||t.ext||'Unknown').toUpperCase()):'No track'],['Source bitrate',t?.size&&t?.dur?'~'+Math.round(t.size*8/t.dur/1000)+' kbps (file average)':'Not reported'],['Source rate (metadata)',t?.sr?t.sr+' Hz':'Not reported'],['Processing',c?c.sampleRate+' Hz · floating point':'Not started'],['Mode',AudioQuality.transparent()?'Transparent · effects bypassed · speed 1.0':'Custom / headphone EQ'],['Normalization',l.reason+(l.reference!=null?' · '+l.reference:'' )],['Normalization gain',l.normalizationDb.toFixed(2)+' dB'],['User preamp / volume',l.userPreampDb.toFixed(2)+' / '+l.volumeDb.toFixed(2)+' dB'],['EQ provenance',SET.eqProvenance||'Saved preset; measurement source not reported'],['EQ headroom (response estimate)',l.eqHeadroomDb.toFixed(2)+' dB'],['Fixed protective gain',l.protectiveDb.toFixed(2)+' dB'+(!l.peakKnown?' · unknown peak; +3 dBTP assumption':'' )],['Overlap reserve',l.overlapDb.toFixed(2)+' dB'],['Analysis',a?.sha256===t?.sha256?a.decoder+' · '+a.method:'Unknown / stale'],['Measured source true peak',l.peakKnown?l.peakDb.toFixed(2)+' dBTP':'Unknown'],['Protection',AudioQuality.protected()?AudioQuality.limiter:'User disabled'],['Guard recent / max reduction',(-decibels(AudioQuality.reduction)).toFixed(2)+' / '+AudioQuality.maxReductionDb.toFixed(2)+' dB'],['Guard recent activity',AudioQuality.recent?(100*AudioQuality.recent.activeFrames/AudioQuality.recent.frames).toFixed(2)+'% frames':'Not available'],['Recent output sample peak',AudioQuality.recent?decibels(AudioQuality.recent.outputPeak).toFixed(2)+' dBFS':'Not available'],['Hardware / Bluetooth codec','Managed by Chrome / Android; not exposed']];
+  const rows=[['Source',t?(t.source+' · '+(t.codec||t.ext||'Unknown').toUpperCase()):'No track'],['Source bitrate',t?.size&&t?.dur?'~'+Math.round(t.size*8/t.dur/1000)+' kbps (file average)':'Not reported'],['Source rate (metadata)',t?.sr?t.sr+' Hz':'Not reported'],['Processing',c?c.sampleRate+' Hz · floating point':'Not started'],['Mode',AudioQuality.transparent()?'Transparent · effects bypassed · speed 1.0':'Custom / headphone EQ'],['Normalization',l.reason+(l.reference!=null?' · '+l.reference:'' )],['Normalization gain',l.normalizationDb.toFixed(2)+' dB'],['User preamp / volume',l.userPreampDb.toFixed(2)+' / '+l.volumeDb.toFixed(2)+' dB'],['EQ provenance',SET.eqProvenance||'Saved preset; measurement source not reported'],['EQ headroom',l.eqHeadroomDb.toFixed(2)+' dB'+(AudioQuality.distributedHeadroom?' · distributed across extreme cascade':' · response estimate')],['Fixed protective gain',l.protectiveDb.toFixed(2)+' dB'+(!l.peakKnown?' · unknown peak; +3 dBTP assumption':'' )],['Overlap reserve',l.overlapDb.toFixed(2)+' dB'],['Analysis',a?.sha256===t?.sha256?a.decoder+' · '+a.method:'Unknown / stale'],['Measured source true peak',l.peakKnown?l.peakDb.toFixed(2)+' dBTP':'Unknown'],['Preparation peak reserve',l.peakMeasurementReserveDb.toFixed(2)+' dB'],['Source peak used for fixed gain',l.peakBoundDb.toFixed(2)+' dB'+(!l.peakKnown?' · assumption':' · measurement plus reserve')],['Protection',AudioQuality.protected()?AudioQuality.limiter:'User disabled'],['Guard recent / max reduction',(-decibels(AudioQuality.reduction)).toFixed(2)+' / '+AudioQuality.maxReductionDb.toFixed(2)+' dB'],['Guard recent activity',AudioQuality.recent?(100*AudioQuality.recent.activeFrames/AudioQuality.recent.frames).toFixed(2)+'% frames':'Not available'],['Recent output sample peak',AudioQuality.recent?decibels(AudioQuality.recent.outputPeak).toFixed(2)+' dBFS':'Not available'],['Hardware / Bluetooth codec','Managed by Chrome / Android; not exposed']];
   dialog('Audio Info','<div class="audio-info">'+rows.map(([k,v])=>'<div>'+esc(k)+'</div><strong>'+esc(v)+'</strong>').join('')+'</div>',[{label:'Close'}]);
 }
 audioInfo=qualityInfo;
