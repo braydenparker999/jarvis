@@ -3323,10 +3323,11 @@ const UI = {
     const pct = dur>0 ? clamp(cur/dur*100,0,100) : 0;
     if(!UI.seekDragging){
       paintSeekFraction(pct/100);
+      $('#mini-fill').style.width=pct+'%';
+      $('#mini-seek').style.setProperty('--mini-progress',String(pct/100));
+      $('#mini-seek').setAttribute('aria-valuenow',String(Math.round(cur||0)));$('#mini-seek').setAttribute('aria-valuetext',fmtTime(cur)+' of '+fmtTime(dur));
     }
-    $('#mini-fill').style.width=pct+'%';
-    $('#mini-seek').style.setProperty('--mini-progress',String(pct/100));
-    $('#mini-seek').setAttribute('aria-valuemax',String(Math.round(dur||0)));$('#mini-seek').setAttribute('aria-valuenow',String(Math.round(cur||0)));$('#mini-seek').setAttribute('aria-valuetext',fmtTime(cur)+' of '+fmtTime(dur));
+    $('#mini-seek').setAttribute('aria-valuemax',String(Math.round(dur||0)));
     if(!UI.seekDragging)$('#t-cur').textContent=fmtTime(cur);
     $('#t-dur').textContent=fmtTime(dur);
   },
@@ -5785,7 +5786,7 @@ function setupSeekGestures(){
   const miniSeek=$('#mini-seek'),miniFill=$('#mini-fill'),mini=$('#mini');let miniDrag=null;
   const blockMiniClick=InputLifecycle.clickGuard(miniSeek);
   const miniFraction=x=>{const r=miniSeek.getBoundingClientRect();return clamp((x-r.left)/(r.width||1),0,1);};
-  const paintMini=x=>{const fraction=miniFraction(x);miniFill.style.width=(fraction*100)+'%';miniSeek.style.setProperty('--mini-progress',String(fraction));miniSeek.setAttribute('aria-valuenow',String(Math.round(fraction*Engine.duration())));return fraction;};
+  const paintMini=x=>{const fraction=miniFraction(x);miniFill.style.width=(fraction*100)+'%';miniSeek.style.setProperty('--mini-progress',String(fraction));miniSeek.setAttribute('aria-valuenow',String(Math.round(fraction*Engine.duration())));miniSeek.setAttribute('aria-valuetext',fmtTime(fraction*Engine.duration())+' of '+fmtTime(Engine.duration()));return fraction;};
   const endMini=(e,cancel=false)=>{
     if(!miniDrag||miniDrag.pointer!==e.pointerId)return;
     const state=miniDrag;miniDrag=null;UI.seekDragging=false;document.body.classList.remove('scrubbing');

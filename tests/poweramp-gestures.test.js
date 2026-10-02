@@ -121,6 +121,13 @@ test('mini seek cancels after backgrounding or a song change and supports keyboa
  for(const mode of ['background','changed']){const h=seek(),n=h.nodes.get('#mini-seek');n.fire('pointerdown');if(mode==='background')h.win.fire('blur');else h.Engine.current={id:'new'};n.fire('pointerup',{clientX:393});assert.deepEqual(h.calls,[]);assert.equal(h.context.UI.seekDragging,false);}
  const h=seek();h.nodes.get('#mini-seek').fire('keydown',{key:'ArrowRight'});assert.deepEqual(h.calls,[['seek',25]]);
 });
+test('playback progress does not overwrite a mini seek preview while the finger owns it',()=>{
+ const h=seek(),n=h.nodes.get('#mini-seek'),fill=h.nodes.get('#mini-fill');
+ const start=source.indexOf('  renderProgress:function('),end=source.indexOf('  lastProg:',start);
+ vm.runInContext('UI.renderProgress='+source.slice(start+'  renderProgress:'.length,end).trim().replace(/,$/,'')+';',h.context);
+ n.fire('pointerdown',{clientX:196.5});h.context.UI.renderProgress();assert.equal(fill.style.width,'50%');assert.equal(n.attrs['aria-valuenow'],'50');assert.equal(n.attrs['aria-valuetext'],'50 of 100');
+ n.fire('pointercancel');assert.equal(fill.style.width,'20%');assert.equal(n.attrs['aria-valuenow'],'20');
+});
 test('track menus open immediately and late artwork cannot reopen or overwrite a newer menu',async()=>{
  const h=harness(),resolvers=new Map(),heads=[],arts=[];
  h.context.getArtURL=t=>new Promise(resolve=>resolvers.set(t.id,resolve));h.context.esc=String;h.context.icoHTML=()=>'';
