@@ -23,15 +23,37 @@ test('complete albums share normalization and protective gain; partial albums us
   const album={id:'album-1',complete:true,members:[{sha256:sha,size}],integratedLufs:-10,truePeakDbtp:4};
   const t={sha256:sha,size,audioAnalysis:{...analysis,album}};
   const s={...settings,rgEnabled:true,rgSource:'album'};
-  const l=gainLedger(t,s);assert.equal(l.normalizationDb,-6);assert.equal(l.peakDb,4);assert.equal(l.protectiveDb,-1);
+  const l=gainLedger(t,s);assert.equal(l.normalizationDb,-6);assert.equal(l.peakDb,4);assert.equal(l.protectiveDb,-1.25);
   const u=gainLedger({...t,audioAnalysis:{...analysis,album:{...album,complete:false}}},s);assert.equal(u.normalizationDb,0);assert.equal(u.peakKnown,false);
 });
 test('protective gain accounts for volume before guard and never adds OpusHead twice',()=>{
   const t={sha256:sha,size,audioAnalysis:analysis};
-  assert.equal(gainLedger(t,settings).protectiveDb,-6);
+  assert.equal(gainLedger(t,settings).protectiveDb,-6.25);
   assert.equal(gainLedger(t,{...settings,volume:.5}).protectiveDb,0);
   const q=gainLedger(t,{...settings,audioMode:'custom',eqEnabled:true,preamp:4},{headroom:-9,effectPeakDb:4});
-  assert.equal(q.protectiveDb,-5);assert.ok(Number.isFinite(gainLedger(t,{...settings,volume:NaN}).finalGain));
+  assert.equal(q.protectiveDb,-5.25);assert.ok(Number.isFinite(gainLedger(t,{...settings,volume:NaN}).finalGain));
+});
+test('fixed gain reserves measurement precision and honors a higher exact sample peak',()=>{
+  const t={sha256:sha,size,audioAnalysis:{...analysis,samplePeakDbfs:3.04,truePeakDbtp:3}};
+  const l=gainLedger(t,settings);
+  assert.equal(l.peakDb,3);assert.equal(l.peakBoundDb,3.29);assert.equal(l.protectiveDb,-6.29);
+  assert.equal(l.peakMeasurementReserveDb,.25);
+  const unknown=gainLedger({},settings);assert.equal(unknown.peakBoundDb,3);assert.equal(unknown.peakMeasurementReserveDb,0);
+});
+test('extreme cascades allocate finite headroom per section even with automatic headroom disabled',()=>{
+  for(const type of ['peaking','lowshelf','highshelf']){
+    const c=DSP.coeff(type,997,15,12,48000),filters=Array.from({length:32},()=>c);
+    const a=DSP.cascadePlan(filters,15,48000),b=DSP.cascadePlan(filters,15,48000,false);
+    assert.equal(a.distributed,true);assert.deepEqual(a,b);assert.ok(a.headroomDb<=a.estimate+.001);
+    assert.ok(a.filters.every(x=>x.every(Number.isFinite)));
+  }
+  const ordinary=[DSP.coeff('peaking',997,5,1,48000)];
+  const a=DSP.cascadePlan(ordinary,0,48000);assert.equal(a.distributed,false);assert.equal(a.headroomDb,a.estimate);
+  assert.equal(DSP.cascadePlan(ordinary,0,48000,false).headroomDb,0);
+  const quiet=DSP.cascadePlan(ordinary,-15,48000);
+  assert.equal(quiet.headroomDb,0);assert.ok(Math.abs(quiet.responsePeakDb-5)<.001);
+  const l=gainLedger({sha256:sha,size,audioAnalysis:analysis},{...settings,audioMode:'custom',eqEnabled:true,preamp:-15},{headroom:quiet.headroomDb,effectPeakDb:quiet.responsePeakDb});
+  assert.equal(l.protectiveDb,0);
 });
 test('guard idle output is exact delayed float identity; reset discards all state',()=>{
   const g=new TruePeakGuard(48000),x=Float32Array.from({length:2000},(_,i)=>.05*Math.sin(i*.7));

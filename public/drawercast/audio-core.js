@@ -3,10 +3,14 @@ import {analysisForTrack} from './audio-analysis.js';
 // windowed-sinc, linked-stereo lookahead guard. No integer quantization.
 export const finite=(v,f=0)=>Number.isFinite(v)?v:f;
 export const bound=(v,lo,hi,f=lo)=>Math.max(lo,Math.min(hi,finite(v,f)));
-export const linear=db=>10**(bound(db,-180,60,0)/20);
+export const linear=db=>10**(bound(db,-1200,60,0)/20);
 export const decibels=x=>x>0?20*Math.log10(x):-180;
 export const GUARD_CEILING_DB=-1;
 export const GUARD_MARGIN_DB=2;
+// This is an explicit preparation allowance, not another true-peak reading.
+// FFmpeg's summary rounds to 0.1 dB; decoder/SRC and detector differences also
+// need room if fixed gain is to keep the guard idle on measured originals.
+export const MEASURED_PEAK_RESERVE_DB=.25;
 export const DSP={
   coeff(type,freq,gain,q,sr){
     if(!Number.isFinite(sr)||sr<8000||sr>384000)throw Error('Invalid processing rate');
@@ -30,13 +34,13 @@ export const DSP={
     const w=2*Math.PI*f/sr,c=Math.cos(w),s=Math.sin(w),c2=Math.cos(2*w),s2=Math.sin(2*w);
     return 10*Math.log10(Math.max(1e-30,((a[0]+a[1]*c+a[2]*c2)**2+(a[1]*s+a[2]*s2)**2)/Math.max(1e-30,(1+a[4]*c+a[5]*c2)**2+(a[4]*s+a[5]*s2)**2)));
   },
-  headroom(filters,preamp,sr){
-    if(!filters.length)return -Math.max(0,finite(preamp));
+  responsePeak(filters,sr){
+    if(!filters.length)return 0;
     // Locate all sampled maxima, then refine each in log frequency. This
     // estimates steady-state response; the final guard covers transients.
-    const at=x=>finite(preamp)+filters.reduce((v,c)=>v+DSP.db(c,Math.exp(x),sr),0);
+    const at=x=>filters.reduce((v,c)=>v+DSP.db(c,Math.exp(x),sr),0);
     const lo=Math.log(10),hi=Math.log(sr*.499),step=(hi-lo)/2048;
-    let peak=Math.max(0,at(lo),at(hi)),a=at(lo),b=at(lo+step);
+    let peak=Math.max(at(lo),at(hi)),a=at(lo),b=at(lo+step);
     for(let i=2;i<=2048;i++){
       const x=lo+i*step,d=at(x);peak=Math.max(peak,b);
       if(b>=a&&b>=d){let l=x-2*step,r=x;
@@ -44,7 +48,25 @@ export const DSP={
         peak=Math.max(peak,at((l+r)/2));
       }a=b;b=d;
     }
+    return peak;
+  },
+  headroom(filters,preamp,sr){
+    if(!filters.length)return -Math.max(0,finite(preamp));
+    const peak=DSP.responsePeak(filters,sr)+finite(preamp);
     return peak>.01?-peak-.5:0;
+  },
+  cascadePlan(filters,preamp,sr,auto=true){
+    const responsePeakDb=DSP.responsePeak(filters,sr),peak=responsePeakDb+finite(preamp);
+    const estimate=filters.length?(peak>.01?-peak-.5:0):-Math.max(0,finite(preamp));
+    // Ordinary presets retain their existing graph and constant gain. An
+    // extreme cascade needs distributed attenuation: a tiny input GainNode
+    // can underflow before hundreds of dB of later boost, or those boosts can
+    // overflow before the final protective gain when auto headroom is off.
+    if(estimate>=-120)return {filters,inputDb:auto?estimate:0,headroomDb:auto?estimate:0,estimate,responsePeakDb,distributed:false};
+    const stages=filters.map(c=>Math.max(0,-DSP.headroom([c],0,sr)-.5));
+    const inputDb=-Math.max(0,finite(preamp))-.5;
+    return {filters:filters.map((c,i)=>{const g=linear(-stages[i]);return [c[0]*g,c[1]*g,c[2]*g,...c.slice(3)];}),
+      inputDb,headroomDb:inputDb-stages.reduce((a,b)=>a+b,0),estimate,responsePeakDb,distributed:true};
   }
 };
 export function normalization(track,settings){
@@ -79,12 +101,16 @@ export function gainLedger(track,settings,{headroom=0,effectPeakDb=0,overlapDb=0
   // Unknown peak is an explicit +3 dBTP working assumption, never a bound
   // on all possible files. Protection remains enabled for unknown audio.
   const peakDb=Number.isFinite(peak)?peak:3;
+  const peakMeasurementReserveDb=Number.isFinite(peak)?MEASURED_PEAK_RESERVE_DB:0;
+  // Exact float sample peaks sometimes exceed the rounded true-peak summary.
+  // Album mode uses the SAME common peak/reserve for every member.
+  const peakBoundDb=(Number.isFinite(peak)&&!album?Math.max(peak,a.samplePeakDbfs):peakDb)+peakMeasurementReserveDb;
   const effectiveCeiling=GUARD_CEILING_DB-GUARD_MARGIN_DB-(degraded?6:0);
   const eqHeadroomDb=transparent?0:Math.min(0,finite(headroom));
-  const expected=peakDb+norm.db+userPreampDb+eqHeadroomDb+finite(effectPeakDb)+finite(overlapDb)+volumeDb;
+  const expected=peakBoundDb+norm.db+userPreampDb+eqHeadroomDb+finite(effectPeakDb)+finite(overlapDb)+volumeDb;
   const protectiveDb=Math.min(0,effectiveCeiling-expected);
   return {...norm,normalizationDb:norm.db,userPreampDb,eqHeadroomDb,volumeDb,overlapDb,protectiveDb,
-    peakDb,peakKnown:Number.isFinite(peak),ceilingDb:GUARD_CEILING_DB,detectorMarginDb:GUARD_MARGIN_DB,
+    peakDb,peakBoundDb,peakMeasurementReserveDb,peakKnown:Number.isFinite(peak),ceilingDb:GUARD_CEILING_DB,detectorMarginDb:GUARD_MARGIN_DB,
     degraded,trackGain:linear(norm.db),finalGain:linear(protectiveDb)};
 }
 export class TruePeakGuard{

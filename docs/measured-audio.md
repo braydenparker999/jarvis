@@ -16,10 +16,10 @@ they are disconnected from active audio. The only final output connection is
 flowchart LR
     A[Browser decoded media slot A] --> NA[Normalization and fades]
     B[Browser decoded media slot B] --> NB[Normalization and fades]
-    NA --> SUM[Track sum and user preamp]
+    NA --> SUM[Track sum]
     NB --> SUM
-    SUM --> HR[EQ response headroom]
-    HR --> T[Transparent bypass]
+    SUM --> T[Transparent bypass]
+    SUM --> HR[Per-curve preamp and headroom]
     HR --> EQ[Optional IIR EQ and tone]
     EQ --> FX[Reverb / stereo / balance]
     FX --> M[Squared user volume]
@@ -71,9 +71,31 @@ steady-state estimate, not a transient bound. Reverb receives an additional
 3 dB reserve. Coherent crossfade reserve is 6.0206 dB while two tracks overlap.
 The implementation uses linear fades, not an allegedly peak-safe equal-power mix.
 
-FFmpeg's summary true peaks are rounded to 0.1 dB. Tiny residual guard action
-in some full-volume fixed-gain corpus cases is retained in the evidence, rather
-than claimed to be absent. At 50% pre-guard volume, all six files had zero action.
+FFmpeg's summary true peaks are rounded to 0.1 dB. The first release retained
+tiny residual guard action on some full-volume files. The follow-up uses the
+higher of the measured sample and true peak, plus a separately reported 0.25 dB
+preparation reserve. All six full files now have zero guard reduction at 100%
+in the 48 kHz preparation/render test (`followup-peak.json`); the original
+results remain in `corpus-measurements.json`. This allowance is tested on that
+corpus, not a universal bound on every decoder/resampler. Album mode keeps one
+common album peak and reserve so relative levels stay intact. Unknown-peak
+policy is unchanged, and the guard remains enabled.
+
+Curve changes retain each outgoing branch's preamp and headroom until its fade
+ends. A new gain therefore cannot expose an old boosted filter during the fade.
+The response peak is calculated independently of user preamp; the former
+reverse calculation overstated EQ boost when a negative preamp canceled it.
+
+For exceptionally large curves requiring more than 120 dB of attenuation,
+headroom is distributed by scaling each section's numerator by its positive
+response peak, plus one common 0.5 dB margin. This prevents a tiny upstream
+float gain or an overflowing downstream cascade. It can reserve more gain
+than the composite curve requires; the ledger shows the actual total. This
+capacity protection applies even with automatic headroom off, while retaining
+that saved choice for normal presets. The requested coefficients and phase
+remain unchanged apart from the reported constant scale. Deep stopbands can
+fall below float precision. This is not a promise to reproduce arbitrarily
+large dynamic ranges. Ordinary presets keep their existing constant gain.
 
 ## Guard and numerical limits
 
@@ -183,7 +205,7 @@ only as an explicit one-time bounded backfill using the reported `lastId`.
 | EQ | Independent coefficient algebra, 108 rendered extreme cases and rapid production-graph edits; edit output peaks around −4.915 dBTP. |
 | Full pipeline | Actual R2 decode/Range/CORS, artwork, media session, two-slot transitions, real callback failure and measured non-silent recovery. Drive/local/server regression tests remain separate; no Google audio was fetched. |
 | Endurance | Final 30-minute run passed 180 actual-PCM samples, advancing clocks, alternating volume, seeks and mode edits, followed by non-silent recovery from a real callback exception. See `endurance.json`; cloud behavior does not certify the phone. |
-| Regression/release | 249 source JavaScript / 93 Python / 530 deployment tests and the exact pinned build. Live pin and rollback evidence are recorded after promotion. |
+| Regression/release | 251 source JavaScript / 93 Python / 530 deployment tests and the exact pinned build. Live pin and rollback evidence are recorded after promotion. |
 
 ## Small owner comparison protocol (hardware unverified)
 
@@ -227,3 +249,38 @@ it against that upstream release with `gcc -O2 ... ebur128.c -lm` and feed
 interleaved float PCM, channels and rate. Official EBU public vector download
 returned HTTP 403 in this environment: EBU-vector conformance was not verified.
 The existing mature meters are not claimed to be new certified implementations.
+
+## Follow-up verification
+
+`followup-peak.json` compares the first release and follow-up at 100% on the same
+six hashed originals. `followup-cascade-baseline.json` retains the reproduced
+32-band failure: peaked curves caused hundreds of dB of dynamic reduction;
+resonant shelf cascades became silent. `followup-cascade.json` uses the full
+production graph at 44.1/48/96 kHz, all three filter types, and automatic
+headroom on/off. All 18 cases produce finite, nonzero stereo output, match
+independent complex transfer algebra within 0.001 dB, and keep the guard idle.
+The relative waveform residual is below −145 dB after settling. These are
+digital graph measurements, not hardware or audibility claims.
+
+Reproduce with `node scripts/audio/cascade.mjs`; set
+`AUDIO_BASELINE_COMMIT=cebdc8d924e35480aaefc293e0a90e8e113118c3` and a separate
+`AUDIO_CASCADE_REPORT` to retain the baseline. Run
+`python scripts/audio/peak-reserve.py /path/to/hash-verified-corpus` for full-file
+protection measurements. Set `AUDIO_EXTREME_TRANSITIONS=1` and a separate
+`AUDIO_TRANSITION_PCM` when rendering rapid 32-band edits; scan that output with
+`verify-transitions.py --input ... --output ...`. Standard graph, pipeline,
+failure recovery and repository regressions are repeated for this release.
+
+The bass/treble preview now uses the actual configured shelf frequencies and
+Q instead of hard-coded 200/4000 Hz. `followup-tone-curve.json` observes the
+shipped renderer and checks 180 plotted values for nine rate/configuration
+cases against independent RBJ algebra and the active processing coefficients.
+Run `node scripts/audio/tone-curve.mjs` to reproduce.
+
+One additional bounded 100-track Actions batch was reviewed by hash, size,
+R2 object identity and the strict analysis schema before metadata-only apply.
+All 100 live records match the reviewed artifact, and all 1600 pre-apply
+audio identities remain unchanged despite concurrent uploads. Coverage is
+120 measured tracks, not the whole growing library. Twelve additional tracks
+exceeded the +3 dBTP unknown-file assumption; they now receive measured
+fixed protection. Run/artifact/digest evidence is in `followup-metadata.json`.
