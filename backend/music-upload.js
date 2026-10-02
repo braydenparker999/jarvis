@@ -1,9 +1,10 @@
+import {validateAnalysis} from '../public/drawercast/audio-analysis.js';
 import {FRONTEND_ORIGINS} from './origins.js';
 import {byteRange} from './music.js';
 import {LIBRARY_KEY,MAX_LIBRARY_BYTES,HEX,SONG_ID,metadata,identityMatches,validateLibrary,boundedBytes,readStoredLibrary,signatureMessage} from '../public/drawercast/r2-library.js';
 const AUDIO=/^\/music\/uploads\/audio\/([a-f0-9]{64})\.opus$/;
 const ART=/^\/music\/uploads\/art\/([a-f0-9]{64})\.(jpg|png)$/;
-const REGISTER='/music/uploads/register';
+const REGISTER='/music/uploads/register',ANALYSIS='/music/uploads/analysis';
 const utf8=new TextEncoder();
 const hash=async bytes=>[...new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))].map(x=>x.toString(16).padStart(2,'0')).join('');
 const raw=hex=>Uint8Array.from(hex.match(/../g),x=>parseInt(x,16));
@@ -39,12 +40,12 @@ export async function nativeMusic(request,env){
     if(upload){
       if(origin)return json({error:'Server-to-server uploads only'},403);
       const audio=AUDIO.exec(p),art=ART.exec(p);
-      if(!(audio||art||p===REGISTER))return json({error:'Not found'},404);
-      if(request.method!==(p===REGISTER?'POST':'PUT'))return json({error:'Method not allowed'},405);
+      if(!(audio||art||(p===REGISTER||p===ANALYSIS)))return json({error:'Not found'},404);
+      if(request.method!==([REGISTER,ANALYSIS].includes(p)?'POST':'PUT'))return json({error:'Method not allowed'},405);
       const auth=await signed(request,env,url);if(!auth)return json({error:'Authorized music signature required'},401);
       const max=audio?32*1024*1024:art?2*1024*1024:16384;
       if(auth.size>max)return json({error:'Upload exceeds its size limit'},413);
-      if(audio&&auth.type!=='audio/ogg'||art&&auth.type!==(art[2]==='jpg'?'image/jpeg':'image/png')||p===REGISTER&&auth.type!=='application/json')return json({error:'Unexpected content type'},415);
+      if(audio&&auth.type!=='audio/ogg'||art&&auth.type!==(art[2]==='jpg'?'image/jpeg':'image/png')||[REGISTER,ANALYSIS].includes(p)&&auth.type!=='application/json')return json({error:'Unexpected content type'},415);
       // Bound streamed bytes after signature authentication; never trust Content-Length.
       const bytes=await boundedBytes(request.body,Math.min(max,auth.size));
       if(bytes.length!==auth.size||await hash(bytes)!==auth.hash)return json({error:'Uploaded bytes do not match signed proof'},422);
@@ -58,7 +59,27 @@ export async function nativeMusic(request,env){
         if(!verifiedBlob(o,sha,bytes.length))return json({error:'Existing object conflicts with verified upload'},409);
         return json({key,sha256:sha,size:o.size,r2Identity:proof(o)});
       }
+      if(p===ANALYSIS){
+        let body;try{body=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));}catch{return json({error:'Invalid analysis registration'},422);}
+        if(!SONG_ID.test(body.id)||!HEX.test(body.sha256)||!Number.isSafeInteger(body.size)||!(body.previousAnalysisSha256===null||HEX.test(body.previousAnalysisSha256)||body.previousAnalysisSha256===undefined&&Object.hasOwn(body,'previousAnalysis')))return json({error:'Invalid analysis identity'},422);
+        let analysis;try{analysis=validateAnalysis(body.audioAnalysis,body.sha256,body.size);}catch{return json({error:'Invalid audio analysis'},422);}
+        for(let attempt=0;attempt<5;attempt++){
+          const {data,etag}=await readStoredLibrary(env.MUSIC_R2),existing=data.tracks.find(t=>t.id===body.id);
+          if(!existing||existing.sha256!==body.sha256||existing.size!==body.size||!identityMatches({size:body.r2Identity?.size,etag:body.r2Identity?.etag,uploaded:new Date(body.r2Identity?.lastModified)},existing.r2Identity))return json({error:'Analysis object identity conflict'},409);
+          const object=await env.MUSIC_R2.head(existing.audioKey);
+          if(!identityMatches(object,existing.r2Identity)||!(existing.audioKey.startsWith('native/')?verifiedBlob(object,existing.sha256,existing.size):object.customMetadata?.['source-sha256']===existing.sha256&&object.customMetadata?.['source-size']===String(existing.size)))return json({error:'Verified audio is unavailable'},409);
+          const old=existing.metadata.audioAnalysis,revision=old?await hash(utf8.encode(JSON.stringify(old))):null;
+          if(JSON.stringify(old)===JSON.stringify(analysis))return json({registered:true,analysisUpdated:false,id:existing.id,count:data.count});
+          const expected=body.previousAnalysisSha256===undefined?(body.previousAnalysis?await hash(utf8.encode(JSON.stringify(body.previousAnalysis))):null):body.previousAnalysisSha256;
+          if(revision!==expected)return json({error:'Analysis changed concurrently; review before retry'},409);
+          existing.metadata.audioAnalysis=analysis;data.generatedAt=new Date().toISOString();validateLibrary(data);
+          const text=JSON.stringify(data);if(utf8.encode(text).length>MAX_LIBRARY_BYTES)return json({error:'Music library limit reached'},413);
+          if(await env.MUSIC_R2.put(LIBRARY_KEY,text,{onlyIf:{etagMatches:etag},httpMetadata:{contentType:'application/json'}}))return json({registered:true,analysisUpdated:true,id:existing.id,count:data.count});
+        }
+        return json({error:'Library changed concurrently; retry analysis with reviewed identity'},409);
+      }
       let body,meta;try{body=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));meta=metadata(body.metadata);}catch{return json({error:'Invalid track metadata'},422);}
+      if(meta.audioAnalysis){try{meta.audioAnalysis=validateAnalysis(meta.audioAnalysis,body.sha256,body.size);}catch{return json({error:'Invalid audio analysis'},422);}}
       if(meta.dur<=0)return json({error:'A positive prepared duration is required'},422);
       if(!HEX.test(body.sha256)||!Number.isSafeInteger(body.size)||body.size<=0||typeof body.name!=='string'||body.name.length>512||/[\x00-\x1f\/\\]/.test(body.name)||!body.name.endsWith('.opus'))return json({error:'Invalid track registration'},422);
       const audioKey='native/audio/'+body.sha256+'.opus',o=await env.MUSIC_R2.head(audioKey);

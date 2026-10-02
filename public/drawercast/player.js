@@ -1,3 +1,4 @@
+import {DSP,TruePeakGuard,guardWorkletSource,normalization,gainLedger,linear,decibels,bound} from './audio-core.js';
 
 (function(){
 'use strict';
@@ -162,6 +163,7 @@ const DEFAULTS = {
   crossfade:false, crossfadeLen:4, crossfadeMode:'manual', gapless:true,
   fadeOnPause:true, fadeLen:250,
   rgEnabled:false, rgSource:'track', rgPreamp:0, rgPreampNoTag:0,
+  audioMode:'transparent', normalizationTarget:-16,
   audioFocus:'pause', duckLevel:30,
   eqMode:'graphic', eqTypes:Array(10).fill('peaking'), eqBands:10, eqEnabled:true, toneEnabled:false, limiterEnabled:true,
   eqGains:[0,0,0,0,0,0,0,0,0,0], eqFreqs:[31,62,125,250,500,1000,2000,4000,8000,16000],
@@ -198,6 +200,8 @@ try{
   const raw = localStorage.getItem('pa.settings');
   if(raw){
     const saved=JSON.parse(raw);SET=Object.assign(SET,saved);
+    // Existing installs retain their effects and normalization choices.
+    if(!saved.audioMode)SET.audioMode='custom';
     // Preserve the old DSP's endpoint shelves for an existing tuned preset.
     if(!saved.eqTypes && Array.isArray(saved.eqFreqs)){
       SET.eqMode='parametric';SET.eqTypes=saved.eqFreqs.map((_,i)=>i===0?'lowshelf':i===saved.eqFreqs.length-1?'highshelf':'peaking');
@@ -417,7 +421,7 @@ function u32le(b,o){ return (b[o]|(b[o+1]<<8)|(b[o+2]<<16)|(b[o+3]<<24))>>>0; }
 
 function applyTagKV(key,val,out){
   const k=clean(key).toUpperCase();
-  val=clean(val);
+  const rawGainValue=String(val);val=clean(val);
   if(!val) return;
   if(k==='TITLE') out.title=val;
   else if(k==='ARTIST') out.artist=val;
@@ -428,10 +432,14 @@ function applyTagKV(key,val,out){
   else if(k==='TRACKNUMBER'||k==='TRACK') out.track=parseInt(val,10)||out.track;
   else if(k==='DISCNUMBER'||k==='DISC') out.disc=parseInt(val,10)||out.disc;
   else if(k==='COMPOSER') out.composer=val;
-  else if(k==='REPLAYGAIN_TRACK_PEAK') out.rgTrackPeak=parseFloat(val);
-  else if(k==='REPLAYGAIN_ALBUM_PEAK') out.rgAlbumPeak=parseFloat(val);
-  else if(k==='REPLAYGAIN_TRACK_GAIN') out.rgTrack=parseFloat(val);
-  else if(k==='REPLAYGAIN_ALBUM_GAIN') out.rgAlbum=parseFloat(val);
+  else if(['REPLAYGAIN_TRACK_PEAK','REPLAYGAIN_ALBUM_PEAK','REPLAYGAIN_TRACK_GAIN','REPLAYGAIN_ALBUM_GAIN','R128_TRACK_GAIN','R128_ALBUM_GAIN'].includes(k)){
+    const fields={REPLAYGAIN_TRACK_PEAK:'rgTrackPeak',REPLAYGAIN_ALBUM_PEAK:'rgAlbumPeak',REPLAYGAIN_TRACK_GAIN:'rgTrack',REPLAYGAIN_ALBUM_GAIN:'rgAlbum',R128_TRACK_GAIN:'r128TrackGain',R128_ALBUM_GAIN:'r128AlbumGain'},field=fields[k];
+    out._gainSeen=out._gainSeen||{};
+    if(out._gainSeen[k]){out[field]=null;return;}out._gainSeen[k]=true;
+    const r128=k.startsWith('R128_'),peak=k.endsWith('_PEAK');
+    const pattern=r128?/^[+-]?\d{1,6}$/:peak?/^(?:\d+(?:\.\d*)?|\.\d+)$/:/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:\s*dB)?$/i;
+    const value=Number.parseFloat(val);out[field]=pattern.test(val)&&(!r128||rawGainValue===val)&&Number.isFinite(value)&&(r128?value>=-32768&&value<=32767&&val.length<=6:peak?value>0&&value<=1000:Math.abs(value)<=60)?value:null;
+  }
   else if(k==='LYRICS'||k==='UNSYNCEDLYRICS') out.lyrics=val;
   else if(k==='METADATA_BLOCK_PICTURE'){
     const bytes=b64toBytes(val);
@@ -669,6 +677,7 @@ function parseOgg(b,out,skipArt){
     const head=TDL.decode(pk.slice(0,8));
     if(head==='OpusHead'){
       out.codec='opus'; out.channels=pk[9]; out.sampleRate=48000;
+      if(pk.length>=19)out.opusHeadGainDb=new DataView(pk.buffer,pk.byteOffset,pk.byteLength).getInt16(16,true)/256;
     } else if(head==='OpusTags'){
       parseVorbisComments(pk,8,out,skipArt);
       out.codec='opus';
@@ -1517,6 +1526,9 @@ async function addFiles(files, opts){
       sr: tg.sampleRate || 0,
       ch: tg.channels || 0,
       bits: tg.bits || 0,
+      r128TrackGain:Number.isInteger(tg.r128TrackGain)?tg.r128TrackGain:null,
+      r128AlbumGain:Number.isInteger(tg.r128AlbumGain)?tg.r128AlbumGain:null,
+      opusHeadGainDb:Number.isFinite(tg.opusHeadGainDb)?tg.opusHeadGainDb:null,
       rgTrackPeak: Number.isFinite(tg.rgTrackPeak)?tg.rgTrackPeak:null,
       rgAlbumPeak: Number.isFinite(tg.rgAlbumPeak)?tg.rgAlbumPeak:null,
       rgTrack: isFinite(tg.rgTrack) ? tg.rgTrack : null,
@@ -2269,7 +2281,7 @@ const DriveSource={
     if(controller.signal.aborted)return;
     const live=LIB.map.get(t.id);if(!live||live.md5!==t.md5||live.size!==t.size)return;
     const update={driveTagVersion:1};
-    for(const key of ['title','artist','album','albumArtist','genre','composer','year','track','disc','rgTrack','rgAlbum','rgTrackPeak','rgAlbumPeak'])if(tags[key]!=null)update[key]=tags[key];
+    for(const key of ['title','artist','album','albumArtist','genre','composer','year','track','disc','rgTrack','rgAlbum','rgTrackPeak','rgAlbumPeak','r128TrackGain','r128AlbumGain','opusHeadGainDb'])if(tags[key]!=null)update[key]=tags[key];
     if(tags.sampleRate)update.sr=tags.sampleRate;if(tags.channels)update.ch=tags.channels;if(tags.codec)update.codec=tags.codec;
     if(tags.bits)update.bits=tags.bits;
     if(tags.pic?.data?.length>100&&!live.customArt){
@@ -2541,6 +2553,10 @@ const Engine = {
           g.gain.value = i===0?1:0;
           s.connect(g); g.connect(n.preamp);
           this.srcs.push(s); this.gains.push(g);
+          // Before a context exists, transport fades use element volume.
+          // Once routed, slot/master gains own volume; do not retain a muted
+          // spare element and silently lose audio at the first preload swap.
+          this.els[i].volume=1;
         }catch(e){ this.srcs.push(null); this.gains.push(null); }
       }
       this.ready=true;
@@ -6234,7 +6250,7 @@ EQ.allPresets=function(){
 EQ.applyPreset=function(p){
   if(!p||!Array.isArray(p.freqs)||!Array.isArray(p.gains))return;
   SET.eqMode=p.mode==='graphic'?'graphic':'parametric';SET.eqFreqs=p.freqs.slice(0,32);SET.eqGains=p.gains.slice(0,32);
-  SET.eqQ=(p.q||[]).slice(0,32);SET.eqTypes=(p.types||[]).slice(0,32);SET.preamp=Number(p.preamp)||0;SET.eqEnabled=true;SET.preset=p.name;
+  SET.eqQ=(p.q||[]).slice(0,32);SET.eqTypes=(p.types||[]).slice(0,32);SET.preamp=Number(p.preamp)||0;SET.eqEnabled=true;SET.preset=p.name;SET.eqProvenance=(p.source||'User')+(p.meta?' · '+p.meta:'');
   normalizeEq();saveSet();Engine.applyEQ();EQ.render();toast('Preset: '+p.name);
 };
 EQ.savePreset=function(){
@@ -6332,11 +6348,11 @@ UI.drawCurve=function(){
    browser implementation rather than Poweramp's native reverb algorithm. */
 Engine.applyReverb=function(){
   const n=this.nodes;if(!n||!n.reverbWet)return;const t=this.ctx.currentTime;
-  const mix=SET.reverbEnabled?clamp(SET.reverbMix,0,.7):0;
+  const mix=SET.reverbEnabled&&!AudioQuality.transparent()?bound(SET.reverbMix,0,.7,0):0;
   n.reverbWet.gain.setTargetAtTime(mix,t,.03);n.reverbDry.gain.setTargetAtTime(1-mix*.35,t,.03);
   n.reverbDelay.delayTime.setTargetAtTime(clamp(SET.reverbDelay,0,200)/1000,t,.03);
   n.reverbDamp.frequency.setTargetAtTime(18000*Math.pow(1/18,clamp(SET.reverbDamp,0,1)),t,.03);
-  if(!SET.reverbEnabled)return;
+  if(!SET.reverbEnabled||AudioQuality.transparent())return;
   const size=clamp(SET.reverbSize,.2,4);if(n.reverbSize===size)return;n.reverbSize=size;
   const length=Math.ceil(this.ctx.sampleRate*size),buffer=this.ctx.createBuffer(2,length,this.ctx.sampleRate);
   let seed=5323;for(let ch=0;ch<2;ch++){const a=buffer.getChannelData(ch);for(let i=0;i<length;i++){seed=(Math.imul(seed,1664525)+1013904223)>>>0;a[i]=(seed/2147483648-1)*Math.exp(-7*i/length);}}
@@ -6350,6 +6366,7 @@ applySettings=function(k){
   root.style.setProperty('--card-r',clamp(Number(SET.cardRadius)||0,0,60)+'px');
   if(k&&k.startsWith('reverb'))Engine.applyReverb();
   if(k==='eqMode'){EQ.render();Engine.applyEQ();}
+  if(['audioMode','normalizationTarget','rgEnabled','rgSource','rgPreamp','rgPreampNoTag'].includes(k)){Engine.applyEQ();Engine.applyVolume();Engine.applyReverb();Engine.applySpeed();if(Engine.current)Engine.setGain(Engine.cur,Engine.rgGain(Engine.current),100);}
   if(k==='trackView'||k==='gridColumns'||k==='albumView'){if(Nav.cur==='list')Views.render(Views.currentSpec,true);if(Nav.cur==='search')Search.run();}
   if(k==='artAspect')$$('.artcard').forEach(c=>c.style.backgroundSize=SET.artAspect==='crop'?'cover':'contain');
 };
@@ -6908,31 +6925,7 @@ const installServerBeforeRevision=DrawerCast.install;
 DrawerCast.install=function(){installServerBeforeRevision.call(DrawerCast);PAGES.root.items=PAGES.root.items.filter(it=>it.title!=='A15 Music Server');};
 
 /* Shared by the player and offline signal tests. Q is linear for every filter. */
-const AudioDSP={
-  coeff(type,freq,gain,q,sr){
-    const w=2*Math.PI*Math.max(10,Math.min(freq,sr*.49))/sr,c=Math.cos(w),s=Math.sin(w),A=Math.pow(10,gain/40),alpha=s/(2*Math.max(.1,q));
-    let b0,b1,b2,a0,a1,a2;
-    if(type==='lowshelf'||type==='highshelf'){
-      const k=2*Math.sqrt(A)*alpha,p=A+1,m=A-1;
-      if(type==='lowshelf'){b0=A*(p-m*c+k);b1=2*A*(m-p*c);b2=A*(p-m*c-k);a0=p+m*c+k;a1=-2*(m+p*c);a2=p+m*c-k;}
-      else{b0=A*(p+m*c+k);b1=-2*A*(m+p*c);b2=A*(p+m*c-k);a0=p-m*c+k;a1=2*(m-p*c);a2=p-m*c-k;}
-    }else{b0=1+alpha*A;b1=-2*c;b2=1-alpha*A;a0=1+alpha/A;a1=-2*c;a2=1-alpha/A;}
-    return [b0/a0,b1/a0,b2/a0,1,a1/a0,a2/a0];
-  },
-  db(a,f,sr){
-    const w=2*Math.PI*f/sr,c=Math.cos(w),s=Math.sin(w),c2=Math.cos(2*w),s2=Math.sin(2*w);
-    return 10*Math.log10(Math.max(1e-20,((a[0]+a[1]*c+a[2]*c2)**2+(a[1]*s+a[2]*s2)**2)/((1+a[4]*c+a[5]*c2)**2+(a[4]*s+a[5]*s2)**2)));
-  },
-  headroom(filters,preamp,sr){
-    if(!filters.length)return Math.min(0,-Math.max(0,preamp));
-    let peak=0;
-    for(let i=0;i<768;i++){
-      const f=10*Math.pow((sr*.49)/10,i/767);
-      peak=Math.max(peak,preamp+filters.reduce((d,c)=>d+AudioDSP.db(c,f,sr),0));
-    }
-    return peak>.01?-peak-.5:0;
-  }
-};
+const AudioDSP=DSP;
 /* Linked stereo sample-peak limiter. A monotonic queue finds the upcoming
    peak in O(1) amortized time. It is not advertised as a true-peak limiter. */
 class SamplePeakLimiter{
@@ -6961,62 +6954,112 @@ class SamplePeakLimiter{
 EqMath.coeff=AudioDSP.coeff;
 EqMath.db=AudioDSP.db;
 const AudioQuality={
-  headroom:0,limiter:'Browser compressor',generation:0,
+  headroom:0,effectPeakDb:0,limiter:'Degraded browser compressor',generation:0,reduction:1,maxReductionDb:0,recent:null,
+  transparent(){return SET.audioMode==='transparent';},
+  protected(){return this.transparent()||SET.limiterEnabled;},
   filters(){
+    if(this.transparent())return [];
     const sr=Engine.ctx?.sampleRate||48000,out=[];
-    if(SET.eqEnabled)SET.eqFreqs.forEach((f,i)=>{if(Math.abs(SET.eqGains[i]||0)>.00001)out.push(AudioDSP.coeff(SET.eqTypes[i]||'peaking',f,SET.eqGains[i],SET.eqQ[i]||1.4142,sr));});
-    if(SET.toneEnabled){if(SET.bass)out.push(AudioDSP.coeff('lowshelf',SET.bassFreq||100,SET.bass*15,SET.bassQ||.7071068,sr));if(SET.treble)out.push(AudioDSP.coeff('highshelf',SET.trebleFreq||10000,SET.treble*15,SET.trebleQ||.7071068,sr));}
+    if(SET.eqEnabled)SET.eqFreqs.slice(0,32).forEach((f,i)=>{const gain=bound(SET.eqGains[i],-15,15,0);if(gain)out.push(AudioDSP.coeff(SET.eqTypes[i]||'peaking',f,gain,SET.eqQ[i],sr));});
+    if(SET.toneEnabled){if(SET.bass)out.push(AudioDSP.coeff('lowshelf',SET.bassFreq||100,bound(SET.bass,-1,1,0)*15,SET.bassQ,sr));if(SET.treble)out.push(AudioDSP.coeff('highshelf',SET.trebleFreq||10000,bound(SET.treble,-1,1,0)*15,SET.trebleQ,sr));}
     return out;
   },
   attach(){
     const n=Engine.nodes,c=Engine.ctx;if(!n||n.precise)return;
     n.precise=true;n.qualityIn=c.createGain();n.qualityOut=c.createGain();n.headroom=c.createGain();
-    // Replace the old fixed-size EQ/tone chain while preserving stereo/reverb/output.
     n.preamp.disconnect();n.treble.disconnect();n.preamp.connect(n.headroom);n.headroom.connect(n.qualityIn);
     n.qualityOut.connect(n.reverbDry);n.qualityOut.connect(n.reverbDelay);
-    this.worklet(c,n);
+    // User volume precedes every protective backend. Nothing boosts after it.
+    const tail=n.pan||n.mix;tail.disconnect(n.limiter);tail.disconnect(n.bypass);
+    n.analyser.disconnect();n.master.disconnect();n.limited.disconnect();n.bypass.disconnect();
+    n.effects=c.createGain();n.transparent=c.createGain();n.protectionGain=c.createGain();
+    tail.connect(n.effects);n.effects.connect(n.master);n.headroom.connect(n.transparent);n.transparent.connect(n.master);
+    n.master.connect(n.protectionGain);n.protectionGain.connect(n.limiter);n.protectionGain.connect(n.bypass);
+    n.limited.connect(n.analyser);n.bypass.connect(n.analyser);n.analyser.connect(c.destination);
+    this.fallback(n,c);this.worklet(c,n);
   },
-  update(){
+  fallback(n,c){
+    clearInterval(n.guardWatchdog);n.guardWatchdog=null;
+    if(n.peakLimiter){try{n.protectionGain.disconnect(n.peakLimiter);n.peakLimiter.disconnect();}catch(e){}n.peakLimiter=null;
+      n.protectionGain.connect(n.limiter);n.protectionGain.connect(n.bypass);
+      n.limiter.connect(n.limited);n.limited.connect(n.analyser);n.bypass.connect(n.analyser);
+    }
+    this.limiter='Degraded browser compressor; true peak unverified';
+    const on=this.protected();n.limited.gain.value=on?1:0;n.bypass.gain.value=on?0:1;
+    // Strong extra attenuation for a known different backend, reported in ledger.
+    if(n.precise)this.refreshGain();
+  },
+  refreshGain(track=Engine.current){
+    const n=Engine.nodes,c=Engine.ctx;if(!n?.protectionGain)return;
+    const transparent=this.transparent(),peak=transparent?0:this.effectPeakDb;
+    const stereoReserve=transparent?0:decibels(1+Math.sin(Math.abs(bound(SET.balance,-1,1,0))*Math.PI/2));
+    const ledger=gainLedger(track,SET,{headroom:this.headroom,effectPeakDb:peak+stereoReserve,
+      overlapDb:Engine.xfading?6.0206:0,degraded:!n.peakLimiter&&this.protected()});
+    if(!transparent&&SET.reverbEnabled){ledger.protectiveDb-=3;ledger.finalGain=linear(ledger.protectiveDb);ledger.reverbReserveDb=3;}
+    if(Engine.xfading&&Engine._overlapTrack){
+      const outgoing=gainLedger(Engine._overlapTrack,SET,{headroom:this.headroom,effectPeakDb:peak+stereoReserve,overlapDb:6.0206,degraded:!n.peakLimiter&&this.protected()});
+      ledger.outgoingProtectiveDb=outgoing.protectiveDb;ledger.protectiveDb=Math.min(ledger.protectiveDb,outgoing.protectiveDb);ledger.finalGain=linear(ledger.protectiveDb);
+    }
+    ledger.stereoReserveDb=stereoReserve;this.ledger=ledger;const now=c.currentTime,target=ledger.finalGain,old=n.protectionGain.gain.value;
+    n.protectionGain.gain.cancelScheduledValues(now);n.protectionGain.gain.setValueAtTime(Math.min(old,target),now);
+    if(target>old)n.protectionGain.gain.setTargetAtTime(target,now+.03,.04);
+  },
+  update(force=false){
     const n=Engine.nodes,c=Engine.ctx;if(!n)return;this.attach();
     const filters=this.filters(),signature=JSON.stringify(filters),now=c.currentTime;
-    const preamp=SET.eqEnabled?SET.preamp||0:0;
-    this.headroom=SET.autoHeadroom!==false?AudioDSP.headroom(filters,preamp,c.sampleRate):0;
-    // Apply protection before fading to a newly boosted curve.
-    const targetHeadroom=Math.pow(10,this.headroom/20),oldHeadroom=n.headroom.gain.value;n.headroom.gain.cancelScheduledValues(now);n.headroom.gain.setValueAtTime(Math.min(oldHeadroom,targetHeadroom),now);if(targetHeadroom>oldHeadroom)n.headroom.gain.setTargetAtTime(targetHeadroom,now+.03,.04);
-    n.preamp.gain.setTargetAtTime(Math.pow(10,preamp/20),now,.01);
-    if(signature!==n.filterSignature){
+    const preamp=this.transparent()?0:SET.eqEnabled?bound(SET.preamp,-15,15,0):0;
+    const estimate=DSP.headroom(filters,preamp,c.sampleRate);
+    this.effectPeakDb=filters.length?Math.max(0,-estimate-.5-preamp):0;
+    this.headroom=!this.transparent()&&SET.autoHeadroom!==false?estimate:0;
+    const target=linear(this.headroom),old=n.headroom.gain.value;n.headroom.gain.cancelScheduledValues(now);n.headroom.gain.setValueAtTime(Math.min(old,target),now);if(target>old)n.headroom.gain.setTargetAtTime(target,now+.03,.04);
+    n.preamp.gain.setTargetAtTime(linear(preamp),now,.01);
+    n.transparent.gain.setTargetAtTime(this.transparent()?1:0,now,.01);n.effects.gain.setTargetAtTime(this.transparent()?0:1,now,.01);
+    this.refreshGain();
+    if(force||signature!==n.filterSignature){
       n.filterSignature=signature;const branch={input:c.createGain(),output:c.createGain(),nodes:[]};
       let tail=branch.input;for(const coeff of filters){const f=c.createIIRFilter(coeff.slice(0,3),coeff.slice(3));tail.connect(f);tail=f;branch.nodes.push(f);}
       tail.connect(branch.output);branch.output.connect(n.qualityOut);n.qualityIn.connect(branch.input);
       const old=n.qualityBranch;branch.output.gain.value=old?0:1;n.qualityBranch=branch;
-      if(old){const smooth=NativeSettings.values.dsp_border_gain!==false,seconds=smooth?.025:.003;branch.output.gain.linearRampToValueAtTime(1,now+seconds);old.output.gain.cancelScheduledValues(now);old.output.gain.setValueAtTime(old.output.gain.value,now);old.output.gain.linearRampToValueAtTime(0,now+seconds);setTimeout(()=>{try{n.qualityIn.disconnect(old.input);old.input.disconnect();old.nodes.forEach(x=>x.disconnect());old.output.disconnect();}catch(e){}},seconds*1000+50);}
+      if(old){const seconds=.025;branch.output.gain.setValueAtTime(0,now);branch.output.gain.linearRampToValueAtTime(1,now+seconds);old.output.gain.cancelScheduledValues(now);old.output.gain.setValueAtTime(old.output.gain.value,now);old.output.gain.linearRampToValueAtTime(0,now+seconds);setTimeout(()=>{try{n.qualityIn.disconnect(old.input);old.input.disconnect();old.nodes.forEach(x=>x.disconnect());old.output.disconnect();}catch(e){}},seconds*1000+50);}
     }
-    if(n.peakLimiter)n.peakLimiter.port.postMessage({enabled:SET.limiterEnabled});
-    else{n.limited.gain.setTargetAtTime(SET.limiterEnabled?1:0,now,.01);n.bypass.gain.setTargetAtTime(SET.limiterEnabled?0:1,now,.01);}
+    if(n.peakLimiter)n.peakLimiter.port.postMessage({enabled:this.protected()});
+    else{n.limited.gain.value=this.protected()?1:0;n.bypass.gain.value=this.protected()?0:1;}
     UI.drawCurve();
   },
+  reset(){const n=Engine.nodes;if(!n)return;n.peakLimiter?.port.postMessage({reset:true});
+    // Discard all filter/convolver state on a hard transport discontinuity.
+    const old=n.qualityBranch;if(old){try{n.qualityIn.disconnect(old.input);old.input.disconnect();old.nodes.forEach(x=>x.disconnect());old.output.disconnect();}catch(e){}n.qualityBranch=null;n.filterSignature=null;}
+    if(n.reverb?.buffer){n.reverb.buffer=null;n.reverbSize=0;Engine.applyReverb();}this.update(true);
+    this.reduction=1;this.maxReductionDb=0;this.recent=null;},
   async worklet(c,n){
     if(!c.audioWorklet||typeof AudioWorkletNode==='undefined')return;
-    const code=SamplePeakLimiter.toString()+`\nclass PeakProcessor extends AudioWorkletProcessor{constructor(){super();this.limiter=new SamplePeakLimiter(sampleRate);this.port.onmessage=e=>this.limiter.enabled=e.data.enabled!==false;this.frames=0;}process(inputs,outputs){const input=inputs[0],out=outputs[0];if(!out?.length)return true;for(let i=0;i<out[0].length;i++){this.limiter.tick(input?.[0]?.[i]||0,input?.[1]?.[i]??input?.[0]?.[i]??0);out[0][i]=this.limiter.outL;if(out[1])out[1][i]=this.limiter.outR;}this.frames+=out[0].length;if(this.frames>=sampleRate/4){this.port.postMessage({reduction:this.limiter.reduction});this.limiter.reduction=1;this.frames=0;}return true;}}registerProcessor('drawercast-peak',PeakProcessor);`;
-    const url=URL.createObjectURL(new Blob([code],{type:'application/javascript'}));
-    try{await c.audioWorklet.addModule(url);if(Engine.ctx!==c)return;
-      const node=new AudioWorkletNode(c,'drawercast-peak',{numberOfInputs:1,numberOfOutputs:1,outputChannelCount:[2]});
-      node.port.postMessage({enabled:SET.limiterEnabled});node.port.onmessage=e=>this.reduction=e.data.reduction;
-      const tail=n.pan||n.mix;tail.disconnect(n.limiter);tail.disconnect(n.bypass);n.limiter.disconnect();n.limited.disconnect();n.bypass.disconnect();tail.connect(node);node.connect(n.analyser);
-      n.peakLimiter=node;this.limiter='6 ms lookahead sample-peak';
-    }catch(e){this.limiter='Browser compressor (worklet unavailable)';}finally{URL.revokeObjectURL(url);}
+    const url=URL.createObjectURL(new Blob([guardWorkletSource()],{type:'application/javascript'}));
+    try{await c.audioWorklet.addModule(url);if(Engine.ctx!==c||Engine.nodes!==n)return;
+      const node=new AudioWorkletNode(c,'jarvis-true-peak',{numberOfInputs:1,numberOfOutputs:1,outputChannelCount:[2]});
+      let heartbeat=performance.now();
+      node.port.postMessage({enabled:this.protected()});node.port.onmessage=e=>{heartbeat=performance.now();this.recent=e.data;this.reduction=e.data.reduction;this.maxReductionDb=Math.max(this.maxReductionDb,-decibels(this.reduction));};
+      node.addEventListener('processorerror',()=>{if(Engine.nodes===n&&n.peakLimiter===node){this.fallback(n,c);toast('Audio protection switched to the degraded browser compressor');}});
+      n.protectionGain.disconnect(n.limiter);n.protectionGain.disconnect(n.bypass);n.limiter.disconnect();n.limited.disconnect();n.bypass.disconnect();
+      n.protectionGain.connect(node);node.connect(n.analyser);n.peakLimiter=node;this.limiter='4× FIR true-peak guard · 6 ms lookahead + 64 samples · 2 dB detector margin';this.refreshGain();
+      // Some Chromium runtimes stop the processor without delivering its error
+      // event. The existing 4 Hz telemetry is also a rendering heartbeat.
+      n.guardWatchdog=setInterval(()=>{
+        if(Engine.ctx!==c||Engine.nodes!==n||n.peakLimiter!==node){clearInterval(n.guardWatchdog);n.guardWatchdog=null;return;}
+        const now=performance.now();if(c.state!=='running'||!Engine.playing){heartbeat=now;return;}
+        if(now-heartbeat>3000){this.fallback(n,c);toast('Audio protection stopped responding; using the degraded browser compressor');}
+      },500);
+    }catch(e){this.workletFailure=e.name+': '+e.message;this.fallback(n,c);}finally{URL.revokeObjectURL(url);}
   }
 };
 Engine.applyEQ=function(){if(this.nodes)AudioQuality.update();};
-Engine.rgGain=function(t){
-  if(!SET.rgEnabled||!t)return 1;
-  const album=SET.rgSource==='album',db=album?(t.rgAlbum??t.rgTrack):(t.rgTrack??t.rgAlbum);
-  let gain=Math.pow(10,((db==null?SET.rgPreampNoTag:db+SET.rgPreamp)||0)/20);
-  if(NativeSettings.values.rg_type===2){const peak=album?(t.rgAlbumPeak??t.rgTrackPeak):(t.rgTrackPeak??t.rgAlbumPeak);if(Number.isFinite(peak)&&peak>0)gain=Math.min(gain,1/peak);}
-  return clamp(gain,.001,32);
-};
+Engine.rgGain=function(t){AudioQuality.refreshGain(t);return normalization(t,SET).db===0?1:linear(normalization(t,SET).db);};
+const volumeBeforeQuality=Engine.applyVolume;
+Engine.applyVolume=function(){volumeBeforeQuality.call(this);if(AudioQuality.transparent()&&this.nodes){if(this.nodes.pan)this.nodes.pan.pan.value=0;this.nodes.stereoGain.gain.value=1;if(this.nodes.monoGain)this.nodes.monoGain.gain.value=0;}AudioQuality.refreshGain();};
+const speedBeforeQuality=Engine.applySpeed;
+Engine.applySpeed=function(){if(AudioQuality.transparent()){this.els.forEach(a=>{a.playbackRate=1;a.preservesPitch=true;});}else speedBeforeQuality.call(this);};
 function qualityInfo(){
-  const t=Engine.current,c=Engine.ctx,rows=[['Source',t?(t.codec||t.ext||'Unknown').toUpperCase():'No track'],['Source bitrate',t?.bitrate?t.bitrate+' kbps':t?.size&&t?.dur?'~'+Math.round(t.size*8/t.dur/1000)+' kbps (file average)':'Not reported'],['Source rate',t?.sr?t.sr+' Hz':'Not reported'],['Source bit depth',t?.bits&&!['opus','ogg','oga','mp3','aac','m4a','vorbis'].includes(t.codec||t.ext)?t.bits+' bit':'Not applicable / not reported'],['Processing',c?c.sampleRate+' Hz · floating point':'Not started'],['EQ',SET.eqEnabled?SET.eqFreqs.length+' bands · adjustable shelf Q':'Off'],['EQ headroom',AudioQuality.headroom.toFixed(1)+' dB'],['Limiter',SET.limiterEnabled?AudioQuality.limiter:'Off'],['ReplayGain',SET.rgEnabled?SET.rgSource:'Off'],['Output device','Managed by Chrome and the operating system']];
+  const t=Engine.current,c=Engine.ctx,l=AudioQuality.ledger||gainLedger(t,SET),a=t?.audioAnalysis;
+  const rows=[['Source',t?(t.source+' · '+(t.codec||t.ext||'Unknown').toUpperCase()):'No track'],['Source bitrate',t?.size&&t?.dur?'~'+Math.round(t.size*8/t.dur/1000)+' kbps (file average)':'Not reported'],['Source rate (metadata)',t?.sr?t.sr+' Hz':'Not reported'],['Processing',c?c.sampleRate+' Hz · floating point':'Not started'],['Mode',AudioQuality.transparent()?'Transparent · effects bypassed · speed 1.0':'Custom / headphone EQ'],['Normalization',l.reason+(l.reference!=null?' · '+l.reference:'' )],['Normalization gain',l.normalizationDb.toFixed(2)+' dB'],['User preamp / volume',l.userPreampDb.toFixed(2)+' / '+l.volumeDb.toFixed(2)+' dB'],['EQ provenance',SET.eqProvenance||'Saved preset; measurement source not reported'],['EQ headroom (response estimate)',l.eqHeadroomDb.toFixed(2)+' dB'],['Fixed protective gain',l.protectiveDb.toFixed(2)+' dB'+(!l.peakKnown?' · unknown peak; +3 dBTP assumption':'' )],['Overlap reserve',l.overlapDb.toFixed(2)+' dB'],['Analysis',a?.sha256===t?.sha256?a.decoder+' · '+a.method:'Unknown / stale'],['Measured source true peak',l.peakKnown?l.peakDb.toFixed(2)+' dBTP':'Unknown'],['Protection',AudioQuality.protected()?AudioQuality.limiter:'User disabled'],['Guard recent / max reduction',(-decibels(AudioQuality.reduction)).toFixed(2)+' / '+AudioQuality.maxReductionDb.toFixed(2)+' dB'],['Guard recent activity',AudioQuality.recent?(100*AudioQuality.recent.activeFrames/AudioQuality.recent.frames).toFixed(2)+'% frames':'Not available'],['Recent output sample peak',AudioQuality.recent?decibels(AudioQuality.recent.outputPeak).toFixed(2)+' dBFS':'Not available'],['Hardware / Bluetooth codec','Managed by Chrome / Android; not exposed']];
   dialog('Audio Info','<div class="audio-info">'+rows.map(([k,v])=>'<div>'+esc(k)+'</div><strong>'+esc(v)+'</strong>').join('')+'</div>',[{label:'Close'}]);
 }
 audioInfo=qualityInfo;
@@ -7297,6 +7340,8 @@ function proSkip(direction){
 }
 
 function setupRework(){
+  PAGES.equalizer.items.unshift(S_note('Transparent bypasses effects and speed changes while retaining your saved curve. Protection activity is shown in Audio Info.'),S_seg('audioMode','Playback mode',[['transparent','Transparent'],['custom','Custom / headphone EQ']]));
+  PAGES.rg.items.unshift(S_note('Normalization is independent of playback mode. Complete album analysis preserves relative levels; missing album data stays unnormalized. Track target is optional.'),S_sl('normalizationTarget','Measured / R128 target',-23,-14,1,v=>v+' LUFS',['-23','-14']));
   PAGES.peq_equ_tone.items=[option('knob','_bassFreq','Bass Frequency',{min:20,max:1000,step:1,default:100,format:'%d Hz'}),option('knob','_bassQ','Bass Q',{min:.1,max:12,step:.01,default:.7071068,format:'%.2f'}),option('knob','_trebleFreq','Treble Frequency',{min:1000,max:20000,step:10,default:10000,format:'%d Hz'}),option('knob','_trebleQ','Treble Q',{min:.1,max:12,step:.01,default:.7071068,format:'%.2f'}),option('action','restore_defaults','Restore Defaults')];
   PAGES.equalizer.items.splice(1,0,option('switch','auto_headroom','Automatic Headroom',{desc:'Lower the level before boosted EQ bands to leave room for peaks.',default:true}));
   for(const it of PAGES.root.items)if(it.page&&ReferenceIcons['settings-'+it.page])it.icon='settings-'+it.page;
@@ -7305,7 +7350,7 @@ function setupRework(){
   $('#art-more').oncontextmenu=e=>{e.preventDefault();const value=nativeValues().menu_button_long_press,choice=PAGES.player.items.find(i=>i.key==='menu_button_long_press')?.options.find(i=>i[0]===value);if(!choice||!value||!Engine.current)return;const name=choice[1]==='Add to Playlist'?'Playlist':choice[1];trackAction(name,Engine.current,Engine.queue,Engine.pos);};
   const meta=UI.renderMeta;UI.renderMeta=function(){meta.call(this);const t=Engine.current;if(t)$('#outinfo-txt').textContent=[t.sr?(t.sr/1000)+' KHZ':'',t.dur&&t.size?Math.round(t.size*8/t.dur/1000)+' KBPS':'',(t.codec||t.ext||'').toUpperCase()].filter(Boolean).join(' · ');};
   const play=UI.renderNowPlaying;UI.renderNowPlaying=async function(t){await play.call(UI,t);if(Engine.current?.id===t?.id){measurePlayerLabels();Waveform.load(t);}};
-  const sync=EQ.sync;EQ.sync=function(){sync.call(this);const v=nativeValues();if(v.eq_labels===2){$$('#bands [data-gain-label]').forEach(b=>b.textContent=Math.round((Math.pow(10,SET.eqGains[+b.dataset.gainLabel]/20)-1)*100)+'%');if($('#pv'))$('#pv').textContent=Math.round((Math.pow(10,SET.preamp/20)-1)*100)+'%';}if(v.tone_labels===1){$('#bass-v').textContent=(SET.bass*15).toFixed(1)+' dB';$('#treble-v').textContent=(SET.treble*15).toFixed(1)+' dB';}};
+  const sync=EQ.sync;EQ.sync=function(){sync.call(this);if(AudioQuality.transparent())$('#eqstat').textContent='Transparent · effects bypassed';const v=nativeValues();if(v.eq_labels===2){$$('#bands [data-gain-label]').forEach(b=>b.textContent=Math.round((Math.pow(10,SET.eqGains[+b.dataset.gainLabel]/20)-1)*100)+'%');if($('#pv'))$('#pv').textContent=Math.round((Math.pow(10,SET.preamp/20)-1)*100)+'%';}if(v.tone_labels===1){$('#bass-v').textContent=(SET.bass*15).toFixed(1)+' dB';$('#treble-v').textContent=(SET.treble*15).toFixed(1)+' dB';}};
   const item=PAGES.skin.items.find(i=>i.key==='skin_seekbar');if(item)item.desc='Waveform scrolls beneath a fixed center marker. Drag left to seek forward, right to go back. Static mode shows the whole track.';
   const nav=Nav.go;Nav.go=function(...args){nav.apply(Nav,args);NativeSettings.apply();wakeLock(SET.keepScreenOn||Nav.cur==='lyrics'&&nativeValues().lyrics_keep_screen);};
   window.addEventListener('pagehide',()=>Engine.checkpoint());
@@ -7356,7 +7401,7 @@ const PlaybackQueue={
 
 };
 const PlaybackTransitions={token:0,finish:null,pending:false,
-  cancel(pauseOther=true,keepPreload=null){this.token++;clearTimeout(this.finish);this.finish=null;this.pending=false;Engine.xfading=false;if(pauseOther&&Engine.els.length===2){if(keepPreload&&Engine.preloadId===keepPreload)Engine.other().pause();else Engine.releaseSlot(1-Engine.cur);Engine.setGain(1-Engine.cur,0,0);}},
+  cancel(pauseOther=true,keepPreload=null){this.token++;clearTimeout(this.finish);this.finish=null;this.pending=false;Engine.xfading=false;Engine._overlapTrack=null;AudioQuality.refreshGain();if(pauseOther&&Engine.els.length===2){if(keepPreload&&Engine.preloadId===keepPreload)Engine.other().pause();else Engine.releaseSlot(1-Engine.cur);Engine.setGain(1-Engine.cur,0,0);}},
   async to(index,ms){
     const track=Engine.queue[index];if(!track)return;
     this.cancel();this.pending=true;Engine._playRequest=(Engine._playRequest||0)+1;const token=this.token,old=Engine.cur,next=1-old;let file;try{file=await getFileFor(track);}catch(e){if(token===this.token){this.pending=false;toast('Could not load the next track');}return;}if(token!==this.token)return;if(!file){this.pending=false;return;}
@@ -7364,10 +7409,10 @@ const PlaybackTransitions={token:0,finish:null,pending:false,
     Engine.setGain(next,0,0);audio.src=url;audio.currentTime=0;Engine.applySpeed();
     try{await audio.play();}catch(e){if(token===this.token){this.pending=false;audio.pause();toast('Could not start the next track');}return;}
     if(token!==this.token){if(audio.src===url&&Engine.cur!==next)audio.pause();return;}
-    this.pending=false;Engine.preloadId=null;Engine.xfading=true;Engine.cur=next;Engine.current=track;Engine.pos=Math.max(0,Engine.order.indexOf(index));Engine.dur=track.dur||0;Engine.playing=true;
+    this.pending=false;Engine.preloadId=null;Engine.xfading=true;Engine._overlapTrack=Engine.current;Engine.cur=next;Engine.current=track;Engine.pos=Math.max(0,Engine.order.indexOf(index));Engine.dur=track.dur||0;Engine.playing=true;
     Engine.setGain(old,0,ms);Engine.setGain(next,Engine.rgGain(track),ms);
     UI.renderNowPlaying(track);UI.renderPlayState();Engine.updateMediaSession();Engine.listened=0;Engine.listenedLast=0;Engine.counted=false;UI.startLoop();
-    this.finish=setTimeout(()=>{if(token!==this.token)return;Engine.releaseSlot(old);Engine.setGain(old,0,0);Engine.xfading=false;Engine.saveState();},ms+30);
+    this.finish=setTimeout(()=>{if(token!==this.token)return;Engine.releaseSlot(old);Engine.setGain(old,0,0);Engine.xfading=false;Engine._overlapTrack=null;AudioQuality.refreshGain();Engine.saveState();},ms+30);
     if(oldURL?.startsWith('blob:'))URL.revokeObjectURL(oldURL);
   }
 };
@@ -7391,26 +7436,29 @@ function installPlaybackRework(){
     // Cloud media can take seconds to become playable. Manual cloud selection
     // must update immediately, rather than leaving the old song on screen.
     const cloudSwitch=['drive','r2'].includes(t.source)||['drive','r2'].includes(outgoing?.source);
-    if(position==null&&!cloudSwitch&&autoplay!==false&&this.playing&&outgoing?.id!==t.id&&mode&&!this._autoAdvance)return PlaybackTransitions.to(index,mode===1?nativeValues().fade_short_xfade_ms||400:SET.crossfadeLen*1000);
-    PlaybackTransitions.cancel(true,t.id);this.listened=0;this.listenedLast=0;this.counted=false;clearTimeout(this.silenceTimer);clearTimeout(this.fadeTimer);
+    if(position==null&&!cloudSwitch&&autoplay!==false&&this.playing&&outgoing?.id!==t.id&&mode&&SET.audioMode!=='transparent'&&!this._autoAdvance)return PlaybackTransitions.to(index,mode===1?nativeValues().fade_short_xfade_ms||400:SET.crossfadeLen*1000);
+    PlaybackTransitions.cancel(true,t.id);if(!this._autoAdvance)AudioQuality.reset();this.listened=0;this.listenedLast=0;this.counted=false;clearTimeout(this.silenceTimer);clearTimeout(this.fadeTimer);
     if(position==null&&nativeValues().restore_pos&&t.resumeAt>0&&t.resumeAt<(t.dur||0)-3&&(t.dur||0)>=(nativeValues().restore_pos_min_dur||45)*60)position=t.resumeAt;
     return playIndex.call(this,index,autoplay,position||0);
   };
   Engine.setGain=function(i,value,ms){const node=this.gains[i];if(node&&this.ctx){const now=this.ctx.currentTime;node.gain.cancelScheduledValues(now);node.gain.setValueAtTime(Math.max(0,node.gain.value),now);ms>0?node.gain.linearRampToValueAtTime(Math.max(0,value),now+ms/1000):node.gain.setValueAtTime(Math.max(0,value),now);}else if(this.els[i])this.els[i].volume=clamp(value,0,1)*SET.volume*SET.volume;};
   const pause=Engine.pause;Engine.pause=function(){this._playRequest=(this._playRequest||0)+1;this._loadingRequest=null;if(this._pendingSeek)this._pendingSeek.request=this._playRequest;PlaybackTransitions.cancel();clearTimeout(this.silenceTimer);return pause.call(this);};
   const play=Engine.play;Engine.play=function(){clearTimeout(this.fadeTimer);clearTimeout(this.silenceTimer);return play.call(this);};
-  const stop=Engine.stop;Engine.stop=function(){this._playRequest=(this._playRequest||0)+1;this._loadingRequest=null;this._pendingSeek=null;this._resumePosition=null;PlaybackTransitions.cancel();clearTimeout(this.silenceTimer);return stop.call(this);};
-  const seek=Engine.seek;Engine.seek=function(seconds){PlaybackTransitions.cancel();const result=seek.call(this,seconds);this.listenedLast=this.time();if(this.playing&&nativeValues().fade_seek){this.setGain(this.cur,0,0);this.setGain(this.cur,this.rgGain(this.current),nativeValues().fade_seek_ms||100);}return result;};
+  const stop=Engine.stop;Engine.stop=function(){AudioQuality.reset();this._playRequest=(this._playRequest||0)+1;this._loadingRequest=null;this._pendingSeek=null;this._resumePosition=null;PlaybackTransitions.cancel();clearTimeout(this.silenceTimer);return stop.call(this);};
+  const seek=Engine.seek;Engine.seek=function(seconds){PlaybackTransitions.cancel();AudioQuality.reset();const result=seek.call(this,seconds);this.listenedLast=this.time();if(this.playing&&SET.audioMode!=='transparent'&&nativeValues().fade_seek){this.setGain(this.cur,0,0);this.setGain(this.cur,this.rgGain(this.current),nativeValues().fade_seek_ms||100);}return result;};
   const next=Engine.next;
   Engine.next=function(auto){
-    if(auto&&SET.repeatMode==='one')return next.call(this,true);
-    if(PlaybackQueue.shouldStart()){PlaybackQueue.begin(false,0,!!auto||this.wantsPlayback());return;}
-    if(PlaybackQueue.active&&this.pos+1>=this.order.length){PlaybackQueue.finish(!!auto||this.wantsPlayback());return;}
-    this._autoAdvance=!!auto;try{return next.call(this,auto);}finally{this._autoAdvance=false;}
+    const previous=this._autoAdvance;this._autoAdvance=!!auto;
+    try{
+      if(auto&&SET.repeatMode==='one')return next.call(this,true);
+      if(PlaybackQueue.shouldStart()){PlaybackQueue.begin(false,0,!!auto||this.wantsPlayback());return;}
+      if(PlaybackQueue.active&&this.pos+1>=this.order.length){PlaybackQueue.finish(!!auto||this.wantsPlayback());return;}
+      return next.call(this,auto);
+    }finally{this._autoAdvance=previous;}
   };
   Engine.countPlayed=function(){if(!this.current||this.counted)return;this.counted=true;this.current.plays=(this.current.plays||0)+1;this.current.lastPlayed=Date.now();persistTrack(this.current);};
   Engine.onEnded=function(i){if(i!==this.cur||this._loadingRequest||!this.playing||this._endedRequest===this._playRequest)return;this._endedRequest=this._playRequest;if(this.current){this.current.resumeAt=0;this.countPlayed();persistTrack(this.current);}const request=this._playRequest;const advance=()=>{if(request!==this._playRequest||!this.playing)return;this.listened=0;this.counted=false;this.next(true);};const gap=nativeValues().track_end_silence_ms||0;if(gap){clearTimeout(this.silenceTimer);this.silenceTimer=setTimeout(advance,gap);}else advance();};
-  Engine.startCrossfade=function(){if(PlaybackQueue.active&&this.pos+1>=this.order.length)return;if(this.xfading||PlaybackTransitions.pending||!this.playing||PlaybackQueue.shouldStart()||SET.repeatMode==='one')return;let pos=this.pos+1;if(pos>=this.order.length){if(SET.repeatMode==='all')pos=0;else return;}return PlaybackTransitions.to(this.order[pos],Math.max(50,SET.crossfadeLen*1000));};
+  Engine.startCrossfade=function(){if(SET.audioMode==='transparent')return;if(PlaybackQueue.active&&this.pos+1>=this.order.length)return;if(this.xfading||PlaybackTransitions.pending||!this.playing||PlaybackQueue.shouldStart()||SET.repeatMode==='one')return;let pos=this.pos+1;if(pos>=this.order.length){if(SET.repeatMode==='all')pos=0;else return;}return PlaybackTransitions.to(this.order[pos],Math.max(50,SET.crossfadeLen*1000));};
   const time=Engine.onTime;Engine.onTime=function(i){
     if(i!==this.cur||this._loadingRequest)return;
     if(this.playing){const now=this.time(),delta=now-(this.listenedLast||0);if(delta>0&&delta<3*Math.max(1,SET.speed))this.listened=(this.listened||0)+delta;this.listenedLast=now;const threshold=this.duration()*(nativeValues().played_dur??14)/100;if(this.listened>=Math.max(1,threshold))this.countPlayed();}
@@ -7748,6 +7796,6 @@ if(document.readyState==='loading') document.addEventListener('DOMContentLoaded'
 else boot();
 
 /* expose a little for debugging */
-window.PA = {Selection,Visualization, AudioDSP,SamplePeakLimiter,AudioQuality,ConfigIO,BackupSQLite,AutoEqCatalog,SyncedLyrics,Waveform,PlaybackQueue,PlaybackTransitions,PlaylistFiles,proSkip, ListZoom:ListZoom, NativeSettings:NativeSettings, EqMath:EqMath, Search:Search, Sheets:Sheets, PAGES:PAGES, setupParity:setupParity, DrawerCast:DrawerCast, DriveSource,R2Source,SourceLibrary,MusicSources, setVal:setVal, DUR:DUR, queueDurations:queueDurations, applySettings:applySettings, CAP:CAP, ROOTS:ROOTS, BG:BG, TagPool:TagPool, IOSTAT:IOSTAT, linkFolder:linkFolder, rescanRoot:rescanRoot, unlinkRoot:unlinkRoot, loadRoots:loadRoots, Engine:Engine, LIB:LIB, SET:SET, UI:UI, Views:Views, Nav:Nav, Settings:Settings, EQ:EQ, Playlists:Playlists, Bookmarks:Bookmarks, addFiles:addFiles, IDB:IDB, readTags:readTags, closeSheet:closeSheet };
+window.PA = {Selection,Visualization, TruePeakGuard,gainLedger,normalization, AudioDSP,SamplePeakLimiter,AudioQuality,ConfigIO,BackupSQLite,AutoEqCatalog,SyncedLyrics,Waveform,PlaybackQueue,PlaybackTransitions,PlaylistFiles,proSkip, ListZoom:ListZoom, NativeSettings:NativeSettings, EqMath:EqMath, Search:Search, Sheets:Sheets, PAGES:PAGES, setupParity:setupParity, DrawerCast:DrawerCast, DriveSource,R2Source,SourceLibrary,MusicSources, setVal:setVal, DUR:DUR, queueDurations:queueDurations, applySettings:applySettings, CAP:CAP, ROOTS:ROOTS, BG:BG, TagPool:TagPool, IOSTAT:IOSTAT, linkFolder:linkFolder, rescanRoot:rescanRoot, unlinkRoot:unlinkRoot, loadRoots:loadRoots, Engine:Engine, LIB:LIB, SET:SET, UI:UI, Views:Views, Nav:Nav, Settings:Settings, EQ:EQ, Playlists:Playlists, Bookmarks:Bookmarks, addFiles:addFiles, IDB:IDB, readTags:readTags, closeSheet:closeSheet };
 
 })();

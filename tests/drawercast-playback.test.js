@@ -6,16 +6,26 @@ const source=await readFile(new URL('../public/drawercast/player.js',import.meta
 const block=(a,b)=>source.slice(source.indexOf(a),source.indexOf(b,source.indexOf(a)));
 function harness(){
   const revoked=[];let renders=0;
-  const context=vm.createContext({setTimeout,clearTimeout,debounce:fn=>fn,
+  const context=vm.createContext({AudioQuality:{reset(){},refreshGain(){}},setTimeout,clearTimeout,debounce:fn=>fn,
     SourceLibrary:{kind:t=>t?.source||(t?.remote?'server':'local')},R2Source:{status:''},URL:{revokeObjectURL:u=>revoked.push(u)},
     SET:{fadeOnPause:false},UI:{renderPlayState(){renders++;},renderProgress(){},startLoop(){}},toast(){}});
   const {Engine,PlaybackTransitions}=vm.runInContext(block('const Engine = {','function SET_shuffleOn()')+
     block('const PlaybackTransitions={','function installPlaybackRework()')+'\n({Engine,PlaybackTransitions})',context);
   const audio=src=>({src,preload:'auto',paused:false,loads:0,events:{},pause(){this.paused=true;},removeAttribute(){this.src='';},load(){this.loads++;},addEventListener(name,fn){this.events[name]=fn;},removeEventListener(name){delete this.events[name];},play(){return {catch:fn=>{this.reject=fn;}};}});
   Engine.els=[audio('http://music.example.test/audio/current'),audio('http://music.example.test/audio/next')];
+  const ensureCtx=Engine.ensureCtx;
   Engine.cur=0;Engine.setGain=()=>{};Engine.ensureCtx=()=>{};Engine.updateMediaSession=()=>{};Engine._playRequest=1;
-  return {Engine,PlaybackTransitions,ctx:context,revoked,renders:()=>renders};
+  return {Engine,PlaybackTransitions,ensureCtx,ctx:context,revoked,renders:()=>renders};
 }
+test('routing into Web Audio clears retained element volume while slot gains stay separate',()=>{
+  const {Engine,ensureCtx,ctx}=harness();
+  const node=()=>{const n={connect(){}};for(const k of ['gain','frequency','Q','threshold','knee','ratio','attack','release'])n[k]={value:0};return n;};
+  class AudioContext{constructor(){this.state='running';}createGain(){return node();}createBiquadFilter(){return node();}createStereoPanner(){return node();}createDynamicsCompressor(){return node();}createAnalyser(){return node();}createConvolver(){return node();}createDelay(){return node();}createChannelSplitter(){return node();}createChannelMerger(){return node();}createMediaElementSource(){return node();}}
+  ctx.window={AudioContext};ctx.FREQ_SETS={16:Array.from({length:16},(_,i)=>20*(i+1))};
+  Engine.els[0].volume=.25;Engine.els[1].volume=0;Engine.applyEQ=()=>{};Engine.applyVolume=()=>{};Engine.applyReverb=()=>{};
+  assert.ok(ensureCtx.call(Engine));assert.deepEqual(Engine.els.map(a=>a.volume),[1,1]);
+  assert.deepEqual([...Engine.gains].map(g=>g.gain.value),[1,0]);
+});
 test('cancelled transition releases spare streaming request',()=>{
   const {Engine,PlaybackTransitions}=harness();Engine.preloadId='unused';PlaybackTransitions.cancel();
   assert.equal(Engine.els[1].src,'');assert.equal(Engine.els[1].loads,1);assert.equal(Engine.preloadId,null);
@@ -40,7 +50,7 @@ for(const cloud of ['drive','r2'])test('rapid manual '+cloud+' skips select imme
   const calls=[],fades=[];
   const Engine={queue:[{id:'one',source:cloud},{id:'two',source:cloud},{id:'three',source:cloud}],current:{id:'one',source:cloud},playing:true,
     el:()=>({ended:false}),async playIndex(index){this.current=this.queue[index];calls.push(index);}};
-  const ctx=vm.createContext({sourceTrackEnabled:t=>!!t,Engine,PlaybackTransitions:{cancel(){},to(index){fades.push(index);return new Promise(()=>{});}},
+  const ctx=vm.createContext({AudioQuality:{reset(){},refreshGain(){}},sourceTrackEnabled:t=>!!t,Engine,PlaybackTransitions:{cancel(){},to(index){fades.push(index);return new Promise(()=>{});}},
     nativeValues:()=>({fade_manual_advance:1}),clearTimeout,SET:{crossfadeLen:2}});
   const wrapper=source.slice(source.indexOf('  const playIndex=Engine.playIndex;'),source.indexOf('  Engine.setGain=function(i,value,ms)'));
   vm.runInContext(wrapper,ctx);
@@ -313,4 +323,23 @@ test('periodic playback checkpoint captures playhead and explicit queue together
   const {Engine,Queue,ctx}=installed(),writes=[];ctx.IDB={set:async(a,b,value)=>writes.push(value)};ctx.SET.gapless=false;ctx.SET.crossfade=false;
   Engine.queue=[{id:'a'}];Engine.order=[0];Engine.pos=0;Engine.current=Engine.queue[0];Engine.playing=true;Engine.el().currentTime=71;Queue.pending=['b'];
   Engine.onTime(0);Engine.onTime(0);assert.equal(writes.length,1);assert.equal(writes[0].time,71);assert.deepEqual([...writes[0].explicitQueue.pending],['b']);
+});
+
+test('natural advance retains delayed output; manual changes reset the guard/filter state',async()=>{
+  const {Engine,ctx}=installed();let resets=0;ctx.AudioQuality.reset=()=>resets++;
+  Engine.queue=[{id:'first'},{id:'second'}];Engine.order=[0,1];Engine.current=Engine.queue[0];Engine.pos=0;
+  Engine._autoAdvance=true;await Engine.playIndex(1,false);assert.equal(resets,0,'last queued samples must drain at a natural boundary');
+  Engine._autoAdvance=false;await Engine.playIndex(0,false);assert.equal(resets,1,'manual source changes cannot emit stale delayed audio');
+});
+
+test('automatic entry to and return from the explicit queue also retains the output tail',async()=>{
+  const {Engine,Queue,ctx}=installed();let resets=0;ctx.AudioQuality.reset=()=>resets++;
+  const a={id:'a'},b={id:'b'},queued={id:'queued'};
+  for(const t of [a,b,queued])ctx.LIB.map.set(t.id,t);
+  Engine.queue=[a,b];Engine.order=[0,1];Engine.current=a;Engine.pos=0;Queue.pending=['queued'];
+  Engine.next(true);await new Promise(setImmediate);
+  assert.equal(Engine.current.id,'queued');assert.equal(resets,0);
+  Engine.next(true);await new Promise(setImmediate);
+  assert.equal(Engine.current.id,'b');assert.equal(resets,0);
+  Engine.next(false);await new Promise(setImmediate);assert.equal(resets,1);
 });
