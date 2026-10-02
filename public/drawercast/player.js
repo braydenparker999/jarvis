@@ -4020,9 +4020,9 @@ const Views={
     a.style.display = showIt ? 'flex' : 'none';
     if(!showIt) return;
     const letters='#ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
-    const initials=data.items.map(item=>String(data.type==='tracks'?(SET.listUiFilenameAsTitle?baseName(item.path||item.title):item.title):(data.open==='folder'?baseName(item.key)||item.key:item.key)).trim().toUpperCase().charAt(0));
+    const initials=data.items.map(item=>alphaInitial(data.type==='tracks'?(SET.listUiFilenameAsTitle?baseName(item.path||item.title):item.title):(data.open==='folder'?baseName(item.key)||item.key:item.key)));
     a.__anchors.set(String.fromCharCode(94),0);
-    for(const letter of letters){const index=initials.findIndex(first=>letter==='#'?!/[A-Z]/.test(first):first>=letter);if(index>=0)a.__anchors.set(letter,index);}
+    for(const letter of letters){const index=initials.findIndex(first=>letter==='#'?!/^[A-Z]$/.test(first):/^[A-Z]$/.test(first)&&first>=letter);if(index>=0)a.__anchors.set(letter,index);}
     a.innerHTML='<span>'+String.fromCharCode(94)+'</span>'+letters.map(function(l){ return '<span>'+l+'</span>'; }).join('');
   },
   buildFabs:function(data, spec){
@@ -5824,6 +5824,9 @@ function setupVizGestures(){
     }
   });
 }
+function alphaInitial(value){
+  return String(value||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toUpperCase().charAt(0);
+}
 function setupAlphaScrub(){
   const a=$('#alpha'), bubble=$('#alphabubble'), body=$('#list-body');
   let pointer=null,lastLetter=null,jumpVersion=0,letters=[];
@@ -5846,11 +5849,10 @@ function setupAlphaScrub(){
     for(let k=0;k<rows.length;k++){
       const t1=rows[k].querySelector('.t1');
       if(!t1) continue;
-      const s=t1.textContent.replace(/^\d+\.\s*/,'').trim().toUpperCase();
-      const first=s.charAt(0);
-      if(ch==='#'){ if(!/[A-Z]/.test(first)){ target=rows[k]; break; } }
+      const first=alphaInitial(t1.textContent.replace(/^\d+\.\s*/,''));
+      if(ch==='#'){ if(!/^[A-Z]$/.test(first)){ target=rows[k]; break; } }
       else if(ch===String.fromCharCode(94)){ target=rows[0]; break; }
-      else if(first>=ch){ target=rows[k]; break; }
+      else if(/^[A-Z]$/.test(first)&&first>=ch){ target=rows[k]; break; }
     }
     if(target) body.scrollTop = target.offsetTop - 60;
   };
