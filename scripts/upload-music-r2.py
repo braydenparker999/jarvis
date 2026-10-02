@@ -9,6 +9,9 @@ import base64
 import hashlib
 import json
 import os
+import math
+import importlib.util
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -71,6 +74,18 @@ def prepared(file):
             'dur': song.info.length, 'sr': 48000, 'ch': song.info.channels, 'codec': 'Opus'}
     if not tags['title'].strip() or not tags['artist'].strip() or tags['dur'] <= 0:
         raise RuntimeError('Prepared title, artist and positive duration are required.')
+    # Reject malformed/duplicate gain tags rather than choosing a random value.
+    for name, field in [('replaygain_track_gain','rgTrack'),('replaygain_album_gain','rgAlbum'),('replaygain_track_peak','rgTrackPeak'),('replaygain_album_peak','rgAlbumPeak'),('r128_track_gain','r128TrackGain'),('r128_album_gain','r128AlbumGain')]:
+        values=song.tags.get(name,[])
+        if len(values)!=1:continue
+        raw=values[0];r128=name.startswith('r128_');peak=name.endswith('_peak')
+        pattern=r'[+-]?\d{1,6}' if r128 else r'(?:\d+(?:\.\d*)?|\.\d+)' if peak else r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:\s*dB)?'
+        if not re.fullmatch(pattern,raw,re.I):continue
+        value=float(re.sub(r'\s*dB$','',raw,flags=re.I))
+        if math.isfinite(value) and (len(raw)<=6 and -32768<=value<=32767 if r128 else 0<value<=1000 if peak else abs(value)<=60):tags[field]=int(value) if r128 else value
+    with Path(file).open('rb') as f:
+        header=f.read(65536);at=header.find(b'OpusHead')
+        if at>=0:tags['opusHeadGainDb']=int.from_bytes(header[at+16:at+18],'little',signed=True)/256
     cover = None
     for value in song.tags.get('metadata_block_picture', []):
         picture = Picture(base64.b64decode(value, validate=True))
@@ -86,6 +101,7 @@ def main():
     parser.add_argument('file', type=Path)
     parser.add_argument('--key', type=Path, required=True, help='Private Ed25519 PKCS8 PEM; never uploaded')
     parser.add_argument('--report', type=Path)
+    parser.add_argument('--analyze', action='store_true', help='Optional bounded FFmpeg analysis; failure keeps upload working')
     args = parser.parse_args()
     key_stat = args.key.stat()
     if key_stat.st_mode & 0o077 or key_stat.st_uid != os.getuid():
@@ -98,6 +114,15 @@ def main():
         raise RuntimeError('A dedicated Ed25519 PKCS8 PEM key is required.')
     public = der[12:].hex()
     tags, cover = prepared(args.file)
+    analysis_status='not-requested'
+    if args.analyze:
+        try:
+            spec=importlib.util.spec_from_file_location('jarvis_audio_analyzer',Path(__file__).parent/'audio'/'analyze.py')
+            module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+            tags['audioAnalysis']=module.analyze(args.file);analysis_status='measured'
+        except Exception:
+            # Optional tool failure cannot block a byte-preserving upload.
+            analysis_status='unavailable'
     data = args.file.read_bytes()
     digest = hashlib.sha256(data).hexdigest()
     upload_request('PUT', '/music/uploads/audio/' + digest + '.opus', data, 'audio/ogg', args.key, public)
@@ -113,9 +138,21 @@ def main():
     result = upload_request('POST', '/music/uploads/register',
                             json.dumps(registration, ensure_ascii=False, separators=(',', ':')).encode(),
                             'application/json', args.key, public)
+    if result.get('duplicate') is True and 'audioAnalysis' in tags:
+        # A separate signed metadata-only upgrade preserves the existing ID.
+        # No private key leaves this caller; expected prior analysis prevents races.
+        request=urllib.request.Request(ORIGIN+'/music/library.json',headers={'User-Agent':'JarvisMusicUploader/1.0','Accept':'application/json'})
+        with urllib.request.build_opener(NoRedirect).open(request,timeout=30) as response:
+            raw=response.read(16*1024*1024+1)
+        if len(raw)>16*1024*1024:raise RuntimeError('The independent catalog exceeds its bounded limit.')
+        catalog=json.loads(raw);existing=next((t for t in catalog.get('tracks',[]) if t['id']==result['id']),None)
+        if not existing or existing['sha256']!=digest or existing['size']!=len(data):raise RuntimeError('Duplicate registration identity changed; review before analysis upgrade.')
+        correction={'id':existing['id'],'sha256':digest,'size':len(data),'r2Identity':existing['r2Identity'],
+                    'previousAnalysis':existing['metadata'].get('audioAnalysis'),'audioAnalysis':tags['audioAnalysis']}
+        result['analysisCorrection']=upload_request('POST','/music/uploads/analysis',json.dumps(correction,ensure_ascii=False,separators=(',',':')).encode(),'application/json',args.key,public)
     if result.get('registered') is not True:
         raise RuntimeError('The server did not confirm library registration.')
-    result.update({'audioSha256': digest, 'audioBytes': len(data), 'coverUploaded': bool(cover),
+    result.update({'analysisStatus':analysis_status,'audioSha256': digest, 'audioBytes': len(data), 'coverUploaded': bool(cover),
                    'coverSha256': registration.get('cover', {}).get('sha256'),
                    'playbackVerified': False})
     if args.report:

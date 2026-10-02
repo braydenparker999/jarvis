@@ -1,0 +1,11 @@
+import {performance} from 'node:perf_hooks';
+import {writeFile} from 'node:fs/promises';
+import {TruePeakGuard} from '../../public/drawercast/audio-core.js';
+const rows=[];
+for(const rate of [44100,48000,96000]){
+ const g=new TruePeakGuard(rate),blocks=2000,times=new Float64Array(blocks),input=Float32Array.from({length:128},(_,i)=>1.4*Math.sin(i*.7));
+ for(let b=0;b<blocks;b++){const start=performance.now();for(let i=0;i<input.length;i++)g.tick(input[i],-input[i]*.7);times[b]=performance.now()-start;}
+ const sorted=[...times.subarray(100)].sort((a,b)=>a-b),deadline=128/rate*1000;
+ rows.push({rate,framesPerBlock:128,deadlineMs:deadline,p50Ms:sorted[Math.floor(sorted.length*.5)],p95Ms:sorted[Math.floor(sorted.length*.95)],p99Ms:sorted[Math.floor(sorted.length*.99)],maxMs:Math.max(...sorted),allocatedTypedBufferBytes:g.left.byteLength+g.right.byteLength+g.peaks.byteLength+g.indices.byteLength+g.kernels.reduce((n,k)=>n+k.byteLength,0)});
+}
+await writeFile('docs/audio-evidence/callback-benchmark.json',JSON.stringify({runtime:process.version,host:'Managed Linux desktop Node; excludes browser/Android scheduler and is not an underrun measurement',rows},null,2)+'\n');console.log(JSON.stringify(rows));

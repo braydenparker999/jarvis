@@ -6,7 +6,7 @@ const source=await readFile(new URL('../public/drawercast/player.js',import.meta
 const block=(a,b)=>source.slice(source.indexOf(a),source.indexOf(b,source.indexOf(a)));
 function harness(){
   const revoked=[];let renders=0;
-  const context=vm.createContext({setTimeout,clearTimeout,debounce:fn=>fn,
+  const context=vm.createContext({AudioQuality:{reset(){},refreshGain(){}},setTimeout,clearTimeout,debounce:fn=>fn,
     SourceLibrary:{kind:t=>t?.source||(t?.remote?'server':'local')},R2Source:{status:''},URL:{revokeObjectURL:u=>revoked.push(u)},
     SET:{fadeOnPause:false},UI:{renderPlayState(){renders++;},renderProgress(){},startLoop(){}},toast(){}});
   const {Engine,PlaybackTransitions}=vm.runInContext(block('const Engine = {','function SET_shuffleOn()')+
@@ -40,7 +40,7 @@ for(const cloud of ['drive','r2'])test('rapid manual '+cloud+' skips select imme
   const calls=[],fades=[];
   const Engine={queue:[{id:'one',source:cloud},{id:'two',source:cloud},{id:'three',source:cloud}],current:{id:'one',source:cloud},playing:true,
     el:()=>({ended:false}),async playIndex(index){this.current=this.queue[index];calls.push(index);}};
-  const ctx=vm.createContext({sourceTrackEnabled:t=>!!t,Engine,PlaybackTransitions:{cancel(){},to(index){fades.push(index);return new Promise(()=>{});}},
+  const ctx=vm.createContext({AudioQuality:{reset(){},refreshGain(){}},sourceTrackEnabled:t=>!!t,Engine,PlaybackTransitions:{cancel(){},to(index){fades.push(index);return new Promise(()=>{});}},
     nativeValues:()=>({fade_manual_advance:1}),clearTimeout,SET:{crossfadeLen:2}});
   const wrapper=source.slice(source.indexOf('  const playIndex=Engine.playIndex;'),source.indexOf('  Engine.setGain=function(i,value,ms)'));
   vm.runInContext(wrapper,ctx);
@@ -313,4 +313,11 @@ test('periodic playback checkpoint captures playhead and explicit queue together
   const {Engine,Queue,ctx}=installed(),writes=[];ctx.IDB={set:async(a,b,value)=>writes.push(value)};ctx.SET.gapless=false;ctx.SET.crossfade=false;
   Engine.queue=[{id:'a'}];Engine.order=[0];Engine.pos=0;Engine.current=Engine.queue[0];Engine.playing=true;Engine.el().currentTime=71;Queue.pending=['b'];
   Engine.onTime(0);Engine.onTime(0);assert.equal(writes.length,1);assert.equal(writes[0].time,71);assert.deepEqual([...writes[0].explicitQueue.pending],['b']);
+});
+
+test('natural advance retains delayed output; manual changes reset the guard/filter state',async()=>{
+  const {Engine,ctx}=installed();let resets=0;ctx.AudioQuality.reset=()=>resets++;
+  Engine.queue=[{id:'first'},{id:'second'}];Engine.order=[0,1];Engine.current=Engine.queue[0];Engine.pos=0;
+  Engine._autoAdvance=true;await Engine.playIndex(1,false);assert.equal(resets,0,'last queued samples must drain at a natural boundary');
+  Engine._autoAdvance=false;await Engine.playIndex(0,false);assert.equal(resets,1,'manual source changes cannot emit stale delayed audio');
 });

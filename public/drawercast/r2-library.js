@@ -1,3 +1,4 @@
+import {validateAnalysis} from './audio-analysis.js';
 // Native R2 discovery. Audio, tags and identities no longer require a Drive catalog.
 import {commitR2Catalog} from './r2-api.js';
 export {commitR2Catalog};
@@ -8,7 +9,7 @@ export const SONG_ID=/^r2_(?:[A-Za-z0-9_-]{10,200}|native_[a-f0-9]{64})$/;
 const AUDIO_KEY=/^(?:audio\/[A-Za-z0-9_-]{10,200}\/(?:[a-f0-9]{32}|[a-f0-9]{64})\.[a-z0-9]{1,8}|native\/audio\/[a-f0-9]{64}\.opus)$/;
 const ART_KEY=/^native\/art\/[a-f0-9]{64}\.(jpg|png)$/;
 const TEXT=['title','artist','album','albumArtist','genre','composer','codec'];
-const NUM=['year','track','disc','dur','sr','ch','bits','rgTrack','rgAlbum','rgTrackPeak','rgAlbumPeak'];
+const NUM=['year','track','disc','dur','sr','ch','bits','rgTrack','rgAlbum','rgTrackPeak','rgAlbumPeak','r128TrackGain','r128AlbumGain','opusHeadGainDb'];
 const fail=()=>{throw Error('The independent R2 library is incomplete or invalid.');};
 const clean=(s,max=512)=>typeof s==='string'&&s.length<=max&&!/[\x00-\x1f\x7f]/.test(s);
 export function metadata(input){
@@ -18,6 +19,12 @@ export function metadata(input){
   for(const k of NUM){if(input[k]!=null){if(typeof input[k]!=='number'||!Number.isFinite(input[k]))fail();out[k]=input[k];}}
   if(!out.title?.trim()||!out.artist?.trim()||!Number.isFinite(out.dur)||out.dur<0||out.dur>86400)fail();
   for(const k of ['year','track','disc','sr','ch','bits'])if(out[k]!=null&&(out[k]<0||!Number.isInteger(out[k])))fail();
+  for(const k of ['rgTrack','rgAlbum'])if(out[k]!=null&&Math.abs(out[k])>60)fail();
+  for(const k of ['rgTrackPeak','rgAlbumPeak'])if(out[k]!=null&&(out[k]<=0||out[k]>1000))fail();
+  for(const k of ['r128TrackGain','r128AlbumGain'])if(out[k]!=null&&(!Number.isInteger(out[k])||out[k]<-32768||out[k]>32767))fail();
+  if(out.opusHeadGainDb!=null&&Math.abs(out.opusHeadGainDb)>128)fail();
+  // Hash/size validation belongs to the enclosing object, not public tags.
+  if(input.audioAnalysis!=null)out.audioAnalysis=structuredClone(input.audioAnalysis);
   return out;
 }
 export function identityMatches(object,proof){
@@ -37,11 +44,20 @@ export function validateLibrary(data){
       !/^(audio\/[a-z0-9.+-]+|video\/(mp4|webm)|application\/ogg)$/i.test(t.mimeType||''))fail();
     if(t.id.startsWith('r2_native_')&&(t.id!=='r2_native_'+t.sha256||t.audioKey!=='native/audio/'+t.sha256+'.opus'))fail();
     if(!t.id.startsWith('r2_native_')&&(!t.audioKey.startsWith('audio/'+t.id.slice(3)+'/')||!/^([a-f0-9]{32})$/.test(t.md5||'')))fail();
-    identity(t.r2Identity,t.size);metadata(t.metadata);ids.add(t.id);
+    identity(t.r2Identity,t.size);metadata(t.metadata);if(t.metadata.audioAnalysis)validateAnalysis(t.metadata.audioAnalysis,t.sha256,t.size);ids.add(t.id);
     if(t.coverKey!=null){if(!ART_KEY.test(t.coverKey)||!HEX.test(t.coverSha256)||!t.coverKey.includes(t.coverSha256)||
       !Number.isSafeInteger(t.coverSize)||t.coverSize<=0||!['image/jpeg','image/png'].includes(t.coverMimeType))fail();identity(t.coverIdentity,t.coverSize);}
     if(t.coverURL!=null){const u=new URL(t.coverURL);if(u.username||u.password||u.origin!=='https://missionarytube.z13.web.core.windows.net'||
       !/^\/assets\/drive-catalog-v2\/covers\/[a-f0-9]{64}\.jpg$/.test(u.pathname)||u.search||u.hash)fail();}
+  }
+  // A complete album must bind exactly this snapshot's album members.
+  // A newly registered track immediately invalidates an old album claim.
+  const groups=new Map();
+  const groupKey=t=>JSON.stringify([t.metadata.albumArtist||t.metadata.artist,t.metadata.album]);
+  for(const t of data.tracks){const key=groupKey(t);if(!groups.has(key))groups.set(key,[]);groups.get(key).push(t);}
+  for(const t of data.tracks){const a=t.metadata.audioAnalysis?.album;if(!a)continue;
+    const members=t.metadata.album?groups.get(groupKey(t)):[];
+    if(!members.length||members.length!==a.members.length||!members.every(x=>a.members.some(m=>m.sha256===x.sha256&&m.size===x.size)))delete t.metadata.audioAnalysis.album;
   }
   return data;
 }

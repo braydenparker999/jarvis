@@ -105,3 +105,41 @@ test('native source preserves prior migrated track identity and source-local use
   assert.equal(result[0].id,id);assert.equal(result[0].rating,5);assert.equal(result[0].artKey,'saved');assert.equal(result[0].resumeAt,12);
   assert.equal(mapping.mediaURL({...tracks[0],source:'drive'}),null);
 });
+
+test('signed analysis upgrades bind the existing object, preserve IDs and handle CAS/idempotency/conflicts',async()=>{
+  const f=fixture();await f.putAudio();await f.register(f.registration());
+  const index=await (await f.get('/music/library.json')).json(),t=index.tracks[0];
+  const a={version:1,sha256:t.sha256,audioBytes:t.size,gainBasis:'decoded-container-gain',decoder:'fixture FFmpeg',method:'fixture analysis',analyzedAt:new Date().toISOString(),sampleRate:48000,channels:2,integratedLufs:-12,samplePeakDbfs:0,truePeakDbtp:1,containerGainDb:0};
+  const body={id:t.id,sha256:t.sha256,size:t.size,r2Identity:t.r2Identity,previousAnalysisSha256:null,audioAnalysis:a};
+  const update=b=>f.send('/music/uploads/analysis',Buffer.from(JSON.stringify(b)),'POST','application/json');
+  assert.equal((await update({...body,sha256:'a'.repeat(64)})).status,422);
+  assert.equal((await update({...body,r2Identity:{...t.r2Identity,etag:'b'.repeat(32)}})).status,409);
+  f.conflict();const r=await update(body);assert.equal(r.status,200);assert.equal((await r.json()).analysisUpdated,true);
+  const updated=await (await f.get('/music/library.json')).json();assert.equal(updated.count,1);assert.equal(updated.tracks[0].id,t.id);assert.equal(updated.tracks[0].audioKey,t.audioKey);assert.deepEqual(updated.tracks[0].r2Identity,t.r2Identity);
+  assert.deepEqual(updated.tracks[0].metadata.audioAnalysis,a);
+  const mapped=libraryMapping(updated,api+'/music/library.json');assert.deepEqual(mapped.tracks[0].audioAnalysis,a);
+  assert.equal((await (await update(body)).json()).analysisUpdated,false);
+  assert.equal((await update({...body,audioAnalysis:{...a,integratedLufs:-14}})).status,409);
+  const unsigned=new Request(api+'/music/uploads/analysis',{method:'POST',body:JSON.stringify(body)});assert.equal((await nativeMusic(unsigned,f.env)).status,401);
+  f.objects.get(t.audioKey).uploaded=new Date();assert.equal((await update(body)).status,409);
+});
+
+test('signed duplicate analysis correction accepts the exact prior object without client JSON-number ambiguity',async()=>{
+  const f=fixture();await f.putAudio();await f.register(f.registration());const t=(await (await f.get('/music/library.json')).json()).tracks[0];
+  const a={version:1,sha256:t.sha256,audioBytes:t.size,gainBasis:'decoded-container-gain',decoder:'fixture',method:'fixture',analyzedAt:'2026-10-02T00:00:00Z',sampleRate:48000,channels:2,integratedLufs:-14,samplePeakDbfs:-1,truePeakDbtp:0,containerGainDb:0};
+  const base={id:t.id,sha256:t.sha256,size:t.size,r2Identity:t.r2Identity,audioAnalysis:a,previousAnalysis:null};
+  const update=b=>f.send('/music/uploads/analysis',Buffer.from(JSON.stringify(b)),'POST','application/json');
+  assert.equal((await update(base)).status,200);
+  assert.equal((await update({...base,previousAnalysis:a,audioAnalysis:{...a,integratedLufs:-13}})).status,200);
+  assert.equal((await update({...base,audioAnalysis:{...a,integratedLufs:-12}})).status,409);
+});
+
+test('new partial album membership removes a stale complete-album analysis claim',async()=>{
+  const f=fixture();await f.putAudio();await f.register(f.registration());let index=await (await f.get('/music/library.json')).json();const t=index.tracks[0];
+  const a={version:1,sha256:t.sha256,audioBytes:t.size,gainBasis:'decoded-container-gain',decoder:'fixture',method:'fixture',analyzedAt:'2026-10-02T00:00:00Z',sampleRate:48000,channels:2,integratedLufs:-14,samplePeakDbfs:-1,truePeakDbtp:0,containerGainDb:0,album:{id:'Artist/Album',complete:true,members:[{sha256:t.sha256,size:t.size}],integratedLufs:-14,truePeakDbtp:0}};
+  const body={id:t.id,sha256:t.sha256,size:t.size,r2Identity:t.r2Identity,audioAnalysis:a,previousAnalysis:null};
+  assert.equal((await f.send('/music/uploads/analysis',Buffer.from(JSON.stringify(body)),'POST','application/json')).status,200);
+  assert.ok((await (await f.get('/music/library.json')).json()).tracks[0].metadata.audioAnalysis.album);
+  const second=Buffer.concat([audio,Buffer.from('new album member')]);await f.putAudio(second);await f.register(f.registration(second));
+  index=await (await f.get('/music/library.json')).json();assert.equal(index.count,2);assert.equal(index.tracks[0].metadata.audioAnalysis.album,undefined);
+});

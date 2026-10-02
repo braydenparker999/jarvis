@@ -1,0 +1,36 @@
+{
+  "runtime": "v24.19.0",
+  "host": "Managed Linux desktop Node; excludes browser/Android scheduler and is not an underrun measurement",
+  "rows": [
+    {
+      "rate": 44100,
+      "framesPerBlock": 128,
+      "deadlineMs": 2.9024943310657596,
+      "p50Ms": 0.07829499999999712,
+      "p95Ms": 0.12964099999999235,
+      "p99Ms": 0.3257300000000214,
+      "maxMs": 1.7275889999999947,
+      "allocatedTypedBufferBytes": 14136
+    },
+    {
+      "rate": 48000,
+      "framesPerBlock": 128,
+      "deadlineMs": 2.6666666666666665,
+      "p50Ms": 0.07835499999998774,
+      "p95Ms": 0.16014699999999493,
+      "p99Ms": 0.3260209999999688,
+      "maxMs": 1.5505880000000047,
+      "allocatedTypedBufferBytes": 14688
+    },
+    {
+      "rate": 96000,
+      "framesPerBlock": 128,
+      "deadlineMs": 1.3333333333333333,
+      "p50Ms": 0.07709299999999075,
+      "p95Ms": 0.15032200000007379,
+      "p99Ms": 0.2767780000000357,
+      "maxMs": 0.523302000000001,
+      "allocatedTypedBufferBytes": 21600
+    }
+  ]
+}
