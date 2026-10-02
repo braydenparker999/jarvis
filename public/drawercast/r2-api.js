@@ -29,6 +29,9 @@ function trackMatches(track, file, root) {
 export function r2Tracks(mapping, tracks, existing = []) {
   if (!mapping.matches(tracks)) fail();
   const saved = new Map(existing.filter(t => t.source === 'r2').map(t => [t.id, t]));
+  if(mapping.native)return tracks.map(t=>{const old=saved.get(t.id)||{},same=old.size===t.size&&(old.sha256?old.sha256===t.sha256:!!old.md5&&old.md5===t.md5);
+    return {...t,rating:old.rating||0,plays:old.plays||0,lastPlayed:old.lastPlayed||0,resumeAt:old.resumeAt||0,
+      added:old.added||t.added,artKey:same?old.artKey||null:null,customArt:same?old.customArt||false:false};});
   return tracks.filter(t => mapping.mediaURL(t)).map(t => {
     const id = 'r2_' + t.remoteId, old = saved.get(id) || {};
     const same = old.md5 === t.md5 && old.size === t.size;
@@ -53,7 +56,7 @@ export function commitR2Catalog(db, mapping, tracks) {
         const next = pending.get(cursor.key), old = cursor.value;
         if (next) {
           // The full map was checked above; preserve only this source's state.
-          const same = old.md5 === next.md5 && old.size === next.size;
+          const same = old.size === next.size && (mapping.native ? (old.sha256 ? old.sha256===next.sha256 : !!old.md5&&old.md5===next.md5) : old.md5 === next.md5);
           const t = {...next, rating:old.rating || 0, plays:old.plays || 0,
             lastPlayed:old.lastPlayed || 0, resumeAt:old.resumeAt || 0,
             dur:next.dur || (same ? old.dur || 0 : 0), added:old.added || next.added,

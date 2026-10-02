@@ -1,0 +1,107 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {generateKeyPairSync,createHash,sign} from 'node:crypto';
+import {nativeMusic} from '../backend/music-upload.js';
+import {LIBRARY_KEY,validateLibrary,libraryMapping,signatureMessage} from '../public/drawercast/r2-library.js';
+import {r2Tracks} from '../public/drawercast/r2-api.js';
+const api='https://jarvis-hub-api.braydenparker999.workers.dev',origin='https://missionarytube.z13.web.core.windows.net';
+const sha=b=>createHash('sha256').update(b).digest('hex');
+const audio=Buffer.concat([Buffer.from('OggS'),Buffer.alloc(24),Buffer.from('OpusHead'),Buffer.alloc(32)]);
+const art=Buffer.from([137,80,78,71,13,10,26,10,0]);
+function fixture(){
+  const keys=generateKeyPairSync('ed25519'),pub=keys.publicKey.export({type:'spki',format:'der'}).subarray(-32).toString('hex');
+  const objects=new Map(),calls=[];let serial=0,conflicts=0;
+  function stored(key,bytes,options={}){bytes=Buffer.from(bytes);const etag=sha(bytes).slice(0,32);
+    return {key,bytes,size:bytes.length,etag,httpEtag:'"'+etag+'"',uploaded:new Date(1700000000000+(++serial)*1000),customMetadata:options.customMetadata||{},httpMetadata:options.httpMetadata||{}};}
+  objects.set(LIBRARY_KEY,stored(LIBRARY_KEY,JSON.stringify({version:1,kind:'r2-library',complete:true,count:0,generatedAt:new Date().toISOString(),tracks:[]})));
+  const bucket={async head(k){calls.push(['head',k]);return objects.get(k)||null;},async get(k,options={}){
+    calls.push(['get',k]);const o=objects.get(k);if(!o)return null;if(options.onlyIf&&options.onlyIf.etagMatches!==o.etag)return {...o};
+    let b=o.bytes;if(options.range)b=b.subarray(options.range.offset,options.range.offset+options.range.length);
+    return {...o,body:new Response(b).body};},async put(k,b,options={}){
+    calls.push(['put',k]);if(k===LIBRARY_KEY&&conflicts){conflicts--;return null;}
+    const old=objects.get(k);if(options.onlyIf instanceof Headers&&options.onlyIf.get('If-None-Match')==='*'&&old)return null;
+    if(options.onlyIf?.etagMatches!==undefined&&old?.etag!==options.onlyIf.etagMatches)return null;
+    const o=stored(k,b,options);objects.set(k,o);return o;}};
+  const env={MUSIC_R2:bucket,MUSIC_PUBLIC_READ:'true',MUSIC_UPLOAD_PUBLIC_KEYS:JSON.stringify([pub])};
+  function request(path,body,method='PUT',type='audio/ogg',change={}){
+    const time=String(Math.floor(Date.now()/1000)),hash=sha(body),size=String(body.length);
+    const sig=sign(null,Buffer.from(signatureMessage({method,origin:api,path,type,hash,size,time,key:pub})),keys.privateKey).toString('hex');
+    return new Request(api+path,{method,body,headers:{'Content-Type':type,'X-Music-Public-Key':pub,'X-Music-Timestamp':time,
+      'X-Music-Size':size,'X-Music-Sha256':hash,'X-Music-Signature':sig,...change}});
+  }
+  const send=(path,b,m,t,c)=>nativeMusic(request(path,b,m,t,c),env);
+  async function putAudio(b=audio){const r=await send('/music/uploads/audio/'+sha(b)+'.opus',b);assert.equal(r.status,200);return r.json();}
+  function registration(b=audio,extra={}){return Buffer.from(JSON.stringify({sha256:sha(b),size:b.length,name:'Ready.opus',metadata:{title:'Ready',artist:'Artist',album:'Album',dur:10,codec:'Opus'},...extra}));}
+  const register=b=>send('/music/uploads/register',b,'POST','application/json');
+  const get=(path,h={},method='GET')=>nativeMusic(new Request(api+path,{method,headers:{Origin:origin,...h}}),env);
+  return {env,objects,calls,pub,request,send,putAudio,register,registration,get,conflict:()=>{conflicts=1;}};
+}
+test('upload rejects unregistered, tampered, stale and cross-destination signatures before R2',async()=>{
+  const f=fixture(),path='/music/uploads/audio/'+sha(audio)+'.opus';
+  for(const changes of [{'X-Music-Public-Key':'a'.repeat(64)},{'X-Music-Timestamp':'1700000000'},
+    {'X-Music-Sha256':'a'.repeat(64)},{'Content-Type':'image/png'},{'X-Music-Size':'100'},{'X-Music-Signature':'0'.repeat(128)}]){
+    assert.equal((await f.send(path,audio,'PUT','audio/ogg',changes)).status,401);assert.equal(f.calls.length,0);
+  }
+  f.env.MUSIC_UPLOAD_PUBLIC_KEYS='[]';assert.equal((await f.send(path,audio)).status,401);assert.equal(f.calls.length,0);
+});
+test('blobs stay invisible until verified audio and artwork registration; retries are idempotent',async()=>{
+  const f=fixture();await f.putAudio();
+  assert.equal((await (await f.get('/music/library.json')).json()).count,0);
+  const cover={sha256:sha(art),size:art.length,ext:'png'},body=f.registration(audio,{cover});
+  assert.equal((await f.register(body)).status,409);
+  assert.equal((await f.send('/music/uploads/art/'+sha(art)+'.png',art,'PUT','image/png')).status,200);
+  const first=await (await f.register(body)).json();assert.equal(first.registered,true);assert.equal(first.duplicate,false);
+  await f.putAudio();const second=await (await f.register(body)).json();assert.equal(second.duplicate,true);assert.equal(second.id,first.id);assert.equal(second.count,1);
+  const index=await (await f.get('/music/library.json')).json();assert.equal(index.count,1);validateLibrary(index);
+  const {mapping,tracks}=libraryMapping(index,api+'/music/library.json');assert.ok(mapping.matches(tracks));
+  assert.equal(tracks[0].source,'r2');assert.equal(tracks[0].coverURL,api+'/music/library/art/'+first.id);
+  assert.equal(mapping.mediaURL({...tracks[0],sha256:'a'.repeat(64)}),null);
+});
+test('content-addressed PUT cannot overwrite existing data and registration survives a CAS conflict',async()=>{
+  const f=fixture();await f.putAudio();f.conflict();
+  assert.equal((await f.register(f.registration())).status,200);
+  assert.equal(f.calls.filter(c=>c[0]==='put'&&c[1]===LIBRARY_KEY).length,2);
+  const key='native/audio/'+sha(audio)+'.opus';f.objects.get(key).customMetadata['verified-sha256']='a'.repeat(64);
+  assert.equal((await f.send('/music/uploads/audio/'+sha(audio)+'.opus',audio)).status,409);
+  assert.equal((await f.get('/music/library/audio/r2_native_'+sha(audio))).status,503);
+});
+test('valid signatures cannot publish altered, oversized, malformed or incomplete bodies',async()=>{
+  const f=fixture(),path='/music/uploads/audio/'+sha(audio)+'.opus',signed=f.request(path,audio);
+  const changed=Buffer.from(audio);changed[changed.length-1]=1;
+  assert.equal((await nativeMusic(new Request(signed.url,{method:'PUT',headers:signed.headers,body:changed}),f.env)).status,422);
+  assert.equal((await nativeMusic(new Request(signed.url,{method:'PUT',headers:signed.headers,body:Buffer.concat([audio,Buffer.from('overflow')])}),f.env)).status,413);
+  assert.equal(f.calls.length,0);
+  assert.equal((await f.register(Buffer.from('{}'))).status,422);
+  assert.equal((await f.register(f.registration())).status,409);
+  assert.equal((await (await f.get('/music/library.json')).json()).count,0);
+});
+test('different concurrent registrations preserve both songs',async()=>{
+  const f=fixture(),b=Buffer.concat([audio,Buffer.from('second')]);await f.putAudio();await f.putAudio(b);
+  const responses=await Promise.all([f.register(f.registration()),f.register(f.registration(b))]);
+  assert.ok(responses.every(r=>r.status===200));const index=await (await f.get('/music/library.json')).json();
+  assert.equal(index.count,2);assert.equal(new Set(index.tracks.map(t=>t.sha256)).size,2);
+});
+test('native audio supports actual byte ranges, ETags and artwork; changed identities fail closed',async()=>{
+  const f=fixture();await f.putAudio();await f.send('/music/uploads/art/'+sha(art)+'.png',art,'PUT','image/png');
+  await f.register(f.registration(audio,{cover:{sha256:sha(art),size:art.length,ext:'png'}}));
+  const path='/music/library/audio/r2_native_'+sha(audio);
+  const full=await f.get(path);assert.equal(full.status,200);assert.deepEqual(Buffer.from(await full.arrayBuffer()),audio);
+  const etag=full.headers.get('ETag');assert.equal((await f.get(path,{'If-None-Match':etag})).status,304);
+  const range=await f.get(path,{Range:'bytes=2-5'});assert.equal(range.status,206);assert.deepEqual(Buffer.from(await range.arrayBuffer()),audio.subarray(2,6));
+  assert.equal(range.headers.get('Content-Range'),'bytes 2-5/'+audio.length);assert.equal(range.headers.get('Access-Control-Allow-Origin'),origin);
+  assert.equal((await f.get(path,{Range:'bytes=99999-'})).status,416);
+  assert.equal((await f.get(path,{Range:'bytes=2-5'},'HEAD')).headers.get('Content-Length'),String(audio.length));
+  const cover=await f.get('/music/library/art/r2_native_'+sha(audio));assert.equal(cover.status,200);assert.deepEqual(Buffer.from(await cover.arrayBuffer()),art);
+  f.objects.get('native/audio/'+sha(audio)+'.opus').uploaded=new Date();assert.equal((await f.get(path)).status,503);
+  assert.equal((await f.get(path,{Origin:'https://evil.example'})).status,403);
+});
+test('native source preserves prior migrated track identity and source-local user state',()=>{
+  const id='r2_legacyDriveID123',t={id,audioKey:'audio/legacyDriveID123/'+'b'.repeat(32)+'.opus',sha256:'a'.repeat(64),md5:'b'.repeat(32),size:64,
+    mimeType:'audio/ogg',path:'Artist/Ready.opus',folder:'Cloudflare R2/Artist',metadata:{title:'Ready',artist:'Artist',dur:10},
+    r2Identity:{etag:'b'.repeat(32),size:64,lastModified:new Date().toISOString()}};
+  const {tracks,mapping}=libraryMapping({version:1,kind:'r2-library',complete:true,count:1,generatedAt:new Date().toISOString(),tracks:[t]},api+'/music/library.json');
+  const old={...tracks[0],sha256:undefined,rating:5,plays:9,artKey:'saved',resumeAt:12};
+  const result=r2Tracks(mapping,tracks,[old,{...old,id:'gd_legacyDriveID123',source:'drive',rating:1}]);
+  assert.equal(result[0].id,id);assert.equal(result[0].rating,5);assert.equal(result[0].artKey,'saved');assert.equal(result[0].resumeAt,12);
+  assert.equal(mapping.mediaURL({...tracks[0],source:'drive'}),null);
+});

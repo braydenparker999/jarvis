@@ -2368,9 +2368,10 @@ const R2Source={
       const config=await response.json();
       this.root=typeof config.rootId==='string'?config.rootId:'';
       this.manifestURL=typeof config.manifestURL==='string'?config.manifestURL:'';
-      if(!this.root||!this.manifestURL){this.status='Not configured';return;}
-      this.helper=await import('./r2-api.js?v=separate-source-v1');
-      this.catalog=await import('./drive-catalog.js?v=catalog-v2');
+      this.native=this.manifestURL.endsWith('/music/library.json');
+      if(!this.manifestURL||(!this.native&&!this.root)){this.status='Not configured';return;}
+      this.helper=await import(this.native?'./r2-library.js?v=native-v1':'./r2-api.js?v=separate-source-v1');
+      if(!this.native)this.catalog=await import('./drive-catalog.js?v=catalog-v2');
       await this.connect(true);
     }catch(e){this.error=e.message;this.status='R2 unavailable';}
     finally{MusicSources.refresh();}
@@ -2382,7 +2383,7 @@ const R2Source={
     this.timer=setTimeout(()=>this.connect(true),300000);this.timer?.unref?.();
   },
   async connect(quiet=false){
-    if(this.busy||!SourceLibrary.enabled('r2')||!this.helper||!this.catalog)return false;
+    if(this.busy||!SourceLibrary.enabled('r2')||!this.helper||(!this.native&&!this.catalog))return false;
     if(Engine.current?.source==='r2'&&Engine.playing){this.status='R2 update pending · pause playback to sync';this.schedule();return false;}
     this.busy=true;this.error='';this.status='Checking verified R2 library…';MusicSources.refresh();
     const root=this.root,url=this.manifestURL,controller=new AbortController();this.controller=controller;
@@ -2390,9 +2391,13 @@ const R2Source={
     try{
       // Read the static, hashed metadata snapshot independently of DriveSource.
       // No Google API request or media download is needed to build this library.
-      const snapshot=await this.catalog.readCatalog({root,signal:controller.signal});
-      const tracks=snapshot.records.map(record=>this.catalog.catalogTrack(record,root));
-      const mapping=await this.helper.readR2Manifest({url,root,tracks,signal:controller.signal});
+      let tracks,mapping;
+      if(this.native)({tracks,mapping}=await this.helper.readLibrary({url,signal:controller.signal}));
+      else{
+        const snapshot=await this.catalog.readCatalog({root,signal:controller.signal});
+        tracks=snapshot.records.map(record=>this.catalog.catalogTrack(record,root));
+        mapping=await this.helper.readR2Manifest({url,root,tracks,signal:controller.signal});
+      }
       if(controller.signal.aborted||!SourceLibrary.enabled('r2')||root!==this.root||url!==this.manifestURL)return false;
       if(Engine.current?.source==='r2'&&Engine.playing){this.status='R2 update pending · pause playback to sync';return false;}
       const {fresh,gone}=await IDB.r2Catalog(this.helper,mapping,tracks);
@@ -2425,7 +2430,7 @@ const R2Source={
     dialog('Cloudflare R2 Music',
       '<p>Streams only the songs verified in your R2 bucket. Internet is required.</p>'+
       '<p role="status">'+esc(this.error||this.status)+'</p>'+
-      '<p class="note">'+allTracks(true).filter(t=>t.source==='r2').length+' songs copied and verified. More songs appear after their transfer is verified.</p>'+
+      '<p class="note">'+allTracks(true).filter(t=>t.source==='r2').length+' verified songs. Registered uploads appear on refresh; the library also checks for updates every five minutes.</p>'+
       '<p class="note">This source has its own track entries, ratings and playlists. Turning it off keeps its saved library.</p>',
       [{label:'Refresh R2',pri:true},{label:'Close'}]);
     const refresh=$$('#sheet .actions .btn')[0];
