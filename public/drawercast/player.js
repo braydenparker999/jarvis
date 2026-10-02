@@ -5826,13 +5826,12 @@ function setupVizGestures(){
 }
 function setupAlphaScrub(){
   const a=$('#alpha'), bubble=$('#alphabubble'), body=$('#list-body');
-  let pointer=null,lastLetter=null,jumpVersion=0;
+  let pointer=null,lastLetter=null,jumpVersion=0,letters=[];
   const pick=function(y){
     const r=a.getBoundingClientRect();
-    const spans=$$('span',a);
-    if(!spans.length) return;
-    const i=clamp(Math.floor((y-r.top)/r.height*spans.length),0,spans.length-1);
-    const ch=spans[i].textContent;
+    if(!letters.length) return;
+    const hit=letters.findIndex(letter=>y<=letter.bottom),i=hit<0?letters.length-1:hit;
+    const ch=letters[i].text;
     bubble.textContent=ch;
     bubble.style.top=clamp(y-r.top-33,0,r.height-66)+'px';
     if(ch===lastLetter)return;lastLetter=ch;
@@ -5857,11 +5856,12 @@ function setupAlphaScrub(){
   };
   a.addEventListener('pointerdown',function(e){
     if(pointer!==null||e.isPrimary===false||e.button>0||!InputLifecycle.active(a))return;
+    letters=$$('span',a).map(span=>({text:span.textContent,bottom:span.getBoundingClientRect().bottom}));
     pointer=e.pointerId;lastLetter=null;a.classList.add('active'); bubble.classList.add('on');
     a.setPointerCapture(e.pointerId); pick(e.clientY); vibrate(6);
   });
   a.addEventListener('pointermove',function(e){ if(pointer===e.pointerId) pick(e.clientY); });
-  const reset=()=>{const id=pointer;pointer=null;lastLetter=null;a.classList.remove('active');bubble.classList.remove('on');try{if(a.hasPointerCapture?.(id))a.releasePointerCapture(id);}catch(_){};};
+  const reset=()=>{const id=pointer;pointer=null;lastLetter=null;letters=[];a.classList.remove('active');bubble.classList.remove('on');try{if(a.hasPointerCapture?.(id))a.releasePointerCapture(id);}catch(_){};};
   const up=function(e){if(pointer===e.pointerId)reset();};
   a.addEventListener('pointerup',up);
   a.addEventListener('pointercancel',up);

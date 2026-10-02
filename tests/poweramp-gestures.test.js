@@ -77,7 +77,7 @@ test('row: long press must not fire after list is replaced',()=>{const {h,root,r
 test('waveform: a separate button tap right after scrubbing must be accepted',()=>{const h=seek(),n=h.nodes.get('#transport'),target={closest:()=>({})};n.fire('pointerdown',{target:{closest:()=>null}});n.fire('pointermove',{clientX:100});n.fire('pointerup',{clientX:100});h.advance(100);n.fire('pointerdown',{target});n.fire('pointerup',{target});assert.notEqual(n.fire('click',{target}).prevented,true);});
 test('waveform: leaving the app during a scrub must clear dragging state',()=>{const h=seek(),n=h.nodes.get('#transport');n.fire('pointerdown',{target:{closest:()=>null}});n.fire('pointermove',{clientX:100});h.win.fire('blur');assert.notEqual(h.context.UI.seekDragging,true);});
 test('seek rail: leaving the app during a scrub must clear dragging state',()=>{const h=seek();h.nodes.get('#seek').fire('pointerdown');h.doc.hidden=true;h.doc.fire('visibilitychange');assert.notEqual(h.context.UI.seekDragging,true);});
-function alpha(){const h=harness();h.context.$$=(sel,n)=>sel==='span'?Array.from({length:27},(_,i)=>({textContent:String.fromCharCode(65+i)})):[];run(h,'function setupAlphaScrub()','/* =====================================================================\n   INIT','\nsetupAlphaScrub();');return h;}
+function alpha(){const h=harness();h.context.$$=(sel,n)=>sel==='span'?Array.from('^#ABCDEFGHIJKLMNOPQRSTUVWXYZ',(letter,i)=>({textContent:letter,getBoundingClientRect:()=>({top:i*25,bottom:(i+1)*25})})):[];run(h,'function setupAlphaScrub()','/* =====================================================================\n   INIT','\nsetupAlphaScrub();');return h;}
 test('alphabet strip: capture loss must hide the active letter bubble',()=>{const h=alpha(),n=h.nodes.get('#alpha');n.fire('pointerdown');n.fire('lostpointercapture');assert.equal(h.nodes.get('#alphabubble').classList.contains('on'),false);});
 test('alphabet strip: second finger must not move active letter',()=>{const h=alpha(),n=h.nodes.get('#alpha');n.fire('pointerdown',{clientY:100});const before=h.nodes.get('#alphabubble').textContent;n.fire('pointermove',{pointerId:2,isPrimary:false,clientY:600});assert.equal(h.nodes.get('#alphabubble').textContent,before);});
 test('alphabet strip: original pointercancel clears letter bubble',()=>{const h=alpha(),n=h.nodes.get('#alpha');n.fire('pointerdown');n.fire('pointercancel');assert.equal(h.nodes.get('#alphabubble').classList.contains('on'),false);});
@@ -170,8 +170,13 @@ test('a context menu cannot activate a row during a pinch even with detail zero'
 test('A–Z can reach a row that is still loading; a newer view cancels the deferred jump',()=>{
  for(const cancel of [false,true]){const h=alpha(),strip=h.nodes.get('#alpha'),body=h.nodes.get('#list-body'),box=node();let pending;
   strip.__anchors=new Map([['Z',900]]);box.isConnected=true;box.__ensureRow=(i,fn)=>{assert.equal(i,900);pending=fn;return null};body.querySelector=()=>box;
-  strip.fire('pointerdown',{clientY:650});strip.fire('pointerup');if(cancel)h.context.lifecycle.cancel();pending({offsetTop:900});assert.equal(body.scrollTop,cancel?0:840);
+  strip.fire('pointerdown',{clientY:687});strip.fire('pointerup');if(cancel)h.context.lifecycle.cancel();pending({offsetTop:900});assert.equal(body.scrollTop,cancel?0:840);
  }
+});
+test('alphabet hit testing uses visible letter bounds rather than the strip padding',()=>{
+ const h=alpha(),strip=h.nodes.get('#alpha');strip.getBoundingClientRect=()=>({top:64,height:566.421875});
+ h.context.$$=sel=>sel==='span'?Array.from('^#ABCDEFGHIJKLMNOPQRSTUVWXYZ',(text,i)=>({textContent:text,getBoundingClientRect:()=>({top:133.484375+i*15.265625,bottom:148.75+i*15.265625})})):[];
+ strip.fire('pointerdown',{clientY:553});assert.equal(h.nodes.get('#alphabubble').textContent,'Z');strip.fire('pointerup');assert.equal(h.nodes.get('#alphabubble').classList.contains('on'),false);
 });
 test('the final song-row renderer exposes a named keyboard button',()=>{
  const h=harness();h.context.Views={};h.context.nativeValues=()=>({});h.context.trackArtist=()=> 'Artist';h.context.trackAlbum=()=> 'Album';h.context.icoHTML=()=>'';h.context.esc=String;

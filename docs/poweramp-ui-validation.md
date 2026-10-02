@@ -15,7 +15,7 @@ Implementation date: October 2, 2026. The artwork-first layout, pills, navigatio
 
 ## Regression evidence
 
-The original repository suite contained 251 passing tests. The final suite contains 310 passing tests, including 59 focused gesture, menu, navigation, queue, and accessibility regressions. Existing playback sequencing and audio fidelity tests remain included. Playback progress cannot overwrite the mini-player seek preview while the contact owns it.
+The original repository suite contained 251 passing tests. The final suite contains 311 passing tests, including 60 focused gesture, menu, navigation, queue, and accessibility regressions. Existing playback sequencing and audio fidelity tests remain included. Playback progress cannot overwrite the mini-player seek preview while the contact owns it. Live browser testing also found that padding caused a Z tap to select W; alphabet input now uses cached visible letter bounds.
 
 Source-handler tests use simulated DOM nodes, pointer/touch events, timers, and display frames. They verify event ownership and state transitions; they do not establish physical-device smoothness. The deployed build must also be checked with real browser interaction.
 
