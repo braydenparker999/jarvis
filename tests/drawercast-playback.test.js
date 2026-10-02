@@ -13,9 +13,19 @@ function harness(){
     block('const PlaybackTransitions={','function installPlaybackRework()')+'\n({Engine,PlaybackTransitions})',context);
   const audio=src=>({src,preload:'auto',paused:false,loads:0,events:{},pause(){this.paused=true;},removeAttribute(){this.src='';},load(){this.loads++;},addEventListener(name,fn){this.events[name]=fn;},removeEventListener(name){delete this.events[name];},play(){return {catch:fn=>{this.reject=fn;}};}});
   Engine.els=[audio('http://music.example.test/audio/current'),audio('http://music.example.test/audio/next')];
+  const ensureCtx=Engine.ensureCtx;
   Engine.cur=0;Engine.setGain=()=>{};Engine.ensureCtx=()=>{};Engine.updateMediaSession=()=>{};Engine._playRequest=1;
-  return {Engine,PlaybackTransitions,ctx:context,revoked,renders:()=>renders};
+  return {Engine,PlaybackTransitions,ensureCtx,ctx:context,revoked,renders:()=>renders};
 }
+test('routing into Web Audio clears retained element volume while slot gains stay separate',()=>{
+  const {Engine,ensureCtx,ctx}=harness();
+  const node=()=>{const n={connect(){}};for(const k of ['gain','frequency','Q','threshold','knee','ratio','attack','release'])n[k]={value:0};return n;};
+  class AudioContext{constructor(){this.state='running';}createGain(){return node();}createBiquadFilter(){return node();}createStereoPanner(){return node();}createDynamicsCompressor(){return node();}createAnalyser(){return node();}createConvolver(){return node();}createDelay(){return node();}createChannelSplitter(){return node();}createChannelMerger(){return node();}createMediaElementSource(){return node();}}
+  ctx.window={AudioContext};ctx.FREQ_SETS={16:Array.from({length:16},(_,i)=>20*(i+1))};
+  Engine.els[0].volume=.25;Engine.els[1].volume=0;Engine.applyEQ=()=>{};Engine.applyVolume=()=>{};Engine.applyReverb=()=>{};
+  assert.ok(ensureCtx.call(Engine));assert.deepEqual(Engine.els.map(a=>a.volume),[1,1]);
+  assert.deepEqual([...Engine.gains].map(g=>g.gain.value),[1,0]);
+});
 test('cancelled transition releases spare streaming request',()=>{
   const {Engine,PlaybackTransitions}=harness();Engine.preloadId='unused';PlaybackTransitions.cancel();
   assert.equal(Engine.els[1].src,'');assert.equal(Engine.els[1].loads,1);assert.equal(Engine.preloadId,null);

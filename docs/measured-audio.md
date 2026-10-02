@@ -38,6 +38,8 @@ reverb, stereo processing and deliberate crossfades, and sets playback rate to
 pause/resume fades remain a transport feature. Editing a bypassed curve updates
 its saved values; the EQ panel labels the bypass explicitly.
 
+After successful MediaElementAudioSource routing, each element volume returns to unity; slot and master gains then own volume. This repairs the startup-muted spare element that previously made a preloaded switch silent. Actual output PCM, not only a running media clock, is verified.
+
 The volume law is retained: gain = slider²; 50% is −12.0412 dB. It now precedes
 protection. Fixed attenuation may make full-volume playback quieter, as shown in
 Audio Info. It avoids unnecessary envelope modulation rather than recovering
@@ -129,6 +131,7 @@ is intentional processing, not labeled transparent. Reset discards prior tails.
 - `opus-browser.json`: synthetic positive/negative OpusHead gains, seeks and
   44.1 kHz input through actual HTMLMediaElement + production graph.
 - `eq-extremes.json`: 108 rendered impulse cases at exposed frequency/Q/gain extremes, phase checks and 24-second decay tails. This compares the rendered transfer to a separate complex evaluation of the supplied coefficients; `graph.json` separately checks the coefficient algebra.
+- `transitions.json`: rapid peak/shelf/mode edits through the production graph, independently scanned at 32× with long-tail checks.
 - `browser.json`: real R2 streaming, seek/resume, Range/CORS, artwork, media session, natural next, hard switch and controlled callback failure.
 - `transport-latency.json`: cloud transport-clock startup/seek observations against the previous live source; network and polling included, audible latency unmeasured.
 - Final endurance and release evidence is added before promotion.

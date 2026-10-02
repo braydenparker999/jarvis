@@ -2553,6 +2553,10 @@ const Engine = {
           g.gain.value = i===0?1:0;
           s.connect(g); g.connect(n.preamp);
           this.srcs.push(s); this.gains.push(g);
+          // Before a context exists, transport fades use element volume.
+          // Once routed, slot/master gains own volume; do not retain a muted
+          // spare element and silently lose audio at the first preload swap.
+          this.els[i].volume=1;
         }catch(e){ this.srcs.push(null); this.gains.push(null); }
       }
       this.ready=true;

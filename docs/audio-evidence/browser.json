@@ -1,5 +1,5 @@
 {
-  "startedAt": "2026-10-02T04:04:49.983Z",
+  "startedAt": "2026-10-02T04:28:47.622Z",
   "minutes": 0,
   "live": false,
   "errors": [],
@@ -13,33 +13,29 @@
     "artwork decodes",
     "media-session metadata",
     "actual natural current/next track transition",
-    "hard track switch continues",
-    "real callback exception recovers to one degraded path"
+    "hard track switch renders actual PCM",
+    "real callback exception recovers to one degraded path with non-silent PCM"
   ],
   "samples": [],
   "latency": {
     "seeksMs": [
-      1108.845668,
-      280.44209200000023,
-      281.271299,
-      282.5423810000002,
-      256.3456180000003,
-      259.2697850000004
+      1107.3602860000005
     ],
-    "pageAndCatalogMs": 1428.261427,
-    "selectionToPlayheadOverOneSecondMs": 2601.594462
+    "pageAndCatalogMs": 1068.521921,
+    "selectionToPlayheadOverOneSecondMs": 2084.0165509999997
   },
   "passed": true,
   "browser": "151.0.7922.173",
   "injectedFaultModules": 1,
   "catalog": {
-    "r2": 1484,
-    "drive": 1287,
+    "r2": 1512,
+    "drive": 0,
     "mode": "transparent"
   },
   "initial": {
-    "at": 1790913894331,
+    "at": 1790915331065,
     "time": 1.069333,
+    "contextTime": 2.089795918367347,
     "rate": 44100,
     "readyState": 4,
     "mediaError": null,
@@ -72,12 +68,14 @@
       "outputPeak": 0.4484075605869293,
       "delay": 329
     },
-    "heap": 13070868,
+    "outputRms": 0.05343459327809683,
+    "heap": 7519747,
     "playing": true
   },
   "custom": {
-    "at": 1790913896717,
-    "time": 44.298667,
+    "at": 1790915333447,
+    "time": 44.322018,
+    "contextTime": 4.481451247165533,
     "rate": 44100,
     "readyState": 4,
     "mediaError": null,
@@ -106,11 +104,12 @@
       "reduction": 1,
       "activeFrames": 0,
       "frames": 11136,
-      "inputPeak": 0.22928196647395505,
-      "outputPeak": 0.22879736125469208,
+      "inputPeak": 0.2292589396238327,
+      "outputPeak": 0.2292589396238327,
       "delay": 329
     },
-    "heap": 15710155,
+    "outputRms": 0.014053159834775533,
+    "heap": 9866010,
     "playing": true
   },
   "protocol": [
@@ -137,8 +136,9 @@
     "playbackState": "playing"
   },
   "next": {
-    "at": 1790913901921,
-    "time": 0.270681,
+    "at": 1790915337541,
+    "time": 1.021333,
+    "contextTime": 8.568163265306122,
     "rate": 44100,
     "readyState": 4,
     "mediaError": null,
@@ -167,16 +167,18 @@
       "reduction": 1,
       "activeFrames": 0,
       "frames": 11136,
-      "inputPeak": 1.3554111080553313e-34,
-      "outputPeak": 7.645645489602008e-15,
+      "inputPeak": 0.24159431655858749,
+      "outputPeak": 0.23807638883590698,
       "delay": 329
     },
-    "heap": 12124659,
+    "outputRms": 0.05336257886656246,
+    "heap": 11160278,
     "playing": true
   },
   "final": {
-    "at": 1790913903108,
-    "time": 0.337163,
+    "at": 1790915339452,
+    "time": 1.090667,
+    "contextTime": 10.47219954648526,
     "rate": 44100,
     "readyState": 4,
     "mediaError": null,
@@ -205,11 +207,12 @@
       "reduction": 1,
       "activeFrames": 0,
       "frames": 11136,
-      "inputPeak": 0,
-      "outputPeak": 0,
+      "inputPeak": 0.45099085569381714,
+      "outputPeak": 0.45099085569381714,
       "delay": 329
     },
-    "heap": 12763773,
+    "outputRms": 0.048533434932218136,
+    "heap": 11983779,
     "playing": true
   },
   "faultState": {
@@ -218,8 +221,9 @@
     "port": "MessagePort"
   },
   "processorErrorRecovery": {
-    "at": 1790913906840,
-    "time": 4.069079,
+    "at": 1790915343080,
+    "time": 4.714667,
+    "contextTime": 14.094512471655328,
     "rate": 44100,
     "readyState": 4,
     "mediaError": null,
@@ -248,16 +252,17 @@
       "reduction": 1,
       "activeFrames": 0,
       "frames": 11136,
-      "inputPeak": 0,
-      "outputPeak": 0,
+      "inputPeak": 0.45099085569381714,
+      "outputPeak": 0.45099085569381714,
       "delay": 329
     },
-    "heap": 13046369,
+    "outputRms": 0.025077525151462297,
+    "heap": 12309803,
     "playing": true
   },
-  "finishedAt": "2026-10-02T04:05:06.842Z",
+  "finishedAt": "2026-10-02T04:29:03.081Z",
   "productionFiles": {
-    "public/drawercast/player.js": "74e126c43769a418d72e33130632710324ab24d7f84512d7cff47feb89c848ba",
+    "public/drawercast/player.js": "c6860d54c47cc2edf80094902a7c6861ce754076fbfb026a9104efcd91cee1dd",
     "public/drawercast/audio-core.js": "3aa2dccb7f307fb0aadbd3eae46adc7a7ea663f87ca9bdf86d3446fe861aec1c",
     "public/drawercast/audio-analysis.js": "e566046c769ac021141a54ca48c34e7bb21460a15c2a8417204e7556b8199400"
   }

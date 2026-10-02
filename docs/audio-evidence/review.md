@@ -11,3 +11,5 @@ Concrete review findings and fixes during this task:
 
 - Natural entry/return through the explicit queue also needed to preserve delayed output at an automatic boundary. Manual changes still reset stale samples.
 - Chromium 151 stopped the deliberately failed callback without delivering processorerror. Event listeners plus a bounded heartbeat watchdog now recover; the actual exception fixture passed.
+
+- A playback-state-only transition check missed a preexisting muted spare media element. Before Web Audio, transport cancellation set element volume to zero; the new graph used slot gains but retained that zero element volume. Resetting successfully routed elements to unity restored measured PCM. Regression and actual output-RMS checks passed. The silent-slot endurance attempt is excluded; the final run requires real output and advancing clocks.

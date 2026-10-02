@@ -2,9 +2,8 @@ import {performance} from 'node:perf_hooks';
 import {writeFile} from 'node:fs/promises';
 import {TruePeakGuard} from '../../public/drawercast/audio-core.js';
 import {execFileSync} from 'node:child_process';
-import vm from 'node:vm';
 const original=execFileSync('git',['show','79452a07cdc456700e0ebf8b2b5b8ca4bd589d8c:public/drawercast/player.js'],{encoding:'utf8',maxBuffer:8*1024*1024});
-const baseline=vm.runInNewContext(original.match(/class SamplePeakLimiter\{[\s\S]*?\n\}/)[0]+';SamplePeakLimiter');
+const {default:baseline}=await import('data:text/javascript;base64,'+Buffer.from(original.match(/class SamplePeakLimiter\{[\s\S]*?\n\}/)[0]+';export default SamplePeakLimiter;').toString('base64'));
 const rows=[];
 for(const [backend,Guard] of [['previous sample-only limiter',baseline],['new true-peak guard',TruePeakGuard]])for(const rate of [44100,48000,96000]){
  const g=new Guard(rate),blocks=2000,times=new Float64Array(blocks),input=Float32Array.from({length:128},(_,i)=>1.4*Math.sin(i*.7));

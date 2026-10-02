@@ -48,7 +48,7 @@ try{
   await page.waitForFunction(()=>PA.Engine.el().currentTime>1&&PA.Engine.el().readyState>=3,null,{timeout:30000,polling:100});
   report.latency.selectionToPlayheadOverOneSecondMs=performance.now()-playStarted;
   if(process.env.AUDIO_FORCE_FALLBACK!=='1')await page.waitForFunction(()=>PA.Engine.nodes?.peakLimiter,null,{timeout:10000,polling:100});
-  const snapshot=()=>page.evaluate(()=>({at:Date.now(),time:PA.Engine.time(),rate:PA.Engine.ctx.sampleRate,readyState:PA.Engine.el().readyState,mediaError:PA.Engine.el().error?.code||null,mode:PA.SET.audioMode,backend:PA.AudioQuality.limiter,ledger:PA.AudioQuality.ledger,recent:PA.AudioQuality.recent,heap:performance.memory?.usedJSHeapSize,playing:PA.Engine.playing}));
+  const snapshot=()=>page.evaluate(()=>{const pcm=new Float32Array(PA.Engine.nodes.analyser.fftSize);PA.Engine.nodes.analyser.getFloatTimeDomainData(pcm);return {at:Date.now(),time:PA.Engine.time(),contextTime:PA.Engine.ctx.currentTime,rate:PA.Engine.ctx.sampleRate,readyState:PA.Engine.el().readyState,mediaError:PA.Engine.el().error?.code||null,mode:PA.SET.audioMode,backend:PA.AudioQuality.limiter,ledger:PA.AudioQuality.ledger,recent:PA.AudioQuality.recent,outputRms:Math.sqrt(pcm.reduce((sum,x)=>sum+x*x,0)/pcm.length),heap:performance.memory?.usedJSHeapSize,playing:PA.Engine.playing};});
   report.initial=await snapshot();report.checks.push(process.env.AUDIO_FORCE_FALLBACK==='1'?'actual R2 decode and explicit degraded backend':'actual R2 HTMLMediaElement decode and worklet');
   const seekStarted=performance.now();
   await page.evaluate(()=>PA.Engine.seek(42));await page.waitForFunction(()=>PA.Engine.time()>43,null,{timeout:10000,polling:100});report.latency.seeksMs.push(performance.now()-seekStarted);report.checks.push('seek continues actual audio');
@@ -73,22 +73,25 @@ try{
     const nextId=await page.evaluate(()=>{const genesis=PA.LIB.map.get('r2_1594bzGkaPidWVBMpAM5_QwpEX7AVG-t7'),next=[...PA.LIB.map.values()].find(t=>t.source==='r2'&&t.id!==genesis.id&&!t.id.startsWith('r2_native_'));PA.SET.repeatMode='none';PA.Engine.setQueue([genesis,next],0,true);return next.id;});
     await page.waitForFunction(()=>PA.Engine.duration()>10&&PA.Engine.el().readyState>=3,null,{timeout:15000});
     await page.evaluate(()=>PA.Engine.seek(PA.Engine.duration()-1));
-    await page.waitForFunction(id=>PA.Engine.current?.id===id&&PA.Engine.time()>.25&&PA.Engine.el().readyState>=3,nextId,{timeout:20000,polling:25});report.next=await snapshot();report.checks.push('actual natural current/next track transition');
+    await page.waitForFunction(id=>PA.Engine.current?.id===id&&PA.Engine.time()>1&&PA.Engine.el().readyState>=3,nextId,{timeout:20000,polling:25});report.next=await snapshot();report.checks.push('actual natural current/next track transition');
     await page.evaluate(()=>PA.Engine.setQueue([PA.LIB.map.get('r2_1594bzGkaPidWVBMpAM5_QwpEX7AVG-t7')],0,true));
-    await page.waitForFunction(()=>PA.Engine.time()>.25&&PA.Engine.el().readyState>=3,null,{timeout:15000});report.checks.push('hard track switch continues');
+    await page.waitForFunction(()=>PA.Engine.time()>1&&PA.Engine.el().readyState>=3,null,{timeout:15000});assert.ok((await snapshot()).outputRms>1e-8,'hard switch must render actual PCM');report.checks.push('hard track switch renders actual PCM');
   }
   await page.screenshot({path:output.replace(/\.json$/,'.png')});
-  const until=Date.now()+minutes*60000;let iteration=0;
+  const until=Date.now()+minutes*60000;let iteration=0,previous=null,previousSeek=false;
   while(Date.now()<until){
     await page.waitForTimeout(10000);const s=await snapshot();report.samples.push(s);
     assert.equal(s.mediaError,null);assert.ok(s.playing);assert.ok(s.readyState>=2);
-    if(++iteration%6===0){await page.evaluate(i=>{PA.setVal('volume',i%2?.5:.8);PA.Engine.seek(5+(i*17)%110);if(i%3===0)PA.setVal('audioMode',PA.SET.audioMode==='transparent'?'custom':'transparent');},iteration);
+    assert.ok(s.outputRms>1e-8,'endurance track must render actual PCM');
+    if(previous&&!previousSeek){const wall=(s.at-previous.at)/1000,media=s.time-previous.time;assert.ok(Math.abs(media-wall)<.5,'unexplained media-clock stall/drift');}
+    previous=s;previousSeek=false;
+    if(++iteration%6===0){previousSeek=true;await page.evaluate(i=>{const cycle=i/6;PA.setVal('volume',cycle%2?.5:.8);PA.Engine.seek(5+(cycle*17)%110);if(cycle%3===0)PA.setVal('audioMode',PA.SET.audioMode==='transparent'?'custom':'transparent');},iteration);
       // Exercise UI/network pressure without per-block work in the processor.
       await page.evaluate(()=>{PA.Views.refreshAll();PA.EQ.render();});
     }
   }
   report.final=await snapshot();
-  if(process.env.AUDIO_TEST_PROCESSOR_ERROR==='1'){report.faultState=await page.evaluate(()=>({listener:typeof PA.Engine.nodes.peakLimiter.onprocessorerror,ctx:PA.Engine.ctx.state,port:PA.Engine.nodes.peakLimiter.port.constructor.name}));await page.evaluate(()=>PA.Engine.nodes.peakLimiter.port.postMessage({testThrow:true}));await page.waitForFunction(()=>!PA.Engine.nodes.peakLimiter,null,{timeout:10000,polling:25});await page.waitForTimeout(500);report.processorErrorRecovery=await snapshot();assert.match(report.processorErrorRecovery.backend,/Degraded/);assert.ok(report.processorErrorRecovery.playing);report.checks.push('real callback exception recovers to one degraded path');}
+  if(process.env.AUDIO_TEST_PROCESSOR_ERROR==='1'){report.faultState=await page.evaluate(()=>({listener:typeof PA.Engine.nodes.peakLimiter.onprocessorerror,ctx:PA.Engine.ctx.state,port:PA.Engine.nodes.peakLimiter.port.constructor.name}));await page.evaluate(()=>PA.Engine.nodes.peakLimiter.port.postMessage({testThrow:true}));await page.waitForFunction(()=>!PA.Engine.nodes.peakLimiter,null,{timeout:10000,polling:25});await page.waitForTimeout(500);report.processorErrorRecovery=await snapshot();assert.match(report.processorErrorRecovery.backend,/Degraded/);assert.ok(report.processorErrorRecovery.playing);assert.ok(report.processorErrorRecovery.outputRms>1e-8,'fallback must render actual non-silent PCM');report.checks.push('real callback exception recovers to one degraded path with non-silent PCM');}
   assert.equal(report.errors.length,0);report.passed=true;
 }catch(e){report.failure=e.stack;report.debug=await page.evaluate(()=>({track:PA?.Engine.current?.id,flags:PA?.SourceLibrary.flags,current:PA?.Engine.cur,ctx:PA?.Engine.ctx?.state,nodes:!!PA?.Engine.nodes,backend:PA?.AudioQuality.limiter,workletFailure:PA?.AudioQuality.workletFailure,playing:PA?.Engine.playing,audio:[...document.querySelectorAll('audio')].map(a=>({src:a.currentSrc,paused:a.paused,error:a.error?.code,readyState:a.readyState,time:a.currentTime})),text:document.body.innerText.slice(-1500)})).catch(()=>null);process.exitCode=1;}
 finally{report.finishedAt=new Date().toISOString();await writeFile(output,JSON.stringify(report,null,2)+'\n');await browser.close();console.log(JSON.stringify({passed:report.passed,output,failure:report.failure,checks:report.checks}));}
