@@ -1,7 +1,17 @@
 import assert from 'node:assert/strict';
 const origin='https://jarvis-hub-api.braydenparker999.workers.dev';
 const frontend='https://missionarytube.z13.web.core.windows.net';
-async function read(path){const r=await fetch(origin+path,{headers:{Origin:frontend},signal:AbortSignal.timeout(30000)});assert.equal(r.status,200,path);assert.equal(r.headers.get('Access-Control-Allow-Origin'),frontend);return r.json();}
+async function read(path){
+ for(let attempt=0;;attempt++){
+  let response;
+  try{response=await fetch(origin+path,{headers:{Origin:frontend},signal:AbortSignal.timeout(30000)});}catch(e){if(attempt===4)throw e;}
+  if(response?.status===200){assert.equal(response.headers.get('Access-Control-Allow-Origin'),frontend);return response.json();}
+  if(response){if(attempt===4||![429,502,503,504].includes(response.status))assert.equal(response.status,200,path);await response.body?.cancel();}
+  // New Worker versions and independent directory caches can take a short
+  // time to reach the runner's region. Retain the gate and retry transient errors.
+  await new Promise(resolve=>setTimeout(resolve,1000*2**attempt));
+ }
+}
 assert.equal((await read('/podcasts/health')).version,1);
 const search=await read('/podcasts/search?q=history&country=us');assert.ok(search.shows.length,'Real podcast search must return shows');
 let audioVerified=false;
