@@ -17,6 +17,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Install pinned test dependencies
+        run: npm ci
       - name: Run frontend regression tests
         run: npm test
       - uses: actions/setup-python@v5
