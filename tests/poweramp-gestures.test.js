@@ -122,11 +122,17 @@ test('mini seek cancels after backgrounding or a song change and supports keyboa
  const h=seek();h.nodes.get('#mini-seek').fire('keydown',{key:'ArrowRight'});assert.deepEqual(h.calls,[['seek',25]]);
 });
 test('playback progress does not overwrite a mini seek preview while the finger owns it',()=>{
- const h=seek(),n=h.nodes.get('#mini-seek'),fill=h.nodes.get('#mini-fill');
+ const h=seek(),n=h.nodes.get('#mini-seek'),fill=h.context.$('#mini-fill');
  const start=source.indexOf('  renderProgress:function('),end=source.indexOf('  lastProg:',start);
  vm.runInContext('UI.renderProgress='+source.slice(start+'  renderProgress:'.length,end).trim().replace(/,$/,'')+';',h.context);
- n.fire('pointerdown',{clientX:196.5});h.context.UI.renderProgress();assert.equal(fill.style.width,'50%');assert.equal(n.attrs['aria-valuenow'],'50');assert.equal(n.attrs['aria-valuetext'],'50 of 100');
- n.fire('pointercancel');assert.equal(fill.style.width,'20%');assert.equal(n.attrs['aria-valuenow'],'20');
+ n.fire('pointerdown',{clientX:196.5});h.context.UI.renderProgress();assert.equal(fill.style.transform,'scaleX(0.5)');assert.equal(n.attrs['aria-valuenow'],'50');assert.equal(n.attrs['aria-valuetext'],'50 of 100');
+ n.fire('pointercancel');assert.equal(fill.style.transform,'scaleX(0.2)');assert.equal(n.attrs['aria-valuenow'],'20');
+});
+test('mini seeking measures its rail once per contact and commits against the same bounds',()=>{
+ const h=seek(),n=h.nodes.get('#mini-seek');let reads=0;
+ n.getBoundingClientRect=()=>{reads++;return {left:0,width:400};};
+ n.fire('pointerdown',{clientX:100});n.fire('pointermove',{clientX:200});n.fire('pointermove',{clientX:300});n.fire('pointerup',{clientX:300});
+ assert.equal(reads,1);assert.deepEqual(h.calls,[['seek',75]]);assert.equal(h.nodes.get('#mini-fill').style.width,'100%');
 });
 test('track menus open immediately and late artwork cannot reopen or overwrite a newer menu',async()=>{
  const h=harness(),resolvers=new Map(),heads=[],arts=[];

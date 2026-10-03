@@ -27,7 +27,7 @@ function harness({cached,remoteFile=true,cacheRead,response}={}){
   });
   const waveform=vm.runInContext(source.slice(start,end)+'\nWaveform;',context);
   function select(track){waveform.load(track);clearTimeout(waveform.timer);}
-  return {waveform,calls,select};
+  return {waveform,calls,select,context};
 }
 
 test('uncached A15 waveform never opens or downloads a second audio stream',async()=>{
@@ -97,4 +97,27 @@ test('malformed and oversized waveform responses cannot allocate unbounded peaks
 test('new server capability triggers loading even when the same track is selected',()=>{
   const {waveform,select}=harness();const t={id:'same',remote:true,dur:1};select(t);const token=waveform.token;
   t.waveformVersion=1;select(t);assert.equal(waveform.token,token+1);select(null);
+});
+function renderer(h,{time=1,duration=2,staticBar=false}={}){
+  h.context.Engine={current:{id:'render',remote:true,dur:duration},playing:false,time:()=>time,duration:()=>duration};
+  h.context.SET={nativeSeekbar:staticBar?1:0,waveBars:44};h.context.isLightUI=()=>false;
+  const a=source.indexOf('  UI.drawWaveSeek=function(',source.indexOf('function installLyricsRework()'));
+  const b=source.indexOf('\n  };',a);
+  vm.runInContext(source.slice(a,b+5),h.context);
+  h.select(h.context.Engine.current);
+  const bars=[],clips=[];const g={globalAlpha:1,fillStyle:'',beginPath(){},fill(){},save(){},restore(){},clip(){},
+    rect(...r){clips.push(r);},roundRect(...r){bars.push(r);},fillRect(){}};
+  return {g,bars,clips,draw:()=>h.context.UI.drawWaveSeek(g,440,40,null,'#f4ddcb',1)};
+}
+test('loaded prepared waveform draws populated bars in both whole-track and centered views',()=>{
+  for(const staticBar of [false,true]){const h=harness(),r=renderer(h,{staticBar});
+    h.waveform.accept({duration:2,peaks:new Uint8Array(32).fill(200)});r.draw();
+    assert.ok(r.bars.length>0);assert.ok(r.bars.every(([x,y,w,height])=>Number.isFinite(x)&&w>0&&height>2.5&&height<=40));
+    assert.ok(r.clips.some(([x,y,w])=>x===0&&w===220));
+  }
+});
+test('progressive waveform draws sampled audio without inventing bars for unloaded time',()=>{
+  const h=harness(),r=renderer(h,{time:5,duration:20});h.waveform.sample(Uint8Array.of(64,192),5,20);r.draw();
+  assert.ok(r.bars.length>0);assert.ok(r.bars.length<44);
+  assert.equal(h.waveform.level(10,11),null);assert.equal(h.calls.files,0);assert.equal(h.calls.fetch,0);
 });
