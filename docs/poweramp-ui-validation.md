@@ -30,6 +30,16 @@ Source-handler tests use simulated DOM nodes, pointer/touch events, timers, and 
 
 The observed HTTP 503/1102 is documented by Cloudflare as a Worker CPU-limit failure. Removing repeated whole-library processing addresses a measured hot path; attributing every prior failure to that path would require production profiling. Release acceptance includes real Range/CORS/hash/decode verification, independent Drive and R2 browser playback/seek/artwork checks, and review of the mobile viewport evidence. Existing public-by-link access, Muse signing keys, bucket privacy, source settings, and stored tracks must be preserved during deployment.
 
+## Reported UI lag follow-up
+
+The user reported lag across the whole interface after release. Source-handler reproduction found that visibility recovery zeroed the current animation handle without canceling the hidden timer. Five background/return cycles left six independent frame chains running. The fix stops rendering immediately on backgrounding and uses a generation guard so canceled callbacks cannot restart or interfere with the current loop. The same regression now retains exactly one chain and no hidden polling timer. This is a reproduced lifecycle defect, not a measured A15 frame-rate result.
+
+The mini-player thumb previously changed a CSS `left` expression every display frame even though the fill itself used a transform. The thumb now belongs to the translating fill layer; its endpoints, size, and appearance remain the same. Progress no longer paints a hidden player rail or rewrites unchanged time labels and accessibility attributes. Owned scrubs retain their preview without competing periodic canvas work, and navigation refreshes the newly visible progress values.
+
+Waveform bars entirely before or after the playhead now draw once without a clipping stack. Only a bar crossing the playhead receives both clipped colors. For the 44-bar whole-track test fixture, ordinary drawing falls from 88 paths and 88 clipping operations to 44 paths with zero clips; a crossing bar adds one path and two clips. Prepared and progressive data, exact playhead color boundaries, seeking, and the existing gesture regressions remain covered. These operation counts do not measure GPU time or establish 60 fps on the phone. Full-screen visualization keeps its existing animation cadence.
+
+Eleven additional regressions cover render lifecycle, stale callbacks, hidden work, scrub ownership, navigation progress, thumb updates, and waveform clipping. The full current suite is recorded by source CI. The current launcher/Relay release is retained; this hotfix changes only the Poweramp rendering paths and their tests/documentation.
+
 ## Galaxy A15 acceptance checks
 
 - Rapidly tap the mini-player title over different song rows, including while paused. Current track, playback intent, and queue must stay unchanged until a deliberate player control is used.

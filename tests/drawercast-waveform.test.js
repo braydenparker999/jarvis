@@ -105,19 +105,29 @@ function renderer(h,{time=1,duration=2,staticBar=false}={}){
   const b=source.indexOf('\n  };',a);
   vm.runInContext(source.slice(a,b+5),h.context);
   h.select(h.context.Engine.current);
-  const bars=[],clips=[];const g={globalAlpha:1,fillStyle:'',beginPath(){},fill(){},save(){},restore(){},clip(){},
+  const bars=[],clips=[],fills=[];const g={globalAlpha:1,fillStyle:'',beginPath(){},fill(){fills.push(this.globalAlpha);},save(){},restore(){},clip(){},
     rect(...r){clips.push(r);},roundRect(...r){bars.push(r);},fillRect(){}};
-  return {g,bars,clips,draw:()=>h.context.UI.drawWaveSeek(g,440,40,null,'#f4ddcb',1)};
+  return {g,bars,clips,fills,draw:()=>h.context.UI.drawWaveSeek(g,440,40,null,'#f4ddcb',1)};
 }
 test('loaded prepared waveform draws populated bars in both whole-track and centered views',()=>{
   for(const staticBar of [false,true]){const h=harness(),r=renderer(h,{staticBar});
     h.waveform.accept({duration:2,peaks:new Uint8Array(32).fill(200)});r.draw();
     assert.ok(r.bars.length>0);assert.ok(r.bars.every(([x,y,w,height])=>Number.isFinite(x)&&w>0&&height>2.5&&height<=40));
-    assert.ok(r.clips.some(([x,y,w])=>x===0&&w===220));
+    assert.ok(r.fills.includes(.28)&&r.fills.includes(.78));assert.ok(r.clips.length<=2);
   }
 });
 test('progressive waveform draws sampled audio without inventing bars for unloaded time',()=>{
   const h=harness(),r=renderer(h,{time:5,duration:20});h.waveform.sample(Uint8Array.of(64,192),5,20);r.draw();
   assert.ok(r.bars.length>0);assert.ok(r.bars.length<44);
   assert.equal(h.waveform.level(10,11),null);assert.equal(h.calls.files,0);assert.equal(h.calls.fetch,0);
+});
+test('waveform bars away from the playhead draw once without clipping',()=>{
+  const h=harness(),r=renderer(h,{staticBar:true});h.waveform.accept({duration:2,peaks:new Uint8Array(32).fill(200)});r.draw();
+  assert.equal(r.bars.length,44);assert.equal(r.clips.length,0);
+  assert.ok(r.fills.includes(.28)&&r.fills.includes(.78));
+});
+test('only the waveform bar crossing the playhead retains the exact split',()=>{
+  const h=harness(),r=renderer(h,{staticBar:true,time:1.01});h.waveform.accept({duration:2,peaks:new Uint8Array(32).fill(200)});r.draw();
+  assert.equal(r.bars.length,45);assert.equal(r.clips.length,2);
+  assert.deepEqual(r.clips[0],[0,0,222.2,40]);assert.deepEqual(r.clips[1],[222.2,0,217.8,40]);
 });
