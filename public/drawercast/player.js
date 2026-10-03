@@ -5787,6 +5787,29 @@ function setupPlayerSwipeDown(){
   });
 }
 
+function bindTapButton(button,action){
+  let contact=null;const blockClick=InputLifecycle.clickGuard(button);
+  const time=e=>Number.isFinite(e.timeStamp)&&e.timeStamp>0?e.timeStamp:performance.now();
+  const reset=()=>{if(contact)blockClick({pointerId:contact.id});contact=null;};
+  button.onclick=e=>{if(button.disabled||!InputLifecycle.active(button)){e.preventDefault();return;}e.stopPropagation();action();};
+  button.addEventListener('pointerdown',e=>{
+    if(!['touch','pen'].includes(e.pointerType))return;
+    if(contact||e.isPrimary===false){reset();return;}
+    if(e.button>0||button.disabled||!InputLifecycle.active(button))return;
+    contact={id:e.pointerId,x:e.clientX,y:e.clientY,started:time(e),travel:0};
+    try{button.setPointerCapture(e.pointerId);}catch(_){}
+  });
+  button.addEventListener('pointermove',e=>{if(contact?.id===e.pointerId)contact.travel=Math.max(contact.travel,Math.hypot(e.clientX-contact.x,e.clientY-contact.y));});
+  button.addEventListener('pointerup',e=>{
+    if(contact?.id!==e.pointerId)return;
+    const done=contact;contact=null;blockClick(e);e.preventDefault();
+    const travel=Math.max(done.travel,Math.hypot(e.clientX-done.x,e.clientY-done.y));
+    if(travel<=7&&time(e)-done.started<600&&InputLifecycle.active(button)&&!button.disabled)action();
+  });
+  button.addEventListener('pointercancel',reset);button.addEventListener('lostpointercapture',reset);
+  document.addEventListener('pointerdown',()=>{if(InputLifecycle.contacts.size>1)reset();},true);
+  InputLifecycle.register(reset,button);
+}
 function bindTransportButton(button){
   const action=button.dataset.act;let pointer=null,timer=0,repeat=0,suppressUntil=0;
   const stop=()=>{clearTimeout(timer);clearInterval(repeat);timer=0;repeat=0;pointer=null;};
@@ -6019,8 +6042,7 @@ function bindStatic(){
     };
   });
 
-  $('#btn-play').onclick=function(){ Engine.toggle(); vibrate(10); };
-  $('#mini-play').onclick=function(e){ e.stopPropagation(); Engine.toggle(); vibrate(10); };
+  for(const selector of ['#btn-play','#mini-play'])bindTapButton($(selector),()=>{Engine.toggle();vibrate(10);});
   $$('[data-act]').forEach(b=>bindTransportButton(b));
 
   $('#t-repeat').onclick=function(){

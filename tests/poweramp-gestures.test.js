@@ -197,6 +197,21 @@ test('gesture velocity and tap duration use contact timestamps when event proces
  n.fire('pointerdown',{timeStamp:3000});n.fire('pointermove',{clientX:110,timeStamp:3020});n.fire('pointerup',{clientX:110,timeStamp:3200});
  assert.equal(done[1].vx,0,'a real pause before release cancels stale momentum');
 });
+function tapButton(){const h=harness(),button=node();h.context.button=button;run(h,'function bindTapButton(','function bindTransportButton(');vm.runInContext('bindTapButton(button,()=>Engine.toggle())',h.context);return {h,button};}
+test('play buttons act on the owning touch release even when Chrome emits no click',()=>{
+ const {h,button}=tapButton();button.fire('pointerdown');h.advance(30);button.fire('pointerup');assert.deepEqual(h.calls,['toggle']);
+ assert.equal(button.fire('click').prevented,true,'compatibility click cannot activate twice');
+ button.fire('pointerdown');h.advance(30);button.fire('pointerup');assert.deepEqual(h.calls,['toggle','toggle']);
+});
+test('play touches cannot activate after movement, cancellation, or lifecycle changes',()=>{
+ for(const mode of ['move','cancel','background']){const {h,button}=tapButton();button.fire('pointerdown');if(mode==='move')button.fire('pointermove',{clientX:200});else if(mode==='cancel')button.fire('pointercancel');else h.win.fire('blur');button.fire('pointerup');assert.deepEqual(h.calls,[]);assert.equal(button.fire('click').prevented,true,'a canceled touch cannot become a compatibility click');}
+ const {h,button}=tapButton();button.fire('pointerdown');button.fire('pointerdown',{pointerId:2,isPrimary:false});button.fire('pointerup');assert.deepEqual(h.calls,[]);
+});
+test('play mouse and keyboard clicks remain available without duplicate pointer actions',()=>{
+ const {h,button}=tapButton();button.fire('pointerdown',{pointerType:'mouse'});button.fire('pointerup',{pointerType:'mouse'});assert.deepEqual(h.calls,[]);
+ button.onclick({stopPropagation(){}});assert.deepEqual(h.calls,['toggle']);
+ button.fire('pointerdown');button.fire('pointerup');assert.notEqual(button.fire('click',{detail:0}).prevented,true);button.onclick({stopPropagation(){}});assert.deepEqual(h.calls,['toggle','toggle','toggle']);
+});
 test('track menus open immediately and late artwork cannot reopen or overwrite a newer menu',async()=>{
  const h=harness(),resolvers=new Map(),heads=[],arts=[];
  h.context.getArtURL=t=>new Promise(resolve=>resolvers.set(t.id,resolve));h.context.esc=String;h.context.icoHTML=()=>'';
