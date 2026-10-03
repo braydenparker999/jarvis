@@ -1,3 +1,5 @@
+import {icon, sheet, readLocal, writeLocal, el} from '../assets/ui.js';
+import {discover, withinTime} from './discovery.js';
 import {createVideoApi, folderId, mediaURL, thumbnails, parseLibrary, parseProgress, recordProgress, resumeTime,
   continueWatching, searchVideos, sortVideos, groupByFolder, formatDuration, srtToVtt,
   PROGRESS_KEY, LIBRARY_KEY} from './library.js';
@@ -14,6 +16,10 @@ let library = parseLibrary(read(LIBRARY_KEY));
 let progress = parseProgress(read(PROGRESS_KEY));
 let query = '', sort = read(SORT_KEY) || 'newest';
 let current = null, libraryScroll = 0, depth = 0, ready = false;
+let view='explore', collection='', browseKind='', minutes=0, onlyUnwatched=false, pageLimit=60;
+const savedRaw=readLocal('mymedia.saved.v1',[]),queueRaw=readLocal('mymedia.queue.v1',[]);
+let saved=new Set(Array.isArray(savedRaw)?savedRaw:[]), queue=Array.isArray(queueRaw)?queueRaw:[];
+document.querySelectorAll('[data-icon]').forEach(n=>n.innerHTML=icon(n.dataset.icon));
 let openFolders = (() => {
   try {
     const paths = JSON.parse(read(OPEN_FOLDERS_KEY) || '[]');
@@ -36,13 +42,13 @@ function card(video) {
   const percent = p && !p.done && duration ? Math.min(100, p.t / duration * 100) : 0;
   const left = resumeTime(p) && duration ? formatDuration(duration - p.t) + ' left' : '';
   const date = video.modified ? new Date(video.modified).toLocaleDateString(undefined, {month:'short', day:'numeric', year:'numeric'}) : '';
-  const detail = p?.done ? '<span class="watched-mark">✓ Watched</span>' : esc(left || date);
-  return `<a class="video-card" href="#v=${esc(video.id)}"><div class="thumb">` +
+  const detail = p?.done ? '<span class="watched-mark">✓ Watched</span>' : esc(left || video.creator || date);
+  return `<div class="video-tile"><a class="video-card" href="#v=${esc(video.id)}"><div class="thumb">` +
     `<span class="placeholder" aria-hidden="true">▶</span>` +
     (images.length ? `<img alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" src="${esc(images[0])}" data-fallbacks="${esc(JSON.stringify(images.slice(1)))}">` : '') +
     (duration ? `<span class="length">${formatDuration(duration)}</span>` : '') +
     (percent ? `<span class="bar"><span data-progress="${percent.toFixed(1)}"></span></span>` : '') +
-    `</div><span class="card-text"><strong>${esc(video.title)}</strong><small>${detail}</small></span></a>`;
+    `</div><span class="card-text"><strong>${esc(video.title)}</strong><small>${detail}</small></span></a><button class="video-menu" type="button" data-video-menu="${esc(video.id)}" aria-label="Actions for ${esc(video.title)}">${icon('more')}</button></div>`;
 }
 
 // Thumbnail candidates fall through in order; the placeholder shows if all fail.
@@ -63,32 +69,55 @@ function renderLibrary() {
   renderShelves();
   paintBars($('library-view'));
 }
-function renderShelves() {
-  if (!library) { $('sections').innerHTML = ''; $('continue').hidden = true; $('folder-actions').hidden = true; return; }
-  const videos = sortVideos(searchVideos(library.videos, query), sort);
-  if (query) {
-    $('continue').hidden = true;
-    $('folder-actions').hidden = true;
-    $('sections').innerHTML = videos.length
-      ? `<section class="shelf"><h2 class="eyebrow">${videos.length} result${videos.length === 1 ? '' : 's'}</h2><div class="video-grid">${videos.map(v => card(v)).join('')}</div></section>`
-      : `<p class="empty">No videos match “${esc(query)}”.</p>`;
-    return;
-  }
-  const resume = continueWatching(library.videos, progress, 6);
-  $('continue').hidden = !resume.length;
-  $('continue-grid').innerHTML = resume.map(v => card(v)).join('');
-  const groups = groupByFolder(videos, library.name);
-  $('folder-actions').hidden = !groups.length;
-  $('folder-count').textContent = `${groups.length} folder${groups.length === 1 ? '' : 's'}`;
-  $('sections').innerHTML = groups.length
-    ? groups.map(g => `<details class="folder-shelf" data-folder="${esc(g.path)}"${openFolders.has(g.path) ? ' open' : ''}>` +
-      `<summary class="folder-summary"><span class="folder-icon" aria-hidden="true">📁</span><span class="folder-name">${esc(g.label)}</span>` +
-      `<span class="folder-total">${g.items.length} video${g.items.length === 1 ? '' : 's'}</span><span class="folder-chevron" aria-hidden="true">⌄</span></summary>` +
-      `<div class="video-grid folder-grid">${g.items.map(v => card(v)).join('')}</div></details>`).join('')
-    : '<p class="empty">No videos in this folder yet. Add MP4 or WebM files in Google Drive, then refresh.</p>';
-  updateFolderToggle(groups);
+function collectionArt(group){
+  return `<div class="collection-art">${group.items.slice(0,2).map(v=>{const images=thumbnails(v,key);return images.length?`<img alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" src="${esc(images[0])}" data-fallbacks="${esc(JSON.stringify(images.slice(1)))}">`:'';}).join('')}<span>${icon('library')}</span></div>`;
 }
-
+function collectionTile(group,featured=false){
+  const count=group.items.filter(v=>!progress[v.id]?.done).length;
+  return `<a href="#collection=${encodeURIComponent(group.path)}" class="collection-tile${featured?' featured-collection':''}">${collectionArt(group)}<div><span class="eyebrow">${featured?'From your library':'Collection'}</span><h2>${esc(group.label)}</h2><p>${group.items.length} videos${count?' · '+count+' unwatched':''}</p></div>${featured?`<span class="collection-open">Explore collection ${icon('chevron')}</span>`:''}</a>`;
+}
+function shelf(title,items,kind){if(!items.length)return '';return `<section class="shelf"><div class="section-heading"><h2>${title}</h2><a class="text-button" href="#browse=${kind}">See all</a></div><div class="media-rail">${items.slice(0,8).map(card).join('')}</div></section>`;}
+function filteredVideos(){let videos=library?.videos||[];if(view==='saved')videos=videos.filter(v=>saved.has(v.id));if(collection)videos=videos.filter(v=>v.folder===collection||v.creator===collection);if(onlyUnwatched||browseKind==='unwatched')videos=videos.filter(v=>!progress[v.id]?.done);videos=withinTime(videos,minutes|| (browseKind==='quick'?20:0));return sortVideos(searchVideos(videos,query),sort);}
+function renderShelves(){
+  $('continue').hidden=true;$('folder-actions').hidden=true;$('load-more').hidden=true;
+  $('media-nav').hidden=!!current;
+  for(const tab of document.querySelectorAll('[data-view]')){if(tab.dataset.view===view)tab.setAttribute('aria-current','page');else tab.removeAttribute('aria-current');}
+  $('view-title').textContent=collection?collection.split('/').at(-1):browseKind==='fresh'?'Fresh additions':browseKind==='quick'?'Quick watches':browseKind==='unwatched'?'Worth exploring':view==='explore'?'Explore':view==='saved'?'Saved':'Library';
+  $('browse-all').hidden=!collection&&!browseKind;
+  $('time-filter').textContent=minutes?'Under '+minutes+' min':'Any length';$('unwatched-filter').setAttribute('aria-pressed',String(onlyUnwatched));
+  if(!library){$('sections').innerHTML='<div class="media-empty"><h2>Your library is loading</h2><p>Your collections will appear here.</p></div>';return;}
+  const videos=filteredVideos(),focused=query||collection||browseKind||minutes||onlyUnwatched||view==='saved';
+  if(focused){
+    const items=browseKind==='unwatched'?discover(videos,progress,videos.length):videos;
+    $('sections').innerHTML=items.length?`<p class="browse-count">${items.length} video${items.length===1?'':'s'}</p><div class="video-grid">${items.slice(0,pageLimit).map(card).join('')}</div>`:`<div class="media-empty"><h2>${view==='saved'?'Save something for later':'No matching videos'}</h2><p>${view==='saved'?'Use a video’s menu to add it here.':'Try a different filter or search.'}</p></div>`;
+    $('load-more').hidden=items.length<=pageLimit;return;
+  }
+  const groups=groupByFolder(videos,library.name);
+  if(view==='library'){
+    $('folder-actions').hidden=!groups.length;$('folder-count').textContent=groups.length+' collections';
+    $('sections').innerHTML=groups.map(g=>`<details class="folder-shelf" data-folder="${esc(g.path)}"${openFolders.has(g.path)?' open':''}><summary class="folder-summary"><span class="folder-icon">${icon('library')}</span><span class="folder-name">${esc(g.label)}</span><span class="folder-total">${g.items.length}</span><span class="folder-chevron">⌄</span></summary><div class="video-grid folder-grid">${openFolders.has(g.path)?g.items.slice(0,60).map(card).join(''):''}</div><a class="text-button" href="#collection=${encodeURIComponent(g.path)}">Browse collection</a></details>`).join('');updateFolderToggle(groups);return;
+  }
+  if(!videos.length){$('sections').innerHTML='<div class="media-empty"><h2>Your collection starts here</h2><p>Add videos to your shared folder, then refresh.</p></div>';return;}
+  const pool=sortVideos(videos.filter(v=>!progress[v.id]?.done),'newest'),fresh=pool.slice(0,6),used=new Set(fresh.map(v=>v.id));
+  const quick=withinTime(pool.filter(v=>!used.has(v.id)),20).slice(0,6);quick.forEach(v=>used.add(v.id));
+  const picks=discover(pool.filter(v=>!used.has(v.id)),progress,8);
+  const featured=[...groups].sort((a,b)=>b.items.filter(v=>!progress[v.id]?.done).length-a.items.filter(v=>!progress[v.id]?.done).length)[0];
+  const creators=new Map();for(const v of videos)if(v.creator){if(!creators.has(v.creator))creators.set(v.creator,[]);creators.get(v.creator).push(v);}
+  $('sections').innerHTML=(featured?collectionTile(featured,true):'')+shelf('Fresh additions',fresh,'fresh')+shelf('Quick watches',quick,'quick')+shelf('Worth exploring',picks,'unwatched')+
+    `<section class="shelf"><div class="section-heading"><h2>Collections</h2><a class="text-button" href="#library">Browse all</a></div><div class="collection-grid">${groups.slice(0,12).map(g=>collectionTile(g)).join('')}</div></section>`+
+    (creators.size?`<section class="shelf"><div class="section-heading"><h2>Creators</h2></div><div class="creator-list">${[...creators].slice(0,16).map(([name,items])=>`<a href="#collection=${encodeURIComponent(name)}"><strong>${esc(name)}</strong><small>${items.length} videos</small>${icon('chevron')}</a>`).join('')}</div></section>`:'');
+  const resume=continueWatching(library.videos,progress,3);$('continue').hidden=!resume.length;$('continue-grid').innerHTML=resume.map(card).join('');
+}
+function persistSaved(){if(!writeLocal('mymedia.saved.v1',[...saved]))status('Could not save your list on this device.',true);}
+function persistQueue(){if(!writeLocal('mymedia.queue.v1',queue))status('Could not save your queue on this device.',true);if(current)renderNext(current.video);}
+function videoMenu(id){const item=library?.videos.find(v=>v.id===id);if(!item)return;sheet(item.title,[
+  {label:resumeTime(progress[id])?'Resume video':'Play video',icon:'play',action:()=>{location.hash='v='+id;}},
+  {label:saved.has(id)?'Remove from Saved':'Save for later',icon:'bookmark',action:()=>{saved.has(id)?saved.delete(id):saved.add(id);persistSaved();if(current?.video.id===id)$('save-video').textContent=saved.has(id)?'Saved':'Save for later';renderLibrary();}},
+  {label:queue.includes(id)?'Remove from queue':'Add to queue',icon:'plus',action:()=>{queue.includes(id)?queue=queue.filter(x=>x!==id):queue.push(id);persistQueue();}},
+  {label:progress[id]?.done?'Mark unwatched':'Mark watched',icon:'check',action:()=>{progress[id]={...(progress[id]||{}),done:!progress[id]?.done,at:Date.now()};saveProgress();renderLibrary();if(current?.video.id===id)paintWatched();}},
+  {label:'Browse this collection',icon:'library',action:()=>{location.hash='collection='+encodeURIComponent(item.folder);}},
+  {label:'Video details',icon:'info',action:()=>{const d=sheet(item.title,[]);d.append(el('p',[item.creator||item.folder,item.duration?formatDuration(item.duration):'Duration unavailable',item.height?item.height+'p':''].filter(Boolean).join(' · ')));if(item.description)d.append(el('p',item.description));}}
+]);}
 function saveOpenFolders() {
   write(OPEN_FOLDERS_KEY, JSON.stringify([...openFolders]));
 }
@@ -112,6 +141,7 @@ async function refresh() {
     library = await api.list(folder, AbortSignal.timeout(60000));
     if (!write(LIBRARY_KEY, JSON.stringify(library))) console.warn('My Media: library cache not saved');
     status(summary());
+    if(!current)libraryScroll=scrollY;
     renderLibrary();
     route();
   } catch (error) {
@@ -165,9 +195,11 @@ function openVideo(item) {
   closeVideo();
   const controller = new AbortController();
   current = {video:item, controller, urls:[], handle:null};
+  if(queue.includes(item.id)){queue=queue.filter(id=>id!==item.id);writeLocal('mymedia.queue.v1',queue);}
   $('library-view').hidden = true; $('player-view').hidden = false;
-  $('back').textContent = '← Library'; $('back').href = '#'; $('back').setAttribute('aria-label', 'Back to library');
-  $('refresh').hidden = true;
+  $('back').innerHTML=icon('back'); $('back').href = '#'; $('back').setAttribute('aria-label', 'Back to library');
+  $('refresh').hidden = true;$('search-toggle').hidden=true;$('media-nav').hidden=true;
+  $('save-video').textContent=saved.has(item.id)?'Saved':'Save for later';
   document.title = item.title + ' · My Media';
   $('video-title').textContent = item.title;
   const bits = [item.folder, item.height ? item.height + 'p' : '', item.size ? (item.size / 1048576).toFixed(0) + ' MB' : ''];
@@ -211,7 +243,8 @@ function closeVideo() {
 function renderNext(item) {
   const siblings = sortVideos(library.videos.filter(v => v.folder === item.folder), sort);
   const at = siblings.findIndex(v => v.id === item.id);
-  const next = [...siblings.slice(at + 1), ...siblings.slice(0, Math.max(0, at))].slice(0, 12);
+  const next = [...queue.map(id=>library.videos.find(v=>v.id===id)).filter(v=>v&&v.id!==item.id), ...siblings.slice(at + 1), ...siblings.slice(0, Math.max(0, at))].filter((v,i,all)=>v.id!==item.id&&all.findIndex(x=>x.id===v.id)===i).slice(0,12);
+  $('queue-video').textContent='Queue'+(queue.length?' ('+queue.length+')':'');
   $('next-list').innerHTML = next.length ? next.map(v => card(v)).join('') : '<p class="status">Nothing else in this folder.</p>';
   paintBars($('next-list'));
 }
@@ -298,17 +331,25 @@ document.addEventListener('keydown', event => {
 
 // #v=<Drive file ID> is the player; anything else is the library. Real links
 // keep Android Back working.
-function route() {
+function route(event) {
   const id = /^#v=([A-Za-z0-9_-]{10,200})$/.exec(location.hash)?.[1];
   const item = id && library?.videos.find(v => v.id === id);
   if (id && !ready) return; // opened once the Drive key has loaded
   if (item && api) { if (current?.video.id !== id) { if (!current) libraryScroll = scrollY; openVideo(item); } return; }
   if (id && api && (loading || !library)) return; // shown once the list arrives
+  const returning=!!current;
+  if(current){closeVideo();}
+  if(!returning&&event?.type==='hashchange'){libraryScroll=0;pageLimit=60;}
   depth = 0;
-  closeVideo();
+  const hash=location.hash.slice(1);
+  collection='';browseKind='';
+  if(hash.startsWith('collection=')){try{collection=decodeURIComponent(hash.slice(11));}catch{collection='';}}
+  else if(hash.startsWith('browse='))browseKind=hash.slice(7);
+  else if(['explore','library','saved'].includes(hash))view=hash;
+  writeLocal('mymedia.view.v1',view);
   $('player-view').hidden = true; $('library-view').hidden = false;
-  $('back').textContent = '← Jarvis'; $('back').href = '/'; $('back').setAttribute('aria-label', 'Back to Jarvis');
-  $('refresh').hidden = false;
+  $('back').innerHTML=icon('back'); $('back').href = '/'; $('back').setAttribute('aria-label', 'Back to Jarvis');
+  $('refresh').hidden = false;$('search-toggle').hidden=false;$('media-nav').hidden=false;
   document.title = 'My Media · Jarvis';
   if (id) status(api ? 'That video is no longer in the folder.' : 'Videos cannot play until the Drive settings load.', true);
   renderLibrary();
@@ -330,7 +371,7 @@ $('refresh').addEventListener('click', refresh);
 $('sections').addEventListener('toggle', event => {
   const details = event.target;
   if (!(details instanceof HTMLDetailsElement) || !details.dataset.folder) return;
-  if (details.open) openFolders.add(details.dataset.folder);
+  if(details.open){openFolders.add(details.dataset.folder);const items=filteredVideos().filter(v=>v.folder===details.dataset.folder);const grid=details.querySelector('.folder-grid');if(!grid.children.length){grid.innerHTML=items.slice(0,60).map(card).join('');paintBars(grid);}}
   else openFolders.delete(details.dataset.folder);
   saveOpenFolders();
   updateFolderToggle();
@@ -366,4 +407,14 @@ async function start() {
   route(); // thumbnails that need the key, or a video link opened directly
   refresh();
 }
+$('search-toggle').onclick=()=>{const bar=$('library-search');bar.hidden=!bar.hidden;if(!bar.hidden)$('search').focus();else{query='';$('search').value='';renderLibrary();}};
+$('time-filter').onclick=()=>sheet('How much time do you have?',[0,10,20,40].map(n=>({label:n?'Under '+n+' minutes':'Any length',icon:'clock',action:()=>{minutes=n;pageLimit=60;renderLibrary();}})));
+$('unwatched-filter').onclick=()=>{onlyUnwatched=!onlyUnwatched;pageLimit=60;renderLibrary();};
+$('browse-all').onclick=()=>{location.hash=view;};
+$('load-more').onclick=()=>{pageLimit+=60;renderLibrary();};
+$('surprise').onclick=()=>{const picks=discover(filteredVideos(),progress,100,new Date().toISOString().slice(0,10)+Math.random());if(!picks.length){status('No unwatched videos match these filters.');return;}videoMenu(picks[0].id);};
+document.addEventListener('click',e=>{const b=e.target.closest('[data-video-menu]');if(b)videoMenu(b.dataset.videoMenu);});
+$('save-video').onclick=()=>{if(!current)return;const id=current.video.id;saved.has(id)?saved.delete(id):saved.add(id);persistSaved();$('save-video').textContent=saved.has(id)?'Saved':'Save for later';};
+$('queue-video').onclick=()=>sheet('Viewing queue',[{label:queue.includes(current.video.id)?'Remove current video':'Add current video',icon:'plus',action:()=>{const id=current.video.id;queue.includes(id)?queue=queue.filter(x=>x!==id):queue.push(id);persistQueue();}},...queue.map(id=>({label:library.videos.find(v=>v.id===id)?.title||'Unavailable video',icon:'play',action:()=>sheet('Queue item',[{label:'Play next',action:()=>{queue=[id,...queue.filter(x=>x!==id)];persistQueue();}},{label:'Remove from queue',action:()=>{queue=queue.filter(x=>x!==id);persistQueue();}}])}))]);
+view=readLocal('mymedia.view.v1','explore');if(!['explore','library','saved'].includes(view))view='explore';
 start();

@@ -1,3 +1,5 @@
+import {icon as uiIcon, sheet, appViewport, autosize} from './ui.js';
+import {conversation} from './conversation.js';
 import { apps, icon, loadPreferences, savePreferences, renderUtility } from './hub.js';
 import { API_ORIGIN } from './config.js';
 import { request } from './shared-api.js';
@@ -18,7 +20,9 @@ const svg = name => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" 
 let state, storageError = '', syncError = '', busy = false, toastTimer;
 try { state = readState(localStorage); localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
 catch (e) { storageError = e.message || 'Device storage is unavailable.'; }
-let route = getRoute();
+let route = getRoute(), chatUI;
+appViewport();
+addEventListener('pagehide',()=>chatUI?.savePosition());
 const paths = { home: '/', chat: '/jarvis/', board: '/daily-board/', favorites: '/favorites/', settings: '/settings/', notes: '/notes/', tools: '/tools/', server: '/server/' };
 const labels = { home: 'Home', chat: 'Relay', board: 'Daily Board', favorites: 'Favorites', settings: 'Settings', notes: 'Notes', tools: 'Tools', server: 'Server' };
 function getRoute() { return ({jarvis:'chat','daily-board':'board',favorites:'favorites',settings:'settings',notes:'notes',tools:'tools',server:'server'})[location.pathname.split('/')[1]] || 'home'; }
@@ -61,6 +65,8 @@ function connection() {
   return state.syncedAt ? 'Connected' : 'Connecting';
 }
 function drawShell() {
+  chatUI?.savePosition(); chatUI=null;
+  for(const cls of ['module-page','conversation-page','relay-page'])document.body.classList.toggle(cls,route==='chat');
   const hub = ['home','favorites','settings'].includes(route);
   const launcher = ['home','favorites'].includes(route);
   clearTimeout(clockTimer);
@@ -69,7 +75,7 @@ function drawShell() {
   document.title = `${labels[route]} · Jarvis`;
   const header = launcher
     ? `<header class="topbar launcher-topbar"><a class="brand" href="/" data-route="home">Jarvis</a><nav class="toolbar-actions" aria-label="Launcher tools"><button class="icon-button" id="search-button" aria-label="Search apps" aria-expanded="${route==='home'&&searchOpen}" ${route==='home'?'aria-controls="launcher-search"':''}>${icon('search')}</button><a class="icon-button" href="/favorites/" data-route="favorites" aria-label="Favorites" ${route==='favorites'?'aria-current="page"':''}>${icon('favorites')}</a><button class="icon-button" id="connection-button" aria-label="Connection details">${icon('more')}<span class="sr-only">${connection()}</span></button></nav></header>`
-    : `<header class="topbar">${hub?`<button class="icon-button" id="menu-button" aria-label="Open navigation">${icon('menu')}</button>`:`<a class="icon-button" href="/" data-route="home" aria-label="Back to Home">${icon('back')}</a>`}<a class="brand" href="/" data-route="home">Jarvis</a><div class="toolbar-actions">${hub?`<button class="icon-button" id="search-button" aria-label="Search apps">${icon('search')}</button>`:''}<button class="icon-button" id="connection-button" aria-label="Connection details">${icon('more')}<span class="sr-only">${connection()}</span></button></div></header>`;
+    : `<header class="topbar">${hub?`<button class="icon-button" id="menu-button" aria-label="Open navigation">${icon('menu')}</button>`:`<a class="icon-button" href="/" data-route="home" aria-label="Back to Home">${icon('back')}</a>`}<span class="brand" ${route==='chat'?'role="heading" aria-level="1"':''}>${route==='chat'?'Relay':'Jarvis'}</span><div class="toolbar-actions">${route==='chat'?`<button class="icon-button" id="chat-search-toggle" aria-label="Search messages">${uiIcon('search')}</button><button class="icon-button" id="chat-menu" aria-label="Conversation menu">${uiIcon('more')}</button>`:''}${hub?`<button class="icon-button" id="search-button" aria-label="Search apps">${icon('search')}</button>`:''}<button class="icon-button" id="connection-button" aria-label="Connection details">${icon('more')}<span class="sr-only">${connection()}</span></button></div></header>`;
   $('app').innerHTML = `<div class="workspace${launcher?' launcher':''}">${header}<main id="content" tabindex="-1"></main>${hub&&!launcher?`<nav class="bottom-nav" aria-label="Hub navigation">${['home','favorites','settings'].map(key=>`<a href="${paths[key]}" data-route="${key}" ${key===route?'aria-current="page"':''}>${icon(key)}<span>${labels[key]}</span></a>`).join('')}</nav>`:''}</div>`;
   $('connection-button').onclick = showConnection;
   if ($('menu-button')) $('menu-button').onclick = showNavigation;
@@ -81,6 +87,11 @@ function drawShell() {
     (searchOpen ? $('app-search') : $('search-button'))?.focus();
   };
   drawPage();
+  if(route==='chat') {
+    $('connection-button').hidden=true;
+    $('chat-search-toggle').onclick=()=>{const bar=$('chat-search-bar');bar.hidden=!bar.hidden;if(!bar.hidden)$('conversation-search').focus();else{ $('conversation-search').value='';chatUI?.search('');}};
+    $('chat-menu').onclick=()=>sheet('Relay',[{label:'Bookmarks',icon:'bookmark',action:()=>chatUI?.bookmarks()},{label:'Latest messages',icon:'chat',action:()=>chatUI?.latest()},{label:'Refresh inbox',icon:'refresh',action:sync},{label:'Connection details',icon:'info',action:showConnection}]);
+  }
 }
 function drawPage() {
   if (route === 'home' || route === 'favorites') { drawHome(); return; }
@@ -131,12 +142,18 @@ function drawSettings() {
   $('settings-favorites').onclick=editFavorites;
 }
 function drawChat() {
-  const visibleMessages = channelMessages(state.messages);
-  $('content').innerHTML = `<section class="page-heading"><div><h1>Relay</h1><p class="subheading">Thoughtful conversation</p></div><span class="pill">${API_ORIGIN?'INBOX':'DRAFT MODE'}</span></section><section class="chat-panel"><div class="chat-notice">${API_ORIGIN?'Messages and replies, shared across your phones. Replies are asynchronous.':'Cloud messaging is not connected yet. Your drafts stay on this device and have not been sent.'}</div><div class="messages" id="messages" aria-label="Conversation">${visibleMessages.length?visibleMessages.map(messageMarkup).join(''):`<div class="chat-empty"><h2>A place to pick up your thoughts.</h2><p>Write a message below. ${API_ORIGIN?'Messages appear here when saved.':'It will wait here until cloud messaging is ready.'}</p></div>`}</div><form class="composer" id="message-form"><label class="sr-only" for="message-text">Message Relay</label><textarea id="message-text" rows="2" maxlength="4000" placeholder="Write something…" required>${escape(state.composer || '')}</textarea><div class="composer-bottom"><span>${API_ORIGIN?'Enter to send · Shift + Enter for a new line':'Saved on this device · not sent'}</span><button class="primary" type="submit" id="send-message">${API_ORIGIN?'Send':'Save draft'} ${svg('send')}</button></div></form></section>`;
-  $('message-text').oninput = e => { try { commit({ ...state, composer: e.target.value }); } catch { notify('Could not save your draft. Keep this page open and copy your text.'); } };
-  $('message-text').onkeydown = e => { if (e.key==='Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); $('message-form').requestSubmit(); } };
-  $('message-form').onsubmit = e => { e.preventDefault(); submitMessage(); };
-  const messages = $('messages'); messages.scrollTop = messages.scrollHeight;
+  $('content').innerHTML = `<div class="conversation-search" id="chat-search-bar" hidden><label class="sr-only" for="conversation-search">Search messages</label><input id="conversation-search" type="search" placeholder="Search this conversation" autocomplete="off"></div><section class="chat-panel"><div class="messages" id="messages" aria-label="Conversation"></div><form class="composer" id="message-form"><label class="sr-only" for="message-text">Message Relay</label><textarea id="message-text" rows="1" maxlength="4000" placeholder="Message Relay…" required>${escape(state.composer || '')}</textarea><div class="composer-bottom"><span id="relay-status" role="status">${API_ORIGIN?'Replies arrive after an inbox check':'Draft mode · saved on this device'}</span><button class="primary send-icon" type="submit" id="send-message" aria-label="Send message">${uiIcon('send')}</button></div></form></section>`;
+  const input=$('message-text');
+  const saveDraft=value=>{try{commit({...state,composer:value});}catch{notify('Could not save your draft. Copy your text before leaving.');}};
+  input.oninput=()=>{saveDraft(input.value);autosize(input);};
+  input.onkeydown=e=>{if(e.key==='Enter' && (e.ctrlKey||e.metaKey) && !e.isComposing){e.preventDefault();$('message-form').requestSubmit();}};
+  $('message-form').onsubmit=e=>{e.preventDefault();submitMessage();};
+  chatUI=conversation({panel:$('messages'),composer:input,channel:'relay',author:'Jarvis',notify,draftChanged:saveDraft});
+  chatUI.update(channelMessages(state.messages));
+  $('conversation-search').oninput=e=>chatUI.search(e.target.value);
+  const transferred=sessionStorage.getItem('jarvis.relay.transfer.v1');
+  if(transferred){input.value=(input.value?input.value+'\n\n':'')+transferred;input.value=input.value.slice(0,4000);saveDraft(input.value);sessionStorage.removeItem('jarvis.relay.transfer.v1');}
+  autosize(input);
 }
 function messageMarkup(m) {
   return `<article data-message-id="${escape(m.id)}" class="message-row ${m.role==='user'?'outgoing':'incoming'}"><span class="message-author">${m.role==='user'?'YOU':m.kind==='reply'?'JARVIS':'JARVIS · AUTOMATIC RECEIPT'}</span><p class="bubble">${escape(m.body)}</p><span class="message-time">${time(m.createdAt)} · ${m.saved?'Cloud saved':'Not sent · on this device'}</span></article>`;
@@ -147,7 +164,7 @@ function submitMessage() {
   const item = { id: crypto.randomUUID(), body, role: 'user', createdAt: new Date().toISOString(), saved: false };
   try {
     commit({ ...state, composer: '', messages: [...state.messages,item], outbox: [...state.outbox,{...item,type:'message'}] });
-    drawShell(); if (API_ORIGIN) sync(); else notify('Draft saved on this device. It has not been sent.');
+    $('message-text').value='';autosize($('message-text'));chatUI.update(channelMessages(state.messages));chatUI.latest(); if (API_ORIGIN) sync(); else notify('Draft saved on this device. It has not been sent.');
   } catch { notify('Could not save. Your text is still in the message box.'); }
 }
 function drawBoard() {
@@ -180,15 +197,11 @@ async function sync() {
   } catch (e) { syncError = e.message || 'Cloud unavailable. Your drafts are safe.'; notify(syncError); }
   finally {
     busy = false;
-    // Composer values persist on input, so redraws do not discard unsent text.
-    const active = document.activeElement?.id;
-    const oldScroll=$('messages')?.scrollTop;
-    const wasAtBottom=$('messages') ? $('messages').scrollHeight-$('messages').clientHeight-oldScroll<40 : true;
-    const start = document.activeElement?.selectionStart;
-    if (['chat','board'].includes(route)) drawShell();
-    else if ($('connection-button')) $('connection-button').lastElementChild.textContent=connection();
-    if ($('messages') && !wasAtBottom) $('messages').scrollTop=oldScroll;
-    if (active && $(active)) { $(active).focus(); if (typeof start==='number' && typeof $(active).setSelectionRange==='function') $(active).setSelectionRange(start,start); }
+    if(route==='chat' && chatUI){
+      chatUI.update(channelMessages(state.messages));
+      $('relay-status').textContent=syncError?'Offline · draft and queued messages saved':state.outbox.length?'Sending…':'Replies arrive after an inbox check';
+    } else if(route==='board') drawShell();
+    if ($('connection-button')) $('connection-button').lastElementChild.textContent=connection();
     if ($('connection-dialog').open) { $('connection-state').textContent = connection(); $('sync-now').disabled=false; }
   }
 }
@@ -211,4 +224,4 @@ if (API_ORIGIN) sync();
 
 
 setInterval(()=>{if(!document.hidden)sync();},30000);
-window.addEventListener('storage',e=>{if(e.key===STORAGE_KEY&&!busy){try{state=readState(localStorage);if(['chat','board'].includes(route))drawShell();}catch{}}});
+window.addEventListener('storage',e=>{if(e.key===STORAGE_KEY&&!busy){try{state=readState(localStorage);if(route==='chat'&&chatUI)chatUI.update(channelMessages(state.messages));else if(route==='board')drawShell();}catch{}}});

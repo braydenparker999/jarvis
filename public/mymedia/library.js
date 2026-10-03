@@ -1,3 +1,4 @@
+import {enrichVideos} from './discovery.js';
 // My Media: Drive folder listing, file naming and watch progress.
 // Pure functions only; the page wires them to the DOM in app.js.
 import {folderId} from '../drawercast/drive-api.js';
@@ -46,7 +47,7 @@ export function toVideo(file, folder, others = []) {
   const meta = file.videoMediaMetadata || {};
   return {id:file.id, name:file.name, title, youtubeId, folder,
     mimeType:file.mimeType || '', size:Number(file.size) || 0,
-    modified:Date.parse(file.modifiedTime) || 0,
+    modified:Date.parse(file.modifiedTime) || 0, addedAt:Date.parse(file.createdTime)||0,
     duration:Math.round(Number(meta.durationMillis) / 1000) || 0,
     width:Number(meta.width) || 0, height:Number(meta.height) || 0,
     thumbnail:/^https:\/\/[a-z0-9.-]+\.googleusercontent\.com\//.test(file.thumbnailLink || '') ? file.thumbnailLink : '',
@@ -75,6 +76,7 @@ export function createVideoApi(key, fetcher = fetch) {
     const info = await get('/' + root, {fields:'id,name,mimeType'}, signal);
     if (info.mimeType !== FOLDER) throw Error('The configured video folder is not a folder.');
     const queue = [{id:root, path:info.name}], visited = new Set(), videos = [];
+    let metadataFile=null;
     while (queue.length) {
       if (visited.size >= 500) throw Error('This folder has too many subfolders.');
       const current = queue.shift();
@@ -84,7 +86,7 @@ export function createVideoApi(key, fetcher = fetch) {
       let token = '';
       do {
         const page = await get('', {q:"'" + current.id + "' in parents and trashed = false", pageSize:'1000',
-          fields:'nextPageToken,files(id,name,mimeType,size,modifiedTime,thumbnailLink,videoMediaMetadata(width,height,durationMillis),capabilities(canDownload))',
+          fields:'nextPageToken,files(id,name,mimeType,size,modifiedTime,createdTime,thumbnailLink,videoMediaMetadata(width,height,durationMillis),capabilities(canDownload))',
           ...(token ? {pageToken:token} : {})}, signal);
         if (!Array.isArray(page.files)) throw Error('Drive returned an incomplete folder listing.');
         for (const f of page.files) {
@@ -96,11 +98,14 @@ export function createVideoApi(key, fetcher = fetch) {
         if (token && seen.has(token)) throw Error('Drive pagination repeated.');
         seen.add(token);
       } while (token);
+      if(current.id===root)metadataFile=files.find(f=>f.name==='jarvis-video-metadata.json'&&Number(f.size||0)<2000000);
       const others = files.filter(f => !VIDEO.test(f.name));
       for (const f of files) if (VIDEO.test(f.name)) videos.push(toVideo(f, current.path, others));
       if (videos.length > 20000) throw Error('Choose a folder with fewer than 20,000 videos.');
     }
-    return {id:root, name:info.name, videos, fetched:Date.now()};
+    let enriched=videos;
+    if(metadataFile){try{const manifest=await get('/'+metadataFile.id,{alt:'media'},signal);enriched=enrichVideos(videos,manifest);}catch{if(signal?.aborted)throw signal.reason;}}
+    return {id:root, name:info.name, videos:enriched, fetched:Date.now()};
   }
   return {list, mediaURL:id => mediaURL(id, key)};
 }
@@ -183,13 +188,13 @@ export function searchVideos(videos, query) {
   const words = String(query || '').toLowerCase().split(/\s+/).filter(Boolean);
   if (!words.length) return videos;
   return videos.filter(v => {
-    const text = (v.title + ' ' + v.folder).toLowerCase();
+    const text = (v.title + ' ' + v.folder+' '+(v.creator||'')+' '+(v.topics||[]).join(' ')).toLowerCase();
     return words.every(w => text.includes(w));
   });
 }
 
 export const SORTS = {
-  newest:(a, b) => b.modified - a.modified,
+  newest:(a, b) => (b.addedAt||b.modified) - (a.addedAt||a.modified),
   title:(a, b) => a.title.localeCompare(b.title, undefined, {numeric:true, sensitivity:'base'}),
   longest:(a, b) => b.duration - a.duration
 };

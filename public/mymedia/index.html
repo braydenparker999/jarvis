@@ -4,23 +4,26 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#101113">
-  <meta name="mymedia-release" content="0.35.0">
+  <meta name="mymedia-release" content="0.36.0">
   <title>My Media · Jarvis</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/assets/shell.css">
-  <link rel="stylesheet" href="/mymedia/mymedia.css?v=0.35.0">
-  <script type="module" src="/mymedia/app.js?v=0.35.0"></script>
+  <link rel="stylesheet" href="/mymedia/mymedia.css?v=0.36.0">
+  <link rel="stylesheet" href="/assets/premium.css?v=20261003">
+  <script type="module" src="/mymedia/app.js?v=0.36.0"></script>
 </head>
-<body>
+<body class="module-page media-page">
   <div class="workspace mymedia">
     <header class="topbar">
-      <a class="text-button" id="back" href="/" aria-label="Back to Jarvis">← Jarvis</a>
+      <a class="icon-button" id="back" href="/" aria-label="Back to Jarvis" data-icon="back"></a>
       <span class="brand" id="heading">My Media</span>
-      <button class="text-button" id="refresh" type="button">Refresh</button>
+      <button class="icon-button" id="search-toggle" type="button" aria-label="Search videos" data-icon="search"></button>
+      <button class="icon-button" id="refresh" type="button" aria-label="Refresh library" data-icon="refresh"></button>
     </header>
 
     <main id="library-view">
-      <div class="library-tools">
+      <div class="library-title"><h1 id="view-title">Explore</h1><button id="surprise" class="text-button" type="button">Surprise me</button></div>
+      <div class="library-tools" id="library-search" hidden>
         <label class="sr-only" for="search">Search videos</label>
         <input id="search" type="search" placeholder="Search videos" autocomplete="off">
         <label class="sr-only" for="sort">Sort videos</label>
@@ -30,16 +33,18 @@
           <option value="longest">Longest</option>
         </select>
       </div>
+      <div class="discovery-filters" aria-label="Browse filters"><button id="time-filter" type="button">Any length</button><button id="unwatched-filter" type="button" aria-pressed="false">Unwatched</button><button id="browse-all" type="button" hidden>Clear collection</button></div>
       <p id="status" class="status" role="status">Loading your videos…</p>
       <div id="folder-actions" class="folder-actions" hidden>
         <span id="folder-count"></span>
         <button id="toggle-folders" type="button">Open all folders</button>
       </div>
+      <div id="sections"></div>
       <section id="continue" class="shelf" aria-labelledby="continue-label" hidden>
-        <h2 class="eyebrow" id="continue-label">Continue watching</h2>
+        <div class="section-heading"><h2 id="continue-label">Pick up where you left off</h2></div>
         <div class="video-grid" id="continue-grid"></div>
       </section>
-      <div id="sections"></div>
+      <button id="load-more" class="secondary" type="button" hidden>Show more</button>
     </main>
 
     <main id="player-view" hidden>
@@ -65,6 +70,8 @@
           <label class="sr-only" for="captions">Subtitles</label>
           <select id="captions" hidden></select>
           <button type="button" id="pip" hidden>Picture in picture</button>
+          <button type="button" id="save-video">Save for later</button>
+          <button type="button" id="queue-video">Add to queue</button>
           <button type="button" id="watched" aria-pressed="false">Mark watched</button>
         </div>
         <section class="shelf" aria-labelledby="next-label">
@@ -73,6 +80,7 @@
         </section>
       </div>
     </main>
+    <nav class="media-nav" id="media-nav" aria-label="Media navigation"><a href="#explore" data-view="explore" aria-current="page"><span data-icon="search"></span><span>Explore</span></a><a href="#library" data-view="library"><span data-icon="library"></span><span>Library</span></a><a href="#saved" data-view="saved"><span data-icon="bookmark"></span><span>Saved</span></a></nav>
   </div>
   <noscript><p>Enable JavaScript to use My Media.</p></noscript>
 </body>

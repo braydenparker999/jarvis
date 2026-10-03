@@ -237,10 +237,10 @@ test('launcher browser behavior', { skip: executablePath ? false : 'Install Chro
       await page.getByRole('heading', { name: 'Relay', exact: true }).waitFor();
       await page.getByRole('status').filter({ hasText: 'Offline fixture' }).waitFor();
       assert.equal(await page.title(), 'Relay · Jarvis');
-      assert.equal(await page.locator('.subheading').textContent(), 'Thoughtful conversation');
+      assert.equal(await page.locator('.conversation-page').count(),1);
       assert.equal(await page.getByRole('textbox', { name: 'Message Relay' }).inputValue(), state.composer);
       assert.deepEqual(await page.locator('.bubble').allTextContents(), ['Earlier thought', 'Earlier reply', 'Queued thought']);
-      assert.equal(await page.locator('.incoming .message-author').textContent(), 'JARVIS');
+      assert.equal(await page.locator('.incoming .message-author').textContent(), 'Jarvis');
       assert.deepEqual(await page.evaluate(key => JSON.parse(localStorage.getItem(key)), STORAGE_KEY), state);
       await page.locator('#message-text').fill('Draft after rename');
       await page.getByRole('link', { name: 'Back to Home' }).click();
@@ -248,20 +248,21 @@ test('launcher browser behavior', { skip: executablePath ? false : 'Install Chro
       assert.equal(new URL(page.url()).pathname, '/jarvis/');
       assert.equal(await page.locator('#message-text').inputValue(), 'Draft after rename');
       api.offline = false;
-      await page.getByRole('button', { name: 'Connection details' }).click();
+      await page.getByRole('button', { name: 'Conversation menu' }).click();
+      await page.getByRole('button', { name: 'Connection details',exact:true }).click();
       await page.getByRole('button', { name: 'Refresh messages' }).click();
       await page.waitForFunction(key => JSON.parse(localStorage.getItem(key)).outbox.length === 0, STORAGE_KEY);
       assert.deepEqual(api.sent, [{ id: pending.id, body: pending.body }]);
       assert.equal(await page.locator('#message-text').inputValue(), 'Draft after rename');
       await page.getByRole('button', { name: 'Close connection details' }).click();
       await page.locator('#message-text').fill('New Relay thought');
-      await page.getByRole('button', { name: 'Send', exact: true }).click();
+      await page.getByRole('button', { name: 'Send message', exact: true }).click();
       await page.waitForFunction(key => JSON.parse(localStorage.getItem(key)).outbox.length === 0 && JSON.parse(localStorage.getItem(key)).composer === '', STORAGE_KEY);
       assert.deepEqual(Object.keys(api.sent[1]).sort(), ['body', 'id']);
       assert.equal(api.sent[1].body, 'New Relay thought');
       assert.match(api.sent[1].id, /^[a-f0-9-]{36}$/);
       for (const [key, value] of Object.entries(untouched)) assert.equal(await page.evaluate(key => localStorage.getItem(key), key), value);
-      assert.equal(await page.evaluate(() => Object.keys(localStorage).some(key => key.includes('relay'))), false);
+      assert.equal(await page.evaluate(() => Object.keys(localStorage).some(key => key === 'jarvis.relay.messages.v1')), false);
       await finish(session);
     });
 
