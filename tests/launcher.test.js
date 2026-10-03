@@ -6,6 +6,7 @@ import { apps, loadPreferences, savePreferences } from '../public/assets/hub.js'
 const destinations = [
   ['jarvis', 'Relay', '/jarvis/'],
   ['drawercast', 'Poweramp', '/drawercast/'],
+  ['podcasts', 'Podcasts', '/podcasts/'],
   ['media', 'Astra', '/media/'],
   ['muse', 'Muse', '/muse/'],
   ['quick-ai', 'Quick AI', '/quick-ai/'],

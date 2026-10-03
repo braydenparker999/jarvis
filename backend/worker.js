@@ -5,6 +5,7 @@ import {PRIMARY_SITE,FRONTEND_ORIGINS} from './origins.js';
 import {songsterr} from './songsterr.js';
 import {music} from './music.js';
 import {nativeMusic} from './music-upload.js';
+import {podcasts} from './podcasts.js';
 const paths = new Set(['/v1/state', '/v1/messages', '/v1/board', '/v1/responder/connect', '/v1/responder/revoke', '/v1/agent/inbox', '/v1/agent/replies', '/v1/agent/board']);
 const digest = async value => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))),b=>b.toString(16).padStart(2,'0')).join('');
 const randomKey = () => Array.from(crypto.getRandomValues(new Uint8Array(32)),b=>b.toString(16).padStart(2,'0')).join('');
@@ -21,6 +22,7 @@ export default {
     const headers={'Access-Control-Allow-Origin':origin||PRIMARY_SITE,'Access-Control-Allow-Methods':'GET, POST, OPTIONS','Access-Control-Allow-Headers':'Authorization, Content-Type','Access-Control-Max-Age':'600','Vary':'Origin','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'};
     const reply=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{...headers,'Content-Type':'application/json'}});
     if(request.method==='OPTIONS') return new Response(null,{status:204,headers});
+    const podcast=await podcasts(request,reply);if(podcast)return podcast;
     const guitar=await songsterr(request,reply);if(guitar)return guitar;
     const path=new URL(request.url).pathname;
     if(path==='/health' && request.method==='GET') return reply({ok:true,mode:'github-publications',version:7,publicationIssue:2});
