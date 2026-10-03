@@ -443,7 +443,7 @@ body.layout-minimal .timepill{background:transparent}
 #seek-fill{transform-origin:left center}
 #seek-knob{will-change:transform;transition:none}
 #seek-fill{transition:none}
-#mini-fill{width:calc(100% - 18 * var(--pa-u));pointer-events:none;will-change:transform;transition:none}
+#mini .mini-seek .fill{width:calc(100% - 18 * var(--pa-u));pointer-events:none;will-change:transform;transition:none}
 .queue-tabs{display:flex;gap:8px;padding:8px 14px;position:sticky;top:0;background:var(--bg0);z-index:2}
 .queue-tabs .btn{flex:1}
 .trow:focus-visible,.gcard:focus-visible,.catrow:focus-visible,#mini:focus-visible,.mini-seek:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
@@ -1170,7 +1170,7 @@ body:has(#mini:not([hidden])) #nav{border-radius:0 0 calc(29 * var(--pa-u)) calc
 /* Keep list actions above the complete mini-player, including its seekbar. */
 body:has(#mini:not([hidden])) .fabrow:not(.top){bottom:calc(var(--nav-h) + var(--safe-b) + var(--mini-panel-height) + 18 * var(--pa-u))}
 body:has(#mini:not([hidden])) #sc-list .scroll{padding-bottom:calc(var(--nav-h) + var(--safe-b) + var(--mini-panel-height) + 70 * var(--pa-u))!important}
-#mini-fill::after{content:'';position:absolute;top:calc(1 * var(--pa-u));height:calc(10 * var(--pa-u));width:calc(18 * var(--pa-u));left:0;border-radius:calc(7 * var(--pa-u));background:#928c84}
+#mini .mini-seek .fill::after{content:'';position:absolute;top:calc(1 * var(--pa-u));height:calc(10 * var(--pa-u));width:calc(18 * var(--pa-u));left:0;border-radius:calc(7 * var(--pa-u));background:#928c84}
 body.layout-classic .artstage{margin-bottom:calc(20 * var(--pa-u));overflow:hidden;border-radius:var(--card-r)}
 body.layout-classic .ctrlstack,body.layout-fullcover .ctrlstack{min-height:0;flex:1 1 0}
 #sc-player .player-wrap{padding:calc(var(--safe-t) + 13 * var(--pa-u)) calc(14 * var(--pa-u)) calc(var(--nav-h) + var(--safe-b) + 20 * var(--pa-u))!important}
