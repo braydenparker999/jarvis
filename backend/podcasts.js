@@ -15,7 +15,7 @@ export function publicURL(value) {
     throw new PodcastError('Only public podcast feed addresses are supported.', 400);
   u.hash = ''; return u.href;
 }
-const optionalURL = value => { try { return publicURL(value); } catch { return ''; } };
+const optionalURL = value => { if(!value)return '';try { return publicURL(value); } catch { return ''; } };
 export const decodeXML = s => String(s || '').replace(/&(#x[\da-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);/gi, (all, code) => {
   if (code[0] !== '#') return ({amp:'&',lt:'<',gt:'>',quot:'"',apos:"'",nbsp:' '})[code.toLowerCase()] || all;
   const n = code[1].toLowerCase() === 'x' ? parseInt(code.slice(2),16) : Number(code.slice(1));
@@ -25,6 +25,21 @@ const text = (s, max = 3000) => decodeXML(decodeXML(s).replace(/<[^>]*>/g, ' '))
 const tag = (xml, name) => new RegExp(`<${name}\\b[^>]*>([\\s\\S]*?)<\\/${name}\\s*>`, 'i').exec(xml)?.[1] || '';
 const attr = (xml, name) => decodeXML(new RegExp(`\\b${name}\\s*=\\s*(["'])([\\s\\S]*?)\\1`, 'i').exec(xml)?.[2] || '');
 const image = xml => optionalURL(attr(/<itunes:image\b[^>]*>/i.exec(xml)?.[0] || '', 'href') || tag(tag(xml,'image'),'url'));
+function maskCDATA(raw) {
+  const values=[];
+  const xml=raw.replace(/<!--[\s\S]*?-->|<!\[CDATA\[([\s\S]*?)\]\]>/g,(_,value)=>value === undefined ? '' : `JARVIS_CDATA_${values.push(value)-1}_END`);
+  return {xml,read:name=>tag(xml,name).replace(/JARVIS_CDATA_(\d+)_END/g,(_,i)=>values[Number(i)] || '')};
+}
+function feedParts(raw, max = 200) {
+  let header=raw,start=-1;const items=[];
+  // A single pass skips CDATA and comments, including literal </item> in notes.
+  for(const m of raw.matchAll(/<!\[CDATA\[[\s\S]*?\]\]>|<!--[\s\S]*?-->|<\/?item\b[^>]*>/gi)) {
+    if(!/^<\/?item\b/i.test(m[0]))continue;
+    if(!m[0].startsWith('</')){if(start<0){if(!items.length)header=raw.slice(0,m.index);start=m.index+m[0].length;}}
+    else if(start>=0){items.push(raw.slice(start,m.index));start=-1;if(items.length>=max)break;}
+  }
+  return {header,items};
+}
 export function episodeID(s) {
   let a = 2166136261, b = 5381;
   for (let i = 0; i < s.length; i++) { a = Math.imul(a ^ s.charCodeAt(i),16777619); b = Math.imul(b,33) ^ s.charCodeAt(i); }
@@ -35,30 +50,31 @@ export function durationSeconds(value) {
   if (parts.length > 3 || parts.some(n => !Number.isFinite(n) || n < 0)) return 0;
   return Math.min(parts.reduce((n,v) => n * 60 + v,0),604800);
 }
-export function parseFeed(raw, feedUrl) {
-  // Protect CDATA boundaries before matching RSS elements; never expand DTDs.
+export function parseFeed(raw, feedUrl, {offset = 0, limit = 200, id: selectedID} = {}) {
+  // Never expand DTDs; keep CDATA out of element searches without copying and
+  // entity-escaping the whole archive (large feeds duplicate their notes).
   if (/<!DOCTYPE|<!ENTITY/i.test(raw)) throw new PodcastError('This feed uses unsupported XML declarations.');
-  const xml = raw.replace(/<!--[\s\S]*?-->/g,'').replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g,(_,s) => s.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'));
-  if (!/<rss\b/i.test(xml) || !/<channel\b/i.test(xml)) throw new PodcastError('This address did not return a podcast RSS feed.',400);
-  const header = xml.split(/<item\b/i,1)[0];
-  const show = {id:episodeID(feedUrl), feedUrl, title:text(tag(header,'title'),300) || 'Podcast',
-    author:text(tag(header,'itunes:author') || tag(header,'managingEditor'),200), description:text(tag(header,'description')),
-    artwork:image(header), website:optionalURL(decodeXML(tag(header,'link')).trim()), language:text(tag(header,'language'),50)};
+  if (!/<rss\b/i.test(raw) || !/<channel\b/i.test(raw)) throw new PodcastError('This address did not return a podcast RSS feed.',400);
+  const parts=feedParts(raw,selectedID ? 200 : Math.min(200,offset+limit+1)),header=maskCDATA(parts.header),read=header.read;
+  const show = {id:episodeID(feedUrl), feedUrl, title:text(read('title'),300) || 'Podcast',
+    author:text(read('itunes:author') || read('managingEditor'),200), description:text(read('description')),
+    artwork:image(header.xml), website:optionalURL(decodeXML(read('link')).trim()), language:text(read('language'),50)};
   const episodes = [], seen = new Set();
-  for (const match of xml.matchAll(/<item\b[^>]*>([\s\S]*?)<\/item\s*>/gi)) {
-    const item = match[1], enclosure = /<enclosure\b[^>]*>/i.exec(item)?.[0] || '';
+  for (const rawItem of selectedID ? parts.items : parts.items.slice(offset,offset+limit)) {
+    const masked=maskCDATA(rawItem),item=masked.xml,read=masked.read,enclosure = /<enclosure\b[^>]*>/i.exec(item)?.[0] || '';
     const audioUrl = optionalURL(attr(enclosure,'url')), type = attr(enclosure,'type').toLowerCase();
     if (!audioUrl || (type && !type.startsWith('audio/') && !['application/octet-stream','application/ogg'].includes(type))) continue;
-    const id = episodeID(decodeXML(tag(item,'guid')).trim() || audioUrl);
+    const id = episodeID(decodeXML(read('guid')).trim() || audioUrl);
+    if(selectedID && id!==selectedID)continue;
     if (seen.has(id)) continue; seen.add(id);
-    const date = Date.parse(text(tag(item,'pubDate')));
-    episodes.push({id, title:text(tag(item,'title'),500) || 'Untitled episode', description:text(tag(item,'content:encoded') || tag(item,'description'),7000),
+    const date = Date.parse(text(read('pubDate')));
+    episodes.push({id, title:text(read('title'),500) || 'Untitled episode', description:text(read('content:encoded') || read('description'),7000),
       audioUrl, type:type || 'audio/mpeg', publishedAt:Number.isFinite(date) ? new Date(date).toISOString() : '',
-      duration:durationSeconds(text(tag(item,'itunes:duration'))), bytes:Math.max(0,Number(attr(enclosure,'length')) || 0),
-      artwork:image(item) || show.artwork, website:optionalURL(decodeXML(tag(item,'link')).trim())});
-    if (episodes.length >= 200) break;
+      duration:durationSeconds(text(read('itunes:duration'))), bytes:Math.max(0,Number(attr(enclosure,'length')) || 0),
+      artwork:image(item) || show.artwork, website:optionalURL(decodeXML(read('link')).trim())});
+    if (selectedID || episodes.length >= 200) break;
   }
-  return {show, episodes};
+  return {show, episodes,nextOffset:!selectedID && parts.items.length>offset+limit && offset+limit<200 ? offset+limit : null};
 }
 async function boundedText(response, max = 4 * 1024 * 1024, feedPrefix = false) {
   if (!feedPrefix && Number(response.headers.get('Content-Length')) > max) { await response.body?.cancel(); throw new PodcastError('This feed is too large.',413); }
@@ -89,7 +105,7 @@ const memo = new Map();
 async function cached(key, load, ttl = 600000) {
   const existing = memo.get(key); if (existing && existing.expires > Date.now()) return existing.value;
   const value = load(); memo.set(key,{value,expires:Date.now()+ttl});
-  if (memo.size > 64) memo.delete(memo.keys().next().value);
+  if (memo.size > 12) memo.delete(memo.keys().next().value);
   try { return await value; } catch (e) { memo.delete(key); throw e; }
 }
 export async function getFeed(feed, options = {}) {
@@ -97,9 +113,10 @@ export async function getFeed(feed, options = {}) {
   const load = async () => {
     const r = await upstream(url,options);
     if (!r.ok) { await r.body?.cancel(); throw new PodcastError('This podcast feed is unavailable. Try again later.',r.status === 404 ? 404 : 502); }
-    return parseFeed(await boundedText(r,4*1024*1024,true),url);
+    return boundedText(r,4*1024*1024,true);
   };
-  return options.fetcher ? load() : cached('feed:'+url,load);
+  const raw=await (options.fetcher ? load() : cached('feed:'+url,load));
+  return parseFeed(raw,url,{offset:options.offset || 0,limit:options.limit || 40,id:options.id});
 }
 const country = v => /^[a-z]{2}$/i.test(v || '') ? v.toLowerCase() : 'us';
 export async function directory(q, region, options = {}) {
@@ -127,9 +144,13 @@ export async function podcasts(request, reply, options = {}) {
       if (!CATEGORIES[category]) return reply({error:'Unknown podcast category'},400);
       return reply(await directory(CATEGORIES[category],url.searchParams.get('country'),opts));
     }
-    if (url.pathname === '/podcasts/feed') return reply(await getFeed(url.searchParams.get('url') || '',opts));
+    if (url.pathname === '/podcasts/feed') {
+      const offset=Number(url.searchParams.get('offset') || 0);
+      if(!Number.isInteger(offset)||offset<0||offset>199)return reply({error:'Invalid episode page'},400);
+      return reply(await getFeed(url.searchParams.get('url') || '',{...opts,offset}));
+    }
     if (url.pathname !== '/podcasts/audio') return reply({error:'Not found'},404);
-    const {episodes} = await getFeed(url.searchParams.get('feed') || '',opts);
+    const {episodes} = await getFeed(url.searchParams.get('feed') || '',{...opts,id:url.searchParams.get('id')});
     const episode = episodes.find(e => e.id === url.searchParams.get('id'));
     if (!episode) return reply({error:'This episode is no longer in the feed. Use its original audio link.'},404);
     const range = request.headers.get('Range');

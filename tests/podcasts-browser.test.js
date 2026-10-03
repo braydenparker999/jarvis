@@ -17,7 +17,11 @@ test('podcast mobile flows, real offline audio, seeking, timers and queue',{skip
   const json=data=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(data));};
   if(url.pathname==='/assets/config.js'){res.writeHead(200,{'Content-Type':'text/javascript'});res.end('export const API_ORIGIN=location.origin;');return;}
   if(['/podcasts/search','/podcasts/browse'].includes(url.pathname)){json({shows:url.searchParams.get('q')==='empty'?[]:[show,{...show,id:'two',title:'Science in motion',feedUrl:'https://feeds.example.org/science.xml'}]});return;}
-  if(url.pathname==='/podcasts/feed'){json({show:{...show,feedUrl:url.searchParams.get('url')},episodes});return;}
+  if(url.pathname==='/podcasts/feed'){
+   const archive=url.searchParams.get('url')?.includes('archive'),offset=Number(url.searchParams.get('offset') || 0);
+   const items=archive?Array.from({length:95},(_,i)=>({...episodes[0],id:'archive-'+i,title:'Archive episode '+i})):episodes;
+   json({show:{...show,feedUrl:url.searchParams.get('url')},episodes:items.slice(offset,offset+40),nextOffset:items.length>offset+40?offset+40:null});return;
+  }
   if(url.pathname==='/podcasts/audio'){
    const range=/^bytes=(\d+)-(\d*)$/.exec(req.headers.range || ''),start=range?Number(range[1]):0,end=range&&range[2]?Math.min(Number(range[2]),audioBytes.length-1):audioBytes.length-1;
    res.writeHead(range?206:200,{'Content-Type':'audio/wav','Content-Length':end-start+1,'Accept-Ranges':'bytes',...(range?{'Content-Range':`bytes ${start}-${end}/${audioBytes.length}`}:{})});res.end(audioBytes.subarray(start,end+1));return;
@@ -71,6 +75,14 @@ test('podcast mobile flows, real offline audio, seeking, timers and queue',{skip
   await t.test('empty search and mobile/desktop layouts remain usable',async()=>{
    await page.locator('[data-view=discover]').click();await page.locator('#query').fill('empty');await page.locator('#search-form button').click();await page.getByRole('heading',{name:'No shows found'}).waitFor();
    for(const width of [360,390,1200]){await page.setViewportSize({width,height:844});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));}
+   assert.deepEqual(errors,[]);
+  });
+  await t.test('large shows load more pages without rebuilding or losing episode filters',async()=>{
+   await page.setViewportSize({width:390,height:844});await page.goto(origin+'/podcasts/#show='+encodeURIComponent('https://feeds.example.org/archive.xml'));
+   await page.locator('.episode-row').first().waitFor();assert.equal(await page.locator('.episode-row').count(),40);
+   await page.locator('#more-episodes').click();await page.waitForFunction(()=>document.querySelectorAll('.episode-row').length===80);
+   await page.locator('#episode-query').fill('episode 79');assert.equal(await page.locator('.episode-row').count(),1);
+   await page.locator('#more-episodes').click();await page.waitForFunction(()=>document.querySelector('#episode-count').textContent==='95');assert.equal(await page.locator('#episode-query').inputValue(),'episode 79');assert.equal(await page.locator('.episode-row').count(),1);
    assert.deepEqual(errors,[]);
   });
  } finally {await browser.close();await new Promise(done=>server.close(done));}

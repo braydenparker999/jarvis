@@ -28,6 +28,11 @@ test('large archives retain complete playable episodes within the feed budget',a
   const chunks=new ReadableStream({start(c){for(let i=0;i<body.length;i+=32000)c.enqueue(new TextEncoder().encode(body.slice(i,i+32000)));c.close();}});
   const data=await getFeed(feedURL,{fetcher:async()=>new Response(chunks,{headers:{'Content-Length':String(body.length)}})});assert.equal(data.episodes.length,2);
 });
+test('feed pages retain stable episode IDs and audio lookup reaches older loaded items',()=>{
+  const body='<rss><channel><title>Archive</title>'+Array.from({length:100},(_,i)=>`<item><title>Episode ${i}</title><guid>id-${i}</guid><enclosure url="https://media.example.org/${i}.mp3" type="audio/mpeg"/></item>`).join('')+'</channel></rss>';
+  const first=parseFeed(body,feedURL,{limit:40}),second=parseFeed(body,feedURL,{offset:40,limit:40});assert.equal(first.episodes.length,40);assert.equal(first.nextOffset,40);assert.equal(second.episodes[0].id,episodeID('id-40'));
+  const audio=parseFeed(body,feedURL,{id:episodeID('id-99')});assert.equal(audio.episodes.length,1);assert.equal(audio.episodes[0].title,'Episode 99');
+});
 test('directory search returns playable shows and uses bounded podcast-specific queries',async()=>{
   const result=await directory('History','ar',{fetcher:async url=>{const u=new URL(url);assert.equal(u.searchParams.get('country'),'ar');assert.equal(u.searchParams.get('media'),'podcast');assert.equal(u.searchParams.get('limit'),'36');return Response.json({results:[{collectionId:1,collectionName:'History',feedUrl:feedURL},{collectionId:2,collectionName:'No RSS'}]});}});
   assert.equal(result.shows.length,1);await assert.rejects(directory('x','us'),/two characters/);
