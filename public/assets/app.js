@@ -20,13 +20,27 @@ try { state = readState(localStorage); localStorage.setItem(STORAGE_KEY, JSON.st
 catch (e) { storageError = e.message || 'Device storage is unavailable.'; }
 let route = getRoute();
 const paths = { home: '/', chat: '/jarvis/', board: '/daily-board/', favorites: '/favorites/', settings: '/settings/', notes: '/notes/', tools: '/tools/', server: '/server/' };
-const labels = { home: 'Home', chat: 'Jarvis', board: 'Daily Board', favorites: 'Favorites', settings: 'Settings', notes: 'Notes', tools: 'Tools', server: 'Server' };
+const labels = { home: 'Home', chat: 'Relay', board: 'Daily Board', favorites: 'Favorites', settings: 'Settings', notes: 'Notes', tools: 'Tools', server: 'Server' };
 function getRoute() { return ({jarvis:'chat','daily-board':'board',favorites:'favorites',settings:'settings',notes:'notes',tools:'tools',server:'server'})[location.pathname.split('/')[1]] || 'home'; }
 let preferences = loadPreferences();
 let searchQuery = '', searchOpen = false;
 const time = stamp => new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(stamp));
-const date = new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'long', day: 'numeric' }).format(new Date());
+const clockFormat = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' });
+const dateFormat = new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+let clockTimer;
 const escape = text => String(text).replace(/[&<>"']/g, x => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x]));
+function updateClock() {
+  clearTimeout(clockTimer);
+  const clock = $('launcher-time'), date = $('launcher-date');
+  if (!clock || !date || document.hidden) return;
+  const now = new Date();
+  clock.innerHTML = clockFormat.formatToParts(now).map(part => part.type === 'dayPeriod' ? `<span class="clock-period">${escape(part.value)}</span>` : escape(part.value)).join('');
+  clock.dateTime = now.toISOString();
+  date.textContent = dateFormat.format(now);
+  date.dateTime = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+  // Stay aligned to the device's minute, and only update the two clock nodes.
+  clockTimer = setTimeout(updateClock, 60000 - Date.now() % 60000);
+}
 function commit(next) {
   if (storageError) throw new Error(storageError);
   localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
@@ -48,11 +62,24 @@ function connection() {
 }
 function drawShell() {
   const hub = ['home','favorites','settings'].includes(route);
+  const launcher = ['home','favorites'].includes(route);
+  clearTimeout(clockTimer);
+  document.body.classList.toggle('launcher-page', launcher);
+  document.querySelector('meta[name="theme-color"]').content = launcher ? '#090a0c' : '#121212';
   document.title = `${labels[route]} · Jarvis`;
-  $('app').innerHTML = `<div class="workspace"><header class="topbar">${hub?`<button class="icon-button" id="menu-button" aria-label="Open navigation">${icon('menu')}</button>`:`<a class="icon-button" href="/" data-route="home" aria-label="Back to Home">${icon('back')}</a>`}<a class="brand" href="/" data-route="home">Jarvis</a><div class="toolbar-actions">${hub?`<button class="icon-button" id="search-button" aria-label="Search apps">${icon('search')}</button>`:''}<button class="icon-button" id="connection-button" aria-label="Connection details">${icon('more')}<span class="sr-only">${connection()}</span></button></div></header><main id="content" tabindex="-1"></main>${hub?`<nav class="bottom-nav" aria-label="Hub navigation">${['home','favorites','settings'].map(key=>`<a href="${paths[key]}" data-route="${key}" ${key===route?'aria-current="page"':''}>${icon(key)}<span>${labels[key]}</span></a>`).join('')}</nav>`:''}</div>`;
+  const header = launcher
+    ? `<header class="topbar launcher-topbar"><a class="brand" href="/" data-route="home">Jarvis</a><nav class="toolbar-actions" aria-label="Launcher tools"><button class="icon-button" id="search-button" aria-label="Search apps" aria-expanded="${route==='home'&&searchOpen}" ${route==='home'?'aria-controls="launcher-search"':''}>${icon('search')}</button><a class="icon-button" href="/favorites/" data-route="favorites" aria-label="Favorites" ${route==='favorites'?'aria-current="page"':''}>${icon('favorites')}</a><button class="icon-button" id="connection-button" aria-label="Connection details">${icon('more')}<span class="sr-only">${connection()}</span></button></nav></header>`
+    : `<header class="topbar">${hub?`<button class="icon-button" id="menu-button" aria-label="Open navigation">${icon('menu')}</button>`:`<a class="icon-button" href="/" data-route="home" aria-label="Back to Home">${icon('back')}</a>`}<a class="brand" href="/" data-route="home">Jarvis</a><div class="toolbar-actions">${hub?`<button class="icon-button" id="search-button" aria-label="Search apps">${icon('search')}</button>`:''}<button class="icon-button" id="connection-button" aria-label="Connection details">${icon('more')}<span class="sr-only">${connection()}</span></button></div></header>`;
+  $('app').innerHTML = `<div class="workspace${launcher?' launcher':''}">${header}<main id="content" tabindex="-1"></main>${hub&&!launcher?`<nav class="bottom-nav" aria-label="Hub navigation">${['home','favorites','settings'].map(key=>`<a href="${paths[key]}" data-route="${key}" ${key===route?'aria-current="page"':''}>${icon(key)}<span>${labels[key]}</span></a>`).join('')}</nav>`:''}</div>`;
   $('connection-button').onclick = showConnection;
   if ($('menu-button')) $('menu-button').onclick = showNavigation;
-  if ($('search-button')) $('search-button').onclick = () => { searchOpen=!searchOpen; if(!searchOpen)searchQuery=''; route='home'; history.pushState({},'',paths.home); drawShell(); $('app-search')?.focus(); };
+  if ($('search-button')) $('search-button').onclick = () => {
+    if (route !== 'home') { route='home'; searchOpen=true; history.pushState({},'',paths.home); }
+    else searchOpen=!searchOpen;
+    if (!searchOpen) searchQuery='';
+    drawShell();
+    (searchOpen ? $('app-search') : $('search-button'))?.focus();
+  };
   drawPage();
 }
 function drawPage() {
@@ -66,22 +93,30 @@ function drawPage() {
 function appRow(app) {
   return `<a class="app-row" href="${app.href}">${icon(app.icon)}<span><strong>${app.name}</strong><small>${app.description}</small></span>${icon('chevron')}</a>`;
 }
+function launcherRow(app) {
+  const favorite = preferences.favorites.includes(app.id);
+  return `<a class="launcher-link${app.id==='jarvis'?' launcher-relay':''}" href="${app.href}">${icon(app.icon)}<span class="launcher-name">${app.name}</span>${favorite?`<span class="favorite-mark">${icon('favorites')}<span class="sr-only">Favorite</span></span>`:''}</a>`;
+}
 function drawHome() {
   const favorites = route==='favorites';
   const selected = apps.filter(a=>preferences.favorites.includes(a.id));
-  $('content').innerHTML = `<section class="page-heading"><h1>${favorites?'Favorites':'Home'}</h1><button class="text-button" id="edit-favorites">Edit</button></section>${searchOpen&&!favorites?`<div class="search-field"><label class="sr-only" for="app-search">Find an app</label><input id="app-search" type="search" placeholder="Find an app" value="${escape(searchQuery)}" autocomplete="off"></div>`:''}${!favorites&&selected.length?`<div class="shortcuts" aria-label="Favorite apps">${selected.slice(0,2).map(a=>`<a href="${a.href}">${icon(a.icon)}<span>${a.name}</span></a>`).join('')}</div>`:''}<div id="app-directory"></div>`;
+  $('content').innerHTML = `${favorites?`<section class="page-heading launcher-heading"><h1>Favorites</h1><button class="text-button" id="edit-favorites" aria-label="Edit favorites">Edit</button></section>`:`<section class="launcher-clock" aria-label="Local time and date"><h1 class="sr-only">Home</h1><time id="launcher-time" class="launcher-time"></time><time id="launcher-date" class="launcher-date"></time></section><div class="search-field" id="launcher-search" ${searchOpen?'':'hidden'}><label class="sr-only" for="app-search">Find an app</label><input id="app-search" type="search" placeholder="Find an app" value="${escape(searchQuery)}" autocomplete="off"></div>`}<div id="app-directory"></div>`;
   const render=()=>{
-    const filtered=(favorites?selected:apps).filter(a=>(a.name+' '+a.description).toLowerCase().includes(searchQuery.toLowerCase()));
-    $('app-directory').innerHTML = filtered.length?['Conversation','Library','Utilities'].map(group=>{const rows=filtered.filter(a=>a.group===group);return rows.length?`<section class="app-group"><h2 class="eyebrow">${group}</h2>${rows.map(appRow).join('')}</section>`:'';}).join(''):`<p class="empty-note">${favorites?'Choose your favorite apps with Edit.':'No apps match your search.'}</p>`;
+    const filtered=(favorites?selected:apps).filter(a=>(a.name+' '+a.description+' '+a.id).toLowerCase().includes(searchQuery.trim().toLowerCase()));
+    const utilityIds = ['tools','server','settings'];
+    const primary = filtered.filter(a=>!utilityIds.includes(a.id));
+    const utilities = filtered.filter(a=>utilityIds.includes(a.id));
+    $('app-directory').innerHTML = filtered.length?`<nav class="launcher-list" aria-label="${favorites?'Favorite apps':'Apps'}">${primary.map(launcherRow).join('')}${utilities.length?`<div class="launcher-utilities${primary.length?' separated':''}">${utilities.map(launcherRow).join('')}</div>`:''}</nav>`:`<p class="empty-note" role="status">${favorites?'Choose your favorite apps with Edit.':'No apps match your search.'}</p>`;
   };
   if(favorites)searchQuery='';
   render();
   if($('app-search'))$('app-search').oninput=e=>{searchQuery=e.target.value;render();};
-  $('edit-favorites').onclick=editFavorites;
+  if ($('edit-favorites')) $('edit-favorites').onclick=editFavorites;
+  if (!favorites) updateClock();
 }
 function editFavorites() {
   const dialog=$('hub-dialog');
-  dialog.innerHTML=`<div class="dialog-heading"><h2 id="hub-dialog-heading">Favorites</h2><button class="close" aria-label="Close favorites">×</button></div><p>Choose shortcuts for this browser. Your first two appear on Home.</p><form id="favorites-form">${apps.map(a=>`<label class="check-row"><input type="checkbox" name="favorite" value="${a.id}" ${preferences.favorites.includes(a.id)?'checked':''}>${a.name}</label>`).join('')}<button class="primary" type="submit">Save favorites</button></form>`;
+  dialog.innerHTML=`<div class="dialog-heading"><h2 id="hub-dialog-heading">Favorites</h2><button class="close" aria-label="Close favorites">×</button></div><p>Choose favorites for this browser. They are marked on Home and collected in Favorites.</p><form id="favorites-form">${apps.map(a=>`<label class="check-row"><input type="checkbox" name="favorite" value="${a.id}" ${preferences.favorites.includes(a.id)?'checked':''}>${a.name}</label>`).join('')}<button class="primary" type="submit">Save favorites</button></form>`;
   dialog.querySelector('.close').onclick=()=>dialog.close();
   $('favorites-form').onsubmit=e=>{e.preventDefault();try{const next={...preferences,favorites:new FormData(e.target).getAll('favorite')};savePreferences(next);preferences=next;dialog.close();drawShell();}catch{notify('Favorites could not be saved. Browser storage is unavailable.');}};
   dialog.showModal();
@@ -92,12 +127,12 @@ function showNavigation() {
   dialog.querySelector('.close').onclick=()=>dialog.close();dialog.showModal();
 }
 function drawSettings() {
-  $('content').innerHTML=`<section class="page-heading"><h1>Settings</h1></section><section class="app-group"><h2 class="eyebrow">Your hub</h2><button class="app-row" id="settings-favorites">${icon('favorites')}<span><strong>Favorites</strong><small>Choose your Home shortcuts</small></span>${icon('chevron')}</button><a class="app-row" href="/server/">${icon('server')}<span><strong>Connection & status</strong><small>Message sync and service details</small></span>${icon('chevron')}</a></section><section class="reading"><h2>One shared conversation</h2><p>Jarvis messages and Daily Board are shared across phones. Favorites and notes are saved in this browser.</p><h2>Your player</h2><p>DrawerCast has its own full player and settings. Music stays on your phone or server.</p><h2>About</h2><p>Jarvis · version 1.1<br>Dark interface inspired by your Poweramp player.</p></section>`;
+  $('content').innerHTML=`<section class="page-heading"><h1>Settings</h1></section><section class="app-group"><h2 class="eyebrow">Your hub</h2><button class="app-row" id="settings-favorites">${icon('favorites')}<span><strong>Favorites</strong><small>Choose your favorite apps</small></span>${icon('chevron')}</button><a class="app-row" href="/server/">${icon('server')}<span><strong>Connection & status</strong><small>Message sync and service details</small></span>${icon('chevron')}</a></section><section class="reading"><h2>One shared conversation</h2><p>Relay messages and Daily Board are shared across phones. Favorites and notes are saved in this browser.</p><h2>Your player</h2><p>DrawerCast has its own full player and settings. Music stays on your phone or server.</p><h2>About</h2><p>Jarvis · version 1.1<br>Dark interface inspired by your Poweramp player.</p></section>`;
   $('settings-favorites').onclick=editFavorites;
 }
 function drawChat() {
   const visibleMessages = channelMessages(state.messages);
-  $('content').innerHTML = `<section class="page-heading"><div><p class="eyebrow">MESSAGES</p><h1>Jarvis</h1></div><span class="pill">${API_ORIGIN?'INBOX':'DRAFT MODE'}</span></section><section class="chat-panel"><div class="chat-notice">${API_ORIGIN?'Messages and replies, shared across your phones. Replies are asynchronous.':'Cloud messaging is not connected yet. Your drafts stay on this device and have not been sent.'}</div><div class="messages" id="messages" aria-label="Conversation">${visibleMessages.length?visibleMessages.map(messageMarkup).join(''):`<div class="chat-empty"><h2>A place to pick up your thoughts.</h2><p>Write a message below. ${API_ORIGIN?'Messages appear here when saved.':'It will wait here until cloud messaging is ready.'}</p></div>`}</div><form class="composer" id="message-form"><label class="sr-only" for="message-text">Message Jarvis</label><textarea id="message-text" rows="2" maxlength="4000" placeholder="Write something…" required>${escape(state.composer || '')}</textarea><div class="composer-bottom"><span>${API_ORIGIN?'Enter to send · Shift + Enter for a new line':'Saved on this device · not sent'}</span><button class="primary" type="submit" id="send-message">${API_ORIGIN?'Send':'Save draft'} ${svg('send')}</button></div></form></section>`;
+  $('content').innerHTML = `<section class="page-heading"><div><h1>Relay</h1><p class="subheading">Thoughtful conversation</p></div><span class="pill">${API_ORIGIN?'INBOX':'DRAFT MODE'}</span></section><section class="chat-panel"><div class="chat-notice">${API_ORIGIN?'Messages and replies, shared across your phones. Replies are asynchronous.':'Cloud messaging is not connected yet. Your drafts stay on this device and have not been sent.'}</div><div class="messages" id="messages" aria-label="Conversation">${visibleMessages.length?visibleMessages.map(messageMarkup).join(''):`<div class="chat-empty"><h2>A place to pick up your thoughts.</h2><p>Write a message below. ${API_ORIGIN?'Messages appear here when saved.':'It will wait here until cloud messaging is ready.'}</p></div>`}</div><form class="composer" id="message-form"><label class="sr-only" for="message-text">Message Relay</label><textarea id="message-text" rows="2" maxlength="4000" placeholder="Write something…" required>${escape(state.composer || '')}</textarea><div class="composer-bottom"><span>${API_ORIGIN?'Enter to send · Shift + Enter for a new line':'Saved on this device · not sent'}</span><button class="primary" type="submit" id="send-message">${API_ORIGIN?'Send':'Save draft'} ${svg('send')}</button></div></form></section>`;
   $('message-text').oninput = e => { try { commit({ ...state, composer: e.target.value }); } catch { notify('Could not save your draft. Keep this page open and copy your text.'); } };
   $('message-text').onkeydown = e => { if (e.key==='Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); $('message-form').requestSubmit(); } };
   $('message-form').onsubmit = e => { e.preventDefault(); submitMessage(); };
@@ -160,10 +195,14 @@ async function sync() {
 document.addEventListener('click', e => {
   const link = e.target.closest('[data-route]');
   if (!link || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
-  e.preventDefault(); $('hub-dialog')?.close(); route = link.dataset.route; history.pushState({},'',paths[route]); drawShell(); window.scrollTo(0,0);
+  e.preventDefault(); $('hub-dialog')?.close();
+  if (route !== link.dataset.route) { route = link.dataset.route; history.pushState({},'',paths[route]); }
+  drawShell(); window.scrollTo(0,0);
 });
 window.addEventListener('popstate',()=>{ route=getRoute(); drawShell(); });
 window.addEventListener('online',sync);
+window.addEventListener('pageshow',updateClock);
+document.addEventListener('visibilitychange',updateClock);
 document.addEventListener('visibilitychange',()=>{ if(!document.hidden && API_ORIGIN && !busy && (!state.syncedAt || Date.now()-Date.parse(state.syncedAt)>60000)) sync(); });
 document.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>$(b.dataset.close).close());
 $('sync-now').onclick = sync;
