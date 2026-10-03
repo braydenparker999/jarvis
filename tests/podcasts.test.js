@@ -37,6 +37,11 @@ test('directory search returns playable shows and uses bounded podcast-specific 
   const result=await directory('History','ar',{fetcher:async url=>{const u=new URL(url);assert.equal(u.searchParams.get('country'),'ar');assert.equal(u.searchParams.get('media'),'podcast');assert.equal(u.searchParams.get('limit'),'36');return Response.json({results:[{collectionId:1,collectionName:'History',feedUrl:feedURL},{collectionId:2,collectionName:'No RSS'}]});}});
   assert.equal(result.shows.length,1);await assert.rejects(directory('x','us'),/two characters/);
 });
+test('directory host rejection falls back to an independent public podcast index',async()=>{
+  const calls=[];
+  const result=await directory('history','us',{fetcher:async url=>{calls.push(url);return url.startsWith('https://itunes.apple.com/')?new Response('Rejected',{status:403}):Response.json([{title:'A history show',author:'Host',url:feedURL,logo_url:'https://images.example.org/show.jpg',website:'https://show.example.org'}]);}});
+  assert.equal(calls.length,3);assert.ok(calls[2].startsWith('https://gpodder.net/search.json'));assert.equal(result.shows[0].feedUrl,feedURL);
+});
 test('audio is resolved from an RSS enclosure, preserves range headers and rejects non-audio bodies',async()=>{
   const calls=[],fetcher=async(url,opts)=>{calls.push(url);if(url===feedURL)return new Response(rss);assert.equal(opts.headers.Range,'bytes=10-19');return new Response('0123456789',{status:206,headers:{'Content-Type':'audio/mpeg','Content-Range':'bytes 10-19/100','Content-Length':'10','Accept-Ranges':'bytes'}});};
   const request=new Request(`https://api.example.org/podcasts/audio?feed=${encodeURIComponent(feedURL)}&id=${episodeID('episode-1')}`,{headers:{Range:'bytes=10-19',Origin:'https://missionarytube.z13.web.core.windows.net'}});

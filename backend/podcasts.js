@@ -122,11 +122,25 @@ const country = v => /^[a-z]{2}$/i.test(v || '') ? v.toLowerCase() : 'us';
 export async function directory(q, region, options = {}) {
   const query = q.trim(); if (query.length < 2 || query.length > 120) throw new PodcastError('Enter at least two characters to search.',400);
   const load = async () => {
-    const r = await upstream(`https://itunes.apple.com/search?term=${encodeURIComponent(query)}&media=podcast&entity=podcast&limit=36&country=${country(region)}`,options);
-    if (!r.ok) { await r.body?.cancel(); throw new PodcastError('Podcast search is unavailable. Please try again.'); }
-    const data = JSON.parse(await boundedText(r));
-    return {shows:(data.results || []).filter(s => s.feedUrl && s.collectionName).map(s => ({id:String(s.collectionId),title:s.collectionName,author:s.artistName || '',
-      feedUrl:optionalURL(s.feedUrl),artwork:optionalURL(s.artworkUrl600 || s.artworkUrl100),directoryUrl:optionalURL(s.collectionViewUrl),genres:s.genres || []})).filter(s => s.feedUrl)};
+    const params=`term=${encodeURIComponent(query)}&media=podcast&entity=podcast&limit=36&country=${country(region)}`;
+    const endpoints=[`https://itunes.apple.com/search?${params}`,`https://itunes.apple.com/WebObjects/MZStoreServices.woa/ws/wsSearch?${params}`,
+      `https://gpodder.net/search.json?q=${encodeURIComponent(query)}&scale_logo=300`];
+    for(const endpoint of endpoints) {
+      try {
+        const r=await upstream(endpoint,options);
+        if(!r.ok){await r.body?.cancel();continue;}
+        const data=JSON.parse(await boundedText(r));
+        const gpodder=Array.isArray(data);
+        const results=gpodder ? data : data.results;
+        if(!Array.isArray(results))continue;
+        const shows=results.slice(0,100).map(s=>gpodder ? {id:episodeID(s.url || ''),title:s.title,author:s.author || '',feedUrl:optionalURL(s.url),
+          artwork:optionalURL(s.scaled_logo_url || s.logo_url),website:optionalURL(s.website),genres:[]} : {id:String(s.collectionId),title:s.collectionName,author:s.artistName || '',
+          feedUrl:optionalURL(s.feedUrl),artwork:optionalURL(s.artworkUrl600 || s.artworkUrl100),directoryUrl:optionalURL(s.collectionViewUrl),genres:s.genres || []})
+          .filter(s=>s.feedUrl && s.title).slice(0,36);
+        return {shows};
+      }catch(e){if(options.signal?.aborted)throw e;}
+    }
+    throw new PodcastError('Podcast search is unavailable. Please try again.');
   };
   return options.fetcher ? load() : cached('search:'+country(region)+':'+query.toLowerCase(),load,1800000);
 }
