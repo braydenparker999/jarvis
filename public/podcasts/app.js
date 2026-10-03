@@ -50,6 +50,31 @@ async function api(path,params={},signal) {
   let data;try{data=await r.json();}catch{throw Error('The podcast service returned an unreadable response.');}
   if(!r.ok)throw Error(data.error || 'The podcast service is unavailable.');return data;
 }
+function clientDirectory(query,signal) {
+  // Apple's documented JSONP API uses the listener's network, independent of
+  // a server region that is rate-limited. Its results are still escaped data.
+  return new Promise((resolve,reject)=>{
+    const name='__jarvis_podcast_'+crypto.randomUUID().replaceAll('-',''),script=document.createElement('script');
+    const url=new URL('https://itunes.apple.com/search');
+    for(const [k,v] of Object.entries({term:query,media:'podcast',entity:'podcast',limit:'36',country:state.country,callback:name}))url.searchParams.set(k,v);
+    let settled=false;
+    const cleanup=()=>{clearTimeout(timeout);signal?.removeEventListener('abort',abort);script.remove();window[name]=()=>{};setTimeout(()=>delete window[name],30000);};
+    const finish=(error,data)=>{if(settled)return;settled=true;cleanup();error?reject(error):resolve(data);};
+    const abort=()=>finish(new DOMException('Cancelled','AbortError'));
+    const timeout=setTimeout(()=>finish(Error('The podcast directory took too long.')),10000);
+    window[name]=data=>{if(!Array.isArray(data?.results)){finish(Error('Invalid directory results.'));return;}
+      finish(null,{shows:data.results.filter(s=>s.feedUrl&&s.collectionName).slice(0,36).map(s=>({id:String(s.collectionId),title:s.collectionName,author:s.artistName || '',feedUrl:safeURL(s.feedUrl),artwork:safeURL(s.artworkUrl600 || s.artworkUrl100),directoryUrl:safeURL(s.collectionViewUrl),genres:s.genres || []})).filter(s=>s.feedUrl)});};
+    script.onerror=()=>finish(Error('Could not reach the podcast directory.'));script.src=url.href;script.referrerPolicy='no-referrer';
+    if(signal?.aborted){abort();return;}signal?.addEventListener('abort',abort,{once:true});document.head.append(script);
+  });
+}
+async function searchDirectory(path,params,signal) {
+  const controller=new AbortController(),combined=AbortSignal.any([signal,controller.signal]);
+  const query=path==='search'?params.q:categories.find(c=>c[0]===params.category)?.[2] || 'podcast';
+  try{return await Promise.any([api(path,params,combined),clientDirectory(query,combined)]);}
+  catch{if(signal.aborted)throw new DOMException('Cancelled','AbortError');throw Error('Podcast search is unavailable. Please try again.');}
+  finally{controller.abort();}
+}
 async function feed(url,{refresh=false,signal}={}) {
   if(!refresh && feeds.has(url))return feeds.get(url);
   try { const data=await api('feed',{url},signal);feeds.set(url,data);saveFeed(data).catch(()=>{});return data; }
@@ -82,7 +107,7 @@ async function renderRoute() {
     if(view==='discover' || view==='search') {
       const topics=view==='discover'?`<div class="browse-topics" aria-label="Browse topics">${categories.map(([id,name])=>`<button data-category="${id}" aria-pressed="${category===id}">${name}</button>`).join('')}</div>`:'';
       root.innerHTML=topics;status('Finding shows…');
-      const result=await api(view==='search'?'search':'browse',view==='search'?{q:query,country:state.country}:{category,country:state.country},signal);
+      const result=await searchDirectory(view==='search'?'search':'browse',view==='search'?{q:query,country:state.country}:{category,country:state.country},signal);
       if(token!==renderToken)return;status();root.innerHTML=topics+(result.shows.length?showTiles(result.shows):empty('No shows found','Try a show title, host, or a broader topic. You can also add an RSS feed with the + button.'));return;
     }
     if(view==='show') {

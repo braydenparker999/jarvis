@@ -1,7 +1,7 @@
 export const STORAGE_KEY = 'jarvis.podcasts.v1';
 export const AUDIO_CACHE = 'jarvis-podcast-audio-v1';
 export const MAX_DOWNLOAD = 250 * 1024 * 1024;
-export const categories = [['popular','All shows'],['history','History'],['science','Science'],['technology','Technology'],['culture','Culture'],['stories','Stories'],['faith','Faith'],['music','Music']];
+export const categories = [['popular','All shows','podcast'],['history','History','history'],['science','Science','science'],['technology','Technology','technology'],['culture','Culture','society culture'],['stories','Stories','fiction storytelling'],['faith','Faith','religion spirituality'],['music','Music','music']];
 export const emptyState = () => ({version:1,follows:[],queue:[],downloads:{},progress:{},current:null,speed:1,country:'us',autoplay:true});
 export function readState(storage) {
   try { const s = JSON.parse(storage.getItem(STORAGE_KEY)); if (s?.version !== 1) return emptyState();

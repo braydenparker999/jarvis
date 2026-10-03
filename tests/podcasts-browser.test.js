@@ -16,7 +16,7 @@ test('podcast mobile flows, real offline audio, seeking, timers and queue',{skip
   const url=new URL(req.url,'http://local');
   const json=data=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(data));};
   if(url.pathname==='/assets/config.js'){res.writeHead(200,{'Content-Type':'text/javascript'});res.end('export const API_ORIGIN=location.origin;');return;}
-  if(['/podcasts/search','/podcasts/browse'].includes(url.pathname)){json({shows:url.searchParams.get('q')==='empty'?[]:[show,{...show,id:'two',title:'Science in motion',feedUrl:'https://feeds.example.org/science.xml'}]});return;}
+  if(['/podcasts/search','/podcasts/browse'].includes(url.pathname)){if(url.searchParams.get('q')==='fallback'){res.writeHead(502,{'Content-Type':'application/json'});res.end('{"error":"Directory blocked in this region"}');return;}json({shows:url.searchParams.get('q')==='empty'?[]:[show,{...show,id:'two',title:'Science in motion',feedUrl:'https://feeds.example.org/science.xml'}]});return;}
   if(url.pathname==='/podcasts/feed'){
    const archive=url.searchParams.get('url')?.includes('archive'),offset=Number(url.searchParams.get('offset') || 0);
    const items=archive?Array.from({length:95},(_,i)=>({...episodes[0],id:'archive-'+i,title:'Archive episode '+i})):episodes;
@@ -35,6 +35,7 @@ test('podcast mobile flows, real offline audio, seeking, timers and queue',{skip
  const browser=await chromium.launch({executablePath:chrome,headless:true,args:['--no-sandbox']});
  const context=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true}),page=await context.newPage(),errors=[];
  await page.clock.install();
+ await context.route('https://itunes.apple.com/search?**',async route=>{const u=new URL(route.request().url()),term=u.searchParams.get('term');const shows=term==='empty'?[]:[show,{...show,id:'two',title:'Science in motion',feedUrl:'https://feeds.example.org/science.xml'}];await route.fulfill({contentType:'text/javascript',body:u.searchParams.get('callback')+'('+JSON.stringify({results:shows.map(s=>({collectionId:s.id,collectionName:s.title,artistName:s.author,feedUrl:s.feedUrl}))})+');'});});
  page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(m.type()==='error'&&m.text().includes('Content Security Policy'))errors.push(m.text());});
  const stored=()=>page.evaluate(()=>JSON.parse(localStorage.getItem('jarvis.podcasts.v1')));
  const shot=async name=>{if(process.env.JARVIS_SCREENSHOT_DIR){await mkdir(process.env.JARVIS_SCREENSHOT_DIR,{recursive:true});await page.screenshot({path:join(process.env.JARVIS_SCREENSHOT_DIR,'podcasts-'+name+'.png')});}};
@@ -84,6 +85,9 @@ test('podcast mobile flows, real offline audio, seeking, timers and queue',{skip
    await page.locator('#episode-query').fill('episode 79');assert.equal(await page.locator('.episode-row').count(),1);
    await page.locator('#more-episodes').click();await page.waitForFunction(()=>document.querySelector('#episode-count').textContent==='95');assert.equal(await page.locator('#episode-query').inputValue(),'episode 79');assert.equal(await page.locator('.episode-row').count(),1);
    assert.deepEqual(errors,[]);
+  });
+  await t.test('discovery still works when a server region rejects directory requests',async()=>{
+   await page.goto(origin+'/podcasts/#search=fallback');await page.locator('.show-tile').first().waitFor();assert.equal(await page.locator('.show-tile').count(),2);assert.equal(await page.locator('#status').isVisible(),false);assert.deepEqual(errors,[]);
   });
  } finally {await browser.close();await new Promise(done=>server.close(done));}
 });

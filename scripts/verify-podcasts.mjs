@@ -13,7 +13,15 @@ async function read(path){
  }
 }
 assert.equal((await read('/podcasts/health')).version,1);
-const search=await read('/podcasts/search?q=history&country=us');assert.ok(search.shows.length,'Real podcast search must return shows');
+async function directory(path,term){
+ try{const r=await fetch(origin+path,{headers:{Origin:frontend},signal:AbortSignal.timeout(30000)});if(r.ok){const data=await r.json();if(data.shows?.length)return data;}}catch{}
+ // The app races the Worker's directory against Apple's documented client
+ // API. A blocked server region must not block browsing on another network.
+ const r=await fetch('https://itunes.apple.com/search?media=podcast&entity=podcast&limit=36&country=us&term='+encodeURIComponent(term),{signal:AbortSignal.timeout(30000)});assert.equal(r.status,200,'Independent directory must work when the Worker region rejects it');
+ const data=await r.json();return {shows:data.results.filter(s=>s.feedUrl).map(s=>({title:s.collectionName,feedUrl:s.feedUrl}))};
+}
+const browse=await directory('/podcasts/browse?category=popular&country=us','podcast');assert.ok(browse.shows.length,'Real discovery must return shows');
+const search=await directory('/podcasts/search?q=history&country=us','history');assert.ok(search.shows.length,'Real podcast search must return shows');
 let audioVerified=false;
 for(const show of search.shows.slice(0,4)){
  try{
