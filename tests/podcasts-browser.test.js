@@ -91,3 +91,18 @@ test('podcast mobile flows, real offline audio, seeking, timers and queue',{skip
   });
  } finally {await browser.close();await new Promise(done=>server.close(done));}
 });
+test('live podcast discovery, search and playback',{skip:!process.env.PODCAST_LIVE_URL||!chrome||!existsSync(chrome),timeout:120000},async()=>{
+ const browser=await chromium.launch({executablePath:chrome,headless:true,args:['--no-sandbox']});
+ try{
+  const context=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true}),page=await context.newPage(),errors=[];
+  page.on('pageerror',e=>errors.push(e.message));
+  await page.goto(process.env.PODCAST_LIVE_URL);await page.locator('.show-tile').first().waitFor({timeout:45000});
+  if(process.env.JARVIS_SCREENSHOT_DIR){await mkdir(process.env.JARVIS_SCREENSHOT_DIR,{recursive:true});await page.screenshot({path:join(process.env.JARVIS_SCREENSHOT_DIR,'podcasts-live-discover.png')});}
+  await page.locator('#query').fill('The Rest Is History');await page.locator('#search-form button').click();
+  await page.locator('.show-tile').filter({has:page.getByText('The Rest Is History',{exact:true})}).first().click({timeout:45000});
+  await page.locator('[data-play]').first().click({timeout:30000});await page.waitForFunction(()=>!document.querySelector('#audio').paused&&document.querySelector('#audio').currentTime>0,{},{timeout:45000});
+  await page.locator('#open-player').click();
+  if(process.env.JARVIS_SCREENSHOT_DIR)await page.screenshot({path:join(process.env.JARVIS_SCREENSHOT_DIR,'podcasts-live-player.png')});
+  await page.locator('#audio').evaluate(a=>a.pause());assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));assert.deepEqual(errors,[]);
+ }finally{await browser.close();}
+});
