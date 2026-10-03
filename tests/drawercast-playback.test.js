@@ -17,6 +17,14 @@ function harness(){
   Engine.cur=0;Engine.setGain=()=>{};Engine.ensureCtx=()=>{};Engine.updateMediaSession=()=>{};Engine._playRequest=1;
   return {Engine,PlaybackTransitions,ensureCtx,ctx:context,revoked,renders:()=>renders};
 }
+test('metadata-only selected songs can seek before Play, including a refreshed catalog record',()=>{
+ const {Engine,ctx}=harness();ctx.LIB={map:new Map([['saved',{id:'saved',dur:180}]])};
+ Engine.current={id:'saved',dur:0};Engine.dur=0;Engine.els[0].src='';Engine.els[0].duration=999;
+ assert.equal(Engine.duration(),180,'an unloaded slot cannot supply an unrelated duration');
+ Engine.seek(126);assert.equal(Engine.time(),126);assert.equal(Engine._resumePosition.id,'saved');
+ Engine.els[0].src='https://audio.test/current';Engine.els[0].duration=181;assert.equal(Engine.duration(),181);
+ Engine._loadingRequest=2;Engine.dur=180;assert.equal(Engine.duration(),180,'the abandoned media slot cannot override a loading song');
+});
 test('routing into Web Audio clears retained element volume while slot gains stay separate',()=>{
   const {Engine,ensureCtx,ctx}=harness();
   const node=()=>{const n={connect(){}};for(const k of ['gain','frequency','Q','threshold','knee','ratio','attack','release'])n[k]={value:0};return n;};
