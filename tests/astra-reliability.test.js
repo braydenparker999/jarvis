@@ -53,6 +53,16 @@ test('cached replies respect cancellation and explicit Try again reaches instanc
 });
 const app=await readFile(new URL('app.js',base),'utf8');
 function functionSource(name){const start=app.indexOf(`    ${name==='renewYouTubePlayback'?'async ':''}function ${name}(`);assert.ok(start>=0);return app.slice(start,app.indexOf('\n    }',start)+6)}
+test('a newly mounted thumbnail is not discarded while its request starts',()=>{
+  const queued=[],image={dataset:{},complete:true,naturalWidth:0,addEventListener(){}};
+  let failed=0;
+  const c=vm.createContext({$$:()=>[image],queueMicrotask:fn=>queued.push(fn),AstraArtworkFallback:()=>failed++});
+  vm.runInContext(functionSource('bindArtwork'),c);c.bindArtwork({});
+  image.complete=false;queued[0]();
+  assert.equal(failed,0,'template completion is not a network failure');
+  const renderer=functionSource('refreshSearchRun');
+  assert.ok(renderer.indexOf('rail.insertBefore(node')<renderer.indexOf('bindArtwork(node)'), 'artwork binds after the new card is connected');
+});
 test('cached YouTube results share the live video lane and obey provider filters',()=>{
   const item={id:'dQw4w9WgXcQ',type:'youtube',name:'Paco',_providerKey:'youtube',_addonName:'YouTube'};
   for(const enabled of [true,false]){
