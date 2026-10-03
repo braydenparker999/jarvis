@@ -30,6 +30,7 @@ test('podcast mobile flows, real offline audio, seeking, timers and queue',{skip
  await new Promise(done=>server.listen(0,'127.0.0.1',done));const origin='http://127.0.0.1:'+server.address().port;
  const browser=await chromium.launch({executablePath:chrome,headless:true,args:['--no-sandbox']});
  const context=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true}),page=await context.newPage(),errors=[];
+ await page.clock.install();
  page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(m.type()==='error'&&m.text().includes('Content Security Policy'))errors.push(m.text());});
  const stored=()=>page.evaluate(()=>JSON.parse(localStorage.getItem('jarvis.podcasts.v1')));
  const shot=async name=>{if(process.env.JARVIS_SCREENSHOT_DIR){await mkdir(process.env.JARVIS_SCREENSHOT_DIR,{recursive:true});await page.screenshot({path:join(process.env.JARVIS_SCREENSHOT_DIR,'podcasts-'+name+'.png')});}};
@@ -60,11 +61,11 @@ test('podcast mobile flows, real offline audio, seeking, timers and queue',{skip
    await page.locator('#audio').evaluate(a=>a.currentTime=a.duration-.05);await page.waitForFunction(()=>document.querySelector('#audio').ended);
    assert.equal((await stored()).queue.length,1);assert.equal(await page.locator('#sleep-label').textContent(),'Sleep timer');assert.equal(Object.values((await stored()).progress).find(p=>p.episode.id==='episode-0').played,true);
    await page.locator('#play').click();await page.waitForFunction(()=>!document.querySelector('#audio').paused);await page.locator('#audio').evaluate(a=>a.currentTime=a.duration-.05);
-   await page.waitForFunction(()=>document.querySelector('#mini-title').textContent==='The music of a city'&&!document.querySelector('#audio').paused);assert.equal((await stored()).queue.length,0);
+   await page.waitForFunction(()=>document.querySelector('#mini-title').textContent==='The music of a city'&&!document.querySelector('#audio').paused);assert.equal((await stored()).queue.length,0);assert.equal(Object.values((await stored()).progress).find(p=>p.episode.id==='episode-0').played,true);
    await page.locator('#play').click();await page.locator('#close-player').click();
   });
   await t.test('timed sleep uses elapsed wall time and pauses playback',async()=>{
-   await page.clock.install();await page.locator('#open-player').click();await page.locator('#sleep').click();await page.getByRole('button',{name:'15 minutes',exact:true}).click();await page.locator('#play').click();await page.waitForFunction(()=>!document.querySelector('#audio').paused);
+   await page.locator('#open-player').click();await page.locator('#sleep').click();await page.getByRole('button',{name:'15 minutes',exact:true}).click();await page.locator('#play').click();await page.waitForFunction(()=>!document.querySelector('#audio').paused);
    await page.clock.fastForward(15*60000+10);assert.equal(await page.locator('#audio').evaluate(a=>a.paused),true);assert.equal(await page.locator('#sleep-label').textContent(),'Sleep timer');await page.locator('#close-player').click();
   });
   await t.test('empty search and mobile/desktop layouts remain usable',async()=>{

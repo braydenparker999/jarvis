@@ -199,7 +199,7 @@ async function reconcileDownloads() {
   if(changed){commit();repaintLocal();notify('Some downloads were cleared by the browser. Download them again when online.');}
 }
 
-function saveProgress(played=false) {if(!current)return;const key=keyOf(current);state.progress[key]=progressEntry(current,audio.currentTime,audio.duration,played);state.current=current;commit();lastSaved=Date.now();}
+function saveProgress(played=audio.ended) {if(!current)return;const key=keyOf(current);state.progress[key]=progressEntry(current,audio.currentTime,audio.duration,played);state.current=current;commit();lastSaved=Date.now();}
 function setPlayIcons() {
   const playing=!audio.paused&&!audio.ended,name=playing?'pause':'play';for(const id of ['play','mini-play']){$(id).innerHTML=icon(name);$(id).setAttribute('aria-label',playing?'Pause episode':'Play episode');}
   document.querySelectorAll('[data-play]').forEach(b=>{b.innerHTML=icon(playing&&current&&b.dataset.play===keyOf(current)?'pause':'play');});
