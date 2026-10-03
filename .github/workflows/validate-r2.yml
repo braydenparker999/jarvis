@@ -21,6 +21,20 @@ jobs:
         run: npm ci
       - name: Run frontend regression tests
         run: npm test
+      - name: Verify podcast listening and offline playback in Chromium
+        run: |
+          export JARVIS_CHROME="$(command -v google-chrome || command -v chromium)"
+          test -n "$JARVIS_CHROME"
+          export JARVIS_SCREENSHOT_DIR="$RUNNER_TEMP/podcast-screenshots"
+          node --test tests/podcasts-browser.test.js
+      - name: Preserve podcast browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: podcast-browser-${{ github.run_id }}
+          path: ${{ runner.temp }}/podcast-screenshots
+          if-no-files-found: ignore
+          retention-days: 14
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
