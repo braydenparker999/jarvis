@@ -69,6 +69,7 @@ test('Poweramp real Chrome touch and large-library regressions',{skip:executable
 
     await t.test('touch seeking on an unloaded paused song previews immediately and resumes from that position',async()=>{
       await library();const rail=await page.locator('#mini-seek').boundingBox();assert.ok(rail);
+      await page.evaluate(()=>{window.pointerTrace=[];for(const type of ['pointerdown','pointerup','pointercancel','click'])document.addEventListener(type,e=>{pointerTrace.push({type,target:e.target.closest('[id]')?.id,id:e.pointerId,x:e.clientX,y:e.clientY});},true);});
       assert.equal(await page.locator('#mini-seek').getAttribute('aria-valuemax'),'180');
       await send('touchStart',[point(1,rail.x+rail.width*.2,rail.y+rail.height/2)]);
       assert.ok(Math.abs(Number(await page.locator('#mini-seek').getAttribute('aria-valuenow'))-36)<=1);
@@ -80,7 +81,7 @@ test('Poweramp real Chrome touch and large-library regressions',{skip:executable
       assert.equal(await page.evaluate(()=>PA.Engine.el().src),'');assert.equal(audioRequests,0);
       await page.locator('#mini-play').tap();
       try{await page.waitForFunction(()=>PA.Engine.el().readyState>=3&&!PA.Engine.el().paused&&PA.Engine.el().currentTime>=125,null,{timeout:10000});}
-      catch(error){const state=await page.evaluate(()=>{const a=PA.Engine.el();return {id:PA.Engine.current.id,src:a.src,time:a.currentTime,duration:a.duration,paused:a.paused,ready:a.readyState,error:a.error?.code,requested:PA.Engine._requestedSeek,pending:PA.Engine._pendingSeek?.time,resume:PA.Engine._resumePosition,playing:PA.Engine.playing,loading:PA.Engine._loadingRequest,button:document.querySelector('#mini-play').getAttribute('aria-label'),toast:document.querySelector('#toast')?.textContent};});throw Error('Seek-resume state '+JSON.stringify({audioRequests,...state}),{cause:error});}
+      catch(error){const state=await page.evaluate(()=>{const a=PA.Engine.el(),r=document.querySelector('#mini-play').getBoundingClientRect();return {id:PA.Engine.current.id,src:a.src,time:a.currentTime,duration:a.duration,paused:a.paused,ready:a.readyState,error:a.error?.code,requested:PA.Engine._requestedSeek,pending:PA.Engine._pendingSeek?.time,resume:PA.Engine._resumePosition,playing:PA.Engine.playing,loading:PA.Engine._loadingRequest,button:document.querySelector('#mini-play').getAttribute('aria-label'),hit:document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)?.closest('[id]')?.id,events:pointerTrace,toast:document.querySelector('#toast')?.textContent};});throw Error('Seek-resume state '+JSON.stringify({audioRequests,...state}),{cause:error});}
       await page.locator('#mini-play').tap();await page.waitForFunction(()=>PA.Engine.el().paused);
     });
     await t.test('all ten layouts keep a bounded DOM, reach the final track, and support keyboard navigation',async()=>{
