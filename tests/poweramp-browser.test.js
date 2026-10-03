@@ -37,11 +37,16 @@ test('Poweramp real Chrome touch and large-library regressions',{skip:executable
     browser=await chromium.launch({executablePath,headless:true,args:['--no-sandbox']});
     context=await browser.newContext({viewport:{width:393,height:852},isMobile:true,hasTouch:true});
     // External sources are disabled and intercepted. Only the local WAV fixture can play.
-    await context.route('**/*',route=>new URL(route.request().url()).origin===origin?route.continue():route.abort('blockedbyclient'));
+    await context.route('**/*',route=>{
+      const url=new URL(route.request().url());
+      if(url.origin!==origin)return route.abort('blockedbyclient');
+      if(url.pathname==='/assets/r2-config.json')return route.fulfill({contentType:'application/json',body:JSON.stringify({manifestURL:'fixture-disabled',rootId:''})});
+      return route.continue();
+    });
     await context.addInitScript(()=>localStorage.setItem('drawercast.sources.v1',JSON.stringify({local:false,drive:false,r2:false,server:false})));
     const page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
     await page.goto(origin+'/drawercast/');
-    await page.waitForFunction(()=>window.PA?.R2Source.status==='Disabled');
+    await page.waitForFunction(()=>window.PA?.R2Source.manifestURL==='fixture-disabled');
     await page.evaluate(async origin=>{
       const {LIB,SET,SourceLibrary,Engine,R2Source,UI,Views,NativeSettings}=PA;
       SourceLibrary.flags.r2=true;SET.animations='normal';SET.listZoom={files:3};SET.keepQueue=true;
