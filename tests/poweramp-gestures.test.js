@@ -18,7 +18,7 @@ function harness(){
  let now=1000,seq=0;const timers=new Map(),frames=new Map(),nodes=new Map(),calls=[];
  const Engine={current:{id:'one'},_playRequest:1,queue:[],pos:0,duration:()=>100,time:()=>20,next:()=>calls.push('next'),prev:()=>calls.push('prev'),toggle:()=>calls.push('toggle'),seek:v=>calls.push(['seek',v]),seekBy:v=>calls.push(['seekBy',v])};
  const doc=node();doc.body=node();const win=node();win.matchMedia=()=>({matches:false});
- const ScreenDrag={state:null,abort(){this.state=null},begin(target,direction){this.state??={target,direction};},move(){},end(commit){calls.push(['navigate',commit,this.state?.target,this.state?.direction]);this.state=null;},cancel(){this.state=null;}};
+ const ScreenDrag={state:null,pause(){},returnInterrupted(){return false;},abort(){this.state=null},begin(target,direction){this.state??={target,direction};},move(){},end(commit){calls.push(['navigate',commit,this.state?.target,this.state?.direction]);this.state=null;},cancel(){this.state=null;}};
  const context=vm.createContext({Engine,ScreenDrag,SCREENS:{player:'#sc-player',list:'#sc-list'},Sheets:{request:0},SET:{animations:'disabled',longPressMenu:true,longPressMs:480,swipeToChange:true,doubleTapPause:true,seekStyle:'wave',seekStep:10},NativeSettings:{values:{}},Nav:{cur:'player',lastLibrary:'library',go:s=>calls.push(['nav',s])},UI:{setArtEl(){},renderProgress(){},drawViz(){}},
  SwipeArt:{ready:new Map(),neighbors(){},warm:()=>Promise.resolve(null)},peekTrack:d=>({id:d>0?'two':'zero',title:'Other'}),ctxMenuTrack:()=>calls.push('menu'),playerSwipeUp:()=>calls.push('swipeUp'),trackSub:()=>'',el:()=>node(),vibrate(){},proSkip:d=>calls.push(['category',d]),clamp:(v,a,b)=>Math.max(a,Math.min(b,v)),fmtTime:String,Waveform:{span:()=>100},
  performance:{now:()=>now},Date:{now:()=>now},setTimeout:(fn,ms=0)=>{timers.set(++seq,{fn,at:now+ms});return seq},clearTimeout:id=>timers.delete(id),setInterval:(fn,ms)=>{timers.set(++seq,{fn,at:now+ms,ms});return seq},clearInterval:id=>timers.delete(id),requestAnimationFrame:fn=>{frames.set(++seq,fn);return seq},cancelAnimationFrame:id=>frames.delete(id),matchMedia:()=>({matches:false}),document:doc,window:win,innerHeight:850,
@@ -102,6 +102,47 @@ test('new navigation cancels a pending swipe without overriding the selected tab
  const h=harness(),nav=navigation(h);h.context.SET.animations='normal';
  h.context.screenDrag.begin('library',1);h.context.screenDrag.move(180);h.context.screenDrag.end(true,.6);
  nav.go('eq');h.advance(1000);assert.equal(nav.cur,'eq');assert.equal(h.context.$('#sc-library').hidden,true);
+});
+test('a fast reversal cancels even when the swipe had crossed its distance threshold',()=>{
+ const h=harness();motion(h);assert.equal(h.context.motion.commits(-130,1,393),false);assert.equal(h.context.motion.commits(130,-1,393),false);
+ assert.equal(h.context.motion.commits(-130,-1,393),true);
+});
+test('interrupted artwork settling starts the next contact at its displayed position',()=>{
+ const h=art();h.context.SET.animations='normal';const stage=h.nodes.get('#artstage'),a=h.nodes.get('#artA');swipe(h,stage,-120);
+ h.context.getComputedStyle=n=>({transform:n===a?'matrix(1,0,0,1,-60,0)':n.style.transform});
+ stage.fire('pointerdown');assert.equal(a.style.transform,'translateX(-60px)');h.advance(80);stage.fire('pointermove',{clientX:170});h.paint();assert.equal(a.style.transform,'translateX(-40px)');
+ stage.fire('pointerup',{clientX:170});h.advance(600);assert.deepEqual(h.calls,[]);
+});
+test('tapping to interrupt an artwork settle neither skips nor becomes a double tap',()=>{
+ const h=art();h.context.SET.animations='normal';const stage=h.nodes.get('#artstage'),a=h.nodes.get('#artA');swipe(h,stage,-120);
+ h.context.getComputedStyle=n=>({transform:n===a?'matrix(1,0,0,1,-60,0)':n.style.transform});
+ stage.fire('pointerdown');h.advance(40);stage.fire('pointerup');h.advance(600);assert.deepEqual(h.calls,[]);assert.equal(a.style.transform,'');
+});
+test('interrupted mini-player settling retains its content position and cancels the old skip',()=>{
+ const h=mini();h.context.SET.animations='normal';const n=h.nodes.get('#mini'),slide=n.children[0];swipe(h,n,-120);
+ h.context.getComputedStyle=node=>({transform:node===slide?'matrix(1,0,0,1,-60,0)':node.style.transform});
+ n.fire('pointerdown');assert.equal(slide.style.transform,'translateX(-60px)');h.advance(80);n.fire('pointermove',{clientX:180});h.paint();assert.equal(slide.style.transform,'translateX(-30px)');
+ n.fire('pointerup',{clientX:180});h.advance(600);assert.deepEqual(h.calls,[]);
+});
+test('vertical settling resumes and reverses from the displayed position without stale navigation',()=>{
+ const h=harness(),nav=navigation(h),drag=h.context.screenDrag;h.context.SET.animations='normal';drag.begin('library',1);drag.move(180);drag.end(true,.6);
+ const to=h.context.$('#sc-library');h.context.getComputedStyle=n=>({transform:n===to?'matrix(1,0,0,1,0,-400)':n.style.transform});
+ drag.pause();assert.equal(to.style.transform,'translateY(-400px)');drag.begin('eq',-1);assert.equal(drag.state.progress,300);assert.equal(drag.state.target,'library');
+ drag.move(-80);assert.equal(drag.state.progress,220);assert.equal(to.style.transform,'translateY(-480px)');drag.end(false,-.6);h.advance(600);
+ assert.equal(nav.cur,'player');assert.equal(to.hidden,true);
+});
+test('a held contact interrupts vertical navigation and release returns to the current screen',()=>{
+ const h=harness(),nav=navigation(h),drag=h.context.screenDrag;h.context.SET.animations='normal';drag.begin('library',1);drag.move(180);drag.end(true,.6);
+ const to=h.context.$('#sc-library');h.context.getComputedStyle=n=>({transform:n===to?'matrix(1,0,0,1,0,-400)':n.style.transform});drag.pause();h.advance(600);assert.equal(nav.cur,'player');
+ assert.equal(drag.returnInterrupted(),true);h.advance(600);assert.equal(nav.cur,'player');assert.equal(to.hidden,true);
+});
+test('visual offsets support both 2D and 3D transform matrices',()=>{
+ const h=harness();motion(h);const n=node();h.context.getComputedStyle=()=>({transform:'matrix3d(1,0,0,0,0,1,0,0,0,0,1,0,12,-34,0,1)'});
+ assert.equal(h.context.motion.offset(n),12);assert.equal(h.context.motion.offset(n,'y'),-34);
+});
+test('rotation cancels a mini seek contact before cached geometry can commit the wrong position',()=>{
+ const h=seek(),n=h.nodes.get('#mini-seek');n.fire('pointerdown');h.win.fire('resize');n.fire('pointerup',{clientX:393});assert.deepEqual(h.calls,[]);assert.equal(h.context.UI.seekDragging,false);
+ n.fire('pointerdown',{clientX:0});n.fire('pointerup',{clientX:196.5});assert.deepEqual(h.calls,[['seek',50]]);
 });
 test('canceled visualizer contact never skips a track',()=>{
  const h=viz(),n=h.nodes.get('#vizfull');n.fire('pointerdown');n.fire('pointermove',{clientX:300});h.paint();n.fire('pointercancel');assert.deepEqual(h.calls,[]);
