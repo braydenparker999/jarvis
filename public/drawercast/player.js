@@ -3323,8 +3323,7 @@ const UI = {
     const pct = dur>0 ? clamp(cur/dur*100,0,100) : 0;
     if(!UI.seekDragging){
       paintSeekFraction(pct/100);
-      $('#mini-fill').style.width=pct+'%';
-      $('#mini-seek').style.setProperty('--mini-progress',String(pct/100));
+      paintMiniProgress(pct/100);
       $('#mini-seek').setAttribute('aria-valuenow',String(Math.round(cur||0)));$('#mini-seek').setAttribute('aria-valuetext',fmtTime(cur)+' of '+fmtTime(dur));
     }
     $('#mini-seek').setAttribute('aria-valuemax',String(Math.round(dur||0)));
@@ -3338,7 +3337,7 @@ const UI = {
       UI.loopId=0;
       const onPlayer = Nav.cur==='player';
       const visible = document.visibilityState==='visible';
-      if(visible&&onPlayer&&!UI.seekDragging)paintSeekFraction(Engine.duration()>0?clamp(Engine.time()/Engine.duration(),0,1):0);
+      if(visible&&!UI.seekDragging){const fraction=Engine.duration()>0?clamp(Engine.time()/Engine.duration(),0,1):0;if(onPlayer)paintSeekFraction(fraction);else if(!$('#mini').hidden)paintMiniProgress(fraction);}
       /* full rate only where it shows: progress elsewhere ticks a few times a second */
       if(ts-UI.lastProg>(onPlayer?100:240)||UI.seekDragging){ UI.lastProg=ts; UI.renderProgress(); }
       if(visible && (UI.vizFull || onPlayer) && (UI.vizFull || ts-(UI.lastViz||0)>=1000/30)){UI.lastViz=ts;UI.drawViz();}
@@ -5704,6 +5703,12 @@ function paintSeekFraction(fraction){
   if(knob.style.left!=='0%')knob.style.left='0%';
   fill.style.transform='scaleX('+fraction+')';knob.style.transform='translateX('+(fraction*UI.seekWidth)+'px) translateX(-50%) scale('+($('#seek').classList.contains('drag')?1.5:1)+')';
 }
+function paintMiniProgress(fraction){
+  const fill=$('#mini-fill');
+  if(fill.style.width!=='100%')fill.style.width='100%';
+  fill.style.transform='scaleX('+fraction+')';
+  $('#mini-seek').style.setProperty('--mini-progress',String(fraction));
+}
 function setupSeekGestures(){
   const seek=$('#seek');
   let W=1;
@@ -5783,22 +5788,22 @@ function setupSeekGestures(){
   tr.addEventListener('lostpointercapture',e=>finishTimeline(e,true));
   InputLifecycle.register(()=>{if(ts)finishTimeline({pointerId:ts.pointer},true);});
 
-  const miniSeek=$('#mini-seek'),miniFill=$('#mini-fill'),mini=$('#mini');let miniDrag=null;
+  const miniSeek=$('#mini-seek'),mini=$('#mini');let miniDrag=null;
   const blockMiniClick=InputLifecycle.clickGuard(miniSeek);
-  const miniFraction=x=>{const r=miniSeek.getBoundingClientRect();return clamp((x-r.left)/(r.width||1),0,1);};
-  const paintMini=x=>{const fraction=miniFraction(x);miniFill.style.width=(fraction*100)+'%';miniSeek.style.setProperty('--mini-progress',String(fraction));miniSeek.setAttribute('aria-valuenow',String(Math.round(fraction*Engine.duration())));miniSeek.setAttribute('aria-valuetext',fmtTime(fraction*Engine.duration())+' of '+fmtTime(Engine.duration()));return fraction;};
+  const miniFraction=(x,r=miniDrag?.rect||miniSeek.getBoundingClientRect())=>clamp((x-r.left)/(r.width||1),0,1);
+  const paintMini=x=>{const fraction=miniFraction(x);paintMiniProgress(fraction);miniSeek.setAttribute('aria-valuenow',String(Math.round(fraction*Engine.duration())));miniSeek.setAttribute('aria-valuetext',fmtTime(fraction*Engine.duration())+' of '+fmtTime(Engine.duration()));return fraction;};
   const endMini=(e,cancel=false)=>{
     if(!miniDrag||miniDrag.pointer!==e.pointerId)return;
     const state=miniDrag;miniDrag=null;UI.seekDragging=false;document.body.classList.remove('scrubbing');
     blockMiniClick(e);
-    if(!cancel&&state.id===Engine.current?.id&&state.request===Engine._playRequest)Engine.seek(miniFraction(e.clientX)*Engine.duration());
+    if(!cancel&&state.id===Engine.current?.id&&state.request===Engine._playRequest)Engine.seek(miniFraction(e.clientX,state.rect)*Engine.duration());
     try{if(miniSeek.hasPointerCapture?.(e.pointerId))miniSeek.releasePointerCapture(e.pointerId);}catch(_){}
     UI.renderProgress();
   };
   miniSeek.tabIndex=0;miniSeek.setAttribute('role','slider');miniSeek.setAttribute('aria-label','Seek current track');miniSeek.setAttribute('aria-valuemin','0');
   miniSeek.addEventListener('pointerdown',e=>{
     if(miniDrag||e.isPrimary===false||e.button>0||!(Engine.duration()>0)||mini.hidden)return;
-    e.preventDefault();e.stopPropagation();miniDrag={pointer:e.pointerId,id:Engine.current?.id,request:Engine._playRequest};UI.seekDragging=true;document.body.classList.add('scrubbing');
+    e.preventDefault();e.stopPropagation();miniDrag={pointer:e.pointerId,id:Engine.current?.id,request:Engine._playRequest,rect:miniSeek.getBoundingClientRect()};UI.seekDragging=true;document.body.classList.add('scrubbing');
     try{miniSeek.setPointerCapture(e.pointerId);}catch(_){}paintMini(e.clientX);
   });
   miniSeek.addEventListener('pointermove',e=>{if(miniDrag&&miniDrag.pointer===e.pointerId)paintMini(e.clientX);});

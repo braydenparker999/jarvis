@@ -1,6 +1,7 @@
 import {validateAnalysis} from '../public/drawercast/audio-analysis.js';
 import {FRONTEND_ORIGINS} from './origins.js';
 import {byteRange} from './music.js';
+import {publicLibrary} from './music-library-cache.js';
 import {LIBRARY_KEY,MAX_LIBRARY_BYTES,HEX,SONG_ID,metadata,identityMatches,validateLibrary,boundedBytes,readStoredLibrary,signatureMessage} from '../public/drawercast/r2-library.js';
 const AUDIO=/^\/music\/uploads\/audio\/([a-f0-9]{64})\.opus$/;
 const ART=/^\/music\/uploads\/art\/([a-f0-9]{64})\.(jpg|png)$/;
@@ -105,11 +106,11 @@ export async function nativeMusic(request,env){
     }
     if(!['GET','HEAD'].includes(request.method))return json({error:'Method not allowed'},405);
     if(env.MUSIC_PUBLIC_READ!=='true')return json({error:'Public music delivery is not enabled'},403);
-    const {data}=await readStoredLibrary(env.MUSIC_R2);
-    if(p==='/music/library.json')return json(data);
     const route=/^\/music\/library\/(audio|art)\/(r2_[A-Za-z0-9_-]+)$/.exec(p);
-    if(!route||!SONG_ID.test(route[2]))return json({error:'Not found'},404);
-    const t=data.tracks.find(t=>t.id===route[2]);if(!t)return json({error:'Not found'},404);
+    if(p!=='/music/library.json'&&(!route||!SONG_ID.test(route[2])))return json({error:'Not found'},404);
+    const library=await publicLibrary(env.MUSIC_R2);
+    if(p==='/music/library.json')return response(library.text,200,{'Content-Type':'application/json; charset=utf-8'});
+    const t=library.tracks.get(route[2]);if(!t)return json({error:'Not found'},404);
     const art=route[1]==='art',key=art?t.coverKey:t.audioKey;if(!key)return json({error:'Not found'},404);
     const size=art?t.coverSize:t.size,identity=art?t.coverIdentity:t.r2Identity,sha=art?t.coverSha256:t.sha256;
     const matches=o=>identityMatches(o,identity)&&(key.startsWith('native/')?verifiedBlob(o,sha,size):

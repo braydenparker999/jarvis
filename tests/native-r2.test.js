@@ -95,6 +95,46 @@ test('native audio supports actual byte ranges, ETags and artwork; changed ident
   f.objects.get('native/audio/'+sha(audio)+'.opus').uploaded=new Date();assert.equal((await f.get(path)).status,503);
   assert.equal((await f.get(path,{Origin:'https://evil.example'})).status,403);
 });
+test('repeated range and catalog reads reuse validation but still check live catalog and media identities',async()=>{
+  const f=fixture();await f.putAudio();await f.register(f.registration());f.calls.length=0;
+  const path='/music/library/audio/r2_native_'+sha(audio);
+  for(let i=0;i<4;i++){
+    const r=await f.get(path,{Range:'bytes=2-5'});assert.equal(r.status,206);
+    assert.deepEqual(Buffer.from(await r.arrayBuffer()),audio.subarray(2,6));
+    assert.equal((await (await f.get('/music/library.json')).json()).count,1);
+  }
+  assert.equal(f.calls.filter(c=>c[0]==='get'&&c[1]===LIBRARY_KEY).length,1);
+  assert.equal(f.calls.filter(c=>c[0]==='head'&&c[1]===LIBRARY_KEY).length,8);
+  assert.equal(f.calls.filter(c=>c[0]==='head'&&c[1].startsWith('native/audio/')).length,4);
+  f.objects.get('native/audio/'+sha(audio)+'.opus').customMetadata.verification='altered';
+  assert.equal((await f.get(path)).status,503);
+});
+test('a cached catalog immediately sees registration, removal, invalid replacement and deletion',async()=>{
+  const f=fixture();await f.putAudio();await f.register(f.registration());
+  const first=await (await f.get('/music/library.json')).json(),path='/music/library/audio/'+first.tracks[0].id;
+  const b=Buffer.concat([audio,Buffer.from('later upload')]);await f.putAudio(b);await f.register(f.registration(b));
+  assert.equal((await (await f.get('/music/library.json')).json()).count,2);
+  const latest=await (await f.get('/music/library.json')).json();latest.tracks.shift();latest.count=1;
+  await f.env.MUSIC_R2.put(LIBRARY_KEY,JSON.stringify(latest));
+  assert.equal((await f.get(path)).status,404);
+  latest.count=99;await f.env.MUSIC_R2.put(LIBRARY_KEY,JSON.stringify(latest));
+  assert.equal((await f.get('/music/library.json')).status,503);
+  assert.equal((await f.get('/music/library/audio/'+latest.tracks[0].id)).status,503);
+  f.objects.delete(LIBRARY_KEY);assert.equal((await f.get('/music/library.json')).status,503);
+});
+test('catalog cache is isolated by storage binding and fails closed on replacement between HEAD and GET',async()=>{
+  const f=fixture(),other=fixture();await f.putAudio();await f.register(f.registration());
+  assert.equal((await (await f.get('/music/library.json')).json()).count,1);
+  assert.equal((await (await other.get('/music/library.json')).json()).count,0);
+  const old=other.env.MUSIC_R2.head;let replace=true;
+  other.env.MUSIC_R2.head=async k=>{const h=await old(k);if(k===LIBRARY_KEY&&replace){replace=false;await other.env.MUSIC_R2.put(k,JSON.stringify({version:1,kind:'r2-library',complete:true,count:0,generatedAt:'2026-10-03T00:00:00Z',tracks:[]}));}return h;};
+  // Force a cold load of the first replacement before the race above.
+  await other.env.MUSIC_R2.put(LIBRARY_KEY,JSON.stringify({version:1,kind:'r2-library',complete:true,count:0,generatedAt:'2026-10-02T00:00:00Z',tracks:[]}));
+  assert.equal((await other.get('/music/library.json')).status,503);
+  assert.equal((await (await other.get('/music/library.json')).json()).generatedAt,'2026-10-03T00:00:00Z');
+  other.objects.get(LIBRARY_KEY).size=16*1024*1024+1;
+  assert.equal((await other.get('/music/library.json')).status,503);
+});
 test('native source preserves prior migrated track identity and source-local user state',()=>{
   const id='r2_legacyDriveID123',t={id,audioKey:'audio/legacyDriveID123/'+'b'.repeat(32)+'.opus',sha256:'a'.repeat(64),md5:'b'.repeat(32),size:64,
     mimeType:'audio/ogg',path:'Artist/Ready.opus',folder:'Cloudflare R2/Artist',metadata:{title:'Ready',artist:'Artist',dur:10},
