@@ -53,6 +53,18 @@ test('cached replies respect cancellation and explicit Try again reaches instanc
 });
 const app=await readFile(new URL('app.js',base),'utf8');
 function functionSource(name){const start=app.indexOf(`    ${name==='renewYouTubePlayback'?'async ':''}function ${name}(`);assert.ok(start>=0);return app.slice(start,app.indexOf('\n    }',start)+6)}
+test('cached YouTube results share the live video lane and obey provider filters',()=>{
+  const item={id:'dQw4w9WgXcQ',type:'youtube',name:'Paco',_providerKey:'youtube',_addonName:'YouTube'};
+  for(const enabled of [true,false]){
+    const state={currentPage:'search',searchSequence:0,metaCache:new Map([['video',item]]),homeItems:[],library:{}};
+    const route={current:()=>true,onDispose(){}};
+    const c=vm.createContext({state,youtube:{browseToken:0},youtubeEnabled:()=>enabled,YT:{api:{videoIdFromInput:()=>''}},Routes:{},AstraSearchIntent:{parse:()=>({text:'Paco',type:''}),matches:()=>true},AstraSearch:{groupSources:()=>[],matchRank:()=>0,merge:(a,b)=>[...a,...b]},allCatalogs:()=>[],isYouTubeMeta:m=>m.type==='youtube',renderSearchRun(){},searchYouTube(){},searchProviderGroup(){}});
+    vm.runInContext(functionSource('search'),c);c.search('Paco',route);
+    const lanes=state.searchRun.groups.filter(group=>group.key==='youtube');
+    assert.equal(lanes.length,enabled?1:0);
+    if(enabled){assert.equal(lanes[0].youtube,true);assert.equal(lanes[0].items[0],item);assert.equal(lanes[0].pending,1)}
+  }
+});
 test('YouTube renewal keeps the live position, pause state and selected quality',async()=>{
   const controller=deferred(),old={videoId:'dQw4w9WgXcQ',plan:{},refreshed:false};
   const player={youtube:old,session:{snapshot:()=>({resumeTime:13})},sources:[],diagnostics:{},lastPaused:false};
