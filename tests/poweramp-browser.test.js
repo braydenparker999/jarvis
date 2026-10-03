@@ -79,7 +79,8 @@ test('Poweramp real Chrome touch and large-library regressions',{skip:executable
       assert.ok(Math.abs(await page.evaluate(()=>PA.Engine.time())-126)<1);
       assert.equal(await page.evaluate(()=>PA.Engine.el().src),'');assert.equal(audioRequests,0);
       await page.locator('#mini-play').tap();
-      await page.waitForFunction(()=>PA.Engine.el().readyState>=3&&!PA.Engine.el().paused&&PA.Engine.el().currentTime>=125,{timeout:10000});
+      try{await page.waitForFunction(()=>PA.Engine.el().readyState>=3&&!PA.Engine.el().paused&&PA.Engine.el().currentTime>=125,null,{timeout:10000});}
+      catch(error){const state=await page.evaluate(()=>{const a=PA.Engine.el();return {id:PA.Engine.current.id,src:a.src,time:a.currentTime,duration:a.duration,paused:a.paused,ready:a.readyState,error:a.error?.code,requested:PA.Engine._requestedSeek,pending:PA.Engine._pendingSeek?.time,resume:PA.Engine._resumePosition,playing:PA.Engine.playing,loading:PA.Engine._loadingRequest,button:document.querySelector('#mini-play').getAttribute('aria-label'),toast:document.querySelector('#toast')?.textContent};});throw Error('Seek-resume state '+JSON.stringify({audioRequests,...state}),{cause:error});}
       await page.locator('#mini-play').tap();await page.waitForFunction(()=>PA.Engine.el().paused);
     });
     await t.test('all ten layouts keep a bounded DOM, reach the final track, and support keyboard navigation',async()=>{
