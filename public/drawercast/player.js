@@ -281,9 +281,10 @@ async function wakeLock(on){
   }catch(e){}
 }
 document.addEventListener('visibilitychange',function(){
+  if(typeof UI!=='undefined')UI.stopLoop();
   if(document.visibilityState==='visible'){
     if(SET.keepScreenOn) wakeLock(true);
-    if(typeof UI!=='undefined' && Engine.playing){ UI.loopId=0; UI.startLoop(); }
+    if(typeof UI!=='undefined' && (Engine.playing||UI.vizFull||UI.settling))UI.startLoop();
   }
 });
 
@@ -3143,7 +3144,7 @@ function SET_shuffleOn(){ return !!SET.shuffleOn; }
    UI CORE
    ===================================================================== */
 const UI = {
-  loopId:0, lastArt:null, artFlip:false, curArtURL:null,
+  loopId:0, loopToken:0, lastArt:null, artFlip:false, curArtURL:null,
 
   setArtEl:function(node, url){
     if(url){ node.style.backgroundImage='url("'+url+'")'; node.classList.add('has'); }
@@ -3319,30 +3320,44 @@ const UI = {
     $('#t-timer').classList.toggle('on', !!Engine.sleepAt);
   },
   renderProgress:function(){
+    if(document.visibilityState==='hidden')return;
     const cur=Engine.time(), dur=Engine.duration();
     const pct = dur>0 ? clamp(cur/dur*100,0,100) : 0;
+    const onPlayer=Nav.cur==='player',miniVisible=!$('#mini').hidden;
+    const text=(selector,value)=>{const node=$(selector);if(node.textContent!==value)node.textContent=value;};
+    const attribute=(node,name,value)=>{if(node.getAttribute(name)!==value)node.setAttribute(name,value);};
     if(!UI.seekDragging){
-      paintSeekFraction(pct/100);
-      paintMiniProgress(pct/100);
-      $('#mini-seek').setAttribute('aria-valuenow',String(Math.round(cur||0)));$('#mini-seek').setAttribute('aria-valuetext',fmtTime(cur)+' of '+fmtTime(dur));
+      if(onPlayer&&(SET.seekStyle||'wave')!=='wave')paintSeekFraction(pct/100);
+      if(miniVisible){
+        paintMiniProgress(pct/100);
+        const seek=$('#mini-seek');
+        attribute(seek,'aria-valuenow',String(Math.round(cur||0)));attribute(seek,'aria-valuetext',fmtTime(cur)+' of '+fmtTime(dur));
+      }
     }
-    $('#mini-seek').setAttribute('aria-valuemax',String(Math.round(dur||0)));
-    if(!UI.seekDragging)$('#t-cur').textContent=fmtTime(cur);
-    $('#t-dur').textContent=fmtTime(dur);
+    if(miniVisible)attribute($('#mini-seek'),'aria-valuemax',String(Math.round(dur||0)));
+    if(onPlayer){if(!UI.seekDragging)text('#t-cur',fmtTime(cur));text('#t-dur',fmtTime(dur));}
   },
   lastProg:0,
+  stopLoop:function(){
+    cancelAnimationFrame(UI.loopId);UI.loopId=0;UI.loopToken++;
+  },
   startLoop:function(){
-    if(UI.loopId) return;
+    if(UI.loopId||document.visibilityState==='hidden')return;
+    const token=++UI.loopToken;
     const step=function(ts){
+      if(token!==UI.loopToken)return;
       UI.loopId=0;
+      if(document.visibilityState==='hidden')return;
       const onPlayer = Nav.cur==='player';
-      const visible = document.visibilityState==='visible';
-      if(visible&&!UI.seekDragging){const fraction=Engine.duration()>0?clamp(Engine.time()/Engine.duration(),0,1):0;if(onPlayer)paintSeekFraction(fraction);else if(!$('#mini').hidden)paintMiniProgress(fraction);}
-      /* full rate only where it shows: progress elsewhere ticks a few times a second */
-      if(ts-UI.lastProg>(onPlayer?100:240)||UI.seekDragging){ UI.lastProg=ts; UI.renderProgress(); }
-      if(visible && (UI.vizFull || onPlayer) && (UI.vizFull || ts-(UI.lastViz||0)>=1000/30)){UI.lastViz=ts;UI.drawViz();}
-      if((Engine.playing || UI.vizFull || (onPlayer && UI.settling)) && visible) UI.loopId=requestAnimationFrame(step);
-      else if(Engine.playing) UI.loopId=setTimeout(function(){ UI.loopId=0; UI.startLoop(); }, 1000);
+      if(!UI.seekDragging){
+        const duration=Engine.duration(),fraction=duration>0?clamp(Engine.time()/duration,0,1):0;
+        if(onPlayer){if((SET.seekStyle||'wave')!=='wave')paintSeekFraction(fraction);}else if(!$('#mini').hidden)paintMiniProgress(fraction);
+        if(ts-UI.lastProg>(onPlayer?100:240)){UI.lastProg=ts;UI.renderProgress();}
+      }
+      // Owned gestures paint their own previews. Avoid competing canvas work
+      // while a finger is navigating; audio and the next frame continue normally.
+      if((UI.vizFull||onPlayer)&&!InputLifecycle.contacts.size&&(UI.vizFull||ts-(UI.lastViz||0)>=1000/30)){UI.lastViz=ts;UI.drawViz();}
+      if(Engine.playing||UI.vizFull||(onPlayer&&UI.settling))UI.loopId=requestAnimationFrame(step);
     };
     UI.loopId=requestAnimationFrame(step);
   },
@@ -3635,6 +3650,7 @@ const Nav={
     dim.classList.toggle('full', name!=='player' && !SET.listBg);
     $('#mini').hidden = (name==='player' || !Engine.current);
     $('#mini').classList.toggle('down', name==='player');
+    UI.renderProgress();
     UI.syncNav();
     $$('#nav button').forEach(function(b){ b.classList.toggle('on', b.dataset.nav===name || (name==='settings'&&b.dataset.nav==='menu')); });
     if(name==='eq') { setTimeout(function(){ UI.drawCurve(); EQ.render(); },30); }
@@ -5725,9 +5741,8 @@ function paintSeekFraction(fraction){
 }
 function paintMiniProgress(fraction){
   const fill=$('#mini-fill');
-  if(fill.style.width!=='100%')fill.style.width='100%';
-  fill.style.transform='scaleX('+fraction+')';
-  $('#mini-seek').style.setProperty('--mini-progress',String(fraction));
+  const transform='translateX('+(fraction*100)+'%)';
+  if(fill.style.transform!==transform)fill.style.transform=transform;
 }
 function setupSeekGestures(){
   const seek=$('#seek');
@@ -7795,9 +7810,15 @@ function installLyricsRework(){
       const x=staticBar?i*spacing:(i*step-time)/span*W+W/2;
       const h=Math.max(2.5*dpr,Math.sqrt(value)*H*.9),width=Math.max(1,spacing-pad);
       const draw=alpha=>{g.globalAlpha=alpha;g.beginPath();if(g.roundRect)g.roundRect(x+pad/2,(H-h)/2,width,h,width/2);else g.rect(x+pad/2,(H-h)/2,width,h);g.fill();};
-      // Clip the bar crossing the fixed playhead so the past/future split never drifts.
-      g.save();g.beginPath();g.rect(0,0,head,H);g.clip();draw(.28);g.restore();
-      g.save();g.beginPath();g.rect(head,0,W-head,H);g.clip();draw(.78);g.restore();
+      // Only the bar actually crossing the playhead needs two clipped draws.
+      // All other bars keep the same appearance with one path and no clip stack.
+      const left=x+pad/2;
+      if(left+width<=head)draw(.28);
+      else if(left>=head)draw(.78);
+      else{
+        g.save();g.beginPath();g.rect(0,0,head,H);g.clip();draw(.28);g.restore();
+        g.save();g.beginPath();g.rect(head,0,W-head,H);g.clip();draw(.78);g.restore();
+      }
     }
     if(this.seekPreview!=null){g.globalAlpha=.85;g.fillStyle=isLightUI()?'#f4ddcb':'#090807';g.fillRect(head-.65*dpr,0,1.3*dpr,H);}
     g.globalAlpha=1;this.settling=false;

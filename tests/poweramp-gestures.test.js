@@ -98,6 +98,11 @@ test('mini-player expansion makes outgoing list inert before the second click',(
  assert.equal(screen.inert,true);assert.equal(h.calls.includes('play-row'),false);
  h.advance(300);assert.equal(screen.hidden,true);
 });
+test('navigation refreshes progress after the mini-player becomes visible',()=>{
+ const h=harness(),nav=navigation(h),mini=h.context.$('#mini');mini.hidden=true;
+ const visibility=[];h.context.UI.renderProgress=()=>visibility.push(mini.hidden);
+ nav.go('library');assert.deepEqual(visibility,[false]);
+});
 test('new navigation cancels a pending swipe without overriding the selected tab',()=>{
  const h=harness(),nav=navigation(h);h.context.SET.animations='normal';
  h.context.screenDrag.begin('library',1);h.context.screenDrag.move(180);h.context.screenDrag.end(true,.6);
@@ -166,14 +171,14 @@ test('playback progress does not overwrite a mini seek preview while the finger 
  const h=seek(),n=h.nodes.get('#mini-seek'),fill=h.context.$('#mini-fill');
  const start=source.indexOf('  renderProgress:function('),end=source.indexOf('  lastProg:',start);
  vm.runInContext('UI.renderProgress='+source.slice(start+'  renderProgress:'.length,end).trim().replace(/,$/,'')+';',h.context);
- n.fire('pointerdown',{clientX:196.5});h.context.UI.renderProgress();assert.equal(fill.style.transform,'scaleX(0.5)');assert.equal(n.attrs['aria-valuenow'],'50');assert.equal(n.attrs['aria-valuetext'],'50 of 100');
- n.fire('pointercancel');assert.equal(fill.style.transform,'scaleX(0.2)');assert.equal(n.attrs['aria-valuenow'],'20');
+ n.fire('pointerdown',{clientX:196.5});h.context.UI.renderProgress();assert.equal(fill.style.transform,'translateX(50%)');assert.equal(n.attrs['aria-valuenow'],'50');assert.equal(n.attrs['aria-valuetext'],'50 of 100');
+ n.fire('pointercancel');assert.equal(fill.style.transform,'translateX(20%)');assert.equal(n.attrs['aria-valuenow'],'20');
 });
 test('mini seeking measures its rail once per contact and commits against the same bounds',()=>{
  const h=seek(),n=h.nodes.get('#mini-seek');let reads=0;
  n.getBoundingClientRect=()=>{reads++;return {left:0,width:400};};
  n.fire('pointerdown',{clientX:100});n.fire('pointermove',{clientX:200});n.fire('pointermove',{clientX:300});n.fire('pointerup',{clientX:300});
- assert.equal(reads,1);assert.deepEqual(h.calls,[['seek',75]]);assert.equal(h.nodes.get('#mini-fill').style.width,'100%');
+ assert.equal(reads,1);assert.deepEqual(h.calls,[['seek',75]]);assert.equal(h.nodes.get('#mini-fill').style.transform,'translateX(75%)');
 });
 test('track menus open immediately and late artwork cannot reopen or overwrite a newer menu',async()=>{
  const h=harness(),resolvers=new Map(),heads=[],arts=[];
