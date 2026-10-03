@@ -128,7 +128,7 @@
         const ready=()=>{const host=image.parentElement;if(!host)return;host.classList.remove('image-loading','image-error');host.classList.add('image-ready')};
         image.addEventListener('load',ready);
         image.addEventListener('error',()=>globalThis.AstraArtworkFallback(image));
-        if(image.complete)queueMicrotask(()=>{if(!image.complete)return;image.naturalWidth?ready():globalThis.AstraArtworkFallback(image)});
+        if(image.complete)queueMicrotask(()=>{if(!image.complete||!image.currentSrc)return;image.naturalWidth?ready():globalThis.AstraArtworkFallback(image)});
       });
     }
     function progressEntries(m){return progress.entriesFor(mediaKey(m))}
