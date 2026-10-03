@@ -44,7 +44,7 @@ test('Poweramp real Chrome touch and large-library regressions',{skip:executable
       return route.continue();
     });
     await context.addInitScript(()=>localStorage.setItem('drawercast.sources.v1',JSON.stringify({local:false,drive:false,r2:false,server:false})));
-    const page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
+    const page=await context.newPage(),errors=[];page.on('pageerror',e=>{errors.push(e.message);console.error('Poweramp browser error:',e.message);});
     await page.goto(origin+'/drawercast/');
     await page.waitForFunction(()=>window.PA?.R2Source.manifestURL==='fixture-disabled');
     await page.evaluate(async origin=>{
@@ -110,6 +110,12 @@ test('Poweramp real Chrome touch and large-library regressions',{skip:executable
       await page.waitForFunction(()=>document.querySelector('#list-body .zoom-list').dataset.zoom==='4');
       assert.equal(await page.evaluate(()=>PA.Engine.current.id),'r2_fixture_0');
       assert.equal(await page.evaluate(()=>visualViewport.scale),1,'pinch changes the list, not browser zoom');
+      await send('touchStart',[point(1,150,480)]);
+      await send('touchMove',[point(1,150,410)]);await nextFrame();
+      await send('touchStart',[point(1,150,410),point(2,250,410)]);
+      await send('touchMove',[point(1,125,410),point(2,275,410)]);await nextFrame();await send('touchEnd',[]);
+      await page.waitForFunction(()=>document.querySelector('#list-body .zoom-list').dataset.zoom==='5');
+      assert.equal(await page.evaluate(()=>PA.Engine.current.id),'r2_fixture_0','adding a second finger after scrolling does not activate a song');
     });
     await t.test('A–Z and selection operate on the complete list beyond the mounted window',async()=>{
       const z=await page.locator('#alpha span').filter({hasText:/^Z$/}).boundingBox();assert.ok(z);await tap(z.x+z.width/2,z.y+z.height/2);
