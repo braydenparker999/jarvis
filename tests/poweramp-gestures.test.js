@@ -60,7 +60,7 @@ test('EQ: another finger release must not terminate original drag',()=>{const {h
 test('EQ: lost pointer capture must stop subsequent movement',()=>{const {h,n}=eq();n.fire('pointerdown');n.fire('lostpointercapture');n.fire('pointermove',{clientY:200});assert.equal(h.context.moves.length,0);});
 function list(){const h=harness();run(h,'const ListZoom=','// Preserve the existing delegated actions','\nglobalThis.zoom=ListZoom;');const box=node();box.dataset.zoom='3';box.dataset.zoomKey='files';box.contains=()=>true;box.children=[node()];const target=node();target.closest=s=>s==='.zoom-list'?box:box.children[0];h.doc.elementFromPoint=()=>target;for(const sel of ['#list-body','#q-body'])h.context.$(sel).querySelector=()=>box;h.context.zoom.set=(b,id)=>{b.dataset.zoom=String(id);h.calls.push(['zoom',id]);};h.context.zoom.install();return {h,n:h.nodes.get('#list-body'),box,target};}
 const touch=(id,x,y)=>({identifier:id,clientX:x,clientY:y});
-test('list: one-finger scroll moves content and blocks accidental row click',()=>{const {h,n,target}=list();n.fire('touchstart',{target,touches:[touch(1,100,300)]});h.advance(30);n.fire('touchmove',{target,touches:[touch(1,100,200)]});h.paint();n.fire('touchend',{touches:[]});assert.equal(n.scrollTop,100);assert.equal(n.fire('click').stopped,true);});
+test('list: one-finger movement leaves scrolling to the browser and blocks accidental row clicks',()=>{const {h,n,target}=list();n.fire('touchstart',{target,touches:[touch(1,100,300)]});h.advance(30);const move=n.fire('touchmove',{target,touches:[touch(1,100,200)]});h.paint();n.fire('touchend',{touches:[]});assert.notEqual(move.prevented,true);assert.equal(n.scrollTop,0,'no main-thread scroll writes');assert.equal(h.frames.size,0,'no custom momentum loop');assert.equal(n.fire('click').stopped,true);});
 test('list: pinch changes layout and blocks row activation',()=>{const {h,n,box,target}=list();n.fire('touchstart',{target,touches:[touch(1,100,300),touch(2,200,300)]});n.fire('touchmove',{target,touches:[touch(1,75,300),touch(2,225,300)]});h.paint();assert.equal(box.dataset.zoom,'4');assert.equal(n.fire('click').stopped,true);n.fire('touchend',{touches:[]});});
 test('list: canceled pinch restores starting layout and scroll',()=>{const {h,n,box,target}=list();n.scrollTop=100;n.fire('touchstart',{target,touches:[touch(1,100,300),touch(2,200,300)]});n.fire('touchmove',{target,touches:[touch(1,75,300),touch(2,225,300)]});h.paint();n.fire('touchcancel',{touches:[]});assert.equal(box.dataset.zoom,'3');assert.equal(n.scrollTop,100);});
 test('list: remaining finger after pinch does not start an accidental scroll',()=>{const {h,n,target}=list();n.fire('touchstart',{target,touches:[touch(1,100,300),touch(2,200,300)]});n.fire('touchend',{touches:[touch(1,100,300)]});n.fire('touchmove',{target,touches:[touch(1,100,100)]});h.paint();assert.equal(n.scrollTop,0);n.fire('touchend',{touches:[]});});
@@ -177,8 +177,40 @@ test('playback progress does not overwrite a mini seek preview while the finger 
 test('mini seeking measures its rail once per contact and commits against the same bounds',()=>{
  const h=seek(),n=h.nodes.get('#mini-seek');let reads=0;
  n.getBoundingClientRect=()=>{reads++;return {left:0,width:400};};
- n.fire('pointerdown',{clientX:100});n.fire('pointermove',{clientX:200});n.fire('pointermove',{clientX:300});n.fire('pointerup',{clientX:300});
+ n.fire('pointerdown',{clientX:100});n.fire('pointermove',{clientX:200});n.fire('pointermove',{clientX:300});h.paint();n.fire('pointerup',{clientX:300});
  assert.equal(reads,1);assert.deepEqual(h.calls,[['seek',75]]);assert.equal(h.nodes.get('#mini-fill').style.transform,'translateX(75%)');
+});
+test('mini seek batches movement into one display frame and cancels the pending paint on release',()=>{
+ const h=seek(),n=h.nodes.get('#mini-seek'),fill=h.context.$('#mini-fill');
+ n.fire('pointerdown',{clientX:0});for(let i=1;i<=20;i++)n.fire('pointermove',{clientX:i*10});
+ assert.equal(h.frames.size,1);assert.equal(fill.style.transform,'translateX(0%)');h.paint();
+ assert.ok(fill.style.transform.startsWith('translateX(50.'));
+ n.fire('pointermove',{clientX:300});n.fire('pointercancel');assert.equal(h.frames.size,0);assert.equal(h.context.UI.seekDragging,false);
+});
+test('gesture velocity and tap duration use contact timestamps when event processing is delayed',()=>{
+ const h=harness();motion(h);const n=node(),done=[];h.context.n=n;h.context.done=done;
+ vm.runInContext('GestureMotion.bind(n,{end:s=>done.push(s)})',h.context);
+ n.fire('pointerdown',{timeStamp:2000});h.advance(600);
+ n.fire('pointermove',{clientX:110,timeStamp:2020});h.advance(500);
+ n.fire('pointerup',{clientX:110,timeStamp:2030});
+ assert.equal(done[0].vx,-2);assert.equal(done[0].elapsed,30);
+ n.fire('pointerdown',{timeStamp:3000});n.fire('pointermove',{clientX:110,timeStamp:3020});n.fire('pointerup',{clientX:110,timeStamp:3200});
+ assert.equal(done[1].vx,0,'a real pause before release cancels stale momentum');
+});
+function tapButton(){const h=harness(),button=node();h.context.button=button;run(h,'function bindTapButton(','function bindTransportButton(');vm.runInContext('bindTapButton(button,()=>Engine.toggle())',h.context);return {h,button};}
+test('play buttons act on the owning touch release even when Chrome emits no click',()=>{
+ const {h,button}=tapButton();button.fire('pointerdown');h.advance(30);button.fire('pointerup');assert.deepEqual(h.calls,['toggle']);
+ assert.equal(button.fire('click').prevented,true,'compatibility click cannot activate twice');
+ button.fire('pointerdown');h.advance(30);button.fire('pointerup');assert.deepEqual(h.calls,['toggle','toggle']);
+});
+test('play touches cannot activate after movement, cancellation, or lifecycle changes',()=>{
+ for(const mode of ['move','cancel','background']){const {h,button}=tapButton();button.fire('pointerdown');if(mode==='move')button.fire('pointermove',{clientX:200});else if(mode==='cancel')button.fire('pointercancel');else h.win.fire('blur');button.fire('pointerup');assert.deepEqual(h.calls,[]);assert.equal(button.fire('click').prevented,true,'a canceled touch cannot become a compatibility click');}
+ const {h,button}=tapButton();button.fire('pointerdown');button.fire('pointerdown',{pointerId:2,isPrimary:false});button.fire('pointerup');assert.deepEqual(h.calls,[]);
+});
+test('play mouse and keyboard clicks remain available without duplicate pointer actions',()=>{
+ const {h,button}=tapButton();button.fire('pointerdown',{pointerType:'mouse'});button.fire('pointerup',{pointerType:'mouse'});assert.deepEqual(h.calls,[]);
+ button.onclick({stopPropagation(){}});assert.deepEqual(h.calls,['toggle']);
+ button.fire('pointerdown');button.fire('pointerup');assert.notEqual(button.fire('click',{detail:0}).prevented,true);button.onclick({stopPropagation(){}});assert.deepEqual(h.calls,['toggle','toggle','toggle']);
 });
 test('track menus open immediately and late artwork cannot reopen or overwrite a newer menu',async()=>{
  const h=harness(),resolvers=new Map(),heads=[],arts=[];

@@ -1106,8 +1106,12 @@ body.layout-classic .artstage{margin-bottom:calc(20 * var(--pa-u))}
 #lib-cats .catico .native-icon{width:100%;height:100%}
 .catrow{gap:calc(21 * var(--pa-u));min-height:calc(65 * var(--pa-u));padding-left:calc(25 * var(--pa-u))}
 .catrow .catico{width:calc(35 * var(--pa-u));height:calc(35 * var(--pa-u))}
-#list-body,#q-body{touch-action:none;overscroll-behavior:none;scroll-behavior:auto}
-#list-body .zoom-list,#q-body .zoom-list{touch-action:none}
+#list-body,#q-body{touch-action:pan-y;overscroll-behavior:contain;scroll-behavior:auto}
+#list-body .zoom-list,#q-body .zoom-list{touch-action:pan-y}
+.zoom-list[data-windowed]{overflow-anchor:none}
+.zoom-list[data-windowed] .trow{content-visibility:visible}
+.track-spacer{grid-column:1 / -1;pointer-events:none;min-height:0}
+.track-spacer[hidden]{display:none}
 #sc-eq .eqtop{padding:calc(8 * var(--pa-u)) calc(9 * var(--pa-u)) 0}
 .eqtabs{height:calc(54 * var(--pa-u));border-radius:calc(30 * var(--pa-u));background:var(--chip)}
 .eqtabs button{height:100%;opacity:1;color:var(--txt)}
