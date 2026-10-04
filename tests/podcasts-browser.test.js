@@ -40,7 +40,7 @@ test('podcast mobile flows, real offline audio, seeking, timers and queue',{skip
  await context.route('https://itunes.apple.com/search?**',async route=>{const u=new URL(route.request().url()),term=u.searchParams.get('term');const shows=term==='empty'?[]:[show,{...show,id:'two',title:'Science in motion',feedUrl:'https://feeds.example.org/science.xml'}];await route.fulfill({contentType:'text/javascript',body:u.searchParams.get('callback')+'('+JSON.stringify({results:shows.map(s=>({collectionId:s.id,collectionName:s.title,artistName:s.author,feedUrl:s.feedUrl}))})+');'});});
  page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(m.type()==='error'&&m.text().includes('Content Security Policy'))errors.push(m.text());});
  const stored=()=>page.evaluate(()=>JSON.parse(localStorage.getItem('jarvis.podcasts.v1')));
- const shot=async name=>{if(process.env.JARVIS_SCREENSHOT_DIR){await mkdir(process.env.JARVIS_SCREENSHOT_DIR,{recursive:true});await page.screenshot({path:join(process.env.JARVIS_SCREENSHOT_DIR,'podcasts-'+name+'.png')});}};
+ const shot=async name=>{if(process.env.JARVIS_SCREENSHOT_DIR){await mkdir(process.env.JARVIS_SCREENSHOT_DIR,{recursive:true});await page.screenshot({path:join(process.env.JARVIS_SCREENSHOT_DIR,'podcasts-'+name+'.png'),animations:'disabled'});}};
  try {
   await t.test('browse, search, follow and episode filtering',async()=>{
    await page.goto(origin+'/podcasts/');await page.locator('.show-tile').first().waitFor();await page.waitForFunction(()=>!!navigator.serviceWorker.controller);
@@ -95,11 +95,12 @@ test('podcast mobile flows, real offline audio, seeking, timers and queue',{skip
    await page.goto(origin+'/podcasts/#search=race');await page.locator('.show-tile').first().waitFor();assert.equal(await page.locator('.show-tile').count(),2);assert.equal(await page.getByRole('heading',{name:'No shows found'}).count(),0);
   });
   await t.test('failed audio resolves from the publisher and preserves the saved position',async()=>{
-   failPrimaryAudio=true;
    await context.route('https://audio.example.org/4.wav',route=>route.fulfill({contentType:'audio/wav',headers:{'Access-Control-Allow-Origin':'*','Accept-Ranges':'bytes'},body:audioBytes}));
-   await page.evaluate(({show,e})=>{const s=JSON.parse(localStorage.getItem('jarvis.podcasts.v1'));s.progress[show.feedUrl+'#'+e.id]={episode:{...e,show},position:22,duration:60,played:false,updatedAt:Date.now()};localStorage.setItem('jarvis.podcasts.v1',JSON.stringify(s));},{show,e:episodes[4]});
-   await page.goto(origin+'/podcasts/#show='+encodeURIComponent(show.feedUrl));await page.reload();await page.locator('.episode-play').last().click();
-   await page.waitForFunction(()=>!document.querySelector('#audio').paused&&document.querySelector('#audio').currentTime>=22);
+   await page.goto(origin+'/podcasts/#show='+encodeURIComponent(show.feedUrl));await page.getByRole('button',{name:'Play A new chapter',exact:true}).click();
+   await page.waitForFunction(()=>!document.querySelector('#audio').paused&&document.querySelector('#audio').currentTime>0);
+   await page.locator('#mini-seek').evaluate(input=>{input.value=22;input.dispatchEvent(new Event('change'));});await page.locator('#mini-play').click();assert.ok((await stored()).progress[show.feedUrl+'#episode-4'].position>=22);
+   failPrimaryAudio=true;await page.reload();await page.locator('.episode-play').last().click();
+   await page.waitForFunction(()=>!document.querySelector('#audio').paused&&document.querySelector('#audio').currentTime>=22,{},{timeout:5000});
    assert.ok(await page.locator('#audio').evaluate(a=>a.currentTime<25),'Recovery must resume immediately, rather than play from the beginning');
    assert.equal(await page.locator('#audio').evaluate(a=>a.currentSrc),'https://audio.example.org/4.wav');await page.locator('#mini-play').click();assert.equal(await page.locator('#playback-status').isVisible(),false);assert.deepEqual(errors,[]);
   });
@@ -111,12 +112,12 @@ test('live podcast discovery, search and playback',{skip:!process.env.PODCAST_LI
   const context=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true}),page=await context.newPage(),errors=[];
   page.on('pageerror',e=>errors.push(e.message));
   await page.goto(process.env.PODCAST_LIVE_URL);await page.locator('.show-tile').first().waitFor({timeout:45000});
-  if(process.env.JARVIS_SCREENSHOT_DIR){await mkdir(process.env.JARVIS_SCREENSHOT_DIR,{recursive:true});await page.screenshot({path:join(process.env.JARVIS_SCREENSHOT_DIR,'podcasts-live-discover.png')});}
+  if(process.env.JARVIS_SCREENSHOT_DIR){await mkdir(process.env.JARVIS_SCREENSHOT_DIR,{recursive:true});await page.screenshot({path:join(process.env.JARVIS_SCREENSHOT_DIR,'podcasts-live-discover.png'),animations:'disabled'});}
   await page.locator('#query').fill('The Rest Is History');await page.locator('#search-form button').click();
   await page.locator('.show-tile').filter({has:page.getByText('The Rest Is History',{exact:true})}).first().click({timeout:45000});
   await page.locator('[data-play]').first().click({timeout:30000});await page.waitForFunction(()=>!document.querySelector('#audio').paused&&document.querySelector('#audio').currentTime>0,{},{timeout:45000});
   await page.locator('#open-player').click();
-  if(process.env.JARVIS_SCREENSHOT_DIR)await page.screenshot({path:join(process.env.JARVIS_SCREENSHOT_DIR,'podcasts-live-player.png')});
+  if(process.env.JARVIS_SCREENSHOT_DIR)await page.screenshot({path:join(process.env.JARVIS_SCREENSHOT_DIR,'podcasts-live-player.png'),animations:'disabled'});
   await page.locator('#audio').evaluate(a=>a.pause());assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
   // Require real advancing playback for the two publishers whose enclosure
   // chains exceeded the previous redirect cap.
