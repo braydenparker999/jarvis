@@ -1,6 +1,8 @@
 // One shared inbox. Public callers can create user messages only.
 import publication from '../public/content/jarvis.json' with {type:'json'};
-export const SHARED_OBJECT = 'jarvis-shared-v2';
+import {enqueueRelayMessage} from './relay-events.js';
+import {RELAY_OAUTH_OBJECT} from './relay-common.js';
+export const SHARED_OBJECT = RELAY_OAUTH_OBJECT;
 export const PUBLIC_KEY = '2d9a0d0d4254cd5774d2d4e7806cbadae306271ffc1f31fef0d44cd7e226c2a5';
 const id = x => typeof x === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(x);
 const text = (x, max) => typeof x === 'string' && x.trim().length > 0 && x.length <= max;
@@ -76,6 +78,7 @@ export function sharedStore(ctx, path, body = {}, params = new URLSearchParams()
       sql.exec('INSERT OR REPLACE INTO shared_meta VALUES(?,?)','messages:'+today,String(Number(count?.value||0)+1));
     }
     const value={...body,title:body.title?.trim()};insert(value,kind);
+    if(kind==='user')enqueueRelayMessage(ctx,entry(rows('SELECT * FROM shared_entries WHERE id=?',body.id)[0]));
     if(kind==='briefing'&&body.date)sql.exec('INSERT INTO shared_briefing_dates VALUES(?,?)',body.date,body.id);
     return json({entry:entry(rows('SELECT * FROM shared_entries WHERE id=?',body.id)[0])},201);
   });

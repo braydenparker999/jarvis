@@ -6,6 +6,10 @@ import {songsterr} from './songsterr.js';
 import {music} from './music.js';
 import {nativeMusic} from './music-upload.js';
 import {podcasts} from './podcasts.js';
+import {relayConnector,relayRpc} from './relay-connector.js';
+import {relayOAuthStore} from './relay-oauth.js';
+import {drainRelayOutbox,scheduleRelayAlarm} from './relay-events.js';
+import {RelayError} from './relay-common.js';
 const paths = new Set(['/v1/state', '/v1/messages', '/v1/board', '/v1/responder/connect', '/v1/responder/revoke', '/v1/agent/inbox', '/v1/agent/replies', '/v1/agent/board']);
 const digest = async value => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))),b=>b.toString(16).padStart(2,'0')).join('');
 const randomKey = () => Array.from(crypto.getRandomValues(new Uint8Array(32)),b=>b.toString(16).padStart(2,'0')).join('');
@@ -14,6 +18,7 @@ const publicState = state => ({messages:state.messages, posts:state.posts});
 const unanswered = state => state.messages.filter(m=>m.role==='user' && !state.messages.some(r=>r.kind==='reply' && r.replyTo===m.id));
 export default {
   async fetch(request, env) {
+    const relay=await relayConnector(request,env);if(relay)return relay;
     const native=await nativeMusic(request,env);if(native)return native;
     const media = await music(request, env); if (media) return media;
     const connected=await connector(request,env,{syncShared,sharedInternal});if(connected)return connected;
@@ -90,16 +95,28 @@ export default {
   }
 };
 export class Hub {
-  constructor(ctx){this.ctx=ctx;}
+  constructor(ctx,env){this.ctx=ctx;this.env=env||{};}
+  async alarm(){await drainRelayOutbox(this.ctx,this.env);}
   async fetch(request){
     const path=new URL(request.url).pathname;
+    if(path==='/internal/relay/oauth')return relayOAuthStore(this.ctx,await request.json());
+    if(path==='/internal/relay/rpc'){
+      try{const {principal,rpc}=await request.json();return json({result:await relayRpc(this.ctx,this.env,principal,rpc)});}
+      catch(error){return json({error:{code:error instanceof RelayError?error.code:-32603,message:error instanceof RelayError?error.message:'Relay storage unavailable',...(error instanceof RelayError&&error.data?{data:error.data}:{})}});}
+    }
     if(path.startsWith('/internal/shared/')) {
+      // Persist the wake before committing a new message/event, so a crash after
+      // commit cannot strand its outbox. SQLite and normal Durable Object storage
+      // share the same object; old imported rows never become live events.
+      if(path==='/internal/shared/message'&&this.ctx.storage.setAlarm)await this.ctx.storage.setAlarm(Date.now()+100);
       if(path==='/internal/shared/state') {
         // A single in-flight importer for the shared object, across all phones.
         if(!this.publicationSync)this.publicationSync=syncPublications(this.ctx).finally(()=>{this.publicationSync=null;});
         await this.publicationSync;
       }
-      return sharedStore(this.ctx,path,request.method==='POST'?await request.json():{},new URL(request.url).searchParams);
+      const response=sharedStore(this.ctx,path,request.method==='POST'?await request.json():{},new URL(request.url).searchParams);
+      if(path==='/internal/shared/message')await scheduleRelayAlarm(this.ctx);
+      return response;
     }
     if(path==='/internal/oauth-store')return oauthStore(this.ctx.storage,await request.json());
     if(path==='/internal/register'){await this.ctx.storage.put('access',await request.json());return json({ok:true});}

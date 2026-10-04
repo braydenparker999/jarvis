@@ -1,0 +1,253 @@
+// OAuth 2.1 broker. GitHub authenticates the one owner; public Relay keys are never identity.
+import {RELAY_OWNER, RELAY_OAUTH_OBJECT, RELAY_SCOPES, RELAY_CALLBACK, random, hash, challenge, equal, boundedText, fields, isObject, json, relayEnabled, relayIssuer, relayResource} from './relay-common.js';
+const REGISTRY = RELAY_OAUTH_OBJECT;
+const SESSION_MS = 600000;
+const ACCESS_MS = 3600000;
+const REFRESH_MS = 30 * 86400000;
+const COOKIE = '__Host-jarvis-relay';
+const cookieHeader = (value, age = 600) => `${COOKIE}=${value}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${age}`;
+const cookie = request => request.headers.get('Cookie')?.split(';').map(x => x.trim()).find(x => x.startsWith(COOKIE + '='))?.slice(COOKIE.length + 1);
+const scopes = value => typeof value === 'string' && value.length > 0 && value.split(' ').every(x => RELAY_SCOPES.includes(x)) && new Set(value.split(' ')).size === value.split(' ').length;
+const err = (error = 'invalid_request', status = 400) => json({error}, status);
+const registry = async (env, body) => {
+  const r = await env.HUBS.get(env.HUBS.idFromName(REGISTRY)).fetch(new Request('https://internal/internal/relay/oauth', {method: 'POST', body: JSON.stringify(body)}));
+  if (!r.ok) throw Error('OAuth storage unavailable');
+  return r.json();
+};
+const read = (env, key) => registry(env, {op: 'get', key}).then(x => x.value);
+const put = (env, key, value, expiresAt, category) => registry(env, {op: 'put', key, value, expiresAt, category});
+const consume = (env, key, match = {}) => registry(env, {op: 'consume', key, match}).then(x => x.value);
+function authParams(b, client, env) {
+  return client && b.client_id && b.redirect_uri === client.redirect && b.response_type === 'code' && b.code_challenge_method === 'S256'
+    && typeof b.code_challenge === 'string' && /^[A-Za-z0-9_-]{43}$/.test(b.code_challenge)
+    && b.resource === relayResource(env) && typeof b.state === 'string' && b.state.length > 0 && b.state.length <= 2048 && scopes(b.scope);
+}
+const redirect = (url, headers = {}) => new Response(null, {status: 302, headers: {Location: url, 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer', ...headers}});
+function oauthRedirect(p, env, params) {
+  const url = new URL(p.redirect_uri);
+  for (const [k, v] of Object.entries({...params, state: p.state, iss: relayIssuer(env) + '/relay'})) url.searchParams.set(k, v);
+  return redirect(url.href, {'Set-Cookie': cookieHeader('', 0)});
+}
+function consentPage(csrf) {
+  // No interpolated upstream content or script. CSRF is random lowercase hex.
+  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Connect Jarvis Relay</title><body><h1>Connect Jarvis Relay</h1><p>Allow ChatGPT to read the public Relay inbox, post replies in that inbox, and subscribe to new messages. Public messages are unverified visitor content. This connection does not authorize account actions or secret sharing.</p><form method="post" action="/relay/oauth/approve"><input type="hidden" name="csrf" value="${csrf}"><button name="decision" value="allow">Allow this connection</button> <button name="decision" value="deny">Cancel</button></form></body></html>`, {headers: {'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'", 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff'}});
+}
+export async function relayGrantActive(env, grantId, requiredScope) {
+  if (!relayEnabled(env) || typeof grantId !== 'string') return false;
+  const grant = await read(env, 'grant:' + grantId);
+  return !!grant && grant.principal === RELAY_OWNER && !grant.revoked && grant.expiresAt > Date.now() && grant.resource === relayResource(env) && (!requiredScope || grant.scope.split(' ').includes(requiredScope));
+}
+function localValue(ctx,key,now=Date.now()){
+  ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS relay_oauth (key TEXT PRIMARY KEY, category TEXT NOT NULL, value TEXT NOT NULL, expires_at INTEGER NOT NULL)');
+  const row=[...ctx.storage.sql.exec('SELECT value FROM relay_oauth WHERE key=? AND expires_at>?',key,now)][0];
+  return row?JSON.parse(row.value):null;
+}
+export function relayGrantActiveInStore(ctx,env,grantId,requiredScope){
+  if(!relayEnabled(env)||typeof grantId!=='string')return false;
+  const grant=localValue(ctx,'grant:'+grantId);
+  return !!grant&&!grant.revoked&&grant.principal===RELAY_OWNER&&grant.resource===relayResource(env)&&(!requiredScope||grant.scope.split(' ').includes(requiredScope));
+}
+export function relayTokenActiveInStore(ctx,env,principal,requiredScope){
+  if(principal.principal!==RELAY_OWNER||typeof principal.accessHash!=='string')return false;
+  const token=localValue(ctx,'access:'+principal.accessHash);
+  return !!token&&token.grantId===principal.grantId&&(!requiredScope||token.scope.split(' ').includes(requiredScope))&&relayGrantActiveInStore(ctx,env,principal.grantId,requiredScope);
+}
+export async function relayAuthenticate(request, env) {
+  if (!relayEnabled(env)) return null;
+  const token = request.headers.get('Authorization')?.match(/^Bearer ([a-f0-9]{64})$/)?.[1];
+  if (!token) return null;
+  const accessHash=await hash(token),value = await read(env, 'access:' + accessHash);
+  if (!value || !await relayGrantActive(env, value.grantId)) return null;
+  return {principal: RELAY_OWNER, grantId: value.grantId, scopes: value.scope.split(' '),accessHash};
+}
+export async function relayOAuth(request, env, fetcher = fetch) {
+  const url = new URL(request.url), path = url.pathname, issuer = relayIssuer(env), resource = relayResource(env);
+  const protectedPath = '/.well-known/oauth-protected-resource/relay/mcp';
+  const metadataPath = '/.well-known/oauth-authorization-server/relay';
+  if (!(path.startsWith('/relay/oauth/') || path === protectedPath || path === metadataPath)) return null;
+  if (!relayEnabled(env)) return err('temporarily_unavailable', 503);
+  if (path === protectedPath && request.method === 'GET') return json({resource, authorization_servers: [issuer + '/relay'], scopes_supported: RELAY_SCOPES});
+  if (path === metadataPath && request.method === 'GET') return json({issuer: issuer + '/relay', authorization_endpoint: issuer + '/relay/oauth/authorize', token_endpoint: issuer + '/relay/oauth/token', registration_endpoint: issuer + '/relay/oauth/register', revocation_endpoint: issuer + '/relay/oauth/revoke', response_types_supported: ['code'], grant_types_supported: ['authorization_code', 'refresh_token'], token_endpoint_auth_methods_supported: ['none'], code_challenge_methods_supported: ['S256'], authorization_response_iss_parameter_supported: true, scopes_supported: RELAY_SCOPES});
+  try {
+    if (path === '/relay/oauth/register' && request.method === 'POST') {
+      if (!request.headers.get('Content-Type')?.startsWith('application/json')) return err('invalid_client_metadata');
+      const b = JSON.parse(await boundedText(request));
+      if (!isObject(b) || !Array.isArray(b.redirect_uris) || b.redirect_uris.length !== 1 || b.redirect_uris[0] !== RELAY_CALLBACK
+        || b.token_endpoint_auth_method && b.token_endpoint_auth_method !== 'none'
+        || b.grant_types && (!Array.isArray(b.grant_types) || b.grant_types.some(x => !['authorization_code', 'refresh_token'].includes(x)))
+        || b.response_types && (!Array.isArray(b.response_types) || b.response_types.some(x => x !== 'code'))) return err('invalid_client_metadata');
+      const limited = await registry(env, {op: 'rate', identity: await hash(request.headers.get('CF-Connecting-IP') || 'unknown')});
+      if (limited.error) return err('temporarily_unavailable', 429);
+      const client_id = random();
+      // Unapproved public registrations expire quickly. Extend only after owner consent.
+      const stored = await put(env, 'client:' + client_id, {redirect: RELAY_CALLBACK}, Date.now() + SESSION_MS, 'client');
+      if (stored.error) return err('temporarily_unavailable', 503);
+      return json({client_id, redirect_uris: [RELAY_CALLBACK], token_endpoint_auth_method: 'none', grant_types: ['authorization_code', 'refresh_token'], response_types: ['code']}, 201);
+    }
+    if (path === '/relay/oauth/authorize' && request.method === 'GET') {
+      if (!env.RELAY_GITHUB_CLIENT_ID || !env.RELAY_GITHUB_CLIENT_SECRET) return err('temporarily_unavailable', 503);
+      const p = Object.fromEntries(url.searchParams); p.scope ||= RELAY_SCOPES.join(' ');
+      if ([...url.searchParams.keys()].some(k => url.searchParams.getAll(k).length !== 1) || !authParams(p, await read(env, 'client:' + p.client_id), env)) return err();
+      const state = random(), browser = random(), verifier = random();
+      const stored = await put(env, 'login:' + await hash(state), {p, browser: await hash(browser), verifier}, Date.now() + SESSION_MS, 'session');
+      if (stored.error) return err('temporarily_unavailable', 503);
+      const github = new URL('https://github.com/login/oauth/authorize');
+      github.search = new URLSearchParams({client_id: env.RELAY_GITHUB_CLIENT_ID, redirect_uri: issuer + '/relay/oauth/github/callback', state, code_challenge: await challenge(verifier), code_challenge_method: 'S256', allow_signup: 'false', scope: ''});
+      return redirect(github.href, {'Set-Cookie': cookieHeader(browser)});
+    }
+    if (path === '/relay/oauth/github/callback' && request.method === 'GET') {
+      if([...url.searchParams.keys()].some(k=>url.searchParams.getAll(k).length!==1))return err();
+      const state = url.searchParams.get('state'), browser = cookie(request);
+      if (!/^[a-f0-9]{64}$/.test(state || '') || !/^[a-f0-9]{64}$/.test(browser || '')) return err();
+      const login = await consume(env, 'login:' + await hash(state), {browser: await hash(browser)});
+      if (!login) return err();
+      if (url.searchParams.has('error')) return oauthRedirect(login.p, env, {error: 'access_denied'});
+      const code = url.searchParams.get('code');
+      if (typeof code !== 'string' || !/^[A-Za-z0-9_-]{1,200}$/.test(code)) return err();
+      const tokenResponse = await fetcher('https://github.com/login/oauth/access_token', {method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10000), headers: {'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json'}, body: new URLSearchParams({client_id: env.RELAY_GITHUB_CLIENT_ID, client_secret: env.RELAY_GITHUB_CLIENT_SECRET, code, redirect_uri: issuer + '/relay/oauth/github/callback', code_verifier: login.verifier}).toString()});
+      if (!tokenResponse.ok) return err('temporarily_unavailable', 503);
+      const githubToken = JSON.parse(await boundedText(tokenResponse, 65536));
+      if (typeof githubToken.access_token !== 'string' || githubToken.access_token.length > 1000 || githubToken.token_type?.toLowerCase() !== 'bearer') return err('access_denied', 403);
+      const userResponse = await fetcher('https://api.github.com/user', {redirect: 'error', signal: AbortSignal.timeout(10000), headers: {Authorization: 'Bearer ' + githubToken.access_token, Accept: 'application/vnd.github+json', 'User-Agent': 'jarvis-relay-identity'}});
+      if (!userResponse.ok) return err('access_denied', 403);
+      const user = JSON.parse(await boundedText(userResponse, 65536));
+      // Upstream token is never persisted or forwarded to the MCP client.
+      if (user.id !== 183016859) return err('access_denied', 403);
+      const csrf = random(), session = random();
+      const stored = await put(env, 'consent:' + await hash(session), {p: login.p, csrf}, Date.now() + SESSION_MS, 'session');
+      if (stored.error) return err('temporarily_unavailable', 503);
+      const response = consentPage(csrf), headers = new Headers(response.headers); headers.set('Set-Cookie', cookieHeader(session));
+      return new Response(response.body, {status: 200, headers});
+    }
+    if (path === '/relay/oauth/approve' && request.method === 'POST') {
+      if (request.headers.get('Origin') !== issuer || !request.headers.get('Content-Type')?.startsWith('application/x-www-form-urlencoded')) return err('access_denied', 403);
+      const session = cookie(request),params=new URLSearchParams(await boundedText(request));
+      if([...params.keys()].some(k=>params.getAll(k).length!==1))return err();
+      const b = Object.fromEntries(params);
+      if (!/^[a-f0-9]{64}$/.test(session || '') || !/^[a-f0-9]{64}$/.test(b.csrf || '') || !['allow', 'deny'].includes(b.decision)) return err();
+      const consent = await consume(env, 'consent:' + await hash(session), {csrf: b.csrf});
+      if (!consent) return err();
+      if (b.decision === 'deny') return oauthRedirect(consent.p, env, {error: 'access_denied'});
+      const code = random(), grantId = random();
+      const stored = await registry(env, {op: 'authorize', grantId, codeKey: 'code:' + await hash(code), params: consent.p, resource});
+      if (stored.error) return err('temporarily_unavailable', 503);
+      return oauthRedirect(consent.p, env, {code});
+    }
+    if (path === '/relay/oauth/token' && request.method === 'POST') {
+      if (!request.headers.get('Content-Type')?.startsWith('application/x-www-form-urlencoded')) return err();
+      const params = new URLSearchParams(await boundedText(request));
+      if ([...params.keys()].some(k => params.getAll(k).length !== 1)) return err();
+      const b = Object.fromEntries(params);
+      if (b.resource !== resource) return err('invalid_target');
+      const access = random(), refresh = random(); let match, key;
+      if (b.grant_type === 'authorization_code') {
+        if (!/^[a-f0-9]{64}$/.test(b.code || '') || !/^[A-Za-z0-9._~-]{43,128}$/.test(b.code_verifier || '')) return err('invalid_grant');
+        key = 'code:' + await hash(b.code);
+        match = {client_id: b.client_id, redirect_uri: b.redirect_uri, challenge: await challenge(b.code_verifier), resource};
+      } else if (b.grant_type === 'refresh_token') {
+        if (!/^[a-f0-9]{64}$/.test(b.refresh_token || '')) return err('invalid_grant');
+        key = 'refresh:' + await hash(b.refresh_token); match = {client_id: b.client_id, resource};
+        if (b.scope !== undefined && !scopes(b.scope)) return err('invalid_scope');
+      } else return err('unsupported_grant_type');
+      const result = await registry(env, {op: 'exchange', key, match, scope: b.scope, accessKey: 'access:' + await hash(access), refreshKey: 'refresh:' + await hash(refresh)});
+      if (!result.scope) return err('invalid_grant');
+      return json({access_token: access, refresh_token: refresh, token_type: 'Bearer', expires_in: result.expiresIn, scope: result.scope});
+    }
+    if (path === '/relay/oauth/revoke' && request.method === 'POST') {
+      if (!request.headers.get('Content-Type')?.startsWith('application/x-www-form-urlencoded')) return err();
+      const params=new URLSearchParams(await boundedText(request));
+      if([...params.keys()].some(k=>params.getAll(k).length!==1))return err();
+      const b = Object.fromEntries(params);
+      if (!/^[a-f0-9]{64}$/.test(b.token || '') || !/^[a-f0-9]{64}$/.test(b.client_id || '')) return json({});
+      await registry(env, {op: 'revoke', tokenHash: await hash(b.token), client_id: b.client_id});
+      return json({});
+    }
+    return err('not_found', 404);
+  } catch { return err('invalid_request'); }
+}
+
+// Every exchange/rotation and consume is atomic. Rows hold only hashed bearer IDs.
+export function relayOAuthStore(ctx, b, now = Date.now()) {
+  const sql = ctx.storage.sql;
+  sql.exec('CREATE TABLE IF NOT EXISTS relay_oauth (key TEXT PRIMARY KEY, category TEXT NOT NULL, value TEXT NOT NULL, expires_at INTEGER NOT NULL)');
+  return ctx.storage.transactionSync(() => {
+    sql.exec('DELETE FROM relay_oauth WHERE expires_at<=?', now);
+    const get = key => { const r = [...sql.exec('SELECT value FROM relay_oauth WHERE key=?', key)][0]; return r ? JSON.parse(r.value) : null; };
+    const store = (key, category, value, expiration) => sql.exec('INSERT OR REPLACE INTO relay_oauth VALUES(?,?,?,?)', key, category, JSON.stringify(value), expiration);
+    const remove = key => sql.exec('DELETE FROM relay_oauth WHERE key=?', key);
+    const count = category => [...sql.exec('SELECT COUNT(*) AS n FROM relay_oauth WHERE category=?', category)][0].n;
+    const revoke = grantId => {
+      const grant = get('grant:' + grantId);
+      if (grant) { grant.revoked = true; store('grant:' + grantId, 'grant', grant, grant.expiresAt); }
+      if (grant?.accessKey) remove(grant.accessKey);
+      if (grant?.refreshKey) remove(grant.refreshKey);
+    };
+    if (b.op === 'get') return json({value: get(b.key)});
+    if (b.op === 'rate') {
+      const key='rate:'+b.identity, rate=get(key)||{count:0};
+      if (rate.count>=5 || !get(key)&&count('rate')>=500) return json({error:'Rate limit'});
+      store(key,'rate',{count:rate.count+1},now+SESSION_MS);return json({ok:true});
+    }
+    if (b.op === 'put') {
+      const limits = {client: 50, session: 100};
+      if (!(b.category in limits) || !Number.isFinite(b.expiresAt) || b.expiresAt <= now || count(b.category) >= limits[b.category]) return json({error: 'Registry full'});
+      store(b.key, b.category, b.value, b.expiresAt); return json({ok: true});
+    }
+    if (b.op === 'consume') {
+      const value = get(b.key);
+      if (!value || Object.entries(b.match || {}).some(([k, v]) => !equal(value[k], v))) return json({value: null});
+      remove(b.key); return json({value});
+    }
+    if (b.op === 'authorize') {
+      const grantRows=[...sql.exec("SELECT key,value FROM relay_oauth WHERE category='grant'")];
+      if(grantRows.filter(x=>!JSON.parse(x.value).revoked).length>=10)return json({error:'Registry full'});
+      if(grantRows.length>=100)for(const row of grantRows.filter(x=>JSON.parse(x.value).revoked))remove(row.key);
+      const p = b.params, expiration = now + REFRESH_MS;
+      const client=get('client:'+p.client_id);
+      if(!client)return json({error:'Client expired'});
+      store('client:'+p.client_id,'client',client,expiration);
+      const grant = {principal: RELAY_OWNER, client_id: p.client_id, scope: p.scope, resource: b.resource, expiresAt: expiration, revoked: false};
+      store('grant:' + b.grantId, 'grant', grant, expiration);
+      store(b.codeKey, 'code', {grantId: b.grantId, client_id: p.client_id, redirect_uri: p.redirect_uri, challenge: p.code_challenge, resource: b.resource, scope: p.scope}, now + SESSION_MS);
+      return json({ok: true});
+    }
+    if (b.op === 'exchange') {
+      const value = get(b.key);
+      if (!value) {
+        // A reused refresh token indicates a compromised family. Wrong clients cannot revoke it.
+        const used = get('used:' + b.key);
+        if (used && used.client_id === b.match.client_id && used.resource === b.match.resource) revoke(used.grantId);
+        return json({});
+      }
+      if (Object.entries(b.match).some(([k, v]) => !equal(value[k], v))) return json({});
+      const grant = get('grant:' + value.grantId);
+      if (!grant || grant.revoked || grant.principal !== RELAY_OWNER) return json({});
+      const scope = b.scope || value.scope;
+      if (!scopes(scope) || scope.split(' ').some(s => !value.scope.split(' ').includes(s))) return json({});
+      if(b.key.startsWith('refresh:')&&count('used')>=10000)return json({});
+      remove(b.key);
+      if (b.key.startsWith('refresh:')) {
+        // Keep reuse detection for the entire family lifetime. Fail closed at the
+        // bounded cap rather than deleting evidence for a still-active family.
+        store('used:' + b.key, 'used', {grantId: value.grantId, client_id: value.client_id, resource: value.resource},grant.expiresAt);
+      }
+      if (grant.accessKey) remove(grant.accessKey);
+      if (grant.refreshKey) remove(grant.refreshKey);
+      const token = {grantId: value.grantId, client_id: value.client_id, scope, resource: value.resource};
+      const accessExpiry=Math.min(now+ACCESS_MS,grant.expiresAt);
+      store(b.accessKey, 'access', token, accessExpiry);
+      store(b.refreshKey, 'refresh', token, grant.expiresAt);
+      grant.accessKey = b.accessKey; grant.refreshKey = b.refreshKey; grant.scope = scope;
+      store('grant:' + value.grantId, 'grant', grant, grant.expiresAt);
+      return json({scope,expiresIn:Math.floor((accessExpiry-now)/1000)});
+    }
+    if (b.op === 'revoke') {
+      for (const prefix of ['access:', 'refresh:']) {
+        const token = get(prefix + b.tokenHash);
+        if (token?.client_id === b.client_id) revoke(token.grantId);
+      }
+      return json({ok: true});
+    }
+    return json({error: 'Invalid operation'}, 400);
+  });
+}
