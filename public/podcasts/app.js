@@ -295,7 +295,7 @@ async function startSources(e,token,position,index=0) {
 }
 async function playEpisode(e) {
   if(current&&keyOf(current)===keyOf(e)&&loadedKey===keyOf(e)){togglePlay();return;}
-  const token=++loadToken;if(current&&loadedKey)saveProgress();loadedKey='';sourceLoading=false;audio.pause();audio.removeAttribute('src');audio.load();wantPlay=true;
+  const token=++loadToken;if(current&&loadedKey)saveProgress();loadedKey='';sourceLoading=true;audio.pause();audio.removeAttribute('src');audio.load();wantPlay=true;
   current=e;state.current=e;commit();updateCurrent();playbackStatus('Opening audio…');
   if(currentBlob){URL.revokeObjectURL(currentBlob);currentBlob=null;}
   try {

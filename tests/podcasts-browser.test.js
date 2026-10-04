@@ -11,7 +11,7 @@ const show={id:'fixture-show',title:'The Sound of History',author:'A thoughtful 
 const episodes=Array.from({length:5},(_,i)=>({id:'episode-'+i,title:['A remarkable beginning','The music of a city','An overlooked story','Across the mountains','A new chapter'][i],description:'Episode notes with <script>untrusted text</script> and useful details.',duration:60,publishedAt:new Date(Date.UTC(2026,9,3-i)).toISOString(),audioUrl:'https://audio.example.org/'+i+'.wav',type:'audio/wav',bytes:960044}));
 function wav() {const rate=8000,samples=rate*60,b=Buffer.alloc(44+samples*2);b.write('RIFF',0);b.writeUInt32LE(b.length-8,4);b.write('WAVEfmt ',8);b.writeUInt32LE(16,16);b.writeUInt16LE(1,20);b.writeUInt16LE(1,22);b.writeUInt32LE(rate,24);b.writeUInt32LE(rate*2,28);b.writeUInt16LE(2,32);b.writeUInt16LE(16,34);b.write('data',36);b.writeUInt32LE(samples*2,40);return b;}
 test('podcast mobile flows, real offline audio, seeking, timers and queue',{skip:!chrome||!existsSync(chrome),timeout:120000},async t=>{
- const audioBytes=wav();
+ const audioBytes=wav();let failPrimaryAudio=false;
  const server=createServer(async(req,res)=>{try{
   const url=new URL(req.url,'http://local');
   const json=data=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(data));};
@@ -23,6 +23,7 @@ test('podcast mobile flows, real offline audio, seeking, timers and queue',{skip
    json({show:{...show,feedUrl:url.searchParams.get('url')},episodes:items.slice(offset,offset+40),nextOffset:items.length>offset+40?offset+40:null});return;
   }
   if(url.pathname==='/podcasts/audio'){
+   if(failPrimaryAudio&&url.searchParams.get('id')==='episode-4'){res.writeHead(502,{'Content-Type':'application/json'});res.end('{"error":"Publisher redirect chain is unavailable"}');return;}
    const range=/^bytes=(\d+)-(\d*)$/.exec(req.headers.range || ''),start=range?Number(range[1]):0,end=range&&range[2]?Math.min(Number(range[2]),audioBytes.length-1):audioBytes.length-1;
    res.writeHead(range?206:200,{'Content-Type':'audio/wav','Content-Length':end-start+1,'Accept-Ranges':'bytes',...(range?{'Content-Range':`bytes ${start}-${end}/${audioBytes.length}`}:{})});res.end(audioBytes.subarray(start,end+1));return;
   }
@@ -32,6 +33,7 @@ test('podcast mobile flows, real offline audio, seeking, timers and queue',{skip
   res.writeHead(200,{'Content-Type':mime[extname(p)] || 'application/octet-stream'});res.end(content);
  }catch{res.writeHead(404);res.end();}});
  await new Promise(done=>server.listen(0,'127.0.0.1',done));const origin='http://127.0.0.1:'+server.address().port;
+ t.after(async()=>{server.closeAllConnections();await new Promise(done=>server.close(done));});
  const browser=await chromium.launch({executablePath:chrome,headless:true,args:['--no-sandbox']});
  const context=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true}),page=await context.newPage(),errors=[];
  await page.clock.install();
@@ -66,7 +68,7 @@ test('podcast mobile flows, real offline audio, seeking, timers and queue',{skip
    await page.locator('#audio').evaluate(a=>a.currentTime=a.duration-.05);await page.waitForFunction(()=>document.querySelector('#audio').ended);
    assert.equal((await stored()).queue.length,1);assert.equal(await page.locator('#sleep-label').textContent(),'Sleep timer');assert.equal(Object.values((await stored()).progress).find(p=>p.episode.id==='episode-0').played,true);
    await page.locator('#play').click();await page.waitForFunction(()=>!document.querySelector('#audio').paused);await page.locator('#audio').evaluate(a=>a.currentTime=a.duration-.05);
-   await page.waitForFunction(()=>document.querySelector('#mini-title').textContent==='The music of a city'&&!document.querySelector('#audio').paused);assert.equal((await stored()).queue.length,0);assert.equal(Object.values((await stored()).progress).find(p=>p.episode.id==='episode-0').played,true);
+   await page.waitForFunction(()=>document.querySelector('#mini-title').textContent==='The music of a city'&&!document.querySelector('#audio').paused&&JSON.parse(localStorage.getItem('jarvis.podcasts.v1')).queue.length===0);assert.equal((await stored()).queue.length,0);assert.equal(Object.values((await stored()).progress).find(p=>p.episode.id==='episode-0').played,true);
    await page.locator('#play').click();await page.locator('#close-player').click();
   });
   await t.test('timed sleep uses elapsed wall time and pauses playback',async()=>{
@@ -93,14 +95,14 @@ test('podcast mobile flows, real offline audio, seeking, timers and queue',{skip
    await page.goto(origin+'/podcasts/#search=race');await page.locator('.show-tile').first().waitFor();assert.equal(await page.locator('.show-tile').count(),2);assert.equal(await page.getByRole('heading',{name:'No shows found'}).count(),0);
   });
   await t.test('failed audio resolves from the publisher and preserves the saved position',async()=>{
-   await context.route('**/podcasts/audio?**',async route=>{if(new URL(route.request().url()).searchParams.get('id')==='episode-4')await route.fulfill({status:502,contentType:'application/json',body:'{"error":"Publisher redirect chain is unavailable"}'});else await route.continue();});
+   failPrimaryAudio=true;
    await context.route('https://audio.example.org/4.wav',route=>route.fulfill({contentType:'audio/wav',headers:{'Access-Control-Allow-Origin':'*','Accept-Ranges':'bytes'},body:audioBytes}));
    await page.evaluate(({show,e})=>{const s=JSON.parse(localStorage.getItem('jarvis.podcasts.v1'));s.progress[show.feedUrl+'#'+e.id]={episode:{...e,show},position:22,duration:60,played:false,updatedAt:Date.now()};localStorage.setItem('jarvis.podcasts.v1',JSON.stringify(s));},{show,e:episodes[4]});
    await page.goto(origin+'/podcasts/#show='+encodeURIComponent(show.feedUrl));await page.locator('.episode-play').last().click();
    await page.waitForFunction(()=>!document.querySelector('#audio').paused&&document.querySelector('#audio').currentTime>=22);
    assert.equal(await page.locator('#audio').evaluate(a=>a.currentSrc),'https://audio.example.org/4.wav');await page.locator('#mini-play').click();assert.equal(await page.locator('#playback-status').isVisible(),false);assert.deepEqual(errors,[]);
   });
- } finally {await browser.close();await new Promise(done=>server.close(done));}
+ } finally {await browser.close();}
 });
 test('live podcast discovery, search and playback',{skip:!process.env.PODCAST_LIVE_URL||!chrome||!existsSync(chrome),timeout:240000},async()=>{
  const browser=await chromium.launch({executablePath:chrome,headless:true,args:['--no-sandbox']});
