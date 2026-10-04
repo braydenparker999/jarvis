@@ -3,6 +3,11 @@
   "main": "worker.js",
   "compatibility_date": "2026-09-19",
   "workers_dev": true,
+  "keep_vars": true,
+  "vars": {
+    "RELAY_GITHUB_CLIENT_ID": "Ov23liy7fmf3O9cJUBvW",
+    "RELAY_WEBHOOK_EGRESS_URL": "https://jarvis-relay-egress.vercel.app/api/relay-egress"
+  },
   "durable_objects": {
     "bindings": [{ "name": "HUBS", "class_name": "Hub" }]
   },

@@ -27,6 +27,13 @@ The new Worker retains legacy APIs for recovery. Old user messages and trusted c
 
 ## Assistant handoff
 
+The direct Relay MCP Events connector is implemented but disabled by default.
+It reads/replies in the current shared SQLite inbox and emits signed inbound
+message events. Owner OAuth and the DNS-pinned Node callback transport must be
+configured and live-tested before replacing the hourly responder. See
+[Relay setup and validation](docs/relay-mcp-events.md). The old connector,
+GitHub publication flow, Muse, and daily briefings are unchanged.
+
 See [JARVIS-HANDOFF.md](JARVIS-HANDOFF.md). Scheduling is configured in a separate chat after live delivery is verified. Do not claim an hourly task is active until an actual scheduled run succeeds. Quick Chat and other modules remain future work.
 
 ## Deployment and costs
