@@ -98,8 +98,9 @@ test('podcast mobile flows, real offline audio, seeking, timers and queue',{skip
    failPrimaryAudio=true;
    await context.route('https://audio.example.org/4.wav',route=>route.fulfill({contentType:'audio/wav',headers:{'Access-Control-Allow-Origin':'*','Accept-Ranges':'bytes'},body:audioBytes}));
    await page.evaluate(({show,e})=>{const s=JSON.parse(localStorage.getItem('jarvis.podcasts.v1'));s.progress[show.feedUrl+'#'+e.id]={episode:{...e,show},position:22,duration:60,played:false,updatedAt:Date.now()};localStorage.setItem('jarvis.podcasts.v1',JSON.stringify(s));},{show,e:episodes[4]});
-   await page.goto(origin+'/podcasts/#show='+encodeURIComponent(show.feedUrl));await page.locator('.episode-play').last().click();
+   await page.goto(origin+'/podcasts/#show='+encodeURIComponent(show.feedUrl));await page.reload();await page.locator('.episode-play').last().click();
    await page.waitForFunction(()=>!document.querySelector('#audio').paused&&document.querySelector('#audio').currentTime>=22);
+   assert.ok(await page.locator('#audio').evaluate(a=>a.currentTime<25),'Recovery must resume immediately, rather than play from the beginning');
    assert.equal(await page.locator('#audio').evaluate(a=>a.currentSrc),'https://audio.example.org/4.wav');await page.locator('#mini-play').click();assert.equal(await page.locator('#playback-status').isVisible(),false);assert.deepEqual(errors,[]);
   });
  } finally {await browser.close();}
