@@ -4,13 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#101112">
-  <meta name="podcasts-release" content="1.0.0">
+  <meta name="podcasts-release" content="1.1.0">
   <title>Podcasts · Jarvis</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/assets/shell.css">
   <link rel="stylesheet" href="/assets/premium.css?v=20261003">
-  <link rel="stylesheet" href="/podcasts/style.css">
-  <script type="module" src="/podcasts/app.js"></script>
+  <link rel="stylesheet" href="/podcasts/style.css?v=20261004">
+  <script type="module" src="/podcasts/app.js?v=20261004"></script>
 </head>
 <body class="module-page podcast-page">
   <a class="skip-link" href="#content">Skip to content</a>
@@ -23,7 +23,7 @@
     </header>
     <main id="content" tabindex="-1">
       <div class="page-heading"><h1 id="heading">Discover</h1><button class="text-button" id="refresh" aria-label="Refresh podcasts" data-icon="refresh"></button></div>
-      <form id="search-form" role="search"><label class="sr-only" for="query">Search podcasts</label><div class="search-box"><span data-icon="search"></span><input id="query" type="search" placeholder="Shows, people, or topics" maxlength="120" autocomplete="off"><button type="submit" aria-label="Search">Go</button></div></form>
+      <form id="search-form" role="search"><label class="sr-only" for="query">Search podcasts</label><div class="search-box"><span data-icon="search"></span><input id="query" type="search" placeholder="Shows, people, or topics" maxlength="120" autocomplete="off" enterkeyhint="search"><button type="submit" aria-label="Search">Find</button></div></form>
       <p id="status" class="status" role="status" hidden></p>
       <div id="results"></div>
     </main>

@@ -16,7 +16,7 @@ test('podcast mobile flows, real offline audio, seeking, timers and queue',{skip
   const url=new URL(req.url,'http://local');
   const json=data=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(data));};
   if(url.pathname==='/assets/config.js'){res.writeHead(200,{'Content-Type':'text/javascript'});res.end('export const API_ORIGIN=location.origin;');return;}
-  if(['/podcasts/search','/podcasts/browse'].includes(url.pathname)){if(url.searchParams.get('q')==='fallback'){res.writeHead(502,{'Content-Type':'application/json'});res.end('{"error":"Directory blocked in this region"}');return;}json({shows:url.searchParams.get('q')==='empty'?[]:[show,{...show,id:'two',title:'Science in motion',feedUrl:'https://feeds.example.org/science.xml'}]});return;}
+  if(['/podcasts/search','/podcasts/browse'].includes(url.pathname)){if(url.searchParams.get('q')==='fallback'){res.writeHead(502,{'Content-Type':'application/json'});res.end('{"error":"Directory blocked in this region"}');return;}json({shows:['empty','race'].includes(url.searchParams.get('q'))?[]:[show,{...show,id:'two',title:'Science in motion',feedUrl:'https://feeds.example.org/science.xml'}]});return;}
   if(url.pathname==='/podcasts/feed'){
    const archive=url.searchParams.get('url')?.includes('archive'),offset=Number(url.searchParams.get('offset') || 0);
    const items=archive?Array.from({length:95},(_,i)=>({...episodes[0],id:'archive-'+i,title:'Archive episode '+i})):episodes;
@@ -89,9 +89,20 @@ test('podcast mobile flows, real offline audio, seeking, timers and queue',{skip
   await t.test('discovery still works when a server region rejects directory requests',async()=>{
    await page.goto(origin+'/podcasts/#search=fallback');await page.locator('.show-tile').first().waitFor();assert.equal(await page.locator('.show-tile').count(),2);assert.equal(await page.locator('#status').isVisible(),false);assert.deepEqual(errors,[]);
   });
+  await t.test('empty server results do not beat a matching client directory response',async()=>{
+   await page.goto(origin+'/podcasts/#search=race');await page.locator('.show-tile').first().waitFor();assert.equal(await page.locator('.show-tile').count(),2);assert.equal(await page.getByRole('heading',{name:'No shows found'}).count(),0);
+  });
+  await t.test('failed audio resolves from the publisher and preserves the saved position',async()=>{
+   await context.route('**/podcasts/audio?**',async route=>{if(new URL(route.request().url()).searchParams.get('id')==='episode-4')await route.fulfill({status:502,contentType:'application/json',body:'{"error":"Publisher redirect chain is unavailable"}'});else await route.continue();});
+   await context.route('https://audio.example.org/4.wav',route=>route.fulfill({contentType:'audio/wav',headers:{'Access-Control-Allow-Origin':'*','Accept-Ranges':'bytes'},body:audioBytes}));
+   await page.evaluate(({show,e})=>{const s=JSON.parse(localStorage.getItem('jarvis.podcasts.v1'));s.progress[show.feedUrl+'#'+e.id]={episode:{...e,show},position:22,duration:60,played:false,updatedAt:Date.now()};localStorage.setItem('jarvis.podcasts.v1',JSON.stringify(s));},{show,e:episodes[4]});
+   await page.goto(origin+'/podcasts/#show='+encodeURIComponent(show.feedUrl));await page.locator('.episode-play').last().click();
+   await page.waitForFunction(()=>!document.querySelector('#audio').paused&&document.querySelector('#audio').currentTime>=22);
+   assert.equal(await page.locator('#audio').evaluate(a=>a.currentSrc),'https://audio.example.org/4.wav');await page.locator('#mini-play').click();assert.equal(await page.locator('#playback-status').isVisible(),false);assert.deepEqual(errors,[]);
+  });
  } finally {await browser.close();await new Promise(done=>server.close(done));}
 });
-test('live podcast discovery, search and playback',{skip:!process.env.PODCAST_LIVE_URL||!chrome||!existsSync(chrome),timeout:120000},async()=>{
+test('live podcast discovery, search and playback',{skip:!process.env.PODCAST_LIVE_URL||!chrome||!existsSync(chrome),timeout:240000},async()=>{
  const browser=await chromium.launch({executablePath:chrome,headless:true,args:['--no-sandbox']});
  try{
   const context=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true}),page=await context.newPage(),errors=[];
@@ -103,6 +114,14 @@ test('live podcast discovery, search and playback',{skip:!process.env.PODCAST_LI
   await page.locator('[data-play]').first().click({timeout:30000});await page.waitForFunction(()=>!document.querySelector('#audio').paused&&document.querySelector('#audio').currentTime>0,{},{timeout:45000});
   await page.locator('#open-player').click();
   if(process.env.JARVIS_SCREENSHOT_DIR)await page.screenshot({path:join(process.env.JARVIS_SCREENSHOT_DIR,'podcasts-live-player.png')});
-  await page.locator('#audio').evaluate(a=>a.pause());assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));assert.deepEqual(errors,[]);
+  await page.locator('#audio').evaluate(a=>a.pause());assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+  // Require real advancing playback for the two publishers whose enclosure
+  // chains exceeded the previous redirect cap.
+  for(const feedUrl of ['https://feeds.simplecast.com/Sl5CSM3S','https://rss2.flightcast.com/xmsftuzjjykcmqwolaqn6mdn']) {
+   await page.locator('#close-player').click();await page.goto(process.env.PODCAST_LIVE_URL+'#show='+encodeURIComponent(feedUrl));
+   await page.locator('.episode-play').first().click({timeout:30000});await page.waitForFunction(()=>!document.querySelector('#audio').paused&&document.querySelector('#audio').currentTime>0,{},{timeout:55000});
+   await page.locator('#open-player').click();await page.locator('#audio').evaluate(a=>a.pause());
+  }
+  assert.deepEqual(errors,[]);
  }finally{await browser.close();}
 });

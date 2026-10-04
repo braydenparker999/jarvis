@@ -17,18 +17,24 @@ const paths = {
 const icon = name => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || paths.podcast}</svg>`;
 const placeholder = 'data:image/svg+xml,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="300" height="300" viewBox="0 0 24 24"><rect width="24" height="24" fill="#25282b"/><g fill="none" stroke="#aaaeb2" stroke-width="1">${paths.podcast}</g></svg>`);
 const safeURL = value => { try { const u=new URL(value);return ['http:','https:'].includes(u.protocol) ? u.href : ''; } catch { return ''; } };
-const art = (url, cls='artwork') => `<img class="${cls}" src="${esc(safeURL(url) || placeholder)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">`;
+const art = (url, cls='artwork', eager=false) => `<img class="${cls}" src="${esc(safeURL(url) || placeholder)}" alt="" loading="${eager?'eager':'lazy'}" decoding="async" referrerpolicy="no-referrer">`;
 document.querySelectorAll('[data-icon]').forEach(el=>el.innerHTML=icon(el.dataset.icon));
 document.addEventListener('error',e=>{if(e.target instanceof HTMLImageElement && e.target.src !== placeholder)e.target.src=placeholder;},true);
 
 let state = readState(localStorage), view = 'discover', category = 'popular', feedData = null, renderToken = 0, requestController, lastSaved = 0;
 let current = state.current, currentBlob, loadToken = 0, loadedKey = '', timer = null, toastTimer, seeking = false, wantPlay = false;
+let sourceLoading=false, sourceURLs=[], sourceIndex=0, pendingPosition=0;
+const directoryCache=new Map();
 const audio = $('audio'), downloads = new Map(), feeds = new Map();
 const episodeRefs = new Map(), showRefs = new Map();
 const commit = () => {state.progress=compactProgress(state.progress);try{localStorage.setItem(STORAGE_KEY,JSON.stringify(state));return true;}catch{notify('Could not save listening data. Device storage may be full.');return false;}};
 function notify(message) { $('toast').textContent=message;$('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').hidden=true,4000); }
 function status(message='',error=false) { $('status').textContent=message;$('status').hidden=!message;$('status').classList.toggle('error',error); }
-function playbackStatus(message='',error=false) { $('playback-status').textContent=message;$('playback-status').hidden=!message;$('playback-status').classList.toggle('error',error); }
+function playbackStatus(message='',error=false) {
+  $('playback-status').textContent=message;$('playback-status').hidden=!message;$('playback-status').classList.toggle('error',error);
+  $('mini-show').textContent=message || current?.show.title || '';
+  $('mini-player').classList.toggle('has-error',error);$('mini-player').setAttribute('aria-busy',String(!!message&&!error));
+}
 function closeSheet() { $('sheet').close(); }
 function sheet(title,actions) {
   const d=$('sheet');d.innerHTML=`<div class="dialog-heading"><h2 id="sheet-heading">${esc(title)}</h2><button class="close" aria-label="Close menu">×</button></div>${actions.map((a,i)=>`<button class="sheet-action" data-action="${i}">${icon(a.icon || 'podcast')}<span>${esc(a.label)}</span></button>`).join('')}`;
@@ -46,33 +52,45 @@ for(const d of [$('sheet'),$('player')])d.addEventListener('click',e=>{if(e.targ
 
 async function api(path,params={},signal) {
   const url=new URL('/podcasts/'+path,API_ORIGIN);for(const [k,v] of Object.entries(params))url.searchParams.set(k,v);
-  const r=await fetch(url,{signal:signal || AbortSignal.timeout(25000)});
+  const r=await fetch(url,{signal:AbortSignal.any([AbortSignal.timeout(25000),...(signal?[signal]:[])])});
   let data;try{data=await r.json();}catch{throw Error('The podcast service returned an unreadable response.');}
   if(!r.ok)throw Error(data.error || 'The podcast service is unavailable.');return data;
 }
-function clientDirectory(query,signal) {
+function jsonpDirectory(query,signal,endpoint='https://itunes.apple.com/search') {
   // Apple's documented JSONP API uses the listener's network, independent of
   // a server region that is rate-limited. Its results are still escaped data.
   return new Promise((resolve,reject)=>{
     const name='__jarvis_podcast_'+crypto.randomUUID().replaceAll('-',''),script=document.createElement('script');
-    const url=new URL('https://itunes.apple.com/search');
+    const url=new URL(endpoint);
     for(const [k,v] of Object.entries({term:query,media:'podcast',entity:'podcast',limit:'36',country:state.country,callback:name}))url.searchParams.set(k,v);
     let settled=false;
     const cleanup=()=>{clearTimeout(timeout);signal?.removeEventListener('abort',abort);script.remove();window[name]=()=>{};setTimeout(()=>delete window[name],30000);};
     const finish=(error,data)=>{if(settled)return;settled=true;cleanup();error?reject(error):resolve(data);};
     const abort=()=>finish(new DOMException('Cancelled','AbortError'));
-    const timeout=setTimeout(()=>finish(Error('The podcast directory took too long.')),10000);
+    const timeout=setTimeout(()=>finish(Error('The podcast directory took too long.')),7000);
     window[name]=data=>{if(!Array.isArray(data?.results)){finish(Error('Invalid directory results.'));return;}
       finish(null,{shows:data.results.filter(s=>s.feedUrl&&s.collectionName).slice(0,36).map(s=>({id:String(s.collectionId),title:s.collectionName,author:s.artistName || '',feedUrl:safeURL(s.feedUrl),artwork:safeURL(s.artworkUrl600 || s.artworkUrl100),directoryUrl:safeURL(s.collectionViewUrl),genres:s.genres || []})).filter(s=>s.feedUrl)});};
     script.onerror=()=>finish(Error('Could not reach the podcast directory.'));script.src=url.href;script.referrerPolicy='no-referrer';
     if(signal?.aborted){abort();return;}signal?.addEventListener('abort',abort,{once:true});document.head.append(script);
   });
 }
+async function clientDirectory(query,signal) {
+  try { return await jsonpDirectory(query,signal); }
+  catch(e) { if(signal?.aborted)throw e;return jsonpDirectory(query,signal,'https://itunes.apple.com/WebObjects/MZStoreServices.woa/ws/wsSearch'); }
+}
 async function searchDirectory(path,params,signal) {
+  const key=JSON.stringify([path,params]),saved=directoryCache.get(key);
+  if(saved?.expires>Date.now())return saved.data;
   const controller=new AbortController(),combined=AbortSignal.any([signal,controller.signal]);
   const query=path==='search'?params.q:categories.find(c=>c[0]===params.category)?.[2] || 'podcast';
-  try{return await Promise.any([api(path,params,combined),clientDirectory(query,combined)]);}
-  catch{if(signal.aborted)throw new DOMException('Cancelled','AbortError');throw Error('Podcast search is unavailable. Please try again.');}
+  let empty;
+  const useful=data=>{if(!Array.isArray(data?.shows))throw Error('Invalid directory results.');if(!data.shows.length){empty=data;throw Error('No results from this directory.');}return data;};
+  try {
+    const data=await Promise.any([api(path,params,combined).then(useful),clientDirectory(query,combined).then(useful)]);
+    directoryCache.set(key,{data,expires:Date.now()+1800000});if(directoryCache.size>24)directoryCache.delete(directoryCache.keys().next().value);
+    return data;
+  }
+  catch{if(signal.aborted)throw new DOMException('Cancelled','AbortError');if(empty)return empty;throw Error('Podcast search is unavailable. Please try again.');}
   finally{controller.abort();}
 }
 async function feed(url,{refresh=false,signal}={}) {
@@ -83,45 +101,49 @@ async function feed(url,{refresh=false,signal}={}) {
 const normalizedShow = show => ({...show,feedUrl:safeURL(show.feedUrl),artwork:safeURL(show.artwork)});
 const episode = (e,show) => ({...e,show:normalizedShow(show)});
 const date = value => value ? new Date(value).toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'}) : '';
-function showTiles(shows) {
-  return `<div class="show-grid">${shows.map(s=>{showRefs.set(s.feedUrl,s);return `<button class="show-tile" data-feed="${esc(s.feedUrl)}">${art(s.artwork)}<strong>${esc(s.title)}</strong><small>${esc(s.author || s.genres?.[0] || 'Podcast')}</small></button>`;}).join('')}</div>`;
+function showTiles(shows,{featured=false}={}) {
+  return `<div class="show-grid">${shows.map((s,i)=>{showRefs.set(s.feedUrl,s);const feature=featured&&i===0;return `<button class="show-tile${feature?' featured-tile':''}" data-feed="${esc(s.feedUrl)}">${art(s.artwork,'artwork',i<2)}<span class="tile-copy">${feature?`<span class="feature-label">${view==='search'?'Top result':categories.find(c=>c[0]===category)?.[1] || 'Explore'}</span>`:''}<strong>${esc(s.title)}</strong><small>${esc(s.author || s.genres?.[0] || 'Podcast')}</small>${feature?'<span class="feature-action">View episodes</span>':''}</span></button>`;}).join('')}</div>`;
 }
 function rows(list,{thumbs=false,queue=false}={}) {
   return `<div class="episode-list">${list.map(e=>{
     const key=keyOf(e), p=state.progress[key], stored=state.downloads[key];episodeRefs.set(key,e);
     const detail=[thumbs?e.show.title:date(e.publishedAt),minutes(e.duration),p?.played?'Played':p?.position>0?'Resume '+clock(p.position):'',stored?'Downloaded':'',downloads.has(key)?'Downloading…':''].filter(Boolean).join(' · ');
-    return `<article class="episode-row${current && keyOf(current)===key?' playing':''}${p?.played?' played':''}" data-episode="${esc(key)}">${thumbs?art(e.artwork || e.show.artwork,'episode-thumb'):''}<button class="episode-copy" data-details="${esc(key)}"><strong>${esc(e.title)}</strong><small>${esc(detail)}</small>${!thumbs&&e.description?`<span class="episode-description">${esc(e.description)}</span>`:''}</button><button class="episode-play" data-play="${esc(key)}" aria-label="Play ${esc(e.title)}">${icon(current && keyOf(current)===key && !audio.paused ? 'pause':'play')}</button><button class="icon-button" data-options="${esc(key)}" aria-label="Options for ${esc(e.title)}">${icon('more')}</button></article>`;
+    const playing=current && keyOf(current)===key && !audio.paused;
+    return `<article class="episode-row${thumbs?' with-thumb':''}${current && keyOf(current)===key?' playing':''}${p?.played?' played':''}" data-episode="${esc(key)}">${thumbs?art(e.artwork || e.show.artwork,'episode-thumb'):''}<div class="episode-body"><button class="episode-copy" data-details="${esc(key)}"><small>${esc(detail)}</small><strong>${esc(e.title)}</strong>${!thumbs&&e.description?`<span class="episode-description">${esc(e.description.slice(0,350))}</span>`:''}</button><div class="episode-actions"><button class="episode-play" data-play="${esc(key)}" aria-label="Play ${esc(e.title)}">${icon(playing?'pause':'play')}<span class="play-label">${playing?'Pause':p?.position>0&&!p.played?'Resume':'Play'}</span></button>${p?.position>0&&!p.played?`<progress class="episode-progress" aria-label="Listening progress" value="${Math.max(0,p.position)}" max="${Math.max(p.position,p.duration||e.duration||1)}"></progress>`:''}<button class="icon-button" data-options="${esc(key)}" aria-label="Options for ${esc(e.title)}">${icon('more')}</button></div></div></article>`;
   }).join('')}</div>`;
 }
 const empty = (title,body) => `<div class="empty-state"><h2>${esc(title)}</h2><p>${esc(body)}</p></div>`;
-function setNav() { document.querySelectorAll('[data-view]').forEach(a=>{const active=a.dataset.view===view||(view==='show'&&a.dataset.view==='library'&&state.follows.some(s=>s.feedUrl===feedData?.show.feedUrl));if(active)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current');}); }
+function setNav() { const selected=view==='search'?'discover':view==='show'?(state.follows.some(s=>s.feedUrl===feedData?.show.feedUrl)?'library':'discover'):view;document.querySelectorAll('[data-view]').forEach(a=>{if(a.dataset.view===selected)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current');}); }
 function setRoute(hash) { if(location.hash===hash)renderRoute();else location.hash=hash; }
+const skeleton = () => '<div class="show-grid loading-grid" aria-hidden="true">'+Array.from({length:6},()=>'<div class="skeleton-tile"><div></div><span></span><span></span></div>').join('')+'</div>';
 async function renderRoute() {
   requestController?.abort();requestController=new AbortController();const token=++renderToken;const signal=requestController.signal;
   const params=new URLSearchParams(location.hash.slice(1)), raw=location.hash.slice(1), showURL=params.get('show'), query=params.get('search');
   view=showURL?'show':query!==null?'search':['library','downloads','queue'].includes(raw)?raw:'discover';
   $('heading').textContent=({discover:'Discover',search:'Search',show:'Episodes',library:'Your library',downloads:'Downloads',queue:'Up next'})[view];
   $('search-form').hidden=!['discover','search'].includes(view);$('query').value=query || '';status();setNav();
-  const root=$('results');root.innerHTML='';
+  const root=$('results');root.innerHTML='';root.setAttribute('aria-busy','true');
   try {
     if(view==='discover' || view==='search') {
       const topics=view==='discover'?`<div class="browse-topics" aria-label="Browse topics">${categories.map(([id,name])=>`<button data-category="${id}" aria-pressed="${category===id}">${name}</button>`).join('')}</div>`:'';
-      root.innerHTML=topics;status('Finding shows…');
+      root.innerHTML=topics+skeleton();status('Finding shows…');
       const result=await searchDirectory(view==='search'?'search':'browse',view==='search'?{q:query,country:state.country}:{category,country:state.country},signal);
-      if(token!==renderToken)return;status();root.innerHTML=topics+(result.shows.length?showTiles(result.shows):empty('No shows found','Try a show title, host, or a broader topic. You can also add an RSS feed with the + button.'));return;
+      if(token!==renderToken)return;status();root.innerHTML=topics+(result.shows.length?`<div class="section-title result-heading"><h2>${view==='search'?esc(query):'Explore shows'}</h2><span>${result.shows.length} shows</span></div>`+showTiles(result.shows,{featured:true}):empty('No shows found','Try a show title, host, or a broader topic. You can also add an RSS feed with the + button.'));return;
     }
     if(view==='show') {
-      status('Opening the podcast…');feedData=await feed(showURL,{signal});if(token!==renderToken)return;
+      window.scrollTo({top:0});status('Opening the podcast…');root.innerHTML='<div class="show-loading" aria-hidden="true"><div></div><span></span><span></span></div>';feedData=await feed(showURL,{signal});if(token!==renderToken)return;
       const directory=showRefs.get(showURL) || state.follows.find(s=>s.feedUrl===showURL);feedData.show={...directory,...feedData.show};
       status(feedData.stale?'Showing saved episodes. Refresh when you’re online.':'');renderShow();setNav();return;
     }
     renderLocal();
   } catch(e) {if(token!==renderToken || e.name==='AbortError')return;status(e.message,true);root.innerHTML=empty('Couldn’t load podcasts',navigator.onLine?'Try again, or open one of your downloaded episodes.':'You’re offline. Your downloaded episodes are ready in Downloads.')+'<button class="secondary" data-retry>Try again</button>';}
+  finally {if(token===renderToken)root.setAttribute('aria-busy','false');}
 }
 function renderShow() {
   const {show,episodes}=feedData;const followed=state.follows.some(s=>s.feedUrl===show.feedUrl);
-  $('results').innerHTML=`<button class="show-back" id="show-back">${icon('back')}Back to browsing</button><section class="show-header">${art(show.artwork)}<div><h2>${esc(show.title)}</h2><p>${esc(show.author)}</p><button id="follow-show" class="${followed?'secondary':'primary'}" aria-pressed="${followed}">${followed?'Following':'Follow show'}</button></div></section>${show.description?`<details class="show-description"><summary>About this show</summary>${esc(show.description)}</details>`:''}<div class="show-links">${safeURL(show.directoryUrl)?`<a href="${esc(show.directoryUrl)}" target="_blank" rel="noopener">Apple Podcasts</a>`:''}${safeURL(show.website)?`<a href="${esc(show.website)}" target="_blank" rel="noopener">Show website</a>`:''}</div><div class="section-title"><h2>Episodes</h2><span id="episode-count">${episodes.length}${feedData.nextOffset!=null?'+':''}</span></div><div class="episode-filter"><label class="sr-only" for="episode-query">Search this show’s episodes</label><input id="episode-query" type="search" placeholder="Search loaded episodes"><label class="sr-only" for="episode-sort">Episode order</label><select id="episode-sort"><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="unplayed">Unplayed</option></select></div><div id="episodes"></div><button id="more-episodes" class="secondary" hidden>Show more episodes</button>`;
-  $('show-back').onclick=()=>setRoute('#discover');$('follow-show').onclick=()=>{toggleFollow(show);$('follow-show').textContent=state.follows.some(s=>s.feedUrl===show.feedUrl)?'Following':'Follow show';$('follow-show').setAttribute('aria-pressed',String(state.follows.some(s=>s.feedUrl===show.feedUrl)));};
+  if(episodes[0])episodeRefs.set(keyOf(episode(episodes[0],show)),episode(episodes[0],show));
+  $('results').innerHTML=`<button class="show-back" id="show-back">${icon('back')}Back to browsing</button><section class="show-header">${art(show.artwork,'artwork',true)}<div><h2>${esc(show.title)}</h2><p>${esc(show.author)}</p><div class="show-actions">${episodes[0]?`<button class="primary" data-play="${esc(keyOf(episode(episodes[0],show)))}" aria-label="Play latest episode">${icon('play')}<span>Play latest</span></button>`:''}<button id="follow-show" class="secondary" aria-pressed="${followed}">${icon(followed?'check':'plus')}<span>${followed?'Following':'Follow show'}</span></button></div></div></section>${show.description?`<details class="show-description"><summary>About this show</summary>${esc(show.description)}</details>`:''}<div class="show-links">${safeURL(show.directoryUrl)?`<a href="${esc(show.directoryUrl)}" target="_blank" rel="noopener">Apple Podcasts</a>`:''}${safeURL(show.website)?`<a href="${esc(show.website)}" target="_blank" rel="noopener">Show website</a>`:''}</div><div class="section-title"><h2>Episodes</h2><span id="episode-count">${episodes.length}${feedData.nextOffset!=null?'+':''}</span></div><div class="episode-filter"><label class="sr-only" for="episode-query">Search this show’s episodes</label><input id="episode-query" type="search" placeholder="Search episodes"><label class="sr-only" for="episode-sort">Episode order</label><select id="episode-sort"><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="unplayed">Unplayed</option></select></div><div id="episodes"></div><button id="more-episodes" class="secondary" hidden>Show more episodes</button>`;
+  $('show-back').onclick=()=>setRoute('#discover');$('follow-show').onclick=()=>{toggleFollow(show);const active=state.follows.some(s=>s.feedUrl===show.feedUrl);$('follow-show').innerHTML=icon(active?'check':'plus')+'<span>'+(active?'Following':'Follow show')+'</span>';$('follow-show').setAttribute('aria-pressed',String(active));};
   let count=40;
   const paint=()=>{let list=episodes.map(e=>episode(e,show)).filter(e=>(e.title+' '+e.description).toLowerCase().includes($('episode-query').value.toLowerCase()));
     const sort=$('episode-sort').value;if(sort==='unplayed')list=list.filter(e=>!state.progress[keyOf(e)]?.played);
@@ -185,7 +207,7 @@ document.addEventListener('click',e=>{
   else if(node.hasAttribute('data-retry'))renderRoute();
 });
 $('search-form').onsubmit=e=>{e.preventDefault();const q=$('query').value.trim();if(q.length<2){notify('Enter at least two characters to search.');return;}setRoute('#search='+encodeURIComponent(q));};
-$('refresh').onclick=()=>{if(view==='show'&&feedData){feeds.delete(feedData.show.feedUrl);}renderRoute();};
+$('refresh').onclick=()=>{if(view==='show'&&feedData){feeds.delete(feedData.show.feedUrl);}else directoryCache.clear();renderRoute();};
 $('add-feed').onclick=()=>formSheet('Add RSS feed','<label for="feed-url">Podcast RSS address</label><input id="feed-url" name="url" type="url" placeholder="https://…" required><p>Paste the show’s public RSS feed. Private feeds with passwords are not supported.</p>',data=>{const url=safeURL(data.get('url'));if(!url)throw Error('Enter an http or https RSS feed URL.');closeSheet();setRoute('#show='+encodeURIComponent(url));});
 $('settings').onclick=async()=>{
   const estimate=await navigator.storage?.estimate().catch(()=>null);
@@ -203,8 +225,14 @@ async function downloadEpisode(e) {
   let saved=false;
   try {
     await Promise.race([navigator.serviceWorker.ready,new Promise((_,reject)=>setTimeout(()=>reject(Error('Offline storage could not start. Reload this page and try again.')),10000))]);await navigator.storage?.persist?.().catch(()=>false);
-    const r=await fetch(audioURL(e),{signal:controller.signal});
-    if(!r.ok){let data;try{data=await r.json();}catch{}throw Error(data?.error || 'The episode could not download.');}
+    let r;
+    for(const url of [...new Set([audioURL(e),safeURL(e.audioUrl)].filter(Boolean))]) {
+      const connect=new AbortController(),timeout=setTimeout(()=>connect.abort(),30000);
+      try {r=await fetch(url,{signal:AbortSignal.any([controller.signal,connect.signal])});const type=(r.headers.get('Content-Type')||'').split(';')[0].toLowerCase();if(r.ok&&(!type||type.startsWith('audio/')||['application/octet-stream','application/ogg','video/mp4'].includes(type)))break;await r.body?.cancel();r=null;}
+      catch(err) {if(controller.signal.aborted)throw err;}
+      finally {clearTimeout(timeout);}
+    }
+    if(!r?.ok)throw Error('This episode could not download. Try again when the podcast host is available.');
     if(Number(r.headers.get('Content-Length'))>MAX_DOWNLOAD){await r.body?.cancel();throw Error('This episode exceeds the 250 MB download limit.');}
     const estimate=await navigator.storage?.estimate().catch(()=>null),expected=Number(r.headers.get('Content-Length'))||e.bytes;
     if(estimate && expected>0 && estimate.quota-estimate.usage<expected+8*1024*1024){await r.body?.cancel();throw Error('Not enough device storage. Remove a download first.');}
@@ -227,10 +255,11 @@ async function reconcileDownloads() {
   if(changed){commit();repaintLocal();notify('Some downloads were cleared by the browser. Download them again when online.');}
 }
 
-function saveProgress(played=audio.ended) {if(!current)return;const key=keyOf(current);state.progress[key]=progressEntry(current,audio.currentTime,audio.duration,played);state.current=current;commit();lastSaved=Date.now();}
+function saveProgress(played=audio.ended) {if(!current||!loadedKey||sourceLoading||audio.readyState<1)return;const key=keyOf(current);state.progress[key]=progressEntry(current,audio.currentTime,audio.duration,played);state.current=current;commit();lastSaved=Date.now();}
 function setPlayIcons() {
-  const playing=!audio.paused&&!audio.ended,name=playing?'pause':'play';for(const id of ['play','mini-play']){$(id).innerHTML=icon(name);$(id).setAttribute('aria-label',playing?'Pause episode':'Play episode');}
-  document.querySelectorAll('[data-play]').forEach(b=>{b.innerHTML=icon(playing&&current&&b.dataset.play===keyOf(current)?'pause':'play');});
+  const playing=sourceLoading?wantPlay:!audio.paused&&!audio.ended,name=playing?'pause':'play';for(const id of ['play','mini-play']){$(id).innerHTML=icon(name);$(id).setAttribute('aria-label',playing?'Pause episode':'Play episode');}
+  for(const id of ['mini-back','back-15','forward-30'])$(id).disabled=sourceLoading||!loadedKey;
+  document.querySelectorAll('[data-play]').forEach(b=>{const active=playing&&current&&b.dataset.play===keyOf(current),p=state.progress[b.dataset.play],label=active?'Pause':b.classList.contains('episode-play')?(p?.position>0&&!p.played?'Resume':'Play'):'Play latest';b.innerHTML=icon(active?'pause':'play')+'<span class="play-label">'+label+'</span>';const e=episodeRefs.get(b.dataset.play);b.setAttribute('aria-label',b.classList.contains('episode-play')?label+' '+(e?.title||'episode'):active?'Pause latest episode':'Play latest episode');});
 }
 function updateDownloadButton() {if(!current)return;const key=keyOf(current);$('player-download').innerHTML=icon(state.downloads[key]?'check':'download');$('player-download').setAttribute('aria-label',state.downloads[key]?'Episode downloaded':'Download episode');}
 function updateCurrent() {
@@ -241,27 +270,47 @@ function updateCurrent() {
 }
 function updatePosition() {
   const duration=Number.isFinite(audio.duration)&&audio.duration>0?audio.duration:current?.duration || 0, pos=loadedKey?audio.currentTime:resumePosition(state.progress[current?keyOf(current):''],duration);
-  if(!seeking)for(const id of ['seek','mini-seek']){$(id).max=String(duration || 100);$(id).value=String(pos);$(id).disabled=!loadedKey || !duration;}
+  if(!seeking)for(const id of ['seek','mini-seek']){$(id).max=String(duration || 100);$(id).value=String(pos);$(id).disabled=!loadedKey || !duration || sourceLoading;$(id).style.setProperty('--progress',Math.min(100,duration?pos/duration*100:0)+'%');}
   $('elapsed').textContent=clock(pos);$('remaining').textContent='−'+clock(Math.max(0,duration-pos));
   if(timer){$('sleep-label').textContent=timer.endOfEpisode?'End of episode':clock(Math.max(0,(timer.deadline-Date.now())/1000));if(shouldSleep(timer,Date.now()))stopForSleep();}
 }
+async function startSources(e,token,position,index=0) {
+  pendingPosition=position;sourceLoading=true;setPlayIcons();
+  for(sourceIndex=index;sourceIndex<sourceURLs.length;sourceIndex++) {
+    if(token!==loadToken||!wantPlay)return;
+    playbackStatus(sourceIndex?'Trying the publisher’s audio…':'Opening audio…');
+    loadedKey='';audio.pause();audio.src=sourceURLs[sourceIndex];audio.load();audio.playbackRate=state.speed;loadedKey=keyOf(e);
+    let timeout;
+    try {
+      await Promise.race([audio.play(),new Promise((_,reject)=>{timeout=setTimeout(()=>reject(Error('The audio host took too long to respond.')),25000);})]);
+      if(token!==loadToken||!wantPlay)return;
+      sourceLoading=false;state.queue=nextQueued(state.queue,e);commit();playbackStatus();updatePosition();setPlayIcons();repaintLocal();return;
+    } catch(err) {
+      if(token!==loadToken||!wantPlay)return;
+      if(err.name==='NotAllowedError'){sourceLoading=false;playbackStatus('Tap Play to start audio.');setPlayIcons();return;}
+    } finally {clearTimeout(timeout);}
+  }
+  if(token!==loadToken)return;
+  loadedKey='';sourceLoading=false;wantPlay=false;audio.pause();playbackStatus('Audio is unavailable right now. Tap Play to retry.',true);notify('This episode could not start. Tap Play to retry.');setPlayIcons();
+}
 async function playEpisode(e) {
   if(current&&keyOf(current)===keyOf(e)&&loadedKey===keyOf(e)){togglePlay();return;}
-  const token=++loadToken;if(current&&loadedKey)saveProgress();audio.pause();audio.removeAttribute('src');audio.load();loadedKey='';wantPlay=true;
-  current=e;state.current=e;state.queue=nextQueued(state.queue,e);commit();updateCurrent();playbackStatus('Opening audio…');
+  const token=++loadToken;if(current&&loadedKey)saveProgress();loadedKey='';sourceLoading=false;audio.pause();audio.removeAttribute('src');audio.load();wantPlay=true;
+  current=e;state.current=e;commit();updateCurrent();playbackStatus('Opening audio…');
   if(currentBlob){URL.revokeObjectURL(currentBlob);currentBlob=null;}
   try {
     const cached=await cachedAudio(e);if(token!==loadToken)return;
     let url=audioURL(e);
     if(cached) {if(navigator.serviceWorker.controller)url=offlinePath(e);else{currentBlob=URL.createObjectURL(await cached.blob());url=currentBlob;}}
     else if(!navigator.onLine)throw Error('This episode isn’t downloaded. Connect to the internet to play it.');
-    if(token!==loadToken)return;loadedKey=keyOf(e);audio.src=url;audio.playbackRate=state.speed;audio.load();
-    const start=resumePosition(state.progress[keyOf(e)],e.duration);if(start>0)audio.currentTime=start;
-    await audio.play();if(token!==loadToken)return;playbackStatus();repaintLocal();
-  } catch(err) {if(token!==loadToken)return;wantPlay=false;playbackStatus(err.name==='NotAllowedError'?'Tap Play to start audio.':err.message || 'Could not play this episode.',true);notify($('playback-status').textContent);setPlayIcons();}
+    if(token!==loadToken)return;
+    sourceURLs=[...new Set([url,...(!cached?[safeURL(e.audioUrl)]:[])].filter(Boolean))];
+    await startSources(e,token,resumePosition(state.progress[keyOf(e)],e.duration));
+  } catch(err) {if(token!==loadToken)return;sourceLoading=false;wantPlay=false;playbackStatus(err.name==='NotAllowedError'?'Tap Play to start audio.':err.message || 'Could not play this episode.',true);notify($('playback-status').textContent);setPlayIcons();}
 }
 async function togglePlay() {
   if(!current)return;
+  if(sourceLoading){++loadToken;sourceLoading=false;loadedKey='';wantPlay=false;audio.pause();audio.removeAttribute('src');audio.load();playbackStatus();setPlayIcons();return;}
   if(!loadedKey){await playEpisode(current);return;}
   if(audio.paused){wantPlay=true;try{await audio.play();}catch{playbackStatus('Audio could not start. Try opening this episode again.',true);}}else{wantPlay=false;audio.pause();saveProgress();}setPlayIcons();
 }
@@ -272,12 +321,12 @@ for(const id of ['play','mini-play'])$(id).onclick=togglePlay;
 $('mini-back').onclick=$('back-15').onclick=()=>skip(-15);$('forward-30').onclick=()=>skip(30);
 for(const id of ['seek','mini-seek']) {
   const input=$(id);input.addEventListener('pointerdown',()=>seeking=true);
-  input.oninput=()=>{seeking=true;$('elapsed').textContent=clock(Number(input.value));};
+  input.oninput=()=>{seeking=true;$('elapsed').textContent=clock(Number(input.value));input.style.setProperty('--progress',Number(input.value)/Number(input.max)*100+'%');};
   input.onchange=()=>{if(loadedKey)audio.currentTime=Number(input.value);seeking=false;updatePosition();saveProgress();};
   input.addEventListener('pointercancel',()=>{seeking=false;updatePosition();});input.addEventListener('blur',()=>seeking=false);
 }
 $('speed').onclick=()=>sheet('Playback speed',[0.75,1,1.25,1.5,1.75,2,2.5].map(speed=>({label:speed+'×'+(state.speed===speed?' · Selected':''),icon:state.speed===speed?'check':'play',action:()=>{state.speed=speed;audio.playbackRate=speed;audio.preservesPitch=true;commit();$('speed').textContent=speed+'× speed';}})));
-function stopForSleep() {timer=null;wantPlay=false;audio.pause();$('sleep-label').textContent='Sleep timer';saveProgress(audio.ended);notify('Sleep timer finished');}
+function stopForSleep() {timer=null;wantPlay=false;if(sourceLoading){++loadToken;sourceLoading=false;loadedKey='';}audio.pause();playbackStatus();$('sleep-label').textContent='Sleep timer';saveProgress(audio.ended);notify('Sleep timer finished');setPlayIcons();}
 $('sleep').onclick=()=>sheet('Sleep timer',[
   ...[15,30,45,60,90].map(n=>({label:n+' minutes',icon:'moon',action:()=>{timer={deadline:Date.now()+n*60000};updatePosition();notify('Playback stops in '+n+' minutes');}})),
   {label:'End of this episode',icon:'moon',action:()=>{timer={endOfEpisode:true};updatePosition();notify('Playback stops at the end of this episode');}},
@@ -285,13 +334,18 @@ $('sleep').onclick=()=>sheet('Sleep timer',[
   {label:'Turn off timer',icon:'trash',action:()=>{timer=null;$('sleep-label').textContent='Sleep timer';notify('Sleep timer off');}}
 ]);
 $('player-download').onclick=()=>current&&downloadEpisode(current);$('player-menu').onclick=()=>current&&episodeMenu(current);
-audio.addEventListener('loadedmetadata',()=>{audio.playbackRate=state.speed;const start=resumePosition(state.progress[current?keyOf(current):''],audio.duration);if(start>0&&audio.currentTime<1)audio.currentTime=start;updatePosition();updateMediaSession();});
+audio.addEventListener('loadedmetadata',()=>{audio.playbackRate=state.speed;audio.preservesPitch=true;const start=resumePosition({position:pendingPosition},audio.duration);if(start>0&&audio.currentTime<1)audio.currentTime=start;updatePosition();updateMediaSession();});
 audio.addEventListener('timeupdate',()=>{updatePosition();updateMediaPosition();if(Date.now()-lastSaved>10000)saveProgress();});
 audio.addEventListener('play',()=>{wantPlay=true;setPlayIcons();updateMediaSession();});
-audio.addEventListener('playing',()=>playbackStatus());
+audio.addEventListener('playing',()=>{if(wantPlay){playbackStatus();if(current&&state.queue.some(e=>keyOf(e)===keyOf(current))){state.queue=nextQueued(state.queue,current);commit();}}});
 audio.addEventListener('pause',()=>{setPlayIcons();if(loadedKey)saveProgress(audio.ended);updateMediaSession();});
 audio.addEventListener('waiting',()=>{if(wantPlay)playbackStatus('Buffering…');});
-audio.addEventListener('error',()=>{if(!loadedKey)return;wantPlay=false;playbackStatus('This episode could not load. Try again or use Open original audio in its menu.',true);notify('Episode unavailable. Open its menu to retry or use the original audio.');loadedKey='';setPlayIcons();});
+audio.addEventListener('error',()=>{
+  if(!loadedKey||sourceLoading)return;
+  const position=Math.max(audio.currentTime||0,state.progress[keyOf(current)]?.position||0);
+  if(wantPlay&&sourceIndex+1<sourceURLs.length){startSources(current,++loadToken,position,sourceIndex+1);return;}
+  wantPlay=false;playbackStatus('Audio is unavailable right now. Tap Play to retry.',true);notify('Episode unavailable. Tap Play to retry.');loadedKey='';setPlayIcons();
+});
 audio.addEventListener('ended',()=>{
   saveProgress(true);const sleep=shouldSleep(timer,Date.now(),true);if(sleep){stopForSleep();return;}
   if(state.autoplay&&state.queue.length)playEpisode(state.queue[0]);else{wantPlay=false;setPlayIcons();repaintLocal();}

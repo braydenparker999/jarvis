@@ -20,6 +20,22 @@ test('RSS uses stable GUIDs, text-only notes, valid dates, publisher audio and d
 test('all redirects are revalidated before fetching; private redirects are refused',async()=>{
   const calls=[];await assert.rejects(upstream(feedURL,{fetcher:async u=>{calls.push(u);return new Response(null,{status:302,headers:{Location:'http://169.254.169.254/metadata'}});}}));assert.equal(calls.length,1);
 });
+test('long publisher measurement chains resolve audio and forward byte ranges at every hop',async()=>{
+  const calls=[];
+  const r=await upstream('https://audio.example.org/hop/0',{headers:{Range:'bytes=0-4095'},fetcher:async(url,options)=>{
+    calls.push(url);assert.equal(options.headers.Range,'bytes=0-4095');const hop=Number(new URL(url).pathname.split('/').at(-1));
+    return hop<11?new Response(null,{status:302,headers:{Location:'/hop/'+(hop+1)}}):new Response('audio',{status:206,headers:{'Content-Type':'audio/mpeg'}});
+  }});
+  assert.equal(r.status,206);assert.equal(await r.text(),'audio');assert.equal(calls.length,12);
+});
+test('redirect loops stop immediately; the larger hop budget still rejects private targets',async()=>{
+  let calls=0;
+  await assert.rejects(upstream(feedURL,{fetcher:async()=>{calls++;return new Response(null,{status:302,headers:{Location:feedURL}});}}),/redirect loop/);
+  assert.equal(calls,1);
+  calls=0;
+  await assert.rejects(upstream('https://audio.example.org/0',{fetcher:async url=>{const n=Number(new URL(url).pathname.slice(1));calls++;return new Response(null,{status:302,headers:{Location:n===9?'http://169.254.169.254/metadata':'https://audio.example.org/'+(n+1)}});}}));
+  assert.equal(calls,10);
+});
 test('streamed feed byte cap is enforced even without Content-Length',async()=>{
   await assert.rejects(getFeed(feedURL,{fetcher:async()=>new Response('x'.repeat(4*1024*1024+1))}),/too large/);
 });
@@ -41,6 +57,11 @@ test('directory host rejection falls back to an independent public podcast index
   const calls=[];
   const result=await directory('history','us',{fetcher:async url=>{calls.push(url);return url.startsWith('https://itunes.apple.com/')?new Response('Rejected',{status:403}):Response.json([{title:'A history show',author:'Host',url:feedURL,logo_url:'https://images.example.org/show.jpg',website:'https://show.example.org'}]);}});
   assert.equal(calls.length,3);assert.ok(calls[2].startsWith('https://gpodder.net/search.json'));assert.equal(result.shows[0].feedUrl,feedURL);
+});
+test('an empty first directory cannot hide a matching popular show from another provider',async()=>{
+  let calls=0;
+  const r=await directory('The Daily','us',{fetcher:async()=>{calls++;return Response.json({results:calls===1?[]:[{collectionId:1,collectionName:'The Daily',feedUrl:feedURL}]});}});
+  assert.equal(r.shows[0].title,'The Daily');assert.equal(calls,2);
 });
 test('audio is resolved from an RSS enclosure, preserves range headers and rejects non-audio bodies',async()=>{
   const calls=[],fetcher=async(url,opts)=>{calls.push(url);if(url===feedURL)return new Response(rss);assert.equal(opts.headers.Range,'bytes=10-19');return new Response('0123456789',{status:206,headers:{'Content-Type':'audio/mpeg','Content-Range':'bytes 10-19/100','Content-Length':'10','Accept-Ranges':'bytes'}});};

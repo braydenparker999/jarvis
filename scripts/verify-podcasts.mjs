@@ -34,3 +34,10 @@ for(const show of search.shows.slice(0,4)){
  }catch(e){console.log('Trying another publisher:',e.message);}
 }
 assert.ok(audioVerified,'At least one real RSS enclosure must serve audio');
+// One easy publisher must not hide broken popular shows.
+for(const feedURL of ['https://feeds.simplecast.com/Sl5CSM3S','https://rss2.flightcast.com/xmsftuzjjykcmqwolaqn6mdn']) {
+ const data=await read('/podcasts/feed?url='+encodeURIComponent(feedURL));assert.ok(data.episodes.length);
+ const e=data.episodes[0],r=await fetch(origin+'/podcasts/audio?'+new URLSearchParams({feed:feedURL,id:e.id}),{headers:{Origin:frontend,Range:'bytes=0-4095'},signal:AbortSignal.timeout(40000)});
+ assert.ok([200,206].includes(r.status),data.show.title+' must resolve its publisher redirect chain');assert.ok(r.headers.get('Content-Type')?.startsWith('audio/'));
+ const reader=r.body.getReader();assert.ok((await reader.read()).value?.length);await reader.cancel();console.log('Verified popular publisher audio:',data.show.title);
+}

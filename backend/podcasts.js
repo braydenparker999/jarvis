@@ -88,16 +88,20 @@ async function boundedText(response, max = 4 * 1024 * 1024, feedPrefix = false) 
     } parts.push(decoder.decode(value,{stream:true})); }
   parts.push(decoder.decode()); return parts.join('');
 }
-export async function upstream(value, {fetcher = fetch, headers = {}, signal} = {}) {
-  let url = publicURL(value);
-  for (let i = 0; i <= 5; i++) {
+export async function upstream(value, {fetcher = fetch, headers = {}, signal, onResolved} = {}) {
+  let url = publicURL(value); const visited = new Set();
+  // Popular publishers chain several measurement services before their CDN.
+  // Preserve those redirects, validating every hop and stopping actual loops.
+  for (let i = 0; i <= 16; i++) {
+    if (visited.has(url)) throw new PodcastError('The podcast host returned a redirect loop.');
+    visited.add(url);
     const response = await fetcher(url,{headers:{'User-Agent':'Jarvis-Podcasts/1.0',...headers},redirect:'manual',signal});
     if ([301,302,303,307,308].includes(response.status)) {
       const location = response.headers.get('Location'); await response.body?.cancel();
       if (!location) throw new PodcastError('The podcast host returned an invalid redirect.');
       url = publicURL(new URL(location,url).href); continue;
     }
-    return response;
+    onResolved?.(url); return response;
   }
   throw new PodcastError('The podcast host redirected too many times.');
 }
@@ -125,9 +129,12 @@ export async function directory(q, region, options = {}) {
     const params=`term=${encodeURIComponent(query)}&media=podcast&entity=podcast&limit=36&country=${country(region)}`;
     const endpoints=[`https://itunes.apple.com/search?${params}`,`https://itunes.apple.com/WebObjects/MZStoreServices.woa/ws/wsSearch?${params}`,
       `https://gpodder.net/search.json?q=${encodeURIComponent(query)}&scale_logo=300`];
+    let empty;
     for(const endpoint of endpoints) {
       try {
-        const r=await upstream(endpoint,options);
+        // One unavailable index must not spend the entire request budget.
+        const signals=[AbortSignal.timeout(5500),...(options.signal ? [options.signal] : [])];
+        const r=await upstream(endpoint,{...options,signal:AbortSignal.any(signals)});
         if(!r.ok){await r.body?.cancel();continue;}
         const data=JSON.parse(await boundedText(r));
         const gpodder=Array.isArray(data);
@@ -137,14 +144,17 @@ export async function directory(q, region, options = {}) {
           artwork:optionalURL(s.scaled_logo_url || s.logo_url),website:optionalURL(s.website),genres:[]} : {id:String(s.collectionId),title:s.collectionName,author:s.artistName || '',
           feedUrl:optionalURL(s.feedUrl),artwork:optionalURL(s.artworkUrl600 || s.artworkUrl100),directoryUrl:optionalURL(s.collectionViewUrl),genres:s.genres || []})
           .filter(s=>s.feedUrl && s.title).slice(0,36);
-        return {shows};
+        if (shows.length) return {shows};
+        empty = {shows};
       }catch(e){if(options.signal?.aborted)throw e;}
     }
+    if (empty) return empty;
     throw new PodcastError('Podcast search is unavailable. Please try again.');
   };
   return options.fetcher ? load() : cached('search:'+country(region)+':'+query.toLowerCase(),load,1800000);
 }
 export const CATEGORIES = {popular:'podcast',history:'history',science:'science',technology:'technology',culture:'society culture',faith:'religion spirituality',music:'music',stories:'fiction storytelling'};
+const audioLocations = new Map();
 export async function podcasts(request, reply, options = {}) {
   const url = new URL(request.url); if (!url.pathname.startsWith('/podcasts/')) return null;
   if (!['GET','HEAD'].includes(request.method)) return reply({error:'Method not allowed'},405);
@@ -172,10 +182,25 @@ export async function podcasts(request, reply, options = {}) {
     // Stream enclosures only after resolving them from an actual podcast feed.
     // Bound connect time separately; podcast bodies can take longer to stream.
     const audioController = new AbortController();
-    const connectTimer = setTimeout(() => audioController.abort(),20000);
+    const connectTimer = setTimeout(() => audioController.abort(),25000);
     const abort = () => audioController.abort(); request.signal.addEventListener('abort',abort,{once:true});
-    let r;
-    try { r = await upstream(episode.audioUrl,{...options,headers:{Accept:'audio/*,application/octet-stream',...(range ? {Range:range} : {})},signal:audioController.signal}); }
+    let r, resolved;
+    const locationKey = episode.audioUrl;
+    const saved = !options.fetcher && audioLocations.get(locationKey);
+    const target = saved?.expires > Date.now() ? saved.url : episode.audioUrl;
+    const audioOpts = {...options,headers:{Accept:'audio/*,application/octet-stream',...(range ? {Range:range} : {})},signal:audioController.signal,onResolved:url=>resolved=url};
+    try {
+      r = await upstream(target,audioOpts);
+      // Signed CDN addresses expire. Resolve the publisher's enclosure again.
+      if (target !== episode.audioUrl && [401,403,404,410].includes(r.status)) {
+        await r.body?.cancel(); audioLocations.delete(locationKey);
+        r = await upstream(episode.audioUrl,audioOpts);
+      }
+      if (!options.fetcher && [200,206].includes(r.status)) {
+        audioLocations.set(locationKey,{url:resolved,expires:Date.now()+600000});
+        if (audioLocations.size > 64) audioLocations.delete(audioLocations.keys().next().value);
+      }
+    }
     finally { clearTimeout(connectTimer); request.signal.removeEventListener('abort',abort); }
     if (![200,206,416].includes(r.status)) { await r.body?.cancel(); return reply({error:'The episode host could not serve this audio.'},502); }
     const type = (r.headers.get('Content-Type') || '').split(';')[0].toLowerCase();
