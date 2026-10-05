@@ -76,33 +76,68 @@ test('Relay OAuth navigation uses browser-generated origins and real workerd SQL
       return mf.dispatchFetch(RESOURCE, {method: 'POST', headers: {'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', Authorization: 'Bearer ' + token, 'MCP-Protocol-Version': RELAY_VERSION, 'Mcp-Method': method, ...(method === 'tools/call' ? {'Mcp-Name': params.name} : {})}, body: JSON.stringify({jsonrpc: '2.0', id: 1, method, params: {_meta: metadata, ...params}}), redirect: 'manual'});
     }
     async function open({legacyReferrer = false, legacyCsp = false, githubCancel = false, automaticGithub = false} = {}) {
-      const context = await browser.newContext({serviceWorkers: 'block'});
+      const context = await browser.newContext({serviceWorkers: 'block', offline: true});
       const records = [], callbacks = [], errors = [], blocked = [], consoleMessages = [];
       const session = {context, records, callbacks, errors, blocked, consoleMessages, githubCancel, automaticGithub};
-      await context.route('**/*', async route => {
-        const request = route.request(), url = new URL(request.url());
+      const page = await context.newPage();
+      page.setDefaultTimeout(10000);
+      page.on('pageerror', error => errors.push(error));
+      page.on('console', message => consoleMessages.push(message.text()));
+      session.page = page;
+      const cdp = await context.newCDPSession(page);
+      session.cdp = cdp;
+      const pending = new Set();
+      session.pending = pending;
+      await cdp.send('Network.enable');
+      await cdp.send('Network.setCacheDisabled', {cacheDisabled: true});
+      // Independent egress guard, installed before the bridge. Even a missing
+      // Fetch pause/handler cannot connect to any real GitHub/ChatGPT endpoint.
+      // A reserved .invalid name keeps this safety probe non-live as well.
+      try {
+        await assert.rejects(page.goto('https://unhandled.example.invalid/__relay_fixture/offline-canary'), /net::ERR_INTERNET_DISCONNECTED/);
+        await page.goto('about:blank');
+      } catch (error) { await context.close(); throw error; }
+      session.offlineCanaryPassed = true;
+      // Direct CDP interception receives *every* HTTP redirect hop. Playwright
+      // routing automatically continues redirects, so must not be used here.
+      // https://chromedevtools.github.io/devtools-protocol/tot/Fetch/
+      async function bridge(event) {
+        const request = event.request, url = new URL(request.url);
+        // These are Chrome's raw paused-request headers. Never reconstruct a
+        // Cookie from the cookie jar, or supply/override Origin or Referer.
+        const requestHeaders = Object.fromEntries(Object.entries(request.headers).map(([name, value]) => [name.toLowerCase(), String(value)]));
+        const record = {origin: url.origin, path: url.pathname, method: request.method, headers: requestHeaders,
+          fetchId: event.requestId, networkId: event.networkId, redirectedFrom: event.redirectedRequestId};
+        records.push(record);
+        async function fulfill({status = 200, headers = {}, contentType, body = ''}) {
+          const responseHeaders = Object.entries(headers).flatMap(([name, value]) => name.toLowerCase() === 'set-cookie'
+            ? String(value).split('\n').map(value => ({name, value})) : [{name, value: String(value)}]);
+          if (contentType) responseHeaders.push({name: 'Content-Type', value: contentType});
+          record.status = status;
+          record.responseHeaders = Object.fromEntries(responseHeaders.map(({name, value}) => [name.toLowerCase(), value]));
+          await cdp.send('Fetch.fulfillRequest', {requestId: event.requestId, responseCode: status, responseHeaders,
+            body: (Buffer.isBuffer(body) ? body : Buffer.from(body)).toString('base64')});
+        }
+        async function fail(errorReason) {
+          await cdp.send('Fetch.failRequest', {requestId: event.requestId, errorReason});
+        }
         try {
-          // allHeaders includes Cookie, unlike request.headers(). Never add,
-          // replace, synthesize, or replay Origin/Cookie/Referer in this bridge.
-          const requestHeaders = await request.allHeaders();
-          const record = {origin: url.origin, path: url.pathname, method: request.method(), headers: requestHeaders};
-          records.push(record);
-          if ([ISSUER, CHATGPT, GITHUB, ATTACKER].includes(url.origin) && url.pathname === '/favicon.ico') return await route.fulfill({status: 204});
+          if ([ISSUER, CHATGPT, GITHUB, ATTACKER].includes(url.origin) && url.pathname === '/favicon.ico') return await fulfill({status: 204});
           if (url.origin === CHATGPT && url.pathname === '/__relay_fixture/connect') {
-            return await route.fulfill({status: 200, headers: {'Content-Type': 'text/html', 'Referrer-Policy': 'no-referrer'}, body: `<!doctype html><title>Fixture ChatGPT Connect</title><h1>Fixture ChatGPT Connect</h1><a href="${escape(authorize)}">Connect Relay</a>`});
+            return await fulfill({status: 200, headers: {'Content-Type': 'text/html', 'Referrer-Policy': 'no-referrer'}, body: `<!doctype html><title>Fixture ChatGPT Connect</title><h1>Fixture ChatGPT Connect</h1><a href="${escape(authorize)}">Connect Relay</a>`});
           }
           if (url.origin + url.pathname === RELAY_CALLBACK) {
             callbacks.push(url);
-            return await route.fulfill({status: 200, contentType: 'text/html', body: '<!doctype html><title>Fixture ChatGPT OAuth complete</title><h1>OAuth callback received</h1>'});
+            return await fulfill({status: 200, contentType: 'text/html', body: '<!doctype html><title>Fixture ChatGPT OAuth complete</title><h1>OAuth callback received</h1>'});
           }
           if (url.origin === GITHUB && url.pathname === '/login/oauth/authorize') {
-            if (request.method() === 'POST') {
+            if (request.method === 'POST') {
               assert.equal(requestHeaders.origin, GITHUB, 'fixture GitHub owner authorizes with a real same-origin form POST');
-              const posted = new URLSearchParams(request.postData());
+              const posted = new URLSearchParams(request.postData);
               assert.equal(posted.get('state'), session.githubAuthorization.state);
-              return await route.fulfill({status: 302, headers: {Location: session.githubAuthorization.callback, 'Referrer-Policy': 'no-referrer'}});
+              return await fulfill({status: 302, headers: {Location: session.githubAuthorization.callback, 'Referrer-Policy': 'no-referrer'}});
             }
-            assert.equal(request.method(), 'GET');
+            assert.equal(request.method, 'GET');
             assert.equal(url.searchParams.get('client_id'), 'fixture-github-client');
             assert.equal(url.searchParams.get('redirect_uri'), ISSUER + '/relay/oauth/github/callback');
             assert.equal(url.searchParams.get('code_challenge_method'), 'S256');
@@ -112,28 +147,36 @@ test('Relay OAuth navigation uses browser-generated origins and real workerd SQL
             upstreamChallenges.set(code, url.searchParams.get('code_challenge'));
             const state = url.searchParams.get('state');
             session.githubAuthorization = {state, callback: ISSUER + '/relay/oauth/github/callback?' + new URLSearchParams({state, ...(githubCancel ? {error: 'access_denied'} : {code})})};
-            if (automaticGithub) return await route.fulfill({status: 302, headers: {Location: session.githubAuthorization.callback, 'Referrer-Policy': 'no-referrer'}});
-            return await route.fulfill({status: 200, headers: {'Content-Type': 'text/html', 'Referrer-Policy': 'same-origin'}, body: `<!doctype html><title>Fixture GitHub consent</title><h1>Fixture GitHub consent</h1><form method="post" action="${GITHUB}/login/oauth/authorize"><input type="hidden" name="state" value="${escape(state)}"><button>Continue as fixture owner</button></form>`});
+            if (automaticGithub) return await fulfill({status: 302, headers: {Location: session.githubAuthorization.callback, 'Referrer-Policy': 'no-referrer'}});
+            return await fulfill({status: 200, headers: {'Content-Type': 'text/html', 'Referrer-Policy': 'same-origin'}, body: `<!doctype html><title>Fixture GitHub consent</title><h1>Fixture GitHub consent</h1><form method="post" action="${GITHUB}/login/oauth/authorize"><input type="hidden" name="state" value="${escape(state)}"><button>Continue as fixture owner</button></form>`});
           }
           if (url.origin === ATTACKER && url.pathname === '/__relay_fixture/attack') {
-            return await route.fulfill({status: 200, contentType: 'text/html', body: `<!doctype html><title>Untrusted form fixture</title><form method="post" action="${ISSUER}/relay/oauth/approve"><input type="hidden" name="csrf" value="${escape(session.attackCsrf)}"><button name="decision" value="allow">Submit untrusted form</button></form>`});
+            return await fulfill({status: 200, contentType: 'text/html', body: `<!doctype html><title>Untrusted form fixture</title><form method="post" action="${ISSUER}/relay/oauth/approve"><input type="hidden" name="csrf" value="${escape(session.attackCsrf)}"><button name="decision" value="allow">Submit untrusted form</button></form>`});
           }
           if (url.origin === ISSUER && url.pathname === '/__relay_fixture/stale-form') {
             const consent = records.find(r => r.path === '/relay/oauth/github/callback' && r.status === 200);
-            return await route.fulfill({status: 200, headers: {'Content-Type': 'text/html', 'Referrer-Policy': 'same-origin',
+            return await fulfill({status: 200, headers: {'Content-Type': 'text/html', 'Referrer-Policy': 'same-origin',
               'Content-Security-Policy': consent.responseHeaders['content-security-policy']}, body: session.consentHtml});
           }
           const workerPaths = new Set(['/relay/oauth/authorize', '/relay/oauth/github/callback', '/relay/oauth/approve']);
           if (url.origin === ISSUER && workerPaths.has(url.pathname)) {
-            const response = await mf.dispatchFetch(request.url(), {method: request.method(), headers: requestHeaders, body: request.postDataBuffer() ?? undefined, redirect: 'manual'});
+            let body;
+            if (request.postData !== undefined) body = Buffer.from(request.postData);
+            else if (request.postDataEntries?.length) body = Buffer.concat(request.postDataEntries.map(entry => Buffer.from(entry.bytes, 'base64')));
+            else if (request.hasPostData) {
+              assert.ok(event.networkId, 'Chrome must expose the original request body');
+              const original = await cdp.send('Network.getRequestPostData', {requestId: event.networkId});
+              body = Buffer.from(original.postData);
+            }
+            const response = await mf.dispatchFetch(request.url, {method: request.method, headers: requestHeaders, body, redirect: 'manual'});
             const headers = Object.fromEntries(response.headers);
             const cookies = response.headers.getSetCookie();
             if (cookies.length) headers['set-cookie'] = cookies.join('\n');
-            const body = Buffer.from(await response.arrayBuffer());
+            const responseBody = Buffer.from(await response.arrayBuffer());
             record.status = response.status;
             record.responseHeaders = headers;
             if (url.pathname === '/relay/oauth/github/callback' && response.status === 200) {
-              session.consentHtml = body.toString('utf8');
+              session.consentHtml = responseBody.toString('utf8');
               if (legacyReferrer) headers['referrer-policy'] = 'no-referrer';
               if (legacyCsp) {
                 assert.ok(headers['content-security-policy'].includes("form-action 'self' " + RELAY_CALLBACK));
@@ -142,35 +185,49 @@ test('Relay OAuth navigation uses browser-generated origins and real workerd SQL
             }
             // The browser, not Node/Miniflare, follows every redirect. Keep the
             // Worker status, body and headers (especially Set-Cookie) intact.
-            return await route.fulfill({status: response.status, headers, body});
+            return await fulfill({status: response.status, headers, body: responseBody});
           }
           blocked.push(url.origin + url.pathname);
-          await route.abort('blockedbyclient');
+          await fail('BlockedByClient');
         } catch (error) {
           errors.push(error);
-          await route.abort('failed').catch(() => {});
+          await fail('Failed').catch(() => {});
         }
+      }
+      cdp.on('Fetch.requestPaused', event => {
+        const operation = bridge(event);
+        pending.add(operation);
+        operation.finally(() => pending.delete(operation)).catch(error => errors.push(error));
       });
-      const page = await context.newPage();
-      page.setDefaultTimeout(10000);
-      page.on('pageerror', error => errors.push(error));
-      page.on('console', message => consoleMessages.push(message.text()));
-      session.page = page;
+      await cdp.send('Fetch.enable', {patterns: [{urlPattern: '*', requestStage: 'Request'}]});
       return session;
     }
     async function close(session) {
-      await session.context.close();
-      assert.deepEqual(session.blocked, [], 'No unrecognized browser request can reach the network');
-      assert.equal(session.errors.length, 0, session.errors[0]?.message);
-      assert.deepEqual(unexpectedOutbound, [], 'No unrecognized workerd request can reach the network');
+      const isolation = [];
+      try {
+        await Promise.allSettled([...session.pending]);
+        await session.context.close();
+        assert.deepEqual(session.blocked, [], 'No unrecognized browser request can reach the network');
+        assert.equal(session.errors.length, 0, session.errors[0]?.message);
+        assert.deepEqual(unexpectedOutbound, [], 'No unrecognized workerd request can reach the network');
+      } catch (error) { isolation.push(error); }
+      if (isolation.length) {
+        if (session.failure) t.diagnostic('Additional fixture isolation failure: ' + isolation[0].message);
+        else throw isolation[0];
+      }
     }
     async function begin(session) {
       const {page, context, records} = session;
+      assert.equal(session.offlineCanaryPassed, true);
       await page.goto(CHATGPT + '/__relay_fixture/connect');
+      assert.equal(await page.title(), 'Fixture ChatGPT Connect', 'CDP fixture fulfillment works while the independent offline guard remains active');
+      assert.equal(await page.evaluate(() => navigator.onLine), false, 'the browser stays offline throughout every redirect chain');
       if (session.automaticGithub) await page.getByRole('link', {name: 'Connect Relay', exact: true}).click();
       else await Promise.all([page.waitForURL(GITHUB + '/login/oauth/authorize**'), page.getByRole('link', {name: 'Connect Relay', exact: true}).click()]);
       const login = records.find(r => r.path === '/relay/oauth/authorize');
       assert.equal(login.status, 302);
+      const githubGet = records.find(r => r.origin === GITHUB && r.method === 'GET');
+      assert.equal(githubGet.redirectedFrom, login.fetchId, 'CDP pauses the actual authorize HTTP redirect hop');
       assert.match(login.responseHeaders['set-cookie'], /^__Host-jarvis-relay=[a-f0-9]{64}; Path=\/; HttpOnly; Secure; SameSite=Lax; Max-Age=600$/);
       session.loginCookie = login.responseHeaders['set-cookie'].split(';')[0].slice(COOKIE.length + 1);
       const [cookie] = (await context.cookies(ISSUER)).filter(c => c.name === COOKIE);
@@ -185,14 +242,16 @@ test('Relay OAuth navigation uses browser-generated origins and real workerd SQL
         assert.equal(cookie.value, session.loginCookie);
         await page.getByRole('button', {name: 'Continue as fixture owner', exact: true}).click();
       }
-      if (session.githubCancel) { await page.waitForURL(RELAY_CALLBACK + '**'); return; }
-      await page.getByRole('button', {name: 'Allow this connection', exact: true}).waitFor();
       const callback = records.find(r => r.path === '/relay/oauth/github/callback');
-      assert.equal(callback.status, 200);
+      assert.ok(callback, 'CDP must pause the actual GitHub redirect callback');
+      assert.equal(callback.redirectedFrom, records.findLast(r => r.origin === GITHUB && r.path === '/login/oauth/authorize').fetchId);
       assert.equal(callback.method, 'GET', 'GitHub POST authorization redirects to a top-level GET callback');
       assert.equal(callback.headers.origin, undefined, 'Chromium strips the form Origin after the POST to GET redirect');
       assert.equal(callback.headers.referer, undefined);
-      assert.ok(callback.headers.cookie?.includes(COOKIE + '='), 'SameSite=Lax allows GitHub top-level GET callback');
+      assert.ok(callback.headers.cookie?.includes(COOKIE + '='), 'Chrome raw CDP callback Cookie must be present; missing browser Cookie cannot be synthesized');
+      if (session.githubCancel) { assert.equal(callback.status, 302); await page.waitForURL(RELAY_CALLBACK + '**'); return; }
+      assert.equal(callback.status, 200);
+      await page.getByRole('button', {name: 'Allow this connection', exact: true}).waitFor();
       const [consentCookie] = (await context.cookies(ISSUER)).filter(c => c.name === COOKIE);
       assert.notEqual(consentCookie.value, session.loginCookie, 'consent rotates the owner-login cookie');
       assert.equal(consentCookie.secure, true);
@@ -209,6 +268,8 @@ test('Relay OAuth navigation uses browser-generated origins and real workerd SQL
       assert.equal(callback.searchParams.get('state'), STATE);
       assert.equal(callback.searchParams.get('iss'), ISSUER + '/relay');
       const approval = session.records.findLast(r => r.path === '/relay/oauth/approve');
+      const finalHop = session.records.findLast(r => r.origin + r.path === RELAY_CALLBACK);
+      assert.equal(finalHop.redirectedFrom, approval.fetchId, 'CDP pauses the final real approval redirect, without a navigation shortcut');
       assert.equal(approval.method, 'POST');
       assert.equal(approval.headers.origin, ISSUER, 'Origin comes from Chromium, not test-supplied headers');
       assert.equal(approval.headers.referer, session.consentUrl, 'same-origin retains the form referrer');
@@ -239,7 +300,7 @@ test('Relay OAuth navigation uses browser-generated origins and real workerd SQL
         assert.ok(approval.headers.cookie?.includes(COOKIE + '='));
         assert.equal(session.callbacks.length, 0);
         t.diagnostic('Legacy consent: browser Origin=null, HTTP 403, no downstream callback');
-      } finally { await close(session); }
+      } catch (error) { session.failure = error; throw error; } finally { await close(session); }
     });
 
     await t.test('old self-only form CSP blocks the real cross-origin ChatGPT redirect after a valid POST', async () => {
@@ -256,7 +317,7 @@ test('Relay OAuth navigation uses browser-generated origins and real workerd SQL
         assert.equal(session.callbacks.length, 0, 'server-side 302 success alone is not OAuth browser success');
         assert.notEqual(session.page.url().split('?')[0], RELAY_CALLBACK);
         t.diagnostic('Legacy self-only form CSP: issuer Origin, HTTP 302, browser blocks final ChatGPT callback');
-      } finally { await close(session); }
+      } catch (error) { session.failure = error; throw error; } finally { await close(session); }
     });
 
     await t.test('fresh Allow reaches ChatGPT, exchanges S256 once, discovers tools/events and reads real SQLite conversation', async () => {
@@ -314,7 +375,7 @@ test('Relay OAuth navigation uses browser-generated origins and real workerd SQL
         assert.deepEqual(await stale.json(), {error: 'invalid_request', error_description: 'consent_cookie_missing'});
         assert.equal(session.callbacks.length, 1);
         t.diagnostic('Candidate Allow: issuer Origin, exact callback with no cross-origin referrer, one-use S256 exchange, authenticated tool read/event discovery');
-      } finally { await close(session); }
+      } catch (error) { session.failure = error; throw error; } finally { await close(session); }
     });
 
     await t.test('Cancel reaches the exact ChatGPT callback without creating a grant; a fresh retry still works', async () => {
@@ -324,13 +385,13 @@ test('Relay OAuth navigation uses browser-generated origins and real workerd SQL
         const callback = await complete(session, 'Cancel');
         assert.equal(callback.searchParams.get('error'), 'access_denied');
         assert.equal(callback.searchParams.has('code'), false);
-      } finally { await close(session); }
+      } catch (error) { session.failure = error; throw error; } finally { await close(session); }
       const retry = await open();
       try {
         await begin(retry);
         const callback = await complete(retry);
         assert.equal((await exchange(callback.searchParams.get('code'))).status, 200, 'same registered ChatGPT client survives a cancelled first login');
-      } finally { await close(retry); }
+      } catch (error) { retry.failure = error; throw error; } finally { await close(retry); }
     });
 
     await t.test('upstream GitHub cancellation returns access_denied without token exchange', async () => {
@@ -346,7 +407,7 @@ test('Relay OAuth navigation uses browser-generated origins and real workerd SQL
         assert.equal(callback.searchParams.get('iss'), ISSUER + '/relay');
         assert.equal(callback.searchParams.has('code'), false);
         assert.equal(outbound.length, callsBefore);
-      } finally { await close(session); }
+      } catch (error) { session.failure = error; throw error; } finally { await close(session); }
     });
 
     await t.test('previously granted GitHub GET auto-redirect also completes a fresh Relay consent', async () => {
@@ -356,7 +417,7 @@ test('Relay OAuth navigation uses browser-generated origins and real workerd SQL
         assert.equal(session.records.filter(r => r.origin === GITHUB && r.method === 'POST').length, 0);
         const callback = await complete(session);
         assert.equal((await exchange(callback.searchParams.get('code'))).status, 200);
-      } finally { await close(session); }
+      } catch (error) { session.failure = error; throw error; } finally { await close(session); }
     });
 
     await t.test('real browser cross-origin form is rejected without weakening the Origin allowlist', async () => {
@@ -374,7 +435,7 @@ test('Relay OAuth navigation uses browser-generated origins and real workerd SQL
         assert.equal(approval.headers.origin, ATTACKER);
         assert.equal(approval.headers.cookie, undefined, 'SameSite=Lax blocks the cross-site POST cookie');
         assert.equal(session.callbacks.length, 0);
-      } finally { await close(session); }
+      } catch (error) { session.failure = error; throw error; } finally { await close(session); }
     });
 
     await t.test('browser-generated same-origin CSRF mismatch is rejected without consuming the valid consent', async () => {
@@ -396,7 +457,7 @@ test('Relay OAuth navigation uses browser-generated origins and real workerd SQL
         session.consentUrl = session.page.url();
         await complete(session);
         assert.ok(session.callbacks[0].searchParams.has('code'), 'failed CSRF must leave valid owner approval possible');
-      } finally { await close(session); }
+      } catch (error) { session.failure = error; throw error; } finally { await close(session); }
     });
   } finally {
     await browser?.close();
