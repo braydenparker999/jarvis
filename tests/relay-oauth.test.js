@@ -30,7 +30,7 @@ function fixture(t, options = {}) {
     s.upstream.push({url: String(url), init});
     if (url === 'https://github.com/login/oauth/access_token') {
       assert.equal(init.method, 'POST');
-      assert.equal(init.redirect, 'error');
+      assert.equal(init.redirect, 'manual');
       assert.equal(init.headers.Accept, 'application/json');
       const p = new URLSearchParams(init.body);
       assert.equal(p.get('client_id'), 'fixture-github-client');
@@ -40,7 +40,7 @@ function fixture(t, options = {}) {
       return Response.json({access_token: 'fixture-upstream-token-never-persist', token_type: 'bearer'});
     }
     if (url === 'https://api.github.com/user') {
-      assert.equal(init.redirect, 'error');
+      assert.equal(init.redirect, 'manual');
       assert.equal(init.headers.Authorization, 'Bearer fixture-upstream-token-never-persist');
       return Response.json({id: s.githubOwner, login: 'fixture-owner'});
     }
@@ -279,6 +279,32 @@ test('fixed callback processing stages distinguish upstream exceptions without e
     await expectError((await callback(s, login)).response, 'invalid_request', 400, 'login_state_expired_or_used');
     assert.equal(requests, completed, 'replayed callback must never repeat an upstream request');
     assert.equal(oauthRows(s).filter(row => ['grant', 'code', 'access', 'refresh'].includes(row.category)).length, 0);
+  }
+});
+
+test('GitHub token and identity redirects fail closed without forwarding credentials or creating consent', async t => {
+  const s = fixture(t);
+  s.client = await register(s);
+  const originalFetch = globalThis.fetch;
+  for (const stage of ['token', 'identity']) for (const status of [301, 302, 303, 307, 308]) {
+    const requests = [];
+    t.mock.method(globalThis, 'fetch', async (url, init) => {
+      requests.push(String(url));
+      assert.equal(init.redirect, 'manual', 'Workers-supported redirect mode must not follow any redirect');
+      const token = url === 'https://github.com/login/oauth/access_token';
+      if (token === (stage === 'token')) return new Response('fixture-private-redirect-body', {
+        status, headers: {Location: 'https://untrusted.example.invalid/credential-sink'},
+      });
+      return originalFetch(url, init);
+    });
+    const login = await start(s), response = (await callback(s, login)).response;
+    await expectError(response, stage === 'token' ? 'temporarily_unavailable' : 'access_denied',
+      stage === 'token' ? 503 : 403, stage === 'token' ? 'github_token_endpoint_error' : 'github_identity_endpoint_error');
+    assert.deepEqual(requests, stage === 'token' ? ['https://github.com/login/oauth/access_token'] :
+      ['https://github.com/login/oauth/access_token', 'https://api.github.com/user']);
+    await expectError((await callback(s, login)).response, 'invalid_request', 400, 'login_state_expired_or_used');
+    assert.equal(requests.length, stage === 'token' ? 1 : 2, 'callback replay must never resend credentials');
+    assert.equal(oauthRows(s).filter(row => ['session', 'grant', 'code', 'access', 'refresh'].includes(row.category)).length, 0);
   }
 });
 
