@@ -5,6 +5,8 @@ import { API_ORIGIN } from './config.js';
 import { request } from './shared-api.js';
 import { STORAGE_KEY, LEGACY_KEY, readState, mergeState } from './shared-store.js';
 import { channelMessages } from './channels.js';
+import { OWNER_SESSION_KEY } from './relay-owner-api.js';
+import { createRelayOwnerController, createRelayOwnerUI } from './relay-owner-ui.js';
 
 const $ = id => document.getElementById(id);
 const icons = {
@@ -21,6 +23,8 @@ let state, storageError = '', syncError = '', busy = false, toastTimer;
 try { state = readState(localStorage); localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
 catch (e) { storageError = e.message || 'Device storage is unavailable.'; }
 let route = getRoute(), chatUI;
+const ownerController = createRelayOwnerController({onModeChange:()=>{if(route==='chat')drawShell();}});
+const ownerUI = createRelayOwnerUI({controller:ownerController});
 appViewport();
 addEventListener('pagehide',()=>chatUI?.savePosition());
 const paths = { home: '/', chat: '/jarvis/', board: '/daily-board/', favorites: '/favorites/', settings: '/settings/', notes: '/notes/', tools: '/tools/', server: '/server/' };
@@ -65,6 +69,7 @@ function connection() {
   return state.syncedAt ? 'Connected' : 'Connecting';
 }
 function drawShell() {
+  ownerUI.unmount();
   chatUI?.savePosition(); chatUI=null;
   for(const cls of ['module-page','conversation-page','relay-page'])document.body.classList.toggle(cls,route==='chat');
   const hub = ['home','favorites','settings'].includes(route);
@@ -89,14 +94,30 @@ function drawShell() {
   drawPage();
   if(route==='chat') {
     $('connection-button').hidden=true;
-    $('chat-search-toggle').onclick=()=>{const bar=$('chat-search-bar');bar.hidden=!bar.hidden;if(!bar.hidden)$('conversation-search').focus();else{ $('conversation-search').value='';chatUI?.search('');}};
-    $('chat-menu').onclick=()=>sheet('Relay',[{label:'Bookmarks',icon:'bookmark',action:()=>chatUI?.bookmarks()},{label:'Latest messages',icon:'chat',action:()=>chatUI?.latest()},{label:'Refresh inbox',icon:'refresh',action:sync},{label:'Connection details',icon:'info',action:showConnection}]);
+    $('chat-search-toggle').onclick=()=>{
+      if(ownerUI.mode!=='public'){ownerUI.toggleSearch();return;}
+      const bar=$('chat-search-bar');if(!bar)return;bar.hidden=!bar.hidden;if(!bar.hidden)$('conversation-search').focus();else{ $('conversation-search').value='';chatUI?.search('');}
+    };
+    $('chat-menu').onclick=()=>{
+      const privateView=ownerUI.mode!=='public';
+      const ownerActions=[
+        {label:ownerController.hasCredential?'Owner chat':ownerController.status==='pending'?'Pairing status':'Connect this phone',icon:'chat',action:()=>ownerController.showOwner()},
+        ...(privateView?[{label:'Public chat',icon:'chat',action:()=>ownerController.showPublic()}]:[]),
+        ...(ownerController.hasCredential?[{label:'Devices',icon:'info',action:()=>ownerController.showDevices()},{label:'Disconnect this phone',icon:'close',action:()=>ownerController.disconnect()}]:[])
+      ];
+      const conversationActions=privateView
+        ? [{label:'Latest private messages',icon:'chat',action:()=>ownerUI.latest()},{label:'Refresh private inbox',icon:'refresh',action:()=>ownerUI.refresh()}]
+        : [{label:'Bookmarks',icon:'bookmark',action:()=>chatUI?.bookmarks()},{label:'Latest messages',icon:'chat',action:()=>chatUI?.latest()},{label:'Refresh inbox',icon:'refresh',action:sync},{label:'Connection details',icon:'info',action:showConnection}];
+      sheet(privateView?'Owner Relay':'Public Relay',[...ownerActions,...conversationActions]);
+    };
   }
 }
 function drawPage() {
   if (route === 'home' || route === 'favorites') { drawHome(); return; }
   if (route === 'settings') { drawSettings(); return; }
   if (['notes','tools','server'].includes(route)) { renderUtility(route,$('content'),{notify,connection,showConnection,state,storageError,sync}); return; }
+  // A damaged public store must not route private data through its recovery path.
+  if (route === 'chat' && ownerUI.mode !== 'public') { ownerUI.mount($('content')); return; }
   if (storageError) { $('content').innerHTML = `<div class="empty"><h1>Unable to save on this device</h1><p>${escape(storageError)}</p><p>Existing data has not been changed. Allow browser storage, then reload.</p></div>`; return; }
   if (route === 'chat') drawChat();
   if (route === 'board') drawBoard();
@@ -159,6 +180,8 @@ function messageMarkup(m) {
   return `<article data-message-id="${escape(m.id)}" class="message-row ${m.role==='user'?'outgoing':'incoming'}"><span class="message-author">${m.role==='user'?'YOU':m.kind==='reply'?'JARVIS':'JARVIS · AUTOMATIC RECEIPT'}</span><p class="bubble">${escape(m.body)}</p><span class="message-time">${time(m.createdAt)} · ${m.saved?'Cloud saved':'Not sent · on this device'}</span></article>`;
 }
 function submitMessage() {
+  // A stale public form/event must never submit an owner draft to the shared inbox.
+  if (ownerUI.mode !== 'public') return;
   const body = $('message-text').value.trim();
   if (!body) return;
   const item = { id: crypto.randomUUID(), body, role: 'user', createdAt: new Date().toISOString(), saved: false };
@@ -225,3 +248,4 @@ if (API_ORIGIN) sync();
 
 setInterval(()=>{if(!document.hidden)sync();},30000);
 window.addEventListener('storage',e=>{if(e.key===STORAGE_KEY&&!busy){try{state=readState(localStorage);if(route==='chat'&&chatUI)chatUI.update(channelMessages(state.messages));else if(route==='board')drawShell();}catch{}}});
+window.addEventListener('storage',e=>{if(e.key===OWNER_SESSION_KEY)ownerController.storedSessionChanged();});

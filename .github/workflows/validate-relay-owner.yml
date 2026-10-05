@@ -1,0 +1,62 @@
+name: Validate Relay owner pairing
+
+# Validation only. This workflow never deploys or enables a production feature.
+# Fixture pairing approvals are mocked authorization, not live phone approvals.
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/validate-relay-owner.yml'
+      - 'backend/**'
+      - 'public/assets/**'
+      - 'public/jarvis/**'
+      - 'tests/relay-*'
+      - 'tests/shared.test.js'
+      - 'tests/publications.test.js'
+      - 'tests/origins.test.js'
+      - 'tests/hub.test.js'
+      - 'package.json'
+      - 'package-lock.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: relay-owner-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  owner-regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      REQUIRE_RELAY_OWNER_BROWSER: '1'
+    steps:
+      - name: Check out the proposed source
+        # https://github.com/actions/checkout/releases/tag/v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Use Node 24 for the SQLite fixture
+        # https://github.com/actions/setup-node/releases/tag/v7.0.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Install the locked Playwright Chromium runtime
+        run: |
+          npx --no-install playwright-core install --with-deps chromium
+          chromium_path="$(node --input-type=module -e 'import {chromium} from "playwright-core"; process.stdout.write(chromium.executablePath())')"
+          test -x "$chromium_path"
+          printf 'CHROMIUM_PATH=%s\n' "$chromium_path" >> "$GITHUB_ENV"
+          printf 'PLAYWRIGHT_CHROMIUM_EXECUTABLE=%s\n' "$chromium_path" >> "$GITHUB_ENV"
+      - name: Bundle the proposed Worker without deployment
+        run: npx --no-install esbuild backend/worker.js --bundle --platform=browser --format=esm --outfile="$RUNNER_TEMP/relay-owner-worker.mjs"
+      - name: Run owner browser and affected regression tests
+        # Deliberately scoped. oauth-consent-browser.test.js and unrelated
+        # launcher/media browser suites have their own fixtures and gates.
+        run: >-
+          node --test tests/relay-*.test.js tests/shared.test.js
+          tests/publications.test.js tests/origins.test.js tests/hub.test.js

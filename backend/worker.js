@@ -8,7 +8,8 @@ import {nativeMusic} from './music-upload.js';
 import {podcasts} from './podcasts.js';
 import {relayConnector,relayRpc} from './relay-connector.js';
 import {relayOAuthStore} from './relay-oauth.js';
-import {drainRelayOutbox,scheduleRelayAlarm} from './relay-events.js';
+import {drainRelayOutbox,scheduleRelayAlarm,enqueueRelayOwnerMessage} from './relay-events.js';
+import {relayOwnerPublic,relayOwnerStore} from './relay-owner.js';
 import {RelayError} from './relay-common.js';
 const paths = new Set(['/v1/state', '/v1/messages', '/v1/board', '/v1/responder/connect', '/v1/responder/revoke', '/v1/agent/inbox', '/v1/agent/replies', '/v1/agent/board']);
 const digest = async value => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))),b=>b.toString(16).padStart(2,'0')).join('');
@@ -19,6 +20,7 @@ const unanswered = state => state.messages.filter(m=>m.role==='user' && !state.m
 export default {
   async fetch(request, env) {
     const relay=await relayConnector(request,env);if(relay)return relay;
+    const owner=await relayOwnerPublic(request,env);if(owner)return owner;
     const native=await nativeMusic(request,env);if(native)return native;
     const media = await music(request, env); if (media) return media;
     const connected=await connector(request,env,{syncShared,sharedInternal});if(connected)return connected;
@@ -100,6 +102,17 @@ export class Hub {
   async fetch(request){
     const path=new URL(request.url).pathname;
     if(path==='/internal/relay/oauth')return relayOAuthStore(this.ctx,await request.json());
+    if(path==='/internal/relay/owner'){
+      const body=await request.json();
+      // The shared journal can replay both inbox kinds even on a fresh owner-only object.
+      sharedStore(this.ctx,'/internal/shared/state');
+      // Persist wake before the atomic message/event insertion; failed requests
+      // are cleaned up by the ordinary scheduler without a busy loop.
+      if(body.op==='message'&&this.ctx.storage.setAlarm)await this.ctx.storage.setAlarm(Date.now()+100);
+      const response=await relayOwnerStore(this.ctx,this.env,body,enqueueRelayOwnerMessage);
+      if(body.op==='message')await scheduleRelayAlarm(this.ctx);
+      return response;
+    }
     if(path==='/internal/relay/rpc'){
       try{const {principal,rpc}=await request.json();return json({result:await relayRpc(this.ctx,this.env,principal,rpc)});}
       catch(error){return json({error:{code:error instanceof RelayError?error.code:-32603,message:error instanceof RelayError?error.message:'Relay storage unavailable',...(error instanceof RelayError&&error.data?{data:error.data}:{})}});}
@@ -171,3 +184,4 @@ export async function syncShared(env) {
   const imported=await sharedInternal(env,'/import',await old.json());
   if(!imported.ok)throw Error('Inbox migration failed');
 }
+

@@ -1,5 +1,5 @@
 import {PRIMARY_SITE} from './origins.js';
-import {RELAY_OWNER, RELAY_INBOX, RELAY_EVENT, RelayError, fields, inboxArgs, cursor, httpsURL, signingKey, signWebhook, hash, canonical, random, equal, boundedText, encoder, relayEnabled, json} from './relay-common.js';
+import {RELAY_OWNER, RELAY_INBOX, RELAY_EVENT, RELAY_OWNER_SCOPE, RELAY_OWNER_INBOX, RELAY_OWNER_EVENT, RelayError, fields, inboxArgs, cursor, httpsURL, signingKey, signWebhook, hash, canonical, random, equal, boundedText, encoder, relayEnabled, json} from './relay-common.js';
 import {relayGrantActiveInStore,relayTokenActiveInStore} from './relay-oauth.js';
 export const EVENT_RETENTION_MS = 30 * 86400000;
 const DEFAULT_TTL = 86400000;
@@ -9,6 +9,10 @@ const MAX_ATTEMPTS = 6;
 const MAX_SUBSCRIPTIONS = 8;
 const MAX_QUEUED = 2000;
 const rows = (ctx, q, ...v) => [...ctx.storage.sql.exec(q, ...v)];
+const eventName = event => JSON.parse(event.data).inbox_id === RELAY_OWNER_INBOX ? RELAY_OWNER_EVENT : RELAY_EVENT;
+const eventScope = name => name === RELAY_OWNER_EVENT ? RELAY_OWNER_SCOPE : 'relay:events';
+const eventEnabled = (env, name) => relayEnabled(env) && (name !== RELAY_OWNER_EVENT || env.RELAY_OWNER_ENABLED === 'true');
+const subscriptionActive = (ctx, env, sub) => eventEnabled(env, sub.name) && relayGrantActiveInStore(ctx, env, sub.grant_id, eventScope(sub.name));
 export function relayEventSchema(ctx) {
   const sql = ctx.storage.sql;
   sql.exec(`CREATE TABLE IF NOT EXISTS relay_events (
@@ -29,6 +33,8 @@ export function relayEventSchema(ctx) {
   sql.exec('CREATE TABLE IF NOT EXISTS relay_verified (identity TEXT PRIMARY KEY, verified_until INTEGER NOT NULL)');
   sql.exec('CREATE TABLE IF NOT EXISTS relay_activations (id TEXT PRIMARY KEY, revision TEXT NOT NULL, expires_ms INTEGER NOT NULL)');
   sql.exec('CREATE TABLE IF NOT EXISTS relay_event_meta (key TEXT PRIMARY KEY,value INTEGER NOT NULL)');
+  // Private filter/replay text is never part of public entries or callback previews.
+  sql.exec('CREATE TABLE IF NOT EXISTS relay_owner_event_bodies (event_id TEXT PRIMARY KEY,body TEXT NOT NULL)');
 }
 const latest = ctx => Math.max(rows(ctx, 'SELECT COALESCE(MAX(seq),0) AS n FROM relay_events')[0].n,rows(ctx,"SELECT value FROM relay_event_meta WHERE key='floor'")[0]?.value||0);
 const eventCursor = seq => 'relay1:' + seq;
@@ -39,8 +45,18 @@ export const relayEventDefinition = {
   inputSchema: {type: 'object', properties: {inbox_id: {type: 'string', const: RELAY_INBOX}, message_contains: {type: 'string', minLength: 1, maxLength: 100, description: 'Optional case-insensitive literal substring filter'}}, required: ['inbox_id'], additionalProperties: false},
   payloadSchema: {type: 'object', properties: {inbox_id: {type: 'string', const: RELAY_INBOX}, message_id: {type: 'string', format: 'uuid'}, body_preview: {type: 'string', maxLength: 240}, author_authenticated: {type: 'boolean', const: false}, url: {type: 'string', format: 'uri'}}, required: ['inbox_id', 'message_id', 'body_preview', 'author_authenticated', 'url'], additionalProperties: false}
 };
-function eventArguments(value) {
-  fields(value, ['inbox_id', 'message_contains'], ['inbox_id']); inboxArgs(value);
+export const relayOwnerEventDefinition = {
+  name: RELAY_OWNER_EVENT,
+  description: 'A newly saved private owner message from an approved phone. Server-stamped owner identity applies to this message only. Fetch its private conversation before replying; private replies must remain in the owner inbox. Pairing and account actions still require their applicable approval.',
+  delivery: ['webhook'],
+  inputSchema: {type: 'object', properties: {inbox_id: {type: 'string', const: RELAY_OWNER_INBOX}, message_contains: {type: 'string', minLength: 1, maxLength: 100}}, required: ['inbox_id'], additionalProperties: false},
+  payloadSchema: {type: 'object', properties: {inbox_id: {type: 'string', const: RELAY_OWNER_INBOX}, message_id: {type: 'string', format: 'uuid'}, author_authenticated: {type: 'boolean', const: true}, principal: {type: 'string', const: RELAY_OWNER}, device_id: {type: 'string'}, visibility: {type: 'string', const: 'private'}, url: {type: 'string', format: 'uri'}}, required: ['inbox_id', 'message_id', 'author_authenticated', 'principal', 'device_id', 'visibility', 'url'], additionalProperties: false}
+};
+function eventArguments(value, name) {
+  fields(value, ['inbox_id', 'message_contains'], ['inbox_id']);
+  if (name === RELAY_OWNER_EVENT) {
+    if (value.inbox_id !== RELAY_OWNER_INBOX) throw new RelayError(-32012, 'Forbidden inbox');
+  } else inboxArgs(value);
   if (value.message_contains !== undefined && (typeof value.message_contains !== 'string' || !value.message_contains.trim() || value.message_contains.length > 100)) throw new RelayError(-32602, 'Invalid message filter');
   return value;
 }
@@ -50,10 +66,14 @@ const matches = (sub, row) => {
   return !args.message_contains || row.body.toLowerCase().includes(args.message_contains.toLowerCase());
 };
 function enqueueFor(ctx, sub, event, now,budget) {
-  const message = event.message_body!==undefined?{body:event.message_body}:rows(ctx, "SELECT body FROM shared_entries WHERE id=? AND kind='user'", event.message_id)[0];
+  const name = eventName(event);
+  if (sub.name !== name) return;
+  const message = event.message_body != null ? {body:event.message_body} : name === RELAY_OWNER_EVENT
+    ? rows(ctx, 'SELECT body FROM relay_owner_event_bodies WHERE event_id=?', event.event_id)[0]
+    : rows(ctx, "SELECT body FROM shared_entries WHERE id=? AND kind='user'", event.message_id)[0];
   if (!message || !matches(sub, message)) return;
   if(budget?budget.remaining<=0:rows(ctx,"SELECT COUNT(*) AS n FROM relay_outbox WHERE subscription_id=? AND status IN ('pending','failed')",sub.id)[0].n>=MAX_QUEUED)return;
-  const body = JSON.stringify({eventId: event.event_id, name: RELAY_EVENT, timestamp: event.occurred_at, data: JSON.parse(event.data), cursor: eventCursor(event.seq)});
+  const body = JSON.stringify({eventId: event.event_id, name, timestamp: event.occurred_at, data: JSON.parse(event.data), cursor: eventCursor(event.seq)});
   if (encoder.encode(body).length > 262144) throw Error('Relay event exceeds payload limit');
   ctx.storage.sql.exec("INSERT OR IGNORE INTO relay_outbox(subscription_id,event_seq,body,status,next_attempt_ms) VALUES(?,?,?,'pending',?)", sub.id, event.seq, body, now);
   if(budget)budget.remaining--;
@@ -64,8 +84,9 @@ function fillOutbox(ctx,sub,start,now){
   if(!rows(ctx,'SELECT seq FROM relay_events WHERE seq>? LIMIT 1',start).length)return;
   // One joined scan, not thousands of per-row count/message queries. Existing
   // outbox rows are excluded so capacity is used only for missing occurrences.
-  const missing=rows(ctx,`SELECT e.*,u.body AS message_body FROM relay_events e
-    JOIN shared_entries u ON u.id=e.message_id AND u.kind='user'
+  const missing=rows(ctx,`SELECT e.*,COALESCE(b.body,u.body) AS message_body FROM relay_events e
+    LEFT JOIN shared_entries u ON u.id=e.message_id AND u.kind='user'
+    LEFT JOIN relay_owner_event_bodies b ON b.event_id=e.event_id
     LEFT JOIN relay_outbox o ON o.subscription_id=? AND o.event_seq=e.seq
     WHERE e.seq>? AND o.event_seq IS NULL ORDER BY e.seq`,sub.id,start);
   for(const event of missing){enqueueFor(ctx,sub,event,now,budget);if(budget.remaining<=0)break;}
@@ -79,6 +100,18 @@ export function enqueueRelayMessage(ctx, message, now = Date.now()) {
   sql.exec('INSERT OR IGNORE INTO relay_events(event_id,message_id,occurred_at,created_ms,data) VALUES(?,?,?,?,?)', 'relay_msg_' + message.id, message.id, message.createdAt, now, JSON.stringify(data));
   const event = rows(ctx, 'SELECT * FROM relay_events WHERE message_id=?', message.id)[0];
   for (const sub of rows(ctx, "SELECT * FROM relay_subscriptions WHERE state='active' AND expires_ms>?", now)) enqueueFor(ctx, sub, event, now);
+}
+export function enqueueRelayOwnerMessage(ctx, message, now = Date.now()) {
+  // Called only by the authenticated owner store in the same SQLite transaction.
+  relayEventSchema(ctx);
+  const eventId = 'relay_owner_msg_' + message.id;
+  const data = {inbox_id: RELAY_OWNER_INBOX, message_id: message.id, author_authenticated: true,
+    principal: RELAY_OWNER, device_id: message.device_id, visibility: 'private', url: PRIMARY_SITE + '/jarvis/'};
+  ctx.storage.sql.exec('INSERT OR IGNORE INTO relay_events(event_id,message_id,occurred_at,created_ms,data) VALUES(?,?,?,?,?)',
+    eventId, 'owner:' + message.id, message.createdAt, now, JSON.stringify(data));
+  ctx.storage.sql.exec('INSERT OR IGNORE INTO relay_owner_event_bodies(event_id,body) VALUES(?,?)', eventId, message.body);
+  const event = rows(ctx, 'SELECT * FROM relay_events WHERE event_id=?', eventId)[0];
+  for (const sub of rows(ctx, "SELECT * FROM relay_subscriptions WHERE name=? AND state='active' AND expires_ms>?", RELAY_OWNER_EVENT, now)) enqueueFor(ctx, sub, event, now);
 }
 export function webhookTransport(env) {
   // The trusted adapter validates DNS on every connection and pins the public IP.
@@ -127,8 +160,8 @@ async function verifyCallback(ctx, sub, fetcher, now) {
 }
 function subscriptionParams(p, subscribing) {
   fields(p, subscribing ? ['name', 'arguments', 'delivery', 'cursor', 'ttlMs', 'maxAgeMs', '_meta'] : ['name', 'arguments', 'delivery', '_meta'], ['name', 'arguments', 'delivery']);
-  if (p.name !== RELAY_EVENT) throw new RelayError(-32011, 'Unknown event', {kind: 'event'});
-  eventArguments(p.arguments);
+  if (![RELAY_EVENT, RELAY_OWNER_EVENT].includes(p.name)) throw new RelayError(-32011, 'Unknown event', {kind: 'event'});
+  eventArguments(p.arguments, p.name);
   fields(p.delivery, subscribing ? ['mode', 'url', 'secret'] : ['mode', 'url'], subscribing ? ['mode', 'url', 'secret'] : ['mode', 'url']);
   if (p.delivery.mode !== 'webhook') throw new RelayError(-32014, 'Unsupported delivery mode', {feature: 'deliveryMode', value: p.delivery.mode});
   httpsURL(p.delivery.url);
@@ -136,14 +169,16 @@ function subscriptionParams(p, subscribing) {
 }
 export async function relaySubscribe(ctx, principal, p, env, fetcher = webhookTransport(env), now = Date.now()) {
   relayEventSchema(ctx); subscriptionParams(p, true);
-  if (principal.principal!==RELAY_OWNER || !principal.scopes.includes('relay:events')) throw new RelayError(-32012, 'Event scope required');
+  const requiredScope = eventScope(p.name);
+  if (!eventEnabled(env, p.name)) throw new RelayError(-32012, 'Event capability is not activated');
+  if (principal.principal!==RELAY_OWNER || !principal.scopes.includes(requiredScope)) throw new RelayError(-32012, 'Event scope required');
   if (!fetcher) throw new RelayError(-32014, 'Secure callback transport is not configured', {feature: 'webhookDelivery'});
   if (p.ttlMs !== undefined && p.ttlMs !== null && (!Number.isSafeInteger(p.ttlMs) || p.ttlMs <= 0)) throw new RelayError(-32602, 'Invalid subscription lifetime');
   if (p.maxAgeMs !== undefined && (!Number.isSafeInteger(p.maxAgeMs) || p.maxAgeMs < 0 || p.maxAgeMs > EVENT_RETENTION_MS)) throw new RelayError(-32602, 'Invalid replay age');
   const requested = cursor(p.cursor, 'relay1:');
   if (requested !== null && requested > latest(ctx)) throw new RelayError(-32602, 'Cursor is ahead of event history');
   const id = 'sub_' + await hash(canonical([principal.principal, p.delivery.url, p.name, p.arguments]));
-  if(!relayGrantActiveInStore(ctx,env,principal.grantId,'relay:events')||principal.accessHash&&!relayTokenActiveInStore(ctx,env,principal,'relay:events'))throw new RelayError(-32012,'Connection rotated or revoked');
+  if(!relayGrantActiveInStore(ctx,env,principal.grantId,requiredScope)||principal.accessHash&&!relayTokenActiveInStore(ctx,env,principal,requiredScope))throw new RelayError(-32012,'Connection rotated or revoked');
   const at=Math.max(now,Date.now());
   ctx.storage.sql.exec('DELETE FROM relay_activations WHERE expires_ms<=?',at);
   const prior = rows(ctx, 'SELECT * FROM relay_subscriptions WHERE id=?', id)[0];
@@ -158,8 +193,8 @@ export async function relaySubscribe(ctx, principal, p, env, fetcher = webhookTr
   try{
   await verifyCallback(ctx, sub, fetcher, now);
   // Verification awaits external I/O. Recheck revocation before activating storage.
-  if (!relayGrantActiveInStore(ctx,env,principal.grantId,'relay:events')) throw new RelayError(-32012, 'Connection revoked');
-  if(principal.accessHash&&!relayTokenActiveInStore(ctx,env,principal,'relay:events'))throw new RelayError(-32012,'Connection rotated or revoked');
+  if (!relayGrantActiveInStore(ctx,env,principal.grantId,requiredScope)) throw new RelayError(-32012, 'Connection revoked');
+  if(principal.accessHash&&!relayTokenActiveInStore(ctx,env,principal,requiredScope))throw new RelayError(-32012,'Connection rotated or revoked');
   const expires = Math.max(now,Date.now()) + Math.min(p.ttlMs ?? DEFAULT_TTL, DEFAULT_TTL);
   const result = ctx.storage.transactionSync(() => {
     if(!rows(ctx,'SELECT id FROM relay_activations WHERE id=? AND revision=? AND expires_ms>?',id,revision,Math.max(now,Date.now())).length)throw new RelayError(-32012,'Subscription activation canceled or superseded');
@@ -191,9 +226,10 @@ export async function relaySubscribe(ctx, principal, p, env, fetcher = webhookTr
 }
 export async function relayUnsubscribe(ctx, principal, p, now = Date.now(),env) {
   relayEventSchema(ctx); subscriptionParams(p, false);
-  if (principal.principal!==RELAY_OWNER||!principal.scopes.includes('relay:events')) throw new RelayError(-32012, 'Event scope required');
+  const requiredScope = eventScope(p.name);
+  if (principal.principal!==RELAY_OWNER||!principal.scopes.includes(requiredScope)) throw new RelayError(-32012, 'Event scope required');
   const id = 'sub_' + await hash(canonical([principal.principal, p.delivery.url, p.name, p.arguments]));
-  if(env&&!relayTokenActiveInStore(ctx,env,principal,'relay:events'))throw new RelayError(-32012,'Connection rotated or revoked');
+  if(env&&!relayTokenActiveInStore(ctx,env,principal,requiredScope))throw new RelayError(-32012,'Connection rotated or revoked');
   ctx.storage.transactionSync(() => {
     ctx.storage.sql.exec('DELETE FROM relay_activations WHERE id=?',id);
     ctx.storage.sql.exec('DELETE FROM relay_outbox WHERE subscription_id=?', id);
@@ -217,7 +253,7 @@ export async function drainRelayOutbox(ctx, env, fetcher = webhookTransport(env)
   // Cleanup also destroys expired callback secrets. Do not retain them in diagnostics.
   const stop = id => { sql.exec('DELETE FROM relay_outbox WHERE subscription_id=?', id); sql.exec('DELETE FROM relay_subscriptions WHERE id=?', id); };
   for (const sub of rows(ctx, 'SELECT * FROM relay_subscriptions')) {
-    if (sub.expires_ms <= now || !relayEnabled(env) || !relayGrantActiveInStore(ctx,env,sub.grant_id,'relay:events')) { stop(sub.id); continue; }
+    if (sub.expires_ms <= now || !relayEnabled(env) || !subscriptionActive(ctx,env,sub)) { stop(sub.id); continue; }
     if (sub.rotate_until && sub.rotate_until <= now) sql.exec('UPDATE relay_subscriptions SET previous_secret=NULL,rotate_until=NULL WHERE id=?', sub.id);
   }
   sql.exec('DELETE FROM relay_verified WHERE verified_until<=?', now);
@@ -225,6 +261,7 @@ export async function drainRelayOutbox(ctx, env, fetcher = webhookTransport(env)
   const expired = rows(ctx, 'SELECT COALESCE(MAX(seq),0) AS n FROM relay_events WHERE created_ms<=?', now - EVENT_RETENTION_MS)[0].n;
   if (expired) {
     sql.exec("INSERT OR REPLACE INTO relay_event_meta VALUES('floor',?)", expired);
+    sql.exec('DELETE FROM relay_owner_event_bodies WHERE event_id IN (SELECT event_id FROM relay_events WHERE seq<=?)', expired);
     sql.exec('DELETE FROM relay_events WHERE seq<=?', expired);
   }
   if (fetcher) {
@@ -236,16 +273,16 @@ export async function drainRelayOutbox(ctx, env, fetcher = webhookTransport(env)
       const item = rows(ctx, "SELECT * FROM relay_outbox WHERE subscription_id=? AND status IN ('pending','failed') ORDER BY event_seq LIMIT 1", sub.id)[0];
       if (!item || item.status !== 'pending' || item.next_attempt_ms > now) continue;
       const fresh = rows(ctx, "SELECT id FROM relay_subscriptions WHERE id=? AND generation=? AND state='active' AND expires_ms>?", sub.id, sub.generation, now)[0];
-      if (!fresh || !relayGrantActiveInStore(ctx,env,sub.grant_id,'relay:events')) continue;
+      if (!fresh || !subscriptionActive(ctx,env,sub)) continue;
       let status = 0, reason = null;
       try { status = (await signedPost(sub, item.body, JSON.parse(item.body).eventId, fetcher, now,()=>{
         const at=Math.max(now,Date.now());
-        return !!rows(ctx,"SELECT id FROM relay_subscriptions WHERE id=? AND generation=? AND state='active' AND expires_ms>?",sub.id,sub.generation,at).length&&relayGrantActiveInStore(ctx,env,sub.grant_id,'relay:events');
+        return !!rows(ctx,"SELECT id FROM relay_subscriptions WHERE id=? AND generation=? AND state='active' AND expires_ms>?",sub.id,sub.generation,at).length&&subscriptionActive(ctx,env,sub);
       })).status; }
       catch (error) { reason = failureReason(error); }
       // Unsubscribe/renew may have happened while delivery was in flight.
       if (!rows(ctx, 'SELECT id FROM relay_subscriptions WHERE id=? AND generation=?', sub.id, sub.generation).length) continue;
-      if(!relayGrantActiveInStore(ctx,env,sub.grant_id,'relay:events')){stop(sub.id);continue;}
+      if(!subscriptionActive(ctx,env,sub)){stop(sub.id);continue;}
       if (status >= 200 && status < 300) {
         ctx.storage.transactionSync(() => {
           sql.exec("UPDATE relay_outbox SET status='delivered',attempts=attempts+1,last_error=NULL WHERE subscription_id=? AND event_seq=?", sub.id, item.event_seq);
@@ -265,3 +302,4 @@ export async function drainRelayOutbox(ctx, env, fetcher = webhookTransport(env)
   // Missing deployment configuration must not produce a 50ms alarm busy loop.
   await scheduleRelayAlarm(ctx, now,fetcher?0:60000);
 }
+

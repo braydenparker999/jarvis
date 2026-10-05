@@ -4,7 +4,12 @@ export const RELAY_EVENT = 'relay.message.created';
 export const RELAY_INBOX = 'brayden-relay';
 export const RELAY_OAUTH_OBJECT = 'jarvis-shared-v2';
 export const RELAY_OWNER = 'github:183016859';
-export const RELAY_SCOPES = ['relay:read', 'relay:reply', 'relay:events'];
+export const RELAY_PUBLIC_SCOPES = ['relay:read', 'relay:reply', 'relay:events'];
+export const RELAY_OWNER_SCOPE = 'relay:owner';
+export const RELAY_OWNER_INBOX = 'brayden-owner';
+export const RELAY_OWNER_EVENT = 'relay.owner.message.created';
+// Advertising a new capability never expands a previously issued grant.
+export const RELAY_SCOPES = [...RELAY_PUBLIC_SCOPES, RELAY_OWNER_SCOPE];
 export const RELAY_VERSION = '2026-07-28';
 export const RELAY_CALLBACK = 'https://chatgpt.com/connector_platform_oauth_redirect';
 export const encoder = new TextEncoder();
