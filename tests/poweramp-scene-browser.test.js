@@ -185,7 +185,8 @@ test('Poweramp mandatory Chromium scene, seek, and art contracts',{timeout:12000
         await page.evaluate(origin=>{
           const track=PA.Engine.current;track.coverURL=null;track.artKey='fixture-scene-late-art';
           PA.UI.setArtEl(document.querySelector('#artA'),null);PA.UI.setArtEl(document.querySelector('#mini-art'),null);
-          const get=PA.IDB.get;window.lateArtRequested=false;window.lateArtResolvers=[];
+          const get=PA.IDB.get;window.lateArtRequested=false;window.lateArtResolvers=[];window.lateArtWrites={};
+          const writeArt=PA.UI.setArtEl;PA.UI.setArtEl=function(node,url){if(node.id==='artA'||node.id==='mini-art')lateArtWrites[node.id]=url;return writeArt.call(this,node,url);};
           PA.IDB.get=function(store,key){
             if(store==='art'&&String(key).startsWith('fixture-scene-late-art')){
               lateArtRequested=true;return new Promise(resolve=>lateArtResolvers.push(resolve));
@@ -203,14 +204,16 @@ test('Poweramp mandatory Chromium scene, seek, and art contracts',{timeout:12000
           await end();await frame();grab=await center('.player-scene-input');await start(grab.x,grab.y);await frame();
         }
         await page.evaluate(async()=>{await releaseLateArt();await lateArtRender;});
-        assert.ok((await page.locator('#artA').evaluate(n=>n.style.backgroundImage)).includes('/__fixture__/cover/1.svg'),'cover resolves before retirement');
+        const produced=await page.evaluate(async()=>{const image=new Image();image.src=lateArtWrites.artA;await image.decode();return {full:'url("'+lateArtWrites.artA+'")',mini:'url("'+lateArtWrites['mini-art']+'")',width:image.naturalWidth,height:image.naturalHeight};});
+        assert.ok(produced.width>0&&produced.height>0,'late producer returned decoded image bytes');
+        assert.equal(await page.locator('#artA').evaluate(n=>n.style.backgroundImage),produced.full,'cover resolves before retirement');
         assert.equal(await page.locator('#player-live-mask').evaluate(n=>n.hasAttribute('data-active')),true,'exercise a live scene, not a post-settle write');
         if(mode==='abort'){await page.evaluate(()=>window.dispatchEvent(new Event('blur')));await end();}
         else if(mode==='regrab'){await move(grab.x,grab.y+300);await frame();await end();}
         else await end();
         const expected=mode==='closing'||mode==='abort'||mode==='regrab'?'list':'player';await settled(expected);
-        assert.ok((await page.locator('#artA').evaluate(n=>n.style.backgroundImage)).includes('/__fixture__/cover/1.svg'),'cleanup keeps latest producer artwork');
-        assert.ok((await page.locator('#mini-art').evaluate(n=>n.style.backgroundImage)).includes('/__fixture__/cover/1.svg'),'mini keeps latest producer artwork');
+        assert.equal(await page.locator('#artA').evaluate(n=>n.style.backgroundImage),produced.full,'cleanup keeps exact latest producer artwork');
+        assert.equal(await page.locator('#mini-art').evaluate(n=>n.style.backgroundImage),produced.mini,'mini keeps exact latest producer artwork');
         assert.equal(await page.locator('#artA').evaluate(n=>n.style.opacity),'');
         assert.equal(await page.locator('#player-live-mask').evaluate(n=>n.hasAttribute('data-active')),false);
       });

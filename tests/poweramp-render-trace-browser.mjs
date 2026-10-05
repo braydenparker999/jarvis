@@ -13,7 +13,7 @@ import {chromium} from 'playwright-core';
 import {buildPreview} from '../scripts/build-poweramp-preview.mjs';
 
 const sourceHash='a6d0fb71df79ca8cc3d80627fb911e5894bb9fff465818ada78feb81b2688759';
-const expectedCandidateHash='4c73b07de1e2b75b9a79d416335024f87af12cf0dce855d1176c8864d39a1332';
+const expectedCandidateHash='2de70f44087e9cb31de0f1d10783b822c49dafacbccccf824c7889c2c23f7833';
 const baselineRef='04ef034738e6a3ccc2c03391ea9b00e0fc98ae66';
 const profile={viewport:{width:519,height:988},deviceScaleFactor:2.0818214416503906,isMobile:true,hasTouch:true};
 const executablePath=[process.env.JARVIS_CHROME,'/usr/bin/chromium','/usr/bin/google-chrome',chromium.executablePath()].find(p=>p&&existsSync(p));
@@ -132,10 +132,10 @@ async function runCase(browser,built,{name,cpu,variant},environment){
 }
 test('serial pinned-v8 versus isolated dim-layer candidate, reverse-order repeats, real raster attribution and pixel parity',{timeout:240000},async t=>{
   assert.ok(executablePath,'Chrome is mandatory');const directory=await mkdtemp(join(tmpdir(),'poweramp-render-trace-'));let browser;
-  const report={source:sourceHash,cases:[],scope:'Pinned v8 versus one opacity compositing hint on the existing global dim. No backdrop warm-up or snapshots before timing. Fresh contexts in both orders at 1x/4x, unchanged 220ms duration and pixel gates; no phone FPS claim.'};
+  const report={source:sourceHash,cases:[],scope:'Pinned v8 versus V9 dim compositing plus opacity-only canonical artwork ownership. No backdrop warm-up or snapshots before timing. Fresh contexts in both orders at 1x/4x, unchanged 220ms duration and pixel gates; no phone FPS claim.'};
   try{
     const names=['index.html','audio-analysis.js','audio-core.js','player.js'],inputs=names.map(name=>execFileSync('git',['show',baselineRef+':public/drawercast/'+name],{encoding:'utf8',maxBuffer:4_000_000}));
-    const baseline=await buildPreview(join(directory,'v8-baseline.html'),{inputs}),candidate=await buildPreview(join(directory,'candidate.html'));assert.equal(baseline.sourceHash,sourceHash,'pinned production v8 baseline');assert.equal(candidate.sourceHash,expectedCandidateHash,'exact isolated dim-layer production candidate');report.sources={baseline:baseline.sourceHash,candidate:candidate.sourceHash};report.previewSHA256={baseline:baseline.sha256,candidate:candidate.sha256};
+    const baseline=await buildPreview(join(directory,'v8-baseline.html'),{inputs}),candidate=await buildPreview(join(directory,'candidate.html'));assert.equal(baseline.sourceHash,sourceHash,'pinned production v8 baseline');assert.equal(candidate.sourceHash,expectedCandidateHash,'exact dim-layer and artwork-ownership production candidate');report.sources={baseline:baseline.sourceHash,candidate:candidate.sourceHash};report.previewSHA256={baseline:baseline.sha256,candidate:candidate.sha256};
     for(const built of [baseline,candidate]){let html=await readFile(built.output,'utf8');assert.equal(html.split('window.PA = {').length,2);html=html.replace('window.PA = {','window.fixtureTraceMotion=SharedPlayerMotion;window.fixtureTraceScene=ScreenDrag;window.PA = {');await writeFile(built.output,html);}
     report.measuredSHA256={baseline:hash(await readFile(baseline.output)),candidate:hash(await readFile(candidate.output))};
     browser=await chromium.launch({executablePath,headless:true,args:['--no-sandbox']});const info=await browser.newBrowserCDPSession(),environment={version:await info.send('Browser.getVersion'),system:await info.send('SystemInfo.getInfo')};report.environment=environment;
