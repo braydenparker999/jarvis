@@ -124,13 +124,15 @@ export async function relayOAuth(request, env, fetcher = fetch) {
       const code = url.searchParams.get('code');
       if (typeof code !== 'string' || !/^[A-Za-z0-9_-]{1,200}$/.test(code)) return err('invalid_request', 400, 'github_code_invalid');
       processingFailure = 'github_token_exchange_unavailable';
-      const tokenResponse = await fetcher('https://github.com/login/oauth/access_token', {method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10000), headers: {'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json'}, body: new URLSearchParams({client_id: env.RELAY_GITHUB_CLIENT_ID, client_secret: env.RELAY_GITHUB_CLIENT_SECRET, code, redirect_uri: issuer + '/relay/oauth/github/callback', code_verifier: login.verifier}).toString()});
+      // Workers rejects redirect:'error'. Manual never forwards credentials to
+      // a redirect target; the existing !ok checks below reject every 3xx.
+      const tokenResponse = await fetcher('https://github.com/login/oauth/access_token', {method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(10000), headers: {'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json'}, body: new URLSearchParams({client_id: env.RELAY_GITHUB_CLIENT_ID, client_secret: env.RELAY_GITHUB_CLIENT_SECRET, code, redirect_uri: issuer + '/relay/oauth/github/callback', code_verifier: login.verifier}).toString()});
       if (!tokenResponse.ok) return err('temporarily_unavailable', 503, 'github_token_endpoint_error');
       processingFailure = 'github_token_response_invalid';
       const githubToken = JSON.parse(await boundedText(tokenResponse, 65536));
       if (typeof githubToken.access_token !== 'string' || githubToken.access_token.length > 1000 || githubToken.token_type?.toLowerCase() !== 'bearer') return err('access_denied', 403, 'github_authorization_failed');
       processingFailure = 'github_identity_lookup_unavailable';
-      const userResponse = await fetcher('https://api.github.com/user', {redirect: 'error', signal: AbortSignal.timeout(10000), headers: {Authorization: 'Bearer ' + githubToken.access_token, Accept: 'application/vnd.github+json', 'User-Agent': 'jarvis-relay-identity'}});
+      const userResponse = await fetcher('https://api.github.com/user', {redirect: 'manual', signal: AbortSignal.timeout(10000), headers: {Authorization: 'Bearer ' + githubToken.access_token, Accept: 'application/vnd.github+json', 'User-Agent': 'jarvis-relay-identity'}});
       if (!userResponse.ok) return err('access_denied', 403, 'github_identity_endpoint_error');
       processingFailure = 'github_identity_response_invalid';
       const user = JSON.parse(await boundedText(userResponse, 65536));
