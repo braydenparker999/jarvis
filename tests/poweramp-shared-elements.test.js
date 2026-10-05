@@ -385,7 +385,17 @@ test('live progress transforms do not invalidate invariant siblings and remain f
 });
 
 test('a mini contact restamp cannot invalidate prepared invariant child CSS',()=>{
-  const h=appearanceHarness(),slide=h.context.document.createElement('div');slide.id='mini-slide';slide.style.transform='';slide.style.transition='none';h.prepare();const oldValue=slide.style.cssText;slide.style.transition='none';
+  const h=appearanceHarness(),slide=h.context.document.createElement('div');slide.classList.add('mini-swipe-content');slide.style.transform='';slide.style.transition='none';h.prepare();const oldValue=slide.style.cssText;slide.style.transition='none';
   const same={type:'attributes',attributeName:'style',target:slide,oldValue};assert.equal(h.shared.appearanceChanges([same]).length,0,'motion-owned restamp does not change cached child appearance');h.shared.preparedAppearance.observer.records.push(same);h.scene.begin('player',-1);assert.equal(h.shared.appearanceStats.hits,1);
   const before=slide.style.cssText;slide.style.color='blue';assert.equal(h.shared.appearanceChanges([{...same,oldValue:before}]).length,1,'inherited style changes still invalidate');
+});
+
+test('the actual mini gesture start retains and consumes prepared appearance',()=>{
+  const h=appearanceHarness(),mini=h.$('#mini');Object.defineProperty(mini,'firstChild',{get:()=>mini.children[0]||null});
+  h.context.el=(tag,classes)=>{const node=h.context.document.createElement(tag);node.className=classes;return node;};
+  vm.runInContext(section('function setupMiniGestures(){','function setupPlayerSwipeDown(){')+'\nsetupMiniGestures();',h.context);
+  h.prepare();const job=h.shared.preparedAppearance,slide=mini.children[0],style=slide.style;assert.equal(slide.className,'mini-swipe-content');assert.equal(slide.id,'','actual wrapper is class-based');
+  slide.style=new Proxy(style,{set(target,key,value){const oldValue=target.cssText;target[key]=value;job.observer.records.push({type:'attributes',attributeName:'style',target:slide,oldValue});return true;}});
+  mini.fire('pointerdown',{pointerType:'touch',target:h.$('#mini-title')});mini.fire('pointerup',{pointerType:'touch',target:h.$('#mini-title')});
+  assert.equal(h.shared.appearanceStats.hits,1,'real start/end consume the same one-use entry');assert.equal(h.shared.appearanceStats.cold,0);assert.equal(h.nav.cur,'player');
 });

@@ -5883,13 +5883,13 @@ const SharedPlayerMotion={
     return [...nodes].filter(node=>!dynamic.some(root=>root===node||root.contains(node)||node.contains(root)));
   },
   appearanceChanges(records){return records.filter(record=>{
-    const target=record.target?.nodeType===3?record.target.parentElement:record.target,id=target?.id;
+    const target=record.target?.nodeType===3?record.target.parentElement:record.target,id=target?.id,parentMotion=!!target?.classList?.contains('mini-swipe-content');
     if(record.type==='attributes'&&record.oldValue!==undefined&&target?.getAttribute(record.attributeName)===record.oldValue)return false;
-    if(record.type==='attributes'&&record.attributeName==='style'&&['mini-fill','seek-fill','seek-knob','mini-slide'].includes(id)){
+    if(record.type==='attributes'&&record.attributeName==='style'&&(['mini-fill','seek-fill','seek-knob'].includes(id)||parentMotion)){
       // Only compositor progress transforms are exempt; another declaration
       // on the same node still invalidates the invariant sibling cache.
       const old=document.createElement('span').style;old.cssText=record.oldValue||'';const current=target.style;
-      const rest=style=>{const values=[];for(let i=0;i<style.length;i++){const key=style[i];if(key!=='transform'&&!(id==='mini-slide'&&(key==='transition'||key.startsWith('transition-'))))values.push(key+':'+style.getPropertyValue(key)+'!'+style.getPropertyPriority(key));}return values.sort().join('\0');};return rest(old)!==rest(current);
+      const rest=style=>{const values=[];for(let i=0;i<style.length;i++){const key=style[i];if(key!=='transform'&&!(parentMotion&&(key==='transition'||key.startsWith('transition-'))))values.push(key+':'+style.getPropertyValue(key)+'!'+style.getPropertyPriority(key));}return values.sort().join('\0');};return rest(old)!==rest(current);
     }
     if(record.type==='attributes'&&['mini-seek','seek'].includes(id)&&['aria-valuenow','aria-valuetext','aria-valuemax'].includes(record.attributeName))return false;
     if(['characterData','childList'].includes(record.type)&&['t-cur','t-dur'].includes(id))return false;
@@ -5911,7 +5911,7 @@ const SharedPlayerMotion={
       for(const selector of ['#bg','#sc-player','#mini']){const node=$(selector);if(node)job.observer.observe(node,{attributes:true,attributeOldValue:true,childList:true,characterData:true,subtree:true});}
       for(const node of [document.head,document.documentElement,document.body,$('#app')].filter(Boolean))job.observer.observe(node,node===document.head?{attributes:true,childList:true,characterData:true,subtree:true}:{attributes:true,childList:true});
     };
-    job.observer=new MutationObserver(records=>{const changed=this.appearanceChanges(records);if(!changed.length||this.appearanceJob!==job&&this.preparedAppearance!==job)return;this.appearanceStats.lastMiss={reason:'mutation',node:changed[0].target?.id||changed[0].target?.parentElement?.id||null,attribute:changed[0].attributeName||changed[0].type};this.appearanceStats.invalidated++;this.scheduleAppearance();});
+    job.observer=new MutationObserver(records=>{const changed=this.appearanceChanges(records);if(!changed.length||this.appearanceJob!==job&&this.preparedAppearance!==job)return;this.appearanceStats.lastMiss={reason:'mutation',node:changed[0].target?.id||changed[0].target?.parentElement?.id||null,targetClass:changed[0].target?.className||null,attribute:changed[0].attributeName||changed[0].type};this.appearanceStats.invalidated++;this.scheduleAppearance();});
     const step=deadline=>{
       job.idle=0;if(this.appearanceJob!==job||!this.appearanceEligible()){this.clearAppearance();return;}
       if(document.getAnimations?.().some(animation=>animation.playState==='running'||animation.playState==='pending')){job.nodes=null;job.index=0;job.cache.clear();job.timer=setTimeout(()=>{job.timer=0;if(this.appearanceJob===job)job.idle=requestIdleCallback(step);},100);return;}
