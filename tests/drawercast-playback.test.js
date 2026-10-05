@@ -10,7 +10,8 @@ function harness(){
     SourceLibrary:{kind:t=>t?.source||(t?.remote?'server':'local')},R2Source:{status:''},URL:{revokeObjectURL:u=>revoked.push(u)},
     SET:{fadeOnPause:false},UI:{renderPlayState(){renders++;},renderProgress(){},startLoop(){}},toast(){}});
   const {Engine,PlaybackTransitions}=vm.runInContext(block('const Engine = {','function SET_shuffleOn()')+
-    block('const PlaybackTransitions={','function installPlaybackRework()')+'\n({Engine,PlaybackTransitions})',context);
+    block('const PlaybackTransitions={','function installPlaybackRework()')+
+    block('function restoreTrackStepOrigin(','/* Shared finger tracking:')+'\n({Engine,PlaybackTransitions})',context);
   const audio=src=>({src,preload:'auto',paused:false,loads:0,events:{},pause(){this.paused=true;},removeAttribute(){this.src='';},load(){this.loads++;},addEventListener(name,fn){this.events[name]=fn;},removeEventListener(name){delete this.events[name];},play(){return {catch:fn=>{this.reject=fn;}};}});
   Engine.els=[audio('http://music.example.test/audio/current'),audio('http://music.example.test/audio/next')];
   const ensureCtx=Engine.ensureCtx;

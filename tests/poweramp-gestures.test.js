@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {readFileSync} from 'node:fs';
-const source=readFileSync(new URL('../public/drawercast/player.js',import.meta.url),'utf8');
+const source=readFileSync(process.env.POWERAMP_PLAYER_FILE||new URL('../public/drawercast/player.js',import.meta.url),'utf8');
 function node(){
   const handlers={},classes=new Set();
   return {handlers,style:{setProperty(){}},dataset:{},children:[],clientWidth:393,clientHeight:700,scrollTop:0,hidden:false,
@@ -18,9 +18,9 @@ function harness(){
  let now=1000,seq=0;const timers=new Map(),frames=new Map(),nodes=new Map(),calls=[];
  const Engine={current:{id:'one'},_playRequest:1,queue:[],pos:0,duration:()=>100,time:()=>20,next:()=>calls.push('next'),prev:()=>calls.push('prev'),toggle:()=>calls.push('toggle'),seek:v=>calls.push(['seek',v]),seekBy:v=>calls.push(['seekBy',v])};
  const doc=node();doc.body=node();const win=node();win.matchMedia=()=>({matches:false});
- const ScreenDrag={state:null,pause(){},returnInterrupted(){return false;},abort(){this.state=null},begin(target,direction){this.state??={target,direction};},move(){},end(commit){calls.push(['navigate',commit,this.state?.target,this.state?.direction]);this.state=null;},cancel(){this.state=null;}};
+ const ScreenDrag={state:null,complete(){this.state=null;},pause(){},returnInterrupted(){return false;},abort(){this.state=null},begin(target,direction){this.state??={target,direction};},move(){},end(commit){calls.push(['navigate',commit,this.state?.target,this.state?.direction]);this.state=null;},cancel(){this.state=null;}};
  const context=vm.createContext({Engine,ScreenDrag,SCREENS:{player:'#sc-player',list:'#sc-list'},Sheets:{request:0},SET:{animations:'disabled',longPressMenu:true,longPressMs:480,swipeToChange:true,doubleTapPause:true,seekStyle:'wave',seekStep:10},NativeSettings:{values:{}},Nav:{cur:'player',lastLibrary:'library',go:s=>calls.push(['nav',s])},UI:{setArtEl(){},renderProgress(){},drawViz(){}},
- SwipeArt:{ready:new Map(),neighbors(){},warm:()=>Promise.resolve(null)},peekTrack:d=>({id:d>0?'two':'zero',title:'Other'}),ctxMenuTrack:()=>calls.push('menu'),playerSwipeUp:()=>calls.push('swipeUp'),trackSub:()=>'',el:()=>node(),vibrate(){},proSkip:d=>calls.push(['category',d]),clamp:(v,a,b)=>Math.max(a,Math.min(b,v)),fmtTime:String,Waveform:{span:()=>100},
+ SwipeArt:{ready:new Map(),cached(t){return this.ready.get(t?.id)||null;},decode:()=>Promise.resolve(),neighbors(){},warm:()=>Promise.resolve(null)},peekTrack:d=>({id:d>0?'two':'zero',title:'Other'}),resolveTrackStep:d=>({track:{id:d>0?'two':'zero',title:'Other'},direction:d,delta:d,kind:'advance'}),commitTrackStep:step=>{step.direction>0?Engine.next():Engine.prev();return true;},ctxMenuTrack:()=>calls.push('menu'),playerSwipeUp:()=>calls.push('swipeUp'),trackSub:()=>'',el:()=>node(),vibrate(){},proSkip:d=>calls.push(['category',d]),clamp:(v,a,b)=>Math.max(a,Math.min(b,v)),fmtTime:String,Waveform:{span:()=>100},
  performance:{now:()=>now},Date:{now:()=>now},setTimeout:(fn,ms=0)=>{timers.set(++seq,{fn,at:now+ms});return seq},clearTimeout:id=>timers.delete(id),setInterval:(fn,ms)=>{timers.set(++seq,{fn,at:now+ms,ms});return seq},clearInterval:id=>timers.delete(id),requestAnimationFrame:fn=>{frames.set(++seq,fn);return seq},cancelAnimationFrame:id=>frames.delete(id),matchMedia:()=>({matches:false}),document:doc,window:win,innerHeight:850,
  $:s=>{if(!nodes.has(s))nodes.set(s,node());return nodes.get(s)},$$:()=>[]});
  vm.runInContext(source.slice(source.indexOf('const InputLifecycle='),source.indexOf('const Nav='))+'\nglobalThis.lifecycle=InputLifecycle;',context);
@@ -136,10 +136,10 @@ test('vertical settling resumes and reverses from the displayed position without
  drag.move(-80);assert.equal(drag.state.progress,220);assert.equal(to.style.transform,'translateY(-480px)');drag.end(false,-.6);h.advance(600);
  assert.equal(nav.cur,'player');assert.equal(to.hidden,true);
 });
-test('a held contact interrupts vertical navigation and release returns to the current screen',()=>{
+test('a held contact interrupts vertical navigation and release resumes the owned destination',()=>{
  const h=harness(),nav=navigation(h),drag=h.context.screenDrag;h.context.SET.animations='normal';drag.begin('library',1);drag.move(180);drag.end(true,.6);
- const to=h.context.$('#sc-library');h.context.getComputedStyle=n=>({transform:n===to?'matrix(1,0,0,1,0,-400)':n.style.transform});drag.pause();h.advance(600);assert.equal(nav.cur,'player');
- assert.equal(drag.returnInterrupted(),true);h.advance(600);assert.equal(nav.cur,'player');assert.equal(to.hidden,true);
+ const to=h.context.$('#sc-library');h.context.getComputedStyle=n=>({transform:n===to?'matrix(1,0,0,1,0,-400)':n.style.transform});drag.pause();h.advance(600);assert.equal(nav.cur,'library');
+ assert.equal(drag.returnInterrupted(),true);h.advance(600);assert.equal(nav.cur,'library');assert.equal(to.hidden,false);assert.equal(h.context.$('#sc-player').hidden,true);
 });
 test('visual offsets support both 2D and 3D transform matrices',()=>{
  const h=harness();motion(h);const n=node();h.context.getComputedStyle=()=>({transform:'matrix3d(1,0,0,0,0,1,0,0,0,0,1,0,12,-34,0,1)'});
@@ -283,4 +283,80 @@ test('playlist rows expose the playlist name without throwing',()=>{
  const h=harness();h.context.icoHTML=()=>'';h.context.esc=String;const start=source.indexOf('playlistList:function('),end=source.indexOf('  buildAlpha:',start);
  vm.runInContext('globalThis.playlists='+source.slice(start+'playlistList:'.length,end).trim().replace(/,$/,'')+';',h.context);
  assert.match(h.context.playlists([{name:'Favorites',ids:['song']}]).innerHTML,/aria-label="Favorites"/);
+});
+
+// A release can report newer coordinates than the last delivered move.
+// Test the actual handler rather than assuming browser move and paint ordering.
+test('waveform release commits its final coordinate rather than its last move preview',()=>{
+ const h=seek(),n=h.nodes.get('#transport');n.fire('pointerdown',{clientX:150});n.fire('pointermove',{clientX:100});h.paint();n.fire('pointerup',{clientX:50});
+ assert.equal(h.calls.length,1);assert.equal(h.calls[0][0],'seek');assert.ok(Math.abs(h.calls[0][1]-(20+100/393*100))<1e-8);assert.equal(h.context.UI.seekDragging,false);
+});
+test('waveform movement first observed at release is a seek and cannot become a transport tap',()=>{
+ const h=seek(),n=h.nodes.get('#transport');n.fire('pointerdown',{clientX:150});n.fire('pointerup',{clientX:50});
+ assert.equal(h.calls.length,1);assert.ok(Math.abs(h.calls[0][1]-(20+100/393*100))<1e-8);assert.equal(n.fire('click').prevented,true);
+});
+test('waveform static rail release uses its cached geometry and final position',()=>{
+ const h=seek(),n=h.nodes.get('#transport');h.context.SET.nativeSeekbar=1;let reads=0;n.getBoundingClientRect=()=>{reads++;return {left:10,width:400};};
+ n.fire('pointerdown',{clientX:100});n.fire('pointermove',{clientX:200});h.paint();n.fire('pointerup',{clientX:310});
+ assert.deepEqual(h.calls,[['seek',75]]);assert.equal(reads,1,'only the contact start measures the timeline');
+});
+test('release-coordinate waveform seek cannot survive a song change, other pointer, or cancellation',()=>{
+ for(const mode of ['song','pointer','cancel']){const h=seek(),n=h.nodes.get('#transport');n.fire('pointerdown',{clientX:150});n.fire('pointermove',{clientX:100});
+  if(mode==='song')h.Engine.current={id:'replacement'};n.fire(mode==='cancel'?'pointercancel':'pointerup',{clientX:50,...(mode==='pointer'?{pointerId:2}:{})});assert.deepEqual(h.calls,[]);
+ }
+});
+test('seek rail caches geometry for the whole contact and commits its release coordinate',()=>{
+ const h=seek(),n=h.nodes.get('#seek');let reads=0;n.getBoundingClientRect=()=>{reads++;return {left:10,width:400};};
+ n.fire('pointerdown',{clientX:100});n.fire('pointermove',{clientX:200});n.fire('pointerup',{clientX:310});
+ assert.deepEqual(h.calls,[['seek',75]]);assert.equal(reads,1);
+});
+
+function transportButton(action){
+ const h=harness(),button=node();button.dataset.act=action;h.context.button=button;
+ run(h,'function bindTapButton(','function paintSeekFraction(');vm.runInContext('bindTransportButton(button)',h.context);return {h,button};
+}
+test('transport next and previous act exactly once on touch release without compatibility click',()=>{
+ for(const action of ['next','prev']){const {h,button}=transportButton(action);button.fire('pointerdown');h.advance(30);button.fire('pointerup');assert.deepEqual(h.calls,[action]);assert.equal(button.fire('click').prevented,true);}
+});
+test('transport touch movement, cancellation, capture loss, and app blur cannot skip a song',()=>{
+ for(const mode of ['movement','cancel','capture','blur']){const {h,button}=transportButton('next');button.fire('pointerdown');
+  if(mode==='movement')button.fire('pointermove',{clientX:170});else if(mode==='cancel')button.fire('pointercancel');else if(mode==='capture')button.fire('lostpointercapture');else h.win.fire('blur');
+  button.fire('pointerup');assert.deepEqual(h.calls,[]);assert.equal(button.fire('click').prevented,true);
+ }
+});
+test('transport release during a waveform scrub is suppressed but a fresh tap works',()=>{
+ const {h,button}=transportButton('next');button.fire('pointerdown');h.context.UI.seekDragging=true;button.fire('pointerup');assert.deepEqual(h.calls,[]);
+ h.context.UI.seekDragging=false;button.fire('pointerdown');button.fire('pointerup');assert.deepEqual(h.calls,['next']);
+});
+test('transport rewind and fast-forward hold seek once and cannot also skip a category',()=>{
+ for(const [action,amount] of [['ff',10],['rew',-10]]){const {h,button}=transportButton(action);button.fire('pointerdown');h.advance(460);assert.deepEqual(h.calls,[['seekBy',amount]]);
+  button.fire('pointerup');assert.deepEqual(h.calls,[['seekBy',amount]]);assert.equal(button.fire('click').prevented,true);
+ }
+});
+test('transport keyboard activation works after an owned touch and during click suppression',()=>{
+ const {h,button}=transportButton('next');button.fire('pointerdown');button.fire('pointerup');const event=button.fire('click',{detail:0});assert.notEqual(event.prevented,true);button.onclick(event);assert.deepEqual(h.calls,['next','next']);
+});
+
+test('a new seek or control contact cancels a pending artwork skip before it can replace the selected song',()=>{
+ const h=art();h.context.SET.animations='normal';const stage=h.nodes.get('#artstage'),outside=node();stage.contains=target=>target===stage;
+ swipe(h,stage,-120);assert.ok(h.context.lifecycle.motionSettle);
+ h.doc.fire('pointerdown',{target:outside,pointerId:8});h.advance(600);assert.deepEqual(h.calls,[]);assert.equal(h.nodes.get('#artA').style.transform,'');assert.equal(h.context.lifecycle.motionSettle,null);
+ h.doc.fire('pointerup',{pointerId:8});swipe(h,stage,-120);h.advance(600);assert.deepEqual(h.calls,['next']);
+});
+test('a new outside contact cancels pending mini-player track settling without losing normal navigation',()=>{
+ const h=mini();h.context.SET.animations='normal';const n=h.nodes.get('#mini'),outside=node();n.contains=target=>target===n;
+ swipe(h,n,-120);assert.ok(h.context.lifecycle.motionSettle);h.doc.fire('pointerdown',{target:outside,pointerId:8});h.advance(600);assert.deepEqual(h.calls,[]);assert.equal(n.children[0].style.transform,'');
+ h.doc.fire('pointerup',{pointerId:8});n.fire('pointerdown');h.advance(340);n.fire('pointerup');assert.deepEqual(h.calls,[['nav','player']]);
+});
+test('stationary mini-player releases have no gap between tap and long-press duration',()=>{
+ for(const ms of [280,340,480,700]){const h=mini(),n=h.nodes.get('#mini');n.fire('pointerdown');h.advance(ms);n.fire('pointerup');assert.deepEqual(h.calls,[['nav','player']],String(ms));}
+});
+test('mini seek and play children cancel pending mini swipes before excluded controls take ownership',()=>{
+ for(const selector of ['#mini-play','.mini-seek']){const h=mini();h.context.SET.animations='normal';const n=h.nodes.get('#mini'),control=node();control.closest=s=>s==='#mini-play,.mini-seek'?control:null;
+   swipe(h,n,-120);h.doc.fire('pointerdown',{target:control,pointerId:8});h.advance(600);assert.deepEqual(h.calls,[],selector);assert.equal(h.context.lifecycle.motionSettle,null);
+ }
+});
+test('artwork menu-button contact cancels pending art swipe instead of allowing an old skip',()=>{
+ const h=art();h.context.SET.animations='normal';const stage=h.nodes.get('#artstage'),button=node();button.closest=s=>s==='button'?button:null;
+ swipe(h,stage,-120);h.doc.fire('pointerdown',{target:button,pointerId:8});h.advance(600);assert.deepEqual(h.calls,[]);assert.equal(h.context.lifecycle.motionSettle,null);
 });
