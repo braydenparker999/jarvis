@@ -1,16 +1,23 @@
-name: Validate R2 migration and playback
+name: Validate equivalent combined release on Ubuntu 24
 
 on:
-  pull_request:
   push:
-    branches: [main]
+    branches: [fix/relay-owner-stepup-consent]
+    paths: ['.github/workflows/validate-relay-stepup-equivalent.yml']
 
 permissions:
   contents: read
 
+# One bounded validation-only recovery for the queued ubuntu-latest check.
+# Step arrays, Node/Python versions and evidence match current validate-r2.yml.
+concurrency:
+  group: relay-stepup-equivalent-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    if: github.repository == 'braydenparker999/jarvis' && github.actor_id == '183016859' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
