@@ -19,7 +19,7 @@ const registry = async (env, body) => {
 };
 const read = (env, key) => registry(env, {op: 'get', key}).then(x => x.value);
 const put = (env, key, value, expiresAt, category) => registry(env, {op: 'put', key, value, expiresAt, category});
-const consume = (env, key, match = {}) => registry(env, {op: 'consume', key, match}).then(x => x.value);
+const consume = (env, key, match = {}) => registry(env, {op: 'consume', key, match});
 function authParamsError(b, client, env) {
   // Fixed diagnostic codes only: never echo IDs, URIs, state, PKCE or input.
   if (!client || !b.client_id) return 'client_not_registered';
@@ -78,6 +78,7 @@ export async function relayOAuth(request, env, fetcher = fetch) {
   if (!relayEnabled(env)) return err('temporarily_unavailable', 503);
   if (path === protectedPath && request.method === 'GET') return json({resource, authorization_servers: [issuer + '/relay'], scopes_supported: RELAY_SCOPES});
   if (path === metadataPath && request.method === 'GET') return json({issuer: issuer + '/relay', authorization_endpoint: issuer + '/relay/oauth/authorize', token_endpoint: issuer + '/relay/oauth/token', registration_endpoint: issuer + '/relay/oauth/register', revocation_endpoint: issuer + '/relay/oauth/revoke', response_types_supported: ['code'], grant_types_supported: ['authorization_code', 'refresh_token'], token_endpoint_auth_methods_supported: ['none'], code_challenge_methods_supported: ['S256'], authorization_response_iss_parameter_supported: true, scopes_supported: RELAY_SCOPES});
+  let processingFailure;
   try {
     if (path === '/relay/oauth/register' && request.method === 'POST') {
       if (!request.headers.get('Content-Type')?.startsWith('application/json')) return err('invalid_client_metadata');
@@ -110,41 +111,57 @@ export async function relayOAuth(request, env, fetcher = fetch) {
       return redirect(github.href, {'Set-Cookie': cookieHeader(browser)});
     }
     if (path === '/relay/oauth/github/callback' && request.method === 'GET') {
-      if([...url.searchParams.keys()].some(k=>url.searchParams.getAll(k).length!==1))return err();
+      processingFailure = 'github_callback_processing_failed';
+      if([...url.searchParams.keys()].some(k=>url.searchParams.getAll(k).length!==1))return err('invalid_request', 400, 'callback_duplicate_parameter');
       const state = url.searchParams.get('state'), browser = cookie(request);
-      if (!/^[a-f0-9]{64}$/.test(state || '') || !/^[a-f0-9]{64}$/.test(browser || '')) return err();
-      const login = await consume(env, 'login:' + await hash(state), {browser: await hash(browser)});
-      if (!login) return err();
+      if (!/^[a-f0-9]{64}$/.test(state || '')) return err('invalid_request', 400, 'callback_state_invalid');
+      if (browser === undefined) return err('invalid_request', 400, 'login_cookie_missing');
+      if (!/^[a-f0-9]{64}$/.test(browser)) return err('invalid_request', 400, 'login_cookie_invalid');
+      processingFailure = 'login_registry_unavailable';
+      const consumed = await consume(env, 'login:' + await hash(state), {browser: await hash(browser)}), login = consumed.value;
+      if (!login) return err('invalid_request', 400, consumed.reason === 'binding_mismatch' ? 'login_cookie_mismatch' : 'login_state_expired_or_used');
       if (url.searchParams.has('error')) return oauthRedirect(login.p, env, {error: 'access_denied'});
       const code = url.searchParams.get('code');
-      if (typeof code !== 'string' || !/^[A-Za-z0-9_-]{1,200}$/.test(code)) return err();
+      if (typeof code !== 'string' || !/^[A-Za-z0-9_-]{1,200}$/.test(code)) return err('invalid_request', 400, 'github_code_invalid');
+      processingFailure = 'github_token_exchange_unavailable';
       const tokenResponse = await fetcher('https://github.com/login/oauth/access_token', {method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10000), headers: {'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json'}, body: new URLSearchParams({client_id: env.RELAY_GITHUB_CLIENT_ID, client_secret: env.RELAY_GITHUB_CLIENT_SECRET, code, redirect_uri: issuer + '/relay/oauth/github/callback', code_verifier: login.verifier}).toString()});
-      if (!tokenResponse.ok) return err('temporarily_unavailable', 503);
+      if (!tokenResponse.ok) return err('temporarily_unavailable', 503, 'github_token_endpoint_error');
+      processingFailure = 'github_token_response_invalid';
       const githubToken = JSON.parse(await boundedText(tokenResponse, 65536));
-      if (typeof githubToken.access_token !== 'string' || githubToken.access_token.length > 1000 || githubToken.token_type?.toLowerCase() !== 'bearer') return err('access_denied', 403);
+      if (typeof githubToken.access_token !== 'string' || githubToken.access_token.length > 1000 || githubToken.token_type?.toLowerCase() !== 'bearer') return err('access_denied', 403, 'github_authorization_failed');
+      processingFailure = 'github_identity_lookup_unavailable';
       const userResponse = await fetcher('https://api.github.com/user', {redirect: 'error', signal: AbortSignal.timeout(10000), headers: {Authorization: 'Bearer ' + githubToken.access_token, Accept: 'application/vnd.github+json', 'User-Agent': 'jarvis-relay-identity'}});
-      if (!userResponse.ok) return err('access_denied', 403);
+      if (!userResponse.ok) return err('access_denied', 403, 'github_identity_endpoint_error');
+      processingFailure = 'github_identity_response_invalid';
       const user = JSON.parse(await boundedText(userResponse, 65536));
       // Upstream token is never persisted or forwarded to the MCP client.
-      if (user.id !== 183016859) return err('access_denied', 403);
+      if (user.id !== 183016859) return err('access_denied', 403, 'github_owner_not_allowed');
       const csrf = random(), session = random();
+      processingFailure = 'consent_registry_unavailable';
       const stored = await put(env, 'consent:' + await hash(session), {p: login.p, csrf}, Date.now() + SESSION_MS, 'session');
-      if (stored.error) return err('temporarily_unavailable', 503);
+      if (stored.error) return err('temporarily_unavailable', 503, 'consent_capacity_unavailable');
+      processingFailure = 'consent_response_unavailable';
       const response = consentPage(csrf), headers = new Headers(response.headers); headers.set('Set-Cookie', cookieHeader(session));
       return new Response(response.body, {status: 200, headers});
     }
     if (path === '/relay/oauth/approve' && request.method === 'POST') {
-      if (request.headers.get('Origin') !== issuer || !request.headers.get('Content-Type')?.startsWith('application/x-www-form-urlencoded')) return err('access_denied', 403);
+      processingFailure = 'consent_request_processing_failed';
+      if (request.headers.get('Origin') !== issuer || !request.headers.get('Content-Type')?.startsWith('application/x-www-form-urlencoded')) return err('access_denied', 403, 'consent_origin_or_content_type_invalid');
       const session = cookie(request),params=new URLSearchParams(await boundedText(request));
-      if([...params.keys()].some(k=>params.getAll(k).length!==1))return err();
+      if([...params.keys()].some(k=>params.getAll(k).length!==1))return err('invalid_request', 400, 'consent_duplicate_parameter');
       const b = Object.fromEntries(params);
-      if (!/^[a-f0-9]{64}$/.test(session || '') || !/^[a-f0-9]{64}$/.test(b.csrf || '') || !['allow', 'deny'].includes(b.decision)) return err();
-      const consent = await consume(env, 'consent:' + await hash(session), {csrf: b.csrf});
-      if (!consent) return err();
+      if (session === undefined) return err('invalid_request', 400, 'consent_cookie_missing');
+      if (!/^[a-f0-9]{64}$/.test(session)) return err('invalid_request', 400, 'consent_cookie_invalid');
+      if (!/^[a-f0-9]{64}$/.test(b.csrf || '')) return err('invalid_request', 400, 'consent_csrf_invalid');
+      if (!['allow', 'deny'].includes(b.decision)) return err('invalid_request', 400, 'consent_decision_invalid');
+      processingFailure = 'consent_registry_unavailable';
+      const consumed = await consume(env, 'consent:' + await hash(session), {csrf: b.csrf}), consent = consumed.value;
+      if (!consent) return err('invalid_request', 400, consumed.reason === 'binding_mismatch' ? 'consent_csrf_mismatch' : 'consent_session_expired_or_used');
       if (b.decision === 'deny') return oauthRedirect(consent.p, env, {error: 'access_denied'});
       const code = random(), grantId = random();
+      processingFailure = 'consent_grant_processing_failed';
       const stored = await registry(env, {op: 'authorize', grantId, codeKey: 'code:' + await hash(code), params: consent.p, resource});
-      if (stored.error) return err('temporarily_unavailable', 503);
+      if (stored.error) return err('temporarily_unavailable', 503, 'consent_grant_capacity_unavailable');
       return oauthRedirect(consent.p, env, {code});
     }
     if (path === '/relay/oauth/token' && request.method === 'POST') {
@@ -177,7 +194,7 @@ export async function relayOAuth(request, env, fetcher = fetch) {
       return json({});
     }
     return err('not_found', 404);
-  } catch { return err('invalid_request', 400, path === '/relay/oauth/authorize' ? 'authorization_processing_failed' : undefined); }
+  } catch { return err('invalid_request', 400, processingFailure || (path === '/relay/oauth/authorize' ? 'authorization_processing_failed' : undefined)); }
 }
 
 // Every exchange/rotation and consume is atomic. Rows hold only hashed bearer IDs.
@@ -224,7 +241,8 @@ export function relayOAuthStore(ctx, b, now = Date.now()) {
     }
     if (b.op === 'consume') {
       const value = get(b.key);
-      if (!value || Object.entries(b.match || {}).some(([k, v]) => !equal(value[k], v))) return json({value: null});
+      if (!value) return json({value: null, reason: 'not_found'});
+      if (Object.entries(b.match || {}).some(([k, v]) => !equal(value[k], v))) return json({value: null, reason: 'binding_mismatch'});
       remove(b.key); return json({value});
     }
     if (b.op === 'authorize') {
