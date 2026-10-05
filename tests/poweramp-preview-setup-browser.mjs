@@ -111,7 +111,8 @@ async function measureGroup(browser,built,count,mode,evidence){
         if(node.matches('.player-scene-art-appearance')||node.parentElement?.matches('.player-scene-art')&&node.matches('.art-ov'))owned.add('opacity');
         const style=document.createElement('span').style;style.cssText=node.style.cssText;
         const progressOwned={};for(const key of owned){progressOwned[key]=style.getPropertyValue(key);style.removeProperty(key);}
-        return {index,tag:node.tagName,classes:node.getAttribute('class')||'',css:node.style.cssText,invariantCSS:style.cssText,progressOwned,rect:rect(node)};
+        const invariantDeclarations=Array.from(style,key=>({key,value:style.getPropertyValue(key),priority:style.getPropertyPriority(key)})).sort((a,b)=>a.key.localeCompare(b.key));
+        return {index,tag:node.tagName,classes:node.getAttribute('class')||'',css:node.style.cssText,invariantCSS:style.cssText,invariantDeclarations,progressOwned,rect:rect(node)};
       });
       const miniSource=document.querySelector('#mini-fill'),miniCopy=layer.querySelector('.mini-seek.player-scene-part .fill');
       const currentSource=document.querySelector('#t-cur'),currentCopy=layer.querySelector('.player-scene-full .timepill');
@@ -221,7 +222,7 @@ test('Poweramp isolated same-candidate exhaustive cold versus prepared appearanc
         const baseline=modes.baseline.reports.find(report=>report.label===label).scene,prepared=modes.prepared.reports.find(report=>report.label===label).scene;
         assert.equal(prepared.clonedNodes,baseline.clonedNodes,label+' uses the same real clone topology');
         assert.deepEqual(prepared.serialized.map(({tag,classes})=>({tag,classes})),baseline.serialized.map(({tag,classes})=>({tag,classes})),label+' preserves every clone tag and class');
-        assert.deepEqual(prepared.serialized.map(node=>node.invariantCSS),baseline.serialized.map(node=>node.invariantCSS),label+' preserves identical serialized CSS except the explicitly measured motion-progress properties');
+        assert.deepEqual(prepared.serialized.map(node=>node.invariantDeclarations),baseline.serialized.map(node=>node.invariantDeclarations),label+' preserves every declaration value and priority except the explicitly measured motion-progress properties; native serialization order is irrelevant');
       }
       t.diagnostic('POWERAMP_PAIRED_SETUP '+JSON.stringify({source:built.sourceHash,previewSha256:built.sha256,tracks:count,comparison:evidence.comparison}));
       const create=evidence.comparison.operations['shared.create'];assert.ok(evidence.comparison.materiallyImproved,'actual paused prepared-repeat create median must be <= '+setupImprovementLimit+' of exhaustive baseline repeats; cold is reported separately; got '+JSON.stringify({coldRatio:create.coldRatio,warmRatio:create.warmRatio}));

@@ -6226,7 +6226,14 @@ const SharedPlayerMotion={
     // Read visibility once, before any animation writes. The production canvas
     // renderer stamps UI.vizPaintVersion, including direct waveform/theme paints.
     for(const [source,copy] of m.fullClone._sceneNodes||[])if(source.tagName==='CANVAS'&&!m.fullClone._sceneSuppressed?.has(source))m.canvases.push({source,copy,visible:getComputedStyle(source).display!=='none'});
-    for(const copy of [m.pairs.seek?.mini,m.pairs.seek?.full])for(const [source,part] of copy?._sceneNodes||[]){if(part===copy)continue;m.seekParts.push({source,part,inline:new Map(['transform','left','width'].map(key=>[key,source.style.getPropertyValue(key)]))});}
+    for(const copy of [m.pairs.seek?.mini,m.pairs.seek?.full])for(const [source,part] of copy?._sceneNodes||[]){
+      if(part===copy)continue;const inline=new Map(['transform','left','width'].map(key=>[key,this.dynamicValue(source,key)]));
+      for(const [key,value] of inline)if(value)part.style.setProperty(key,value);
+      // Computed CSS strings round subpixel widths and transform arguments.
+      // Retain the real mini fill width and the writer's unrounded transform.
+      if(source.id==='mini-fill'&&!inline.get('width')){const width=this.rect(source).width;if(width>0)part.style.width=width+'px';}
+      m.seekParts.push({source,part,inline});
+    }
     if(m.playMarkup)m.playSources={mini:$('#mini-play'),full:$('#btn-play')};
     if(m.fullClone._sceneNodes)for(const selector of ['#t-cur','#t-dur']){const source=$(selector),copy=m.fullClone._sceneNodes.get(source);if(copy)m.textParts.push({source,copy});}
     this.box(m.surface,m.endpoints.surface.mini);this.box(m.art,m.endpoints.art.mini);
@@ -6243,14 +6250,15 @@ const SharedPlayerMotion={
     const stamp=typeof UI!=='undefined'?UI.vizPaintVersion:undefined;if(!force&&stamp===m.canvasStamp)return;m.canvasStamp=stamp;
     for(const {source,copy,visible} of m.canvases||[])if(visible)this.copyCanvas(source,copy);
   },
+  dynamicValue(source,key){const value=source.style.getPropertyValue(key);return key==='transform'&&source._sceneSerializedTransform===value&&typeof source._sceneRawTransform==='string'?source._sceneRawTransform:value;},
   refreshDynamic(m,appearance=false){
     this.prepare(m);const updates=[];
     // Normal playback writes inline progress transforms. Copy only changed
     // values, without computed-style/layout reads. Theme/class changes and a
     // cleared inline value take the slower appearance refresh path once.
     for(const entry of m.seekParts){const {source,part,inline}=entry;let style;
-      for(const key of ['transform','left','width']){const value=source.style.getPropertyValue(key),previous=inline.get(key);inline.set(key,value);
-        if(appearance||(value!==previous&&!value)){style ||= getComputedStyle(source);updates.push([part,key,style.getPropertyValue(key)]);}
+      for(const key of ['transform','left','width']){const value=this.dynamicValue(source,key),previous=inline.get(key);inline.set(key,value);
+        if(appearance||(value!==previous&&!value)){if(key==='transform'&&value)updates.push([part,key,value]);else if(key==='width'&&source.id==='mini-fill'&&!value)updates.push([part,key,this.rect(source).width+'px']);else{style ||= getComputedStyle(source);updates.push([part,key,style.getPropertyValue(key)]);}}
         else if(value!==previous)updates.push([part,key,value]);
       }
     }
@@ -6623,12 +6631,14 @@ function paintSeekFraction(fraction,width){
   const fillTransform='scaleX('+fraction+')',knobTransform='translateX('+(fraction*width)+'px) translateX(-50%) scale('+(seek.classList.contains('drag')?1.5:1)+')';
   if(fill.style.transform!==fillTransform)fill.style.transform=fillTransform;
   if(knob.style.transform!==knobTransform)knob.style.transform=knobTransform;
+  fill._sceneRawTransform=fillTransform;fill._sceneSerializedTransform=fill.style.transform;knob._sceneRawTransform=knobTransform;knob._sceneSerializedTransform=knob.style.transform;
 }
 function paintMiniProgress(fraction){
   const fill=$('#mini-fill');
   fraction=Number.isFinite(fraction)?clamp(fraction,0,1):0;
   const transform='translateX('+(fraction*100)+'%)';
   if(fill.style.transform!==transform)fill.style.transform=transform;
+  fill._sceneRawTransform=transform;fill._sceneSerializedTransform=fill.style.transform;
 }
 function setupSeekGestures(){
   const seek=$('#seek'),tr=$('#transport'),miniSeek=$('#mini-seek'),mini=$('#mini');

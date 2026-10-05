@@ -403,3 +403,9 @@ test('the actual mini gesture start retains and consumes prepared appearance',()
 test('mini and outside-toolbar focus remain live while prepared player focus stays guarded',()=>{
   const h=appearanceHarness();h.prepare();assert.equal(h.shared.preparedAppearance.cache.has(h.$('#mini-title')),false,'mini appearance is never warmed');h.context.document.activeElement=h.$('#mini');h.scene.begin('player',-1);assert.equal(h.shared.appearanceStats.hits,1,'unrelated/mini focus cannot change prepared full-player CSS');
 });
+
+test('live progress retains unrounded writer transforms and precise mini-fill width',()=>{
+  const h=harness();h.list();const source=h.$('#mini-fill');source.rect.width=343.203125;source.style.transform='translateX(1.59246%)';source._sceneRawTransform='translateX(1.592457341%)';source._sceneSerializedTransform=source.style.transform;
+  h.scene.begin('player',-1);const m=h.scene.state.morph,copy=m.pairs.seek.mini._sceneNodes.get(source);assert.equal(copy.style.width,'343.203125px');assert.equal(copy.style.transform,source._sceneRawTransform);
+  source.style.transform='translateX(40%)';h.shared.refreshDynamic(m);assert.equal(copy.style.transform,'translateX(40%)','a direct inline override cannot reuse a stale writer stamp');
+});
