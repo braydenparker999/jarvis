@@ -194,6 +194,10 @@ test('Relay OAuth navigation uses browser-generated origins and real workerd SQL
           blocked.push(url.origin + url.pathname);
           await fail('BlockedByClient');
         } catch (error) {
+          // A late favicon may be paused just as this fixture context closes.
+          // Ignore only CDP's exact intentional-close error, never a journey,
+          // header, unknown-URL or offline-isolation failure.
+          if (session.closing && error.message.includes('Target page, context or browser has been closed')) return;
           errors.push(error);
           await fail('Failed').catch(() => {});
         }
@@ -210,7 +214,9 @@ test('Relay OAuth navigation uses browser-generated origins and real workerd SQL
       const isolation = [];
       try {
         await Promise.allSettled([...session.pending]);
+        session.closing = true;
         await session.context.close();
+        await Promise.allSettled([...session.pending]);
         assert.deepEqual(session.blocked, [], 'No unrecognized browser request can reach the network');
         assert.equal(session.errors.length, 0, session.errors[0]?.message);
         assert.deepEqual(unexpectedOutbound, [], 'No unrecognized workerd request can reach the network');
