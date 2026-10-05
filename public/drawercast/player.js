@@ -6489,13 +6489,13 @@ Object.assign(SharedPlayerMotion,{
     const transform=`translate(${r.left-base.left}px,${r.top-base.top}px) scale(${sx},${sy})`,radius=m.miniRadius.map(value=>value*(1-p)/sx+'px').join(' ')+' / '+m.miniRadius.map(value=>value*(1-p)/sy+'px').join(' ');
     for(const node of [m.mask,m.backgroundMask]){node.style.transform=transform;node.style.borderRadius=radius;}
     for(const node of [m.content,m.backgroundContent])node.style.transform=`translate(${(full.left-r.left)/sx}px,${(full.top-r.top)/sy}px) scale(${1/sx},${1/sy})`;
-    m.background.style.opacity=String(p);m.full.style.opacity=String(p);m.mini.style.opacity='1';
+    m.background.style.opacity=String(p);m.full.style.opacity=String(clamp((p-.8)/.2,0,1));m.mini.style.opacity='1';
     for(const [key,nodes] of Object.entries(m.pairs)){
       const node=nodes.mini,box=m.endpoints[key].mini,target=g[key];if(!box.width||!box.height){node.style.opacity='0';continue;}
       const scaleX=target.width/box.width,scaleY=target.height/box.height;node.style.transform=`translate(${target.left-box.left}px,${target.top-box.top}px) scale(${scaleX},${scaleY})`;node.style.opacity=String(key==='seek'&&!m.nativeSeekVisible?1-p:1);
       if(key==='art'){const radii=m.artRadius.mini.map((value,i)=>value+(m.artRadius.full[i]-value)*p);node.style.borderRadius=radii.map(value=>value/scaleX+'px').join(' ')+' / '+radii.map(value=>value/scaleY+'px').join(' ');}
       if(key==='title'||key==='sub'){const model=m.appearances[key],span=node.firstElementChild,font=model.mini.fontSize+(model.full.fontSize-model.mini.fontSize)*p,fontScale=font/model.mini.fontSize,padding={};for(const side of ['left','top'])padding[side]=model.mini.padding[side]+(model.full.padding[side]-model.mini.padding[side])*p;span.style.transform=`translate(${padding.left/scaleX}px,${padding.top/scaleY}px) scale(${fontScale/scaleX},${fontScale/scaleY})`;span.style.fontFamily=p<.5?model.mini.fontFamily:model.full.fontFamily;span.style.fontWeight=String(model.mini.fontWeight+(model.full.fontWeight-model.mini.fontWeight)*p);span.style.lineHeight=(model.mini.lineHeight+(model.full.lineHeight-model.mini.lineHeight)*p)/fontScale+'px';node.style.color=this.blend(model.mini.color,model.full.color,p);node.style.backgroundColor=this.blend(model.mini.background,model.full.background,p);const radii=model.mini.radius.map((value,i)=>value+(model.full.radius[i]-value)*p);node.style.borderRadius=radii.map(value=>value/scaleX+'px').join(' ')+' / '+radii.map(value=>value/scaleY+'px').join(' ');}
-      if(key==='play'){const model=m.appearances.play;node.style.backgroundColor=this.blend(model.mini.background,model.full.background,p);node.style.borderStyle='solid';node.style.borderColor=this.blend(model.mini.borderColor,model.full.borderColor,p);node.style.borderWidth=(model.mini.borderWidth+(model.full.borderWidth-model.mini.borderWidth)*p)/scaleX+'px';}
+      if(key==='play'){const model=m.appearances.play;node.style.backgroundColor=this.blend(model.mini.background,model.full.background,p);node.style.borderStyle='solid';node.style.borderColor=model.full.borderColor;node.style.borderWidth=(model.mini.borderWidth+(model.full.borderWidth-model.mini.borderWidth)*p)/scaleX+'px';}
     }
     if(m.overlay){const art=m.endpoints.art.full;m.overlay.style.transform=`translate(${g.art.left-art.left}px,${g.art.top-art.top}px) scale(${g.art.width/art.width},${g.art.height/art.height})`;}this.paintGlyph(m);this.paintArtwork(m);
     m.dim.style.transition='none';m.dim.style.opacity=String((SET.listBg===false?.94:.66)*(1-p));
@@ -6558,11 +6558,13 @@ const ScreenDrag={
     if(!SCREENS[target]||target===Nav.cur)return null;
     const fromName=Nav.cur,from=$(SCREENS[fromName]),to=$(SCREENS[target]),height=from.clientHeight||innerHeight;
     const preparedAppearance=typeof SharedPlayerMotion!=='undefined'?SharedPlayerMotion.claimAppearance?.({target,fromName}):null;
-    from.hidden=to.hidden=false;from.style.transition=to.style.transition='none';
-    from.dataset.scene=to.dataset.scene='1';to.dataset.gesturePreview='1';to.style.zIndex='3';
     const s={from,to,fromName,target,direction,height,progress:0,baseProgress:0,fromBaseY:fromY,commit:false,preparedAppearance};
+    // Measure the bounded player pose before revealing an incoming library
+    // subtree. Its mounted rows must not force layout inside player setup.
     try{s.morph=carryMorph||(typeof SharedPlayerMotion!=='undefined'?SharedPlayerMotion.create(s):null);}
     catch(error){this.clean(s);throw error;}
+    from.hidden=to.hidden=false;from.style.transition=to.style.transition='none';
+    from.dataset.scene=to.dataset.scene='1';to.dataset.gesturePreview='1';to.style.zIndex='3';
     if(carryMorph){carryMorph.opening=target==='player';s.progress=(carryMorph.opening?carryMorph.p:1-carryMorph.p)*height;s.baseProgress=s.progress;}
     this.state=s;this.phase='drag';this.ownership(s);
     // The original captured gesture remains live, but no new background contact
