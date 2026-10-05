@@ -25,13 +25,31 @@ test('Poweramp mandatory Chromium library history contracts',{timeout:120000},as
       await library();const keyboard=page.locator('#list-body .trow[data-i="2"]'),keyboardId=await keyboard.getAttribute('data-id');await keyboard.focus();await page.keyboard.press('Enter');await page.waitForFunction(()=>playRowCalls===2);assert.equal(await page.evaluate(()=>PA.Engine.current.id),keyboardId);
     });
     await run('trusted nested Back/Forward and new category branches keep exact ancestry',async h=>{
-      const {page,swipe}=h;await page.locator('[data-nav="library"]').tap();await page.getByRole('button',{name:'Artists',exact:true}).tap();await page.waitForFunction(()=>PA.Nav.cur==='list'&&!document.querySelector('#sc-list').inert);
-      const group=page.locator('#list-body .trow,#list-body .gcard').first(),name=await group.getAttribute('aria-label');await group.tap();await page.waitForFunction(()=>PA.Views.currentSpec.kind==='artist');
+      const {page,swipe,settled}=h;await page.locator('[data-nav="library"]').tap();await settled('library');await page.getByRole('button',{name:'Artists',exact:true}).tap();await settled('list');
+      const group=page.locator('#list-body .trow,#list-body .gcard').first(),name=await group.getAttribute('aria-label');await group.tap();await settled('list');assert.equal(await page.evaluate(()=>PA.Views.currentSpec.kind),'artist');
       await swipe('#list-body',120,0);await page.waitForFunction(()=>PA.Views.currentSpec.kind==='artists'&&document.querySelector('#library-page-motion').hidden);
       assert.deepEqual(await page.evaluate(()=>PA.Views.stack.map(s=>s.kind)),['artists']);
       await swipe('#list-body',-120,0);await page.waitForFunction(()=>PA.Views.currentSpec.kind==='artist'&&document.querySelector('#library-page-motion').hidden);assert.equal(await page.evaluate(()=>PA.Views.currentSpec.title),name);
-      await page.locator('#sc-list .library-back').tap();await page.waitForFunction(()=>PA.Views.currentSpec.kind==='artists');await page.locator('#list-body .trow,#list-body .gcard').nth(1).tap();await page.waitForFunction(()=>PA.Views.currentSpec.kind==='artist');
+      const index=await page.evaluate(()=>PA.LibraryPageHistory.index);
+      // Match the failure's real label-origin contact after a horizontal swipe.
+      await page.locator('#sc-list .library-back span').tap();await settled('list');assert.equal(await page.evaluate(()=>PA.Views.currentSpec.kind),'artists');assert.equal(await page.evaluate(()=>PA.LibraryPageHistory.index),index-1,'one fresh Back contact goes to exactly one parent');
+      await page.locator('#list-body .trow,#list-body .gcard').nth(1).tap();await settled('list');assert.equal(await page.evaluate(()=>PA.Views.currentSpec.kind),'artist');
       assert.equal(await page.evaluate(()=>PA.LibraryPageHistory.peek(1)),null);assert.deepEqual(await page.evaluate(()=>PA.Views.stack.map(s=>s.kind)),['artists','artist']);
+    });
+    await run('trusted nested Back rejects moved resized and multi-touch contacts then accepts fresh input',async h=>{
+      const {page,settled,center,start,move,end,tap,frame,swipe}=h;
+      await page.locator('[data-nav="library"]').tap();await settled('library');await page.getByRole('button',{name:'Artists',exact:true}).tap();await settled('list');
+      await page.locator('#list-body .trow,#list-body .gcard').first().tap();await settled('list');const index=await page.evaluate(()=>PA.LibraryPageHistory.index);
+      await swipe('#list-body',120,0);await settled('list');await swipe('#list-body',-120,0);await settled('list');
+      const p=await center('#sc-list .library-back span');await start(p.x,p.y);await move(p.x+30,p.y);await frame();await end();await frame();
+      assert.equal(await page.evaluate(()=>PA.LibraryPageHistory.index),index,'moved Back contact stays on the child');assert.equal(await page.evaluate(()=>PA.Views.currentSpec.kind),'artist');
+      await start(p.x,p.y);await page.setViewportSize({width:394,height:852});await frame();await end();await frame();
+      assert.equal(await page.evaluate(()=>PA.LibraryPageHistory.index),index,'resize cancels the pending Back action');
+      const fresh=await center('#sc-list .library-back span');await start(fresh.x,fresh.y);await h.send('touchStart',[h.point(fresh.x,fresh.y),h.point(fresh.x+2,fresh.y+2,2)]);await end();await frame();
+      assert.equal(await page.evaluate(()=>PA.LibraryPageHistory.index),index,'multi-touch cannot navigate Back');
+      await tap(fresh.x,fresh.y);await settled('list');assert.equal(await page.evaluate(()=>PA.LibraryPageHistory.index),index-1);assert.deepEqual(await page.evaluate(()=>PA.Views.stack.map(s=>s.kind)),['artists']);
+      await swipe('#list-body',-120,0);await settled('list');await page.locator('#sc-list .library-back').focus();await page.keyboard.press('Enter');await settled('list');
+      assert.equal(await page.evaluate(()=>PA.LibraryPageHistory.index),index-1);assert.equal(await page.evaluate(()=>PA.Views.currentSpec.kind),'artists');assert.equal(await page.evaluate(()=>PA.LibraryPageHistory.peek(1).spec.kind),'artist');
     });
     await run('5000-song Back/Forward restores a large viewport without mounting all tracks',async h=>{
       const {page,library,swipe}=h;await library();await page.evaluate(()=>{document.querySelector('#list-body').scrollTop=120000;});await h.frame();await h.frame();

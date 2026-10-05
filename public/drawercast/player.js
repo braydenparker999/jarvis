@@ -5864,19 +5864,23 @@ const SharedPlayerMotion={
     // reuse a stale picture. Inaccessible sheets keep the exhaustive fallback.
     const fail=(reason,error)=>{if(diagnostics)diagnostics.fallback={reason,name:error?.name||null,message:error?.message||null};return null;};
     if(!document.styleSheets?.length&&!document.adoptedStyleSheets?.length)return fail('stylesheets-unavailable');
-    const names=new Set(),rules=[],computed=new Set();
+    const rules=[],computed=new Set();
     const listInfo=list=>{if(diagnostics){const name=list?.constructor?.name||'array-like',iterable=typeof list?.[Symbol.iterator]==='function';diagnostics.lists ||= [];if(!diagnostics.lists.some(item=>item.name===name&&item.iterable===iterable))diagnostics.lists.push({name,iterable});}};
     const each=(list,visit)=>{if(!list)return;listInfo(list);for(let i=0;i<list.length;i++)visit(list[i]??list.item?.(i));};
     for(let i=0;i<style.length;i++)if(!style[i].startsWith('--'))computed.add(style[i]);
     const declaration=(style,pseudo)=>{
-      const keys=[],variables=new Set();
+      const keys=[],variables=new Set();let liveVariables=!!pseudo;
       for(let i=0;i<style.length;i++){
-        const key=style[i];if(!key.startsWith('--')){keys.push(key);names.add(key);}
+        const key=style[i];if(!key.startsWith('--'))keys.push(key);
         // Classes survive ID removal. A live class pseudo or !important rule
         // can outrank the frozen longhands and still consume a local variable.
         // Keep only its referenced variables, not the whole inherited schema.
-        if(pseudo||style.getPropertyPriority(key)==='important')for(const match of style.getPropertyValue(key).matchAll(/\bvar\(\s*(--[^\s,)]+)/g))variables.add(match[1]);
+        if(style.getPropertyPriority(key)==='important')liveVariables=true;
       }
+      // CSSOM enumerates pending-substitution shorthand longhands with empty
+      // values. The authored shorthand still exists in cssText (mask/background
+      // with var(), for example), so discover references from that serialization.
+      if(liveVariables)for(const match of style.cssText.matchAll(/\bvar\(\s*(--[^\s,)]+)/g))variables.add(match[1]);
       return {keys,variables:[...variables]};
     };
     let stage='stylesheet-rules';
@@ -5892,22 +5896,39 @@ const SharedPlayerMotion={
       if(rule.cssRules)visit(rule.cssRules);
     });
     try{for(const list of [document.styleSheets,document.adoptedStyleSheets])each(list,sheet=>{stage='stylesheet-rules';visit(sheet.cssRules);});}catch(error){return fail(stage,error);}
-    const probe=document.createElement('span').style,expanded=new Map();
+    const probe=document.createElement('span').style,expanded=new Map(),inventory=[...computed],dependents=new Map();
+    // CSSOM enumerates canonical declaration slots, even for aliases and
+    // pending-substitution shorthands. Map each slot to every aggregate/alias
+    // in the computed inventory that uses it, without repeatedly scanning all
+    // computed getters for each authored name.
+    const slots=key=>{probe.cssText='';probe.setProperty(key,'initial');const result=[];for(let i=0;i<probe.length;i++)result.push(probe[i]);return result;};
+    for(const key of inventory)for(const slot of slots(key)){if(!dependents.has(slot))dependents.set(slot,new Set());dependents.get(slot).add(key);}
     const expand=key=>{
       if(expanded.has(key))return expanded.get(key);
-      // Computed CSS enumerates longhands. Ask the browser to expand any
-      // authored shorthand/alias with a valid universal value, avoiding empty
-      // computed shorthands (e.g. unequal borders) or handwritten property lists.
-      let keys;
-      if(computed.has(key))keys=[key];
-      else{probe.cssText='';probe.setProperty(key,'initial');keys=[...computed].filter(candidate=>probe.getPropertyValue(candidate));}
-      keys=keys.filter(key=>!key.startsWith('animation-')&&!key.startsWith('transition-')&&key!=='pointer-events');
+      const values=new Set();
+      if(key==='all')for(const property of inventory)values.add(property);
+      else for(const slot of slots(key))for(const property of dependents.get(slot)||[])values.add(property);
+      if(computed.has(key))values.add(key);
+      const keys=[...values].filter(key=>!key.startsWith('animation-')&&!key.startsWith('transition-')&&key!=='pointer-events');
       expanded.set(key,keys);return keys;
     };
-    for(const key of names)expand(key);
-    for(const rule of rules)rule.keys=[...new Set([...rule.keys.flatMap(expand),...rule.variables])];
-    if(diagnostics)diagnostics.rules=rules.length;
-    return {rules,expand,nodes:new Map(),diagnostics};
+    // Repeated selector strings often occur in the page's later overrides.
+    // Only their property vocabulary matters here; the browser still computes
+    // the cascade. Merge exactly equal selectors and expand matched rules lazily.
+    const grouped=new Map();
+    for(const rule of rules){
+      let group=grouped.get(rule.selector);
+      if(!group){group={selector:rule.selector,authored:new Set(),variables:new Set(),keys:null};grouped.set(rule.selector,group);}
+      for(const key of rule.keys)group.authored.add(key);
+      for(const variable of rule.variables)group.variables.add(variable);
+    }
+    if(diagnostics){diagnostics.rules=rules.length;diagnostics.selectorGroups=grouped.size;}
+    // These values change when a clone is reparented into a hidden/inert scene,
+    // or resolve against its rounded frozen box. The exhaustive snapshot also
+    // resolves currentColor consumers before real class pseudos inherit them.
+    // Keep that freeze contract in addition to all CSSOM-authored properties.
+    const context=inventory.filter(key=>key==='visibility'||key==='interactivity'||key==='app-region'||key.endsWith('-origin')||key.endsWith('-color'));
+    return {rules:[...grouped.values()],expand,context,order:new Map(inventory.map((key,index)=>[key,index])),nodes:new Map(),diagnostics};
   },
   snapshotKeys(node,plan){
     if(!plan)return null;
@@ -5918,7 +5939,7 @@ const SharedPlayerMotion={
     // without guessing an inheritance or paint whitelist. Non-inherited names
     // simply resolve to the child's own used value.
     const inherited=node.parentElement?this.snapshotKeys(node.parentElement,plan):[];if(inherited===null)return null;
-    const keys=new Set(inherited);
+    const keys=new Set([...plan.context,...inherited]);
     for(const rule of plan.rules){let matches=!rule.selector;
       if(!matches)try{matches=node.matches(rule.selector);}catch(error){
         // Some readable CSSOM selectors cannot be used by Element.matches.
@@ -5927,10 +5948,10 @@ const SharedPlayerMotion={
         if(plan.diagnostics&&!(plan.diagnostics.selectorFallbacks?.length>=12))(plan.diagnostics.selectorFallbacks ||= []).push({selector:rule.selector,name:error.name,message:error.message});
         rule.selector=null;matches=true;
       }
-      if(matches)for(const key of rule.keys)keys.add(key);
+      if(matches){rule.keys ||= [...new Set([...rule.authored].flatMap(plan.expand).concat([...rule.variables]))];for(const key of rule.keys)keys.add(key);}
     }
     for(let i=0;i<node.style.length;i++){const key=node.style[i];if(!key.startsWith('--'))for(const property of plan.expand(key))keys.add(property);}
-    const result=[...keys];plan.nodes.set(node,result);return result;
+    const result=[...keys].sort((a,b)=>(plan.order.get(a)??Infinity)-(plan.order.get(b)??Infinity));plan.nodes.set(node,result);return result;
   },
   snapshotCSS(style,keys){
     if(!keys){keys=[];for(let i=0;i<style.length;i++)keys.push(style[i]);}
@@ -6423,14 +6444,17 @@ function setupPlayerSwipeDown(){
 }
 
 function bindTapButton(button,action){
-  let contact=null;const blockClick=InputLifecycle.clickGuard(button);
+  let contact=null,canceledContact=null;const blockClick=InputLifecycle.clickGuard(button);
   const time=e=>Number.isFinite(e.timeStamp)&&e.timeStamp>0?e.timeStamp:performance.now();
-  const reset=()=>{if(contact)blockClick({pointerId:contact.id});contact=null;};
+  const reset=()=>{if(contact){canceledContact=contact.id;blockClick({pointerId:contact.id});}contact=null;};
   button.onclick=e=>{if(button.disabled||UI.seekDragging||!InputLifecycle.active(button)){e.preventDefault();return;}e.stopPropagation();InputLifecycle.cancelMotionSettle();action(e);};
   button.addEventListener('pointerdown',e=>{
     if(!['touch','pen'].includes(e.pointerType))return;
-    if(contact||e.isPrimary===false){reset();return;}
+    // The second contact's capture-phase guard clears before this listener.
+    // Rearm the canceled first contact so its trailing click stays rejected.
+    if(contact||e.isPrimary===false||InputLifecycle.contacts.size>1){reset();if(canceledContact!==null)blockClick({pointerId:canceledContact});return;}
     if(e.button>0||button.disabled||UI.seekDragging||!InputLifecycle.active(button))return;
+    canceledContact=null;
     contact={id:e.pointerId,x:e.clientX,y:e.clientY,started:time(e),travel:0};
     try{button.setPointerCapture(e.pointerId);}catch(_){}
   });
@@ -6442,7 +6466,8 @@ function bindTapButton(button,action){
     if(travel<=7&&time(e)-done.started<600&&InputLifecycle.active(button)&&!UI.seekDragging&&!button.disabled)action(e);
   });
   button.addEventListener('pointercancel',reset);button.addEventListener('lostpointercapture',reset);
-  document.addEventListener('pointerdown',()=>{if(InputLifecycle.contacts.size>1)reset();},true);
+  // The shared lifecycle already resets all registered owners on multi-touch.
+  // Do not retain each replaced header through another document listener.
   InputLifecycle.register(reset,button);
 }
 function bindTransportButton(button){
@@ -8434,7 +8459,8 @@ const LibraryPresentation={
     const backLabel=parent?(parent.title||Views.title(parent)):(spec.kind==='album'?'Albums':'Library');
     const header=el('header','library-page-head'+(spec.kind==='album'?' album-hero':''));
     const back=el('button','library-back',icoHTML('back')+'<span>'+esc(backLabel)+'</span>');
-    back.setAttribute('aria-label','Back to '+backLabel);back.onclick=()=>Views.back();header.append(back);
+    // A fresh touch after page dragging may have no compatibility click.
+    back.setAttribute('aria-label','Back to '+backLabel);bindTapButton(back,()=>Views.back());header.append(back);
     const items=data.type==='tracks'?data.items:[],first=items[0];
     if(spec.kind==='album'){
       const art=el('div','album-hero-art art');if(first)art.dataset.art=first.id;art.innerHTML='<div class="ph">'+icoHTML('album')+'</div>';header.prepend(art);

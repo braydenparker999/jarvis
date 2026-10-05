@@ -127,12 +127,17 @@ async function standardSnapshots(h){
   await h.end();await h.settled('player');await h.library();await hold(h,.25);
   // Release and immediately regrab the genuine contact plane. Then use trusted
   // displacement from its captured painted progress to reach the same .5 point.
+  // Read progress from the production-written full clone opacity. Inferring it
+  // from float-rounded transformed bounds can perturb exact corner-radius CSS
+  // by 0.00001px despite paired geometry/pixels satisfying unchanged gates.
   await h.end();await h.start(3,500);
   const frozen=await h.page.evaluate(()=>{
     const surface=document.querySelector('.player-scene-surface'),mini=document.querySelector('#mini'),full=document.querySelector('#sc-player');
     if(!surface||!document.querySelector('.player-scene-input'))throw Error('Regrab did not reach a live shared scene');
     const rect=n=>{const r=n.getBoundingClientRect();return {left:r.left,top:r.top,width:r.width,height:r.height};},a=rect(mini),b=rect(full);
-    return {p:(rect(surface).height-a.height)/(b.height-a.height),height:document.querySelector('#sc-list').clientHeight,art:rect(document.querySelector('.player-scene-art'))};
+    const geometryP=(rect(surface).height-a.height)/(b.height-a.height),p=Number(document.querySelector('.player-scene-full').style.opacity);
+    if(!Number.isFinite(p)||Math.abs(p-geometryP)>.00001)throw Error('Painted DOM opacity disagrees with held geometry');
+    return {p,geometryP,height:document.querySelector('#sc-list').clientHeight,art:rect(document.querySelector('.player-scene-art'))};
   });
   assert.ok(Number.isFinite(frozen.p),'regrab reached a live scene');
   await h.page.waitForTimeout(280);

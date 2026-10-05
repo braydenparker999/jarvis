@@ -26,6 +26,14 @@ jobs:
           export JARVIS_CHROME="$(command -v google-chrome || command -v chromium)"
           test -n "$JARVIS_CHROME"
           npm test
+      - name: Measure isolated Poweramp snapshot setup
+        if: always()
+        env:
+          POWERAMP_EVIDENCE_DIR: ${{ runner.temp }}/poweramp-browser
+        run: |
+          export JARVIS_CHROME="$(command -v google-chrome || command -v chromium)"
+          test -n "$JARVIS_CHROME"
+          node --test tests/poweramp-preview-setup-browser.mjs
       - name: Preserve Poweramp trusted-input evidence
         if: always()
         uses: actions/upload-artifact@v4

@@ -37,7 +37,7 @@ function harness(input=source){
     CATS:[{k:'all',ic:'cat-all',c:'#7589ce'}],SET:{},Engine:{queue:[],order:[],setQueue:(...args)=>calls.push(['play',...args]),playIndex:(...args)=>calls.push(['index',...args])},
     UI:{renderToggles:()=>calls.push('toggles')},Selection:{toggleMode:()=>calls.push('select')},Nav:{go:screen=>calls.push(['nav',screen])},
     ctxMenuList:(...args)=>calls.push(['more',...args]),esc:String,saveSet:()=>calls.push('save'),toast:()=>{},setTimeout:()=>0,
-    requestAnimationFrame:fn=>fn(),DockLayout:{schedule:()=>calls.push('dock')}
+    requestAnimationFrame:fn=>fn(),DockLayout:{schedule:()=>calls.push('dock')},bindTapButton:(button,action)=>{button.onclick=action;}
   });
   // Use both real icon tables and the late override that is active before boot.
   vm.runInContext(section(input,'const S =','/* =====================================================================\n   SMALL UTILS')+

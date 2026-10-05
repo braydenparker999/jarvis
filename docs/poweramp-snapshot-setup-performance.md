@@ -31,10 +31,13 @@ are carried conservatively to descendants to preserve inherited font/color
 and other appearance. The values are always the source's current computed
 values, not raw authored expressions. There is no handwritten paint whitelist.
 
-Authored shorthand and vendor aliases are expanded by the browser's CSSOM
-using `initial`, against its complete computed-property inventory. This avoids
-empty computed shorthand values when different longhands cannot be serialized
-as one shorthand (such as unequal borders). Before/after declarations belong
+Authored shorthand, partial-axis and vendor aliases are expanded by the browser's
+CSSOM against its complete computed-property inventory. Each inventory entry's
+`initial` declaration is indexed by its canonical longhand slots. An authored
+name inherits every aggregate/alias that shares one of those slots, including
+aggregates whose specified serialization becomes empty when one axis changes.
+Standard properties retain computed inventory order so overlapping aliases
+preserve the exhaustive path's serialization. Before/after declarations belong
 to their originating source's property vocabulary. Other pseudo types are
 conservative global entries. Properties immediately overridden by the existing
 clone's disabled animation/transition/pointer policy are omitted.
@@ -104,3 +107,61 @@ the original property-read/CSS-byte reduction gates remain unchanged. The next
 Chrome run must confirm the exact native failure trigger, property/pseudo
 parity, screenshots and actual setup improvement. There is no production
 logging, telemetry or new debug export.
+
+
+## Active compact computed-property repair
+
+The first active compact renderer run exposed 1,419 differences per theme. Most
+were the exhaustive snapshot's browser-context freeze contract: `visibility`
+changed under the fixture's hidden host, `interactivity` changed under HTML
+inertness, app-region serialization differed, and default origins recomputed
+against rounded frozen sizes. The remaining groups included resolved color
+consumers, partially authored background axes, and pending-substitution
+mask/background shorthand variables.
+
+Compact capture now retains scene-context values and the computed inventory's
+resolved origin/color families, alongside the entire authored property vocabulary.
+It discovers live pseudo/important variable references from CSSOM cssText: pending
+substitution shorthand longhands enumerate with empty specified values, even though
+the authored shorthand still contains the variable. Unrelated custom-variable
+schemas remain omitted. Duplicate exactly equal normalized selector strings are
+merged scene-locally, and only matching rules have their authored keys expanded.
+There is no persistent cache, hand-maintained authored paint whitelist, or change
+to animation timing, pointer ownership, geometry, or canvas/art refresh.
+
+Focused regressions model empty partial-axis serialization, pending-substitution
+shorthands, scene-context/origin/color preservation, computed inventory order, exact
+selector grouping, and lazy unmatched expansion. The mandatory renderer additionally
+checks fresh CSSOM background/mask axis changes. Its exact parity report is stored
+as snapshot-parity-report-{theme}.json so generic failure diagnostics cannot replace
+it. All original computed, reduction, geometry and pixel gates remain unchanged.
+
+On this repair, local Chromium launch was rechecked both normally and with permitted
+escalated execution. Both aborted before renderer startup with socket() EPERM in
+process_singleton_posix.cc. The local focused and aggregate non-browser results
+are reported separately; the release owner's browser CI must establish real
+computed/pseudo parity, screenshot acceptance and paired end-to-end speedup.
+
+
+## Canonical CSSOM dependency indexing
+
+The seeded `initial`/`inherit` probe established aggregate/alias correctness but
+read the entire declared inventory for every distinct used authored name. A
+75-property mechanical fixture measured 34,943 specified-value reads. The
+scene-local canonical-slot index instead enumerates each computed inventory
+entry's declaration once, recording every aggregate that uses each canonical
+longhand slot. Expanding an authored name unions those indexed dependents.
+This includes text-decoration-color -> text-decoration and partial background
+axes -> background-position; a singleton specified-declaration shortcut would
+miss the former and was rejected. Shorthand reset-only slots are discovered
+through CSSOM, and an explicitly authored all conservatively includes the
+standard inventory. No persistent metadata is retained.
+
+The same mechanical fixture now makes zero specified-value getter reads and
+503 probe writes, with the same key set. This is an algorithm/count result,
+not a native timing claim. The real renderer suite requires the canonical
+index's key set to contain every key discovered by seeded probing for every
+page stylesheet/selected inline name and explicit aggregate, vendor, border-image,
+font and all edge cases. Exact computed/pseudo, reduction and pixel/geometry
+gates remain unchanged. Native equivalence and actual paired setup timing
+remain pending browser CI.

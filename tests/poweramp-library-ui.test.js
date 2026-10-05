@@ -41,7 +41,7 @@ function harness(){
     esc:s=>String(s??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'),icoHTML:name=>'<i data-icon="'+name+'"></i>',fmtTime:v=>`${Math.floor((v||0)/60)}:${String(Math.floor((v||0)%60)).padStart(2,'0')}`,
     saveSet:()=>calls.push('save'),closeSheet:()=>calls.push('close'),openSheet:()=>calls.push('open'),Settings:{open:p=>calls.push(['settings',p])},
     requestAnimationFrame:fn=>{fn();return 1;},observeArt:n=>calls.push(['observeArt',n[0].dataset.art]),DockLayout:{schedule:()=>calls.push('dock')},CATS:[{k:'all',n:'All Songs',ic:'note',c:'#6d7de8'},{k:'album',n:'Album',ic:'album',c:'#5b4fe0'}],
-    getArtURL:()=>Promise.resolve(null),UI:{setArtEl:(node,url)=>calls.push(['heroArt',node.dataset.art,url])},nativeValues:()=>({}),Selection:{mode:false},Nav:{go:n=>calls.push(['nav',n])}});
+    getArtURL:()=>Promise.resolve(null),UI:{setArtEl:(node,url)=>calls.push(['heroArt',node.dataset.art,url])},nativeValues:()=>({}),Selection:{mode:false},Nav:{go:n=>calls.push(['nav',n])},bindTapButton:(button,action)=>{button.onclick=action;}});
   vm.runInContext(section('const ListOptions={','const ListZoom={')+'\nglobalThis.options=ListOptions;',context);
   context.Views.render=(spec)=>{context.Views.currentSpec=spec;context.Views.currentData=context.options.prepare(context.Views.currentData,spec);box.__items=context.Views.currentData.items;};
   return {context,options:context.options,$,nodes,body,box,calls};

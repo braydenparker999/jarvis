@@ -51,16 +51,73 @@ function harness(){
   const context=vm.createContext({document,window,$,Nav,Views,Selection,Sheets,SCREENS,ScreenDrag,UI:{vizFull:false},SET:{animations:'disabled'},innerWidth:393,performance:{now:()=>now},getComputedStyle:n=>({transform:n.paintedTransform||n.style.transform||'none',overflowX:n.style.overflowX||'visible'}),matchMedia:()=>({matches:false}),clamp:(v,a,b)=>Math.max(a,Math.min(b,v)),history:{pushState:()=>calls.push(['browser-history'])},setTimeout:(fn,ms)=>{timers.set(++serial,{fn,at:now+ms});return serial;},clearTimeout:id=>timers.delete(id),requestAnimationFrame:fn=>{frames.set(++serial,fn);return serial;},cancelAnimationFrame:id=>frames.delete(id)});
   document.createElement=tag=>new Element(tag);
   vm.runInContext(source.slice(source.indexOf('const InputLifecycle='),source.indexOf('const Nav='))+'\nglobalThis.lifecycle=InputLifecycle;',context);
+  vm.runInContext(source.slice(source.indexOf('function bindTapButton('),source.indexOf('function bindTransportButton(')),context);
   vm.runInContext(source.slice(source.indexOf('const GestureMotion='),source.indexOf('const SwipeArt=')),context);
   vm.runInContext(source.slice(source.indexOf('const LibraryPageHistory='),source.indexOf('async function boot(){'))+'\nglobalThis.pages=LibraryPageHistory;globalThis.motion=LibraryPageMotion;LibraryPageHistory.install();',context);
   const h={context,document,window,root,list,cats,listBody,title,alpha,button,row,Nav,Views,Selection,Sheets,calls,timers,frames,history:context.pages,motion:context.motion,
     advance(ms){now+=ms;for(const [id,t] of [...timers])if(t.at<=now){timers.delete(id);t.fn();}},paint(){for(const [id,fn] of [...frames]){frames.delete(id);fn(now);}},
-    fire(node,type,args={}){const e={type,pointerId:1,pointerType:'touch',isPrimary:true,button:0,target:node,clientX:160,clientY:300,timeStamp:now,cancelable:true,detail:1,preventDefault(){this.prevented=true;},stopPropagation(){this.stopped=true;},stopImmediatePropagation(){this.immediateStopped=true;},...args};if(type.startsWith('pointer'))document.fire(type,e);if(!e.immediateStopped)node.fire(type,e);return e;},
+    fire(node,type,args={}){const e={type,pointerId:1,pointerType:'touch',isPrimary:true,button:0,target:node,clientX:160,clientY:300,timeStamp:now,cancelable:true,detail:1,preventDefault(){this.prevented=true;},stopPropagation(){this.stopped=true;},stopImmediatePropagation(){this.immediateStopped=true;},...args};if(type.startsWith('pointer'))document.fire(type,e);if(!e.immediateStopped)node.fire(type,e);if(type==='click'&&!e.immediateStopped)node.onclick?.(e);return e;},
     swipe(node,dx,dy=0){this.fire(node,'pointerdown');this.advance(150);this.fire(node,'pointermove',{clientX:160+dx,clientY:300+dy});this.paint();this.advance(150);this.fire(node,'pointerup',{clientX:160+dx,clientY:300+dy});},
     settle(){this.advance(1000);}
   };ScreenDrag.ownership();return h;
 }
 function nested(){const h=harness();h.Views.push({kind:'artists'});h.listBody.scrollTop=245;h.Views.push({kind:'artist',key:'Mira Vale',title:'Mira Vale'});h.listBody.scrollTop=618;return h;}
+
+// Execute the rendered header's real binding with the production tap owner and
+// production ancestry/history implementation. No compatibility click is added.
+function backControl(h){
+  const start=source.indexOf("back.setAttribute('aria-label','Back to '+backLabel);"),end=source.indexOf('header.append(back);',start)+'header.append(back);'.length;
+  assert.ok(start>=0&&end>start);Object.assign(h.context,{back:h.button,backLabel:'Artists',header:{append() {}}});
+  vm.runInContext(source.slice(start,end),h.context);return h.button;
+}
+
+test('post-swipe touch and pen Back releases preserve ancestry without a compatibility click',()=>{
+  for(const pointerType of ['touch','pen']){
+    const h=nested();h.swipe(h.list,120);h.swipe(h.list,-120);const back=backControl(h),label=back.appendChild(new Element('span'));
+    h.fire(back,'pointerdown',{pointerType,target:label});h.advance(30);h.fire(back,'pointerup',{pointerType,target:label});
+    assert.equal(h.Views.currentSpec.kind,'artists',pointerType);assert.equal(h.history.index,1);assert.equal(h.listBody.scrollTop,245);assert.deepEqual(plain(h.Views.stack.map(s=>s.kind)),['artists']);assert.equal(h.history.peek(1).spec.key,'Mira Vale');
+    assert.equal(h.fire(back,'click',{pointerType,target:label}).prevented,true);assert.equal(h.history.index,1,'a trailing click cannot go Back twice');
+    h.Views.push({kind:'artist',key:'Juniper Static'});assert.equal(h.history.peek(1),null);assert.deepEqual(plain(h.Views.stack.map(s=>s.key||s.kind)),['artists','Juniper Static']);
+  }
+});
+
+test('Back movement, cancellation, capture loss and lifecycle interruption leave ancestry unchanged',()=>{
+  for(const mode of ['move','pointercancel','lostpointercapture','blur','resize','visibilitychange','second-contact','long-hold']){
+    const h=nested(),back=backControl(h);h.fire(back,'pointerdown');
+    if(mode==='move')h.fire(back,'pointermove',{clientX:190});
+    else if(mode==='blur'||mode==='resize')h.fire(h.window,mode);
+    else if(mode==='visibilitychange'){h.document.hidden=true;h.fire(h.document,mode);}
+    else if(mode==='second-contact'){h.fire(back,'pointerdown',{pointerId:2,isPrimary:false});h.fire(back,'pointerup',{pointerId:2,isPrimary:false});}
+    else if(mode==='long-hold')h.advance(650);
+    else h.fire(back,mode);
+    h.fire(back,'pointerup');assert.equal(h.history.index,2,mode);assert.equal(h.fire(back,'click').prevented,true,mode+' suppresses its trailing click');assert.equal(h.history.index,2,mode+' cannot navigate through the stale click');
+    h.document.hidden=false;h.fire(back,'pointerdown',{pointerId:3});h.advance(30);h.fire(back,'pointerup',{pointerId:3});assert.equal(h.history.index,1,mode+' permits the next fresh tap');
+  }
+});
+
+test('Back retains mouse/keyboard, selection dismissal and inactive-screen protection',()=>{
+  const mouse=nested(),mouseBack=backControl(mouse);mouse.fire(mouseBack,'pointerdown',{pointerType:'mouse'});mouse.fire(mouseBack,'pointerup',{pointerType:'mouse'});assert.equal(mouse.history.index,2);mouse.fire(mouseBack,'click',{pointerType:'mouse'});assert.equal(mouse.history.index,1);
+  const keyboard=nested(),keyBack=backControl(keyboard);keyboard.fire(keyBack,'click',{detail:0,pointerId:-1});assert.equal(keyboard.history.index,1);keyboard.fire(keyBack,'click',{detail:0,pointerId:-1});assert.equal(keyboard.Nav.cur,'library');
+  const selection=nested(),selectionBack=backControl(selection);selection.Selection.mode=true;selection.fire(selectionBack,'pointerdown');selection.fire(selectionBack,'pointerup');assert.equal(selection.Selection.mode,false);assert.equal(selection.history.index,2);selection.fire(selectionBack,'pointerdown',{pointerId:2});selection.fire(selectionBack,'pointerup',{pointerId:2});assert.equal(selection.history.index,1);
+  for(const mode of ['hidden','inert','disabled','seek']){const h=nested(),back=backControl(h);if(mode==='seek')h.context.UI.seekDragging=true;else if(mode==='disabled')back.disabled=true;else h.list[mode]=true;h.fire(back,'pointerdown');h.fire(back,'pointerup');h.fire(back,'click',{detail:0});assert.equal(h.history.index,2,mode);}
+});
+
+test('repeated Back header replacement keeps shared listeners and lifecycle resets bounded',()=>{
+  const h=nested(),documentHandlers=h.document.handlers.pointerdown.length,resets=h.context.lifecycle.resets.size;
+  for(let i=0;i<120;i++){
+    // Production render cancels before removing its old header. The next cancel
+    // drops that disconnected reset; the document must never retain the button.
+    h.context.lifecycle.cancel();h.button.remove();h.button.isConnected=false;
+    h.button=h.list.appendChild(new Element('button','library-back'));backControl(h);
+    assert.equal(h.document.handlers.pointerdown.length,documentHandlers,'header '+i+' adds no document handler');
+    assert.ok(h.context.lifecycle.resets.size<=resets+2,'only current and just-detached header resets remain');
+  }
+  const back=h.button;h.fire(back,'pointerdown');h.fire(h.row,'pointerdown',{pointerId:2,isPrimary:false});h.fire(h.row,'pointerup',{pointerId:2,isPrimary:false});h.fire(back,'pointerup');
+  assert.equal(h.fire(back,'click').prevented,true,'a contact on another target still cancels Back through the shared owner');assert.equal(h.history.index,2);
+  h.fire(back,'pointerdown',{pointerId:3});h.fire(back,'pointerup',{pointerId:3});assert.equal(h.history.index,1,'current header still accepts a fresh tap');
+  back.remove();back.isConnected=false;h.context.lifecycle.cancel();
+  assert.equal(h.document.handlers.pointerdown.length,documentHandlers);assert.equal(h.context.lifecycle.resets.size,resets,'disconnected header resets are released');
+});
 
 test('library visits distinguish horizontal history from nested ancestry',()=>{const h=nested();assert.deepEqual(plain(h.history.entries.map(e=>[e.screen,e.spec?.kind])),[['library',undefined],['list','artists'],['list','artist']].map(plain));h.Views.back();assert.equal(h.Views.currentSpec.kind,'artists');assert.equal(h.listBody.scrollTop,245);assert.deepEqual(plain(h.Views.stack.map(s=>s.kind)),['artists']);assert.equal(h.history.peek(1).spec.kind,'artist');assert.equal(h.history.move(1),true);assert.equal(h.Views.currentSpec.key,'Mira Vale');assert.equal(h.listBody.scrollTop,618);assert.deepEqual(plain(h.Views.stack.map(s=>s.kind)),['artists','artist']);});
 test('right swipe goes to the prior visited page, left returns to the page just left',()=>{const h=nested();h.swipe(h.list,120);assert.equal(h.Views.currentSpec.kind,'artists');assert.equal(h.listBody.scrollTop,245);h.swipe(h.list,-120);assert.equal(h.Views.currentSpec.kind,'artist');assert.equal(h.listBody.scrollTop,618);});

@@ -34,9 +34,9 @@ test('compact snapshot derives used properties and shorthand longhands without a
 });
 
 test('new scenes rebuild their plan after inline and CSSOM changes',()=>{
-  const h=harness(),first=h.motion.snapshotPlan(h.style);assert.equal(h.motion.snapshotKeys(h.node,first).includes('outline-color'),false);
-  h.sheet.cssRules.push({selectorText:'#source',style:declaration({'outline-color':'cyan'})});h.node.style.setProperty('filter','blur(1px)');
-  const next=h.motion.snapshotPlan(h.style),keys=h.motion.snapshotKeys(h.node,next);assert.ok(keys.includes('outline-color'));assert.ok(keys.includes('filter'));assert.notEqual(next,first);
+  const h=harness(),first=h.motion.snapshotPlan(h.style);assert.equal(h.motion.snapshotKeys(h.node,first).includes('backdrop-filter'),false);
+  h.sheet.cssRules.push({selectorText:'#source',style:declaration({'backdrop-filter':'blur(2px)'})});h.node.style.setProperty('filter','blur(1px)');
+  const next=h.motion.snapshotPlan(h.style),keys=h.motion.snapshotKeys(h.node,next);assert.ok(keys.includes('backdrop-filter'));assert.ok(keys.includes('filter'));assert.notEqual(next,first);
 });
 
 test('unreadable or absent stylesheets retain the exhaustive snapshot path',()=>{
@@ -69,4 +69,72 @@ test('stylesheet and nested CSS rule lists need only indexed CSSOM access, not a
   const h=harness();h.sheet.cssRules=cssList([{cssRules:cssList(h.sheet.cssRules)}]);h.document.styleSheets=cssList([h.sheet]);h.document.adoptedStyleSheets=cssList([]);
   const plan=h.motion.snapshotPlan(h.style);assert.ok(plan,'non-iterable CSSOM lists must not disable compact capture');
   const keys=h.motion.snapshotKeys(h.node,plan);assert.ok(keys.includes('mask-image'));assert.equal(keys.some(key=>key.startsWith('unused-browser-')),false);
+});
+
+test('partial axis and vendor aliases discover their aggregate computed property',()=>{
+  const h=harness();h.style.cssText+=';background-position:50% 50%';
+  const makeProbe=()=>{
+    const values=new Map();
+    return new Proxy({setProperty(key,value){if(key==='background-position'){values.set('background-position-x',value);values.set('background-position-y',value);}else values.set(key,value);},getPropertyValue(key){if(key==='background-position'){const x=values.get('background-position-x'),y=values.get('background-position-y');return x&&x===y?x:'';}return values.get(key)||'';}},{get(target,key){if(key==='length')return values.size;if(/^\d+$/.test(String(key)))return [...values.keys()][+key];return target[key];},set(target,key,value){if(key==='cssText')values.clear();else target[key]=value;return true;}});
+  };
+  h.document.createElement=()=>({style:makeProbe()});
+  h.sheet.cssRules.push({selectorText:'#source',style:declaration({'background-position-x':'center','background-position-y':'center'})});
+  const plan=h.motion.snapshotPlan(h.style),keys=h.motion.snapshotKeys(h.node,plan);
+  assert.ok(keys.includes('background-position'),'a partial longhand must not disappear when the aggregate serializes as empty');
+  assert.ok(h.motion.snapshotCSS(h.style,keys).includes('background-position:50% 50%;'));
+});
+
+test('pending-substitution shorthand CSSOM keeps variables for live pseudo and important paint',()=>{
+  const h=harness(),pending=(entries,cssText,important=false)=>{
+    const style=declaration(entries);style.getPropertyPriority=()=>important?'important':'';
+    return new Proxy(style,{get(target,key){return key==='cssText'?cssText:target[key];}});
+  };
+  h.sheet.cssRules.push(
+    {selectorText:'#source',style:pending({'mask-image':'','mask-position':'','mask-size':''},'mask:var(--local-mask) center / contain no-repeat !important;',true)},
+    {selectorText:'#source::before',style:pending({'background-color':'',content:'""'},'background:var(--local-pseudo);content:"";')}
+  );
+  h.style.setProperty('--local-mask','url(local-mask)');h.style.setProperty('--local-pseudo','rgb(50, 60, 70)');h.style.setProperty('--unused-schema','unused');
+  const keys=h.motion.snapshotKeys(h.node,h.motion.snapshotPlan(h.style)),css=h.motion.snapshotCSS(h.style,keys);
+  assert.ok(keys.includes('--local-mask'),'important shorthand consumes the retained local mask');
+  assert.ok(keys.includes('--local-pseudo'),'live pseudo shorthand consumes the retained local background');
+  assert.ok(css.includes('--local-mask:url(local-mask);'));assert.ok(css.includes('--local-pseudo:rgb(50, 60, 70);'));
+  assert.equal(keys.includes('--unused-schema'),false);
+});
+
+test('compact freezing includes browser scene context, resolved origins, and currentColor consumers',()=>{
+  const h=harness(),values={'app-region':'no-drag',visibility:'visible',interactivity:'auto','transform-origin':'251.516px 545.266px','perspective-origin':'251.516px 545.266px','caret-color':'rgb(1, 2, 3)','text-decoration-color':'rgb(1, 2, 3)','-webkit-text-fill-color':'rgb(1, 2, 3)','future-current-color':'rgb(1, 2, 3)'};
+  for(const [key,value] of Object.entries(values))h.style.setProperty(key,value);
+  const plan=h.motion.snapshotPlan(h.style),keys=h.motion.snapshotKeys(h.node,plan),css=h.motion.snapshotCSS(h.style,keys);
+  for(const [key,value] of Object.entries(values)){assert.ok(keys.includes(key),key);assert.ok(css.includes(key+':'+value+';'),key+' is resolved before reparenting');}
+  assert.equal(keys.some(key=>key.startsWith('unused-browser-')),false,'context closure does not serialize browser defaults wholesale');
+  assert.deepEqual(Array.from(keys).filter(key=>!key.startsWith('--')),Array.from(keys).filter(key=>!key.startsWith('--')).sort((a,b)=>plan.order.get(a)-plan.order.get(b)),'overlapping standard aliases retain exhaustive inventory order');
+});
+
+test('exact duplicate selectors merge and unmatched property vocabularies stay lazy per scene',()=>{
+  const h=harness();h.sheet.cssRules.push({selectorText:'#source',style:declaration({filter:'blur(2px)'})});
+  const diagnostics={},plan=h.motion.snapshotPlan(h.style,diagnostics),expand=plan.expand,calls=[];plan.expand=key=>{calls.push(key);return expand(key);};
+  let matches=0;const original=h.node.matches;h.node.matches=selector=>{if(selector==='#source')matches++;return original(selector);};
+  const keys=h.motion.snapshotKeys(h.node,plan);
+  assert.equal(matches,1,'one matches call covers exactly equal source selectors');assert.equal(diagnostics.selectorGroups,diagnostics.rules-2);
+  assert.ok(keys.includes('mask-image'));assert.ok(keys.includes('filter'));assert.equal(calls.includes('backdrop-filter'),false,'unrelated rules are never expanded');
+  const reads=calls.length;h.motion.snapshotKeys(h.node,plan);assert.equal(calls.length,reads,'scene-local source cache reuses completed keys');
+});
+
+test('single specified color longhand still changes a computed aggregate',()=>{
+  const h=harness();h.style.setProperty('text-decoration-color','rgb(1, 2, 3)');h.style.setProperty('text-decoration','none solid rgb(1, 2, 3)');
+  const parts=['text-decoration-line','text-decoration-style','text-decoration-color','text-decoration-thickness'];
+  const make=()=>{const values=new Map();return new Proxy({setProperty(key,value){for(const field of key==='text-decoration'?parts:[key])values.set(field,value);},getPropertyValue(key){if(key==='text-decoration'){const first=values.get(parts[0]);return first&&parts.every(field=>values.get(field)===first)?first:'';}return values.get(key)||'';}},{get(target,key){if(key==='length')return values.size;if(/^\d+$/.test(String(key)))return [...values.keys()][+key];return target[key];},set(target,key,value){if(key==='cssText'){values.clear();for(const pair of value.split(';')){const at=pair.indexOf(':');if(at>0)target.setProperty(pair.slice(0,at),pair.slice(at+1));}}else target[key]=value;return true;}});};
+  h.document.createElement=()=>({style:make()});
+  const plan=h.motion.snapshotPlan(h.style),keys=plan.expand('text-decoration-color');
+  assert.ok(keys.includes('text-decoration-color'));assert.ok(keys.includes('text-decoration'),'single canonical specified name does not exclude computed aggregate dependencies');
+});
+
+test('canonical dependency slots avoid a used-name by full-inventory getter scan',()=>{
+  const h=harness(),create=h.document.createElement;let reads=0,writes=0;
+  h.document.createElement=()=>{const element=create(),get=element.style.getPropertyValue,set=element.style.setProperty;element.style.getPropertyValue=key=>{reads++;return get(key);};element.style.setProperty=(key,value)=>{writes++;set(key,value);};return element;};
+  const entries={};for(let i=0;i<75;i++)entries['unused-browser-'+i]='initial';h.sheet.cssRules.push({selectorText:'#source',style:declaration(entries)});
+  const keys=h.motion.snapshotKeys(h.node,h.motion.snapshotPlan(h.style));
+  for(let i=0;i<75;i++)assert.ok(keys.includes('unused-browser-'+i));
+  assert.equal(reads,0,'dependencies use canonical indexed slots, not repeated specified-value getter scans');
+  assert.ok(writes<2*h.style.length,'each inventory and distinct used name is processed once per scene');
 });

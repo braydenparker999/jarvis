@@ -49,9 +49,9 @@ test('Poweramp mandatory Chromium compact snapshot appearance parity',{timeout:1
           }finally{window.getComputedStyle=computed;host.remove();}
           // A brand-new scene must discover CSSOM and inline changes. The chosen
           // longhands were never a handwritten member of a snapshot whitelist.
-          const style=document.createElement('style');document.head.appendChild(style);style.sheet.insertRule('#p-title { outline: 3px dotted rgb(2, 70, 130); border-left: 2px solid red; border-right: 7px double blue; text-decoration-thickness: 3px; }');
+          const style=document.createElement('style');document.head.appendChild(style);style.sheet.insertRule('#p-title { outline: 3px dotted rgb(2, 70, 130); border-left: 2px solid red; border-right: 7px double blue; text-decoration-thickness: 3px; background-position-x: 37%; background-position-y: 61%; -webkit-mask-position-x: 17%; -webkit-mask-position-y: 71%; }');
           const title=document.querySelector('#p-title');title.style.letterSpacing='2px';
-          const updated=motion.clone(title),expected=computed(title),keys=['outline-width','outline-style','outline-color','border-left-width','border-right-width','border-left-color','border-right-color','text-decoration-thickness','letter-spacing'];
+          const updated=motion.clone(title),expected=computed(title),keys=['outline-width','outline-style','outline-color','border-left-width','border-right-width','border-left-color','border-right-color','text-decoration-thickness','background-position','mask-position','letter-spacing'];
           for(const key of keys)if(updated.style.getPropertyValue(key)!==expected.getPropertyValue(key))differences.push({selector:'updated-title',key,compact:updated.style.getPropertyValue(key),full:expected.getPropertyValue(key)});
           style.remove();title.style.removeProperty('letter-spacing');
           // Classes and their real pseudos survive clone ID removal. A local
@@ -61,15 +61,30 @@ test('Poweramp mandatory Chromium compact snapshot appearance parity',{timeout:1
           const actualEdge=motion.clone(edge),expectedEdge=fullMotion.clone(edge),edgeHost=document.createElement('div');edgeHost.className='player-scene-layer';edgeHost.style.visibility='hidden';edgeHost.append(actualEdge,expectedEdge);document.body.appendChild(edgeHost);
           for(const pseudo of [null,'::before','::after']){const a=computed(actualEdge,pseudo),b=computed(expectedEdge,pseudo);for(let i=0;i<b.length;i++){const key=b[i];if(key.startsWith('--'))continue;if(a.getPropertyValue(key)!==b.getPropertyValue(key))differences.push({selector:'local-class-pseudo-important',pseudo,key,compact:a.getPropertyValue(key),full:b.getPropertyValue(key)});}}
           const localVariables={color:actualEdge.style.getPropertyValue('--edge-color').replace(/\s/g,''),pseudo:actualEdge.style.getPropertyValue('--edge-pseudo').replace(/\s/g,''),mask:!!actualEdge.style.getPropertyValue('--edge-mask'),unused:actualEdge.style.getPropertyValue('--unused-edge-schema'),missing:actualEdge.style.getPropertyValue('--missing-edge-color')};
+          // The scene-local declaration-slot index must conservatively cover
+          // every dependency found by the original full-inventory seeded probe.
+          // This check is outside measured snapshot creation and adds no export.
+          const inventory=[...computed(edge)].filter(key=>!key.startsWith('--')),probe=document.createElement('span').style,authored=new Set(['text-decoration-color','background-position-x','background-position-y','-webkit-mask','-webkit-mask-position-x','border','border-image','border-image-source','font','all']);
+          for(const key of inventory)probe.setProperty(key,'initial');
+          const initial=new Map(inventory.map(key=>[key,probe.getPropertyValue(key)])),plan=motion.snapshotPlan(computed(edge)),expansionParity={authoredNames:0,differences:[]};
+          const collect=list=>{for(let i=0;i<list.length;i++){const rule=list[i];if(rule.style)for(let j=0;j<rule.style.length;j++)if(!rule.style[j].startsWith('--'))authored.add(rule.style[j]);if(rule.styleSheet)collect(rule.styleSheet.cssRules);if(rule.cssRules)collect(rule.cssRules);}};
+          for(const sheets of [document.styleSheets,document.adoptedStyleSheets])if(sheets)for(let i=0;i<sheets.length;i++)collect(sheets[i].cssRules);
+          for(const selector of selectors){const root=document.querySelector(selector);for(const node of [root,...root.querySelectorAll('*')])for(let i=0;i<node.style.length;i++)if(!node.style[i].startsWith('--'))authored.add(node.style[i]);}
+          for(const key of authored){
+            probe.setProperty(key,'inherit');const expected=inventory.filter(candidate=>probe.getPropertyValue(candidate)!==initial.get(candidate));if(inventory.includes(key)&&!expected.includes(key))expected.push(key);probe.setProperty(key,'initial');
+            const actual=new Set(plan.expand(key));for(const property of expected)if(!property.startsWith('animation-')&&!property.startsWith('transition-')&&property!=='pointer-events'&&!actual.has(property))expansionParity.differences.push({key,property});
+          }
+          expansionParity.authoredNames=authored.size;
           edgeHost.remove();edge.remove();edgeStyle.remove();
-          return {theme,light:document.body.classList.contains('theme-light'),coverage,counts,snapshotDiagnostics,localVariables,differences};
+          return {theme,light:document.body.classList.contains('theme-light'),coverage,counts,snapshotDiagnostics,localVariables,expansionParity,differences};
         },theme);
-        if(process.env.POWERAMP_EVIDENCE_DIR){const directory=resolve(process.env.POWERAMP_EVIDENCE_DIR);await mkdir(directory,{recursive:true});await writeFile(join(directory,'snapshot-parity-'+theme+'.json'),JSON.stringify(report,null,2)+'\n');}
+        if(process.env.POWERAMP_EVIDENCE_DIR){const directory=resolve(process.env.POWERAMP_EVIDENCE_DIR);await mkdir(directory,{recursive:true});await writeFile(join(directory,'snapshot-parity-report-'+theme+'.json'),JSON.stringify(report,null,2)+'\n');}
         t.diagnostic('POWERAMP_SNAPSHOT_PARITY '+JSON.stringify(report));
         assert.equal(report.light,theme==='light','the requested theme is actually active');
         assert.equal(report.snapshotDiagnostics.fallback,null,'compact plan must be active: '+JSON.stringify(report.snapshotDiagnostics));
         assert.deepEqual(report.snapshotDiagnostics.nodeFallbacks||[],[],'every real source uses compact keys');
         assert.deepEqual(report.differences,[],'every standard computed property and live pseudo equals the exhaustive snapshot');
+        assert.deepEqual(report.expansionParity.differences,[],'native canonical slots cover every seeded-probe authored/inline dependency');
         assert.equal(report.localVariables.color,'rgb(20,30,40)');assert.equal(report.localVariables.pseudo,'rgb(50,60,70)');assert.equal(report.localVariables.mask,true);assert.equal(report.localVariables.unused,'');assert.equal(report.localVariables.missing,'');
         assert.ok(report.counts.icons>10,'actual native raster masks are compared');assert.ok(report.counts.pseudos>0,'actual generated pseudo appearance is compared');
         assert.ok(report.counts.compactProperties<report.counts.fullProperties*.65,'computed property serialization is materially reduced');

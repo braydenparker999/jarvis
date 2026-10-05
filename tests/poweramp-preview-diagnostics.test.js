@@ -68,7 +68,8 @@ test('optional operation timings distinguish setup and release work and restore 
   h.context.UI.fitPlayer();h.diagnostics.stop();
   assert.equal(shared.create,create);assert.equal(h.context.LibraryPageHistory.save,save);assert.equal(h.diagnostics.wrappers.length,0);
   const operations=h.diagnostics.result.operations,setup=operations.find(v=>v.operation==='shared.create'),capture=operations.find(v=>v.operation==='history.save');
-  assert.equal(setup.phase,'shared:setup:expand');assert.equal(setup.max_ms,60);assert.equal(setup.calls,1);
+  assert.equal(setup.phase,'shared:setup:expand');assert.equal(setup.max_ms,60);assert.equal(setup.calls,1);assert.equal(setup.self_ms,40);
+  const clone=operations.find(v=>v.operation==='shared.clone');assert.equal(clone.total_ms,20);assert.equal(clone.self_ms,20);
   assert.equal(capture.phase,'shared:settle:expand');assert.equal(capture.max_ms,53);
   assert.ok(h.diagnostics.result.long_operations.some(v=>v.operation==='shared.clone'&&v.duration_ms===20));
   assert.ok(h.diagnostics.result.events.some(v=>v.type==='motion-settle'&&v.planned_ms===220&&v.from===.2));
@@ -104,4 +105,22 @@ test('owner snapshots occur after target handlers while contact timestamps remai
   const contact=h.diagnostics.events.find(e=>e.type==='pointerup'),owner=h.diagnostics.events.find(e=>e.type==='owner'&&e.scene==='shared-player');
   assert.equal(contact.ms,0);assert.equal(owner.ms,53);assert.equal(owner.scene_phase,'settle');assert.equal(owner.scene_progress,.4);
   h.diagnostics.stop();assert.equal(h.listenerCount(),0);
+});
+
+
+test('preview snapshot subphase self times exclude recursive and nested measured calls',()=>{
+  const h=harness(),shared={
+    snapshotPlan(){h.advance(7);return {};},
+    snapshotKeys(node){if(node.parent)this.snapshotKeys(node.parent);h.advance(3);return [];},
+    snapshotCSS(){h.advance(5);return '';},copyCanvas(){h.advance(2);},
+    clone(){this.snapshotPlan();this.snapshotKeys({parent:{}});this.snapshotCSS();this.copyCanvas();h.advance(11);return {};},
+    create(){this.clone();h.advance(13);return {};}
+  };
+  h.context.SharedPlayerMotion=shared;const originals=Object.fromEntries(Object.entries(shared));h.diagnostics.start();shared.create({target:'player'});h.diagnostics.stop();
+  const operations=new Map(h.diagnostics.result.operations.map(v=>[v.operation,v]));
+  for(const [key,expected] of [['snapshotPlan',7],['snapshotKeys',6],['snapshotCSS',5],['copyCanvas',2],['clone',11],['create',13]]){
+    assert.equal(operations.get('shared.'+key).self_ms,expected,key+' self time');assert.equal(shared[key],originals[key],key+' restored');
+  }
+  assert.equal(operations.get('shared.snapshotKeys').calls,2);assert.equal(operations.get('shared.snapshotKeys').total_ms,9,'recursive inclusive time overlaps');
+  assert.equal(operations.get('shared.clone').total_ms,31);assert.equal(operations.get('shared.create').total_ms,44);assert.equal(h.diagnostics.operationFrames.length,0);
 });
