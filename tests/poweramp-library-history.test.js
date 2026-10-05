@@ -26,7 +26,7 @@ class Element{
   contains(node){return node===this||this.children.some(n=>n.contains(node));}
   querySelectorAll(selector){const list=this.children.flatMap(n=>[n,...n.querySelectorAll('*')]);return selector==='*'?list:list.filter(n=>selector==='[id]'?n.id:selector==='.list'?n.classList.contains('list'):false);}
   closest(selector){for(let node=this;node;node=node.parentElement){if(selector==='.screen'&&node.classList.contains('screen'))return node;if(selector.includes('button')&&node.tagName==='BUTTON')return node;if(selector.includes('#alpha')&&node.id==='alpha')return node;if(selector.includes('[data-horizontal-gesture]')&&node.dataset.horizontalGesture!==undefined)return node;}return null;}
-  cloneNode(deep){const node=new Element(this.tagName,this.id);Object.assign(node.style,this.style);Object.assign(node.dataset,this.dataset);Object.assign(node.attrs,this.attrs);node.hidden=this.hidden;node.inert=this.inert;if(this.tagName==='CANVAS'){node.width=this.width;node.height=this.height;}node.classList.add(...this.classList);if(deep)this.children.forEach(n=>node.appendChild(n.cloneNode(true)));return node;}
+  cloneNode(deep){const node=new Element(this.tagName,this.id);Object.assign(node.style,this.style);Object.assign(node.dataset,this.dataset);Object.assign(node.attrs,this.attrs);node.textContent=this.textContent;node.hidden=this.hidden;node.inert=this.inert;if(this.tagName==='CANVAS'){node.width=this.width;node.height=this.height;}node.classList.add(...this.classList);if(deep)this.children.forEach(n=>node.appendChild(n.cloneNode(true)));return node;}
   addEventListener(type,fn,options){(this.handlers[type]??=[]).push({fn,capture:options===true||!!options?.capture});}
   removeEventListener(type,fn){this.handlers[type]=(this.handlers[type]||[]).filter(h=>h.fn!==fn);}
   setPointerCapture(id){this.capture.add(id);this.captureCount++;}
@@ -68,6 +68,51 @@ test('root Library participates in Back and Forward and restores its own scroll'
 test('new navigation after Back truncates the abandoned forward branch',()=>{const h=nested();h.Views.back();h.Views.push({kind:'artist',key:'Juniper Static'});assert.equal(h.history.peek(1),null);assert.equal(h.history.entries.some(e=>e.spec?.key==='Mira Vale'),false);assert.deepEqual(plain(h.Views.stack.map(s=>s.key||s.kind)),['artists','Juniper Static']);});
 test('visiting root from a category resets stale ancestry without losing visited history',()=>{const h=nested();h.Nav.go('library');h.Views.push({kind:'albums'});assert.deepEqual(plain(h.Views.stack.map(s=>s.kind)),['albums']);h.Views.back();assert.equal(h.Nav.cur,'library');h.history.move(-1);assert.equal(h.Views.currentSpec.kind,'artist');assert.deepEqual(plain(h.Views.stack.map(s=>s.kind)),['artists','artist']);});
 test('same-screen returns from the player do not duplicate or truncate visits',()=>{const h=nested();h.Nav.go('player');h.Nav.go('list');assert.equal(h.history.entries.length,3);assert.equal(h.history.index,2);h.Views.back();h.Nav.go('player');h.Nav.go('list');assert.equal(h.history.peek(1).spec.key,'Mira Vale');});
+function recordCaptures(h){const captures=[],capture=h.motion.capture.bind(h.motion);h.motion.capture=(screen,savedScroll)=>{captures.push({screen,savedScroll,title:h.title.textContent});h.calls.push(['capture',screen]);return capture(screen,savedScroll);};return captures;}
+const snapshotScroll=(snapshot,id)=>{const index=[snapshot.node,...snapshot.node.querySelectorAll('*')].findIndex(n=>n.dataset.pageSourceId===id);return snapshot.scroll.find(([i])=>i===index)?.slice(1)||[0,0];};
+
+test('library-to-player saves navigation state without a viewport clone or scheduled capture',()=>{
+  const h=nested(),captures=recordCaptures(h),entry=h.history.current();h.listBody.scrollLeft=37;
+  h.Nav.go('player');assert.equal(captures.length,0);assert.equal(entry.scrollTop,618);assert.equal(entry.scrollLeft,37);assert.equal(entry.spec.scrollTop,618);assert.equal(entry.stack.at(-1).scrollTop,618);assert.equal(entry.snapshotDeferred,true);
+  assert.equal(h.frames.size,0);assert.equal(h.timers.size,0);h.advance(10000);h.paint();assert.equal(captures.length,0,'no idle capture competes with the player morph');
+  h.context.lifecycle.cancel();h.Nav.go('list');assert.equal(captures.length,0);assert.equal(h.history.current(),entry);assert.equal(h.history.index,2);assert.equal(h.history.entries.length,3);
+});
+
+test('a later horizontal gesture captures the returned page with its fresh scroll before mounting',()=>{
+  const h=nested(),captures=recordCaptures(h),entry=h.history.current();h.Nav.go('player');h.Nav.go('list');h.listBody.scrollTop=731;h.listBody.scrollLeft=22;
+  h.fire(h.list,'pointerdown');h.fire(h.list,'pointermove',{clientX:280});h.paint();
+  assert.equal(captures.length,1);assert.equal(captures[0].screen,'list');assert.equal(entry.snapshotDeferred,false);assert.deepEqual(plain(snapshotScroll(entry.snapshot,'list-body')),[731,22]);
+  const from=h.motion.state.from.querySelectorAll('*').find(n=>n.dataset.pageSourceId==='list-body');assert.equal(from.scrollTop,731);assert.equal(from.scrollLeft,22);
+  h.fire(h.list,'pointercancel',{clientX:280});h.settle();assert.equal(h.motion.state,null);assert.equal(h.history.index,2);
+});
+
+test('opening a new category from player captures the old retained page before replacing its DOM',()=>{
+  const h=nested(),captures=recordCaptures(h),entry=h.history.current();h.list.__cssomScrollRoot=true;h.listBody.scrollLeft=37;
+  h.Nav.go('player');assert.equal(h.listBody.scrollTop,0,'the hidden source has no CSSOM scrolling box');assert.equal(captures.length,0);
+  h.calls.length=0;h.Views.push({kind:'albums',title:'Albums'});
+  assert.equal(captures.length,1);assert.equal(captures[0].title,'Mira Vale');assert.deepEqual(plain(snapshotScroll(entry.snapshot,'list-body')),[618,37]);assert.equal(entry.snapshotDeferred,false);
+  assert.equal(h.calls[0][0],'capture');assert.equal(h.calls[1][0],'render');assert.equal(entry.snapshot.node.querySelectorAll('*').find(n=>n.dataset.pageSourceId==='list-title').textContent,'Mira Vale');
+  h.history.move(-1);assert.equal(h.Views.currentSpec.key,'Mira Vale');assert.equal(h.listBody.scrollTop,618);
+});
+
+test('player-to-root branch preserves the pending list picture and primary scroll',()=>{
+  const h=nested(),captures=recordCaptures(h),entry=h.history.current();h.list.__cssomScrollRoot=true;h.Nav.go('player');h.Nav.go('library');
+  assert.equal(captures.length,1);assert.equal(captures[0].screen,'list');assert.deepEqual(plain(snapshotScroll(entry.snapshot,'list-body')),[618,0]);assert.equal(entry.snapshotDeferred,false);
+  assert.equal(h.history.current().screen,'library');assert.equal(h.history.peek(-1),entry);h.swipe(h.root,120);assert.equal(h.Views.currentSpec.key,'Mira Vale');assert.equal(h.listBody.scrollTop,618);
+});
+
+test('root-player detours stay cheap and root capture waits for an actual category change',()=>{
+  const h=harness(),captures=recordCaptures(h),entry=h.history.current();h.root.__cssomScrollRoot=true;h.cats.scrollTop=189;
+  for(let i=0;i<4;i++){h.Nav.go('player');h.context.lifecycle.cancel();h.Nav.go('library');}
+  assert.equal(captures.length,0);assert.equal(entry.snapshotDeferred,true);h.Nav.go('player');h.Views.push({kind:'all'});
+  assert.equal(captures.length,1);assert.equal(captures[0].screen,'library');assert.deepEqual(plain(snapshotScroll(entry.snapshot,'lib-cats')),[189,0]);assert.equal(entry.snapshotDeferred,false);
+});
+
+test('deferred pictures cannot outlive visit eviction through asynchronous jobs',()=>{
+  const h=nested(),captures=recordCaptures(h);h.history.limit=5;
+  for(let i=0;i<12;i++){h.Nav.go('player');const leaving=h.history.current();const count=captures.length;h.advance(10000);h.paint();assert.equal(captures.length,count);h.Views.push({kind:'tree',path:'folder/'+i});assert.equal(leaving.snapshotDeferred,false);assert.ok(h.history.entries.length<=5);}
+  assert.equal(h.frames.size,0);assert.equal(h.timers.size,0);assert.ok(h.history.entries.every(entry=>!entry.snapshotDeferred));
+});
 test('bounded visits retain a deeply nested Back parent and its Forward destination',()=>{const h=harness();h.history.limit=5;for(let i=0;i<20;i++)h.Views.push({kind:'tree',path:'folder/'.repeat(i),title:'Folder '+i});assert.equal(h.history.entries.length,5);for(let i=0;i<12;i++){const before=h.Views.currentSpec.path;h.Views.back();assert.equal(h.history.entries.length,5);assert.equal(h.history.peek(1).spec.path,before);}assert.equal(h.Views.stack.length,8);});
 test('page specs including queue view survive Back/Forward and refresh',()=>{const h=harness();h.Views.push({kind:'queue',queueView:'added'});h.Views.currentSpec.queueView='upcoming';h.Views.render(h.Views.currentSpec);h.listBody.scrollTop=225;h.Views.push({kind:'playlists'});h.history.move(-1);assert.equal(h.Views.currentSpec.queueView,'upcoming');assert.equal(h.listBody.scrollTop,225);});
 test('Back exits selection without changing visits or scroll',()=>{const h=nested();h.Selection.mode=true;h.Views.back();assert.equal(h.history.index,2);assert.equal(h.listBody.scrollTop,618);assert.equal(h.Selection.mode,false);});

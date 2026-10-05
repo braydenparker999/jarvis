@@ -5786,6 +5786,10 @@ const GestureMotion={
       if(!frame)frame=requestAnimationFrame(paint);
     });
     const end=e=>{
+      // Touch implicitly captures the hit-tested child before this surface
+      // takes explicit capture. Its bubbling loss is a transfer notification,
+      // not a loss of our still-owned pointer stream.
+      if(e.type==='lostpointercapture'&&e.target!==node&&node.hasPointerCapture?.(e.pointerId))return;
       pointers.delete(e.pointerId);if(!pointers.size)blocked=false;
       if(!state||state.id!==e.pointerId)return;
       clearTimeout(longTimer);cancelAnimationFrame(frame);frame=0;
@@ -6482,6 +6486,9 @@ function setupSeekGestures(){
   const finish=(e,canceled=false)=>{
     if(!owner||owner.pointer!==e.pointerId)return;
     const state=owner;
+    // A button-origin scrub transfers capture to the transport. The old
+    // button's bubbling loss must not discard the timeline's active preview.
+    if(e.type==='lostpointercapture'&&e.target!==state.node&&state.node.hasPointerCapture?.(state.pointer))return;
     if(!canceled)update(e,false);
     if(owner!==state)return;
     const commits=!canceled&&valid(state)&&state.active&&(state.node!==tr||state.moved);
@@ -8837,25 +8844,36 @@ const LibraryPageHistory={
   key(screen,spec,stack=[]){return JSON.stringify([screen,spec,stack].map(value=>value));},
   current(){return this.entries[this.index]||null;},
   peek(delta){return this.entries[this.index+(delta<0?-1:1)]||null;},
-  make(screen,spec,stack=[]){return {id:++this.serial,screen,spec:this.copy(spec),stack:stack.map(s=>this.copy(s)),scrollTop:Number(spec?.scrollTop)||0,snapshot:null};},
+  make(screen,spec,stack=[]){return {id:++this.serial,screen,spec:this.copy(spec),stack:stack.map(s=>this.copy(s)),scrollTop:Number(spec?.scrollTop)||0,scrollLeft:0,snapshot:null,snapshotDeferred:false};},
   same(entry,screen,spec,stack=[]){
     if(!entry||entry.screen!==screen)return false;
     const identity=s=>{if(!s)return null;const value=Object.assign({},s);delete value.scrollTop;return value;};
     return this.key(screen,identity(entry.spec),entry.stack.map(identity))===this.key(screen,identity(spec),stack.map(identity));
   },
   seed(){if(this.index<0){this.entries=[this.make('library',null)];this.index=0;}return this.current();},
-  save(){
+  save({snapshot=true}={}){
     const entry=this.current();if(!entry||!this.active()||entry.screen!==Nav.cur)return;
-    const scroll=$(entry.screen==='list'?'#list-body':'#lib-cats');entry.scrollTop=scroll?.scrollTop||0;
+    const scroll=$(entry.screen==='list'?'#list-body':'#lib-cats');entry.scrollTop=scroll?.scrollTop||0;entry.scrollLeft=scroll?.scrollLeft||0;
     if(entry.screen==='list'){
       if(Views.currentSpec)Views.currentSpec.scrollTop=entry.scrollTop;
       entry.spec=this.copy(Views.currentSpec);entry.stack=Views.stack.map(s=>this.copy(s));
     }
-    entry.snapshot=LibraryPageMotion.capture(entry.screen);
+    // A player detour keeps this page's DOM. Save its small navigation state
+    // now, not a deep viewport clone inside the mini-player release handler.
+    // Horizontal motion refreshes the live snapshot before using it; a later
+    // category change captures the retained DOM before replacing it.
+    if(snapshot){entry.snapshot=LibraryPageMotion.capture(entry.screen);entry.snapshotDeferred=false;}
+    else entry.snapshotDeferred=true;
+  },
+  captureDeferred(){
+    const entry=this.current();if(!entry?.snapshotDeferred)return;
+    entry.snapshot=LibraryPageMotion.capture(entry.screen,{id:entry.screen==='list'?'list-body':'lib-cats',top:entry.scrollTop,left:entry.scrollLeft});
+    entry.snapshotDeferred=false;
   },
   visit(screen,spec,stack=[]){
     this.seed();const current=this.current();
     if(this.same(current,screen,spec,stack))return current;
+    this.captureDeferred();
     this.entries.splice(this.index+1);this.entries.push(this.make(screen,spec,stack));this.index=this.entries.length-1;
     while(this.entries.length>this.limit){this.entries.shift();this.index--;}
     return this.current();
@@ -8884,12 +8902,12 @@ const LibraryPageHistory={
   },
   moveTo(index){
     if(index<0||index>=this.entries.length||index===this.index)return false;
-    this.save();this.index=index;this.restore(this.current());return true;
+    this.save();this.captureDeferred();this.index=index;this.restore(this.current());return true;
   },
   move(delta){return this.moveTo(this.index+(delta<0?-1:1));},
   back(){
     if(Selection.mode){Selection.exit();return false;}
-    LibraryPageMotion.abort();this.save();this.seed();
+    LibraryPageMotion.abort();this.save();this.captureDeferred();this.seed();
     const chain=Views.stack.slice(0,-1),screen=chain.length?'list':'library',spec=chain.at(-1)||null;
     let index=this.index-1;
     if(index<0||!this.same(this.entries[index],screen,spec,chain)){
@@ -8908,7 +8926,7 @@ const LibraryPageHistory={
     if(this.installed)return;this.installed=true;this.seed();
     const push=Views.push,render=Views.render,go=Nav.go;let navDepth=0;
     Views.push=spec=>{
-      LibraryPageMotion.abort();this.save();this.seed();
+      LibraryPageMotion.abort();this.save();this.captureDeferred();this.seed();
       const stack=Nav.cur==='list'?Views.stack.slice():[];
       const root=this.current();if(!root.snapshot&&root.screen==='library')root.snapshot=LibraryPageMotion.capture('library');
       this.mutating=true;
@@ -8917,6 +8935,7 @@ const LibraryPageHistory={
     };
     Views.back=()=>this.back();
     Views.render=(spec,keep)=>{
+      if(!this.restoring&&!this.mutating&&!this.active())this.captureDeferred();
       const result=render.call(Views,spec,keep);
       if(!this.restoring&&!this.mutating&&Nav.cur==='list'&&this.current()?.screen==='list'){
         const entry=this.current();entry.spec=this.copy(Views.currentSpec);entry.stack=Views.stack.map(s=>this.copy(s));entry.scrollTop=$('#list-body').scrollTop;
@@ -8925,7 +8944,13 @@ const LibraryPageHistory={
     };
     Nav.go=(name,pushState)=>{
       const outer=navDepth===0,from=Nav.cur;
-      if(outer&&!this.restoring&&!this.mutating){LibraryPageMotion.abort();this.save();}
+      if(outer&&!this.restoring&&!this.mutating){
+        LibraryPageMotion.abort();this.save({snapshot:name!=='player'});
+        const entry=this.current();
+        // Returning to the retained page needs no picture. A new library visit
+        // must preserve the old one before navigation can replace its DOM.
+        if(!this.active()&&['library','list'].includes(name)&&!this.same(entry,name,name==='list'?Views.currentSpec:null,name==='list'?Views.stack:[]))this.captureDeferred();
+      }
       navDepth++;try{go.call(Nav,name,pushState);}finally{navDepth--;}
       if(!outer||this.restoring||this.mutating||!['library','list'].includes(name)||Nav.cur!==name)return;
       if(name==='library'){
@@ -8945,11 +8970,11 @@ const LibraryPageHistory={
    source selectors and scroll geometry, but have unique IDs and no actions. */
 const LibraryPageMotion={
   state:null,finish:null,host:null,serial:0,installed:false,styleSignature:'',
-  capture(screen){
+  capture(screen,savedScroll=null){
     const source=$(SCREENS[screen]);if(!source)return null;
     const clone=source.cloneNode(true),original=[source,...source.querySelectorAll('*')],nodes=[clone,...clone.querySelectorAll('*')];
     const prefix='library-snapshot-'+(++this.serial)+'-',ids=new Map(),scroll=[];
-    original.forEach((n,i)=>{if(n.id){const id=prefix+i+'-'+n.id;ids.set(n.id,id);nodes[i].dataset.pageSourceId=n.id;nodes[i].id=id;}if(n.scrollTop||n.scrollLeft)scroll.push([i,n.scrollTop,n.scrollLeft]);if(n.tagName==='CANVAS')try{nodes[i].getContext('2d')?.drawImage(n,0,0);}catch(_){};});
+    original.forEach((n,i)=>{if(n.id){const id=prefix+i+'-'+n.id;ids.set(n.id,id);nodes[i].dataset.pageSourceId=n.id;nodes[i].id=id;}const saved=savedScroll?.id===n.id,top=saved?savedScroll.top:n.scrollTop,left=saved?savedScroll.left:n.scrollLeft;if(top||left)scroll.push([i,top||0,left||0]);if(n.tagName==='CANVAS')try{nodes[i].getContext('2d')?.drawImage(n,0,0);}catch(_){};});
     nodes.forEach(n=>{
       n.removeAttribute('autofocus');n.removeAttribute('tabindex');
       for(const a of Array.from(n.attributes||[])){

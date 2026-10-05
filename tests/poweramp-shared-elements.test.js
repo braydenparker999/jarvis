@@ -83,6 +83,30 @@ function harness({reduced=false,width=393,height=852,mutations=false}={}){
   return {context,$,nodes,body,fits,frames,timers,observers,cost,pseudoReads,resetCost(){for(const key of Object.keys(cost))cost[key]=0;draws=0;pseudoReads.clear();},draws:()=>draws,advance,frame,list,shared:context.shared,scene:context.scene,nav:context.nav,lifecycle:context.lifecycle};
 }
 
+function installHistoryCounter(h){
+  const list=h.$('#sc-list'),scroll=h.context.document.createElement('div');scroll.id='list-body';scroll.scrollTop=618;scroll.scrollLeft=37;list.appendChild(scroll);
+  const select=h.context.$;h.context.$=selector=>selector==='#list-body'?scroll:select(selector);
+  h.context.Views={currentSpec:{kind:'all'},stack:[{kind:'all'}],push(){},render(){},renderLibrary(){}};
+  vm.runInContext(section('const LibraryPageHistory=','function bindLibraryPageGesture')+'\nLibraryPageMotion.install=()=>{};LibraryPageHistory.install();LibraryPageHistory.entries=[LibraryPageHistory.make("list",Views.currentSpec,Views.stack)];LibraryPageHistory.index=0;globalThis.pageHistory=LibraryPageHistory;globalThis.pageMotion=LibraryPageMotion;',h.context);
+  const captures=[],capture=h.context.pageMotion.capture.bind(h.context.pageMotion);h.context.pageMotion.capture=(screen,...args)=>{captures.push(screen);return capture(screen,...args);};
+  return {captures,scroll,entry:h.context.pageHistory.current()};
+}
+
+test('real shared-player drag release saves library scroll without cloning its mounted page',()=>{
+  const h=harness();h.list();const {captures,scroll,entry}=installHistoryCounter(h);
+  h.scene.begin('player',-1);h.scene.move(-100);assert.ok(h.scene.state.morph);assert.equal(captures.length,0);
+  h.scene.end(true,-.7);assert.equal(h.nav.cur,'player');assert.ok(h.scene.settling.morph);assert.equal(captures.length,0,'release does not capture the outgoing list');
+  assert.equal(entry.scrollTop,618);assert.equal(entry.scrollLeft,37);assert.equal(entry.snapshotDeferred,true);
+  h.frame(1000);assert.equal(captures.length,0,'morph cleanup does not schedule an idle history clone');h.nav.go('list');h.frame(1000);assert.equal(captures.length,0,'same-page return does not need a snapshot');
+  scroll.scrollTop=731;h.context.pageHistory.save();assert.equal(captures.length,1);assert.equal(entry.scrollTop,731);assert.equal(entry.snapshotDeferred,false);
+});
+
+test('real shared-player tap avoids a history clone before and inside scene activation',()=>{
+  const h=harness();h.list();const {captures,entry}=installHistoryCounter(h);h.nav.go('player');
+  assert.equal(h.nav.cur,'player');assert.ok(h.scene.settling.morph);assert.equal(captures.length,0,'outer tap navigation and nested activation both stay cheap');assert.equal(entry.snapshotDeferred,true);
+  h.frame(1000);assert.equal(captures.length,0);assert.equal(h.scene.phase,'idle');
+});
+
 test('actual canonical DOM bounds define all six shared paths, independent of screen transforms',()=>{
   for(const width of [320,393,744]){const h=harness({width});h.list();h.$('#sc-player').style.transform='translateY(237px)';h.scene.begin('player',-1);const m=h.scene.state.morph;
     assert.ok(m,'exercise the real clone/morph branch');assert.equal(h.fits.at(-1).transform,'none');assert.equal(h.fits.at(-1).hidden,false);

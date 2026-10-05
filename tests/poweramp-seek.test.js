@@ -125,6 +125,32 @@ test('timeline scrubbing over a button consumes owning release and trailing clic
   const release=h.up('#transport',{target,clientX:320});assert.equal(release.prevented,true);assert.equal(release.stopped,true);
   assert.equal(tr.fire('click',{target}).prevented,true);h.down('#transport',{target});h.up('#transport',{target});assert.notEqual(tr.fire('click',{target}).prevented,true);
 });
+test('button-to-transport capture transfer retains the active waveform scrub and final seek',()=>{
+  const h=harness(),tr=h.$('#transport'),button=node();button.closest=()=>button;
+  h.down('#transport',{target:button,clientX:200});tr.fire('pointermove',{target:button,clientX:160});
+  assert.equal(tr.hasPointerCapture(1),true);assert.equal(h.UI.seekDragging,true);
+  tr.fire('lostpointercapture',{target:button});
+  assert.equal(h.UI.seekDragging,true,'old button loss must not cancel its new timeline owner');
+  tr.fire('pointermove',{clientX:100});h.up('#transport',{clientX:80});
+  assert.deepEqual(h.calls,[['seek',67]]);assert.equal(h.UI.seekDragging,false);
+  assert.equal(tr.fire('click',{target:button}).prevented,true);
+  h.down('#transport',{target:button});h.up('#transport',{target:button});
+  assert.notEqual(tr.fire('click',{target:button}).prevented,true,'a fresh button tap is still available');
+});
+test('actual transport capture loss and genuine child pointercancel still discard the scrub',()=>{
+  for(const [type,child] of [['lostpointercapture',false],['pointercancel',true]]){
+    const h=harness(),tr=h.$('#transport'),button=node();button.closest=()=>button;
+    h.down('#transport',{target:button});tr.fire('pointermove',{target:button,clientX:160});
+    tr.fire(type,{target:child?button:tr});h.up('#transport',{clientX:80});
+    assert.deepEqual(h.calls,[]);assert.equal(h.UI.seekDragging,false);
+  }
+});
+test('a child capture loss without transport capture still cancels a pending button contact',()=>{
+  const h=harness(),tr=h.$('#transport'),button=node();button.closest=()=>button;
+  h.down('#transport',{target:button});assert.equal(tr.hasPointerCapture(1),false);
+  tr.fire('lostpointercapture',{target:button});tr.fire('pointermove',{clientX:100});h.up('#transport',{clientX:80});
+  assert.deepEqual(h.calls,[]);assert.equal(h.UI.seekDragging,false);
+});
 test('a canceled button-origin contact and a long hold cannot activate a trailing timeline button click',()=>{
   for(const interruption of ['pointercancel','hold']){
     const h=harness(),tr=h.$('#transport'),target={closest:()=>({})};h.down('#transport',{target});

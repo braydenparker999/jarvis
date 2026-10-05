@@ -244,7 +244,7 @@ const Preview={
     }catch(error){this.fail(error);}
   },
   help(){
-    dialog('Offline UI Preview v4','<p>Fictional placeholder songs, artwork, playlists, and queue. Play, pause, seek, track changes, and progress are simulated. No sound is generated.</p><p>Drag up from the mini player to grow the same cover, title and controls into the full player. Drag down to reverse it, including halfway through a transition.</p><p>In library pages, swipe right to the previously visited page and left to return forward. Vertical scrolling stays native. Try top versus scrolled action buttons, the alphabet rail, album pages and List Options. “5,000 tracks” exercises the large-library renderer.</p><p>Optional diagnostics measures callback gaps and gesture outcomes for 30 seconds. It is off by default, stays in this file, and sends nothing. These callback gaps are not touch latency or display-frame measurements.</p><p>Nothing connects to your accounts or touches the real app’s library. Changes last only while this file is open. Reset restores the fixture.</p><p>If Android opens a file viewer, choose Open with Chrome. Use in-app Back if this local file does not support browser history.</p>',[{label:'Measure 30 seconds',fn:()=>PreviewDiagnostics.start()},{label:'Show diagnostics',fn:()=>PreviewDiagnostics.show()},{label:'Close'}]);
+    dialog('Offline UI Preview v5','<p>Fictional placeholder songs, artwork, playlists, and queue. Play, pause, seek, track changes, and progress are simulated. No sound is generated.</p><p>Drag up from the mini player to grow the same cover, title and controls into the full player. Drag down to reverse it, including halfway through a transition.</p><p>In library pages, swipe right to the previously visited page and left to return forward. Vertical scrolling stays native. Try top versus scrolled action buttons, the alphabet rail, album pages and List Options. “5,000 tracks” exercises the large-library renderer.</p><p>Optional diagnostics measures callback gaps and gesture outcomes for 30 seconds. It is off by default, stays in this file, and sends nothing. These callback gaps are not touch latency or display-frame measurements.</p><p>Nothing connects to your accounts or touches the real app’s library. Changes last only while this file is open. Reset restores the fixture.</p><p>If Android opens a file viewer, choose Open with Chrome. Use in-app Back if this local file does not support browser history.</p>',[{label:'Measure 30 seconds',fn:()=>PreviewDiagnostics.start()},{label:'Show diagnostics',fn:()=>PreviewDiagnostics.show()},{label:'Close'}]);
   },
   fail(error){
     console.error('Offline UI preview could not start',error);
@@ -255,36 +255,76 @@ const Preview={
 // Optional, bounded phone feedback aid. No listeners or animation callback run
 // until requested; no layout reads, console stream, storage or networking.
 const PreviewDiagnostics={
-  active:false,frame:0,started:0,last:0,gaps:[],gapCursor:0,count:0,sum:0,max:0,over33:0,over50:0,events:[],handlers:[],lastOwner:'',result:null,
-  snapshot(){return {preview:'v4',source:document.querySelector('meta[name="poweramp-preview-source-sha256"]')?.content||'',tracks:Preview.count,viewport:{width:innerWidth,height:innerHeight,dpr:devicePixelRatio},settings:{animations:SET.animations,playerLayout:SET.playerLayout,bgBlur:SET.bgBlur,vizOnPlayer:SET.vizOnPlayer,listZoom:JSON.parse(JSON.stringify(SET.listZoom||{})),headerButtons:NativeSettings.values.list_header_buttons}};},
+  active:false,frame:0,started:0,last:0,gaps:[],gapCursor:0,count:0,sum:0,max:0,over33:0,over50:0,events:[],handlers:[],lastOwner:'',result:null,wrappers:[],contexts:[],operations:new Map(),longOperations:[],longGaps:[],phaseGaps:new Map(),contactSamples:new Map(),lastPhase:'idle',
+  snapshot(){return {preview:'v5',source:document.querySelector('meta[name="poweramp-preview-source-sha256"]')?.content||'',tracks:Preview.count,viewport:{width:innerWidth,height:innerHeight,dpr:devicePixelRatio},settings:{animations:SET.animations,playerLayout:SET.playerLayout,bgBlur:SET.bgBlur,vizOnPlayer:SET.vizOnPlayer,listZoom:JSON.parse(JSON.stringify(SET.listZoom||{})),headerButtons:NativeSettings.values.list_header_buttons}};},
   owner(){
     const gesture=InputLifecycle.gesture,library=LibraryPageMotion.state,scene=ScreenDrag.state||ScreenDrag.settling;
-    return {screen:Nav.cur,owner:gesture?.node?.id||(library?'library-page-motion':scene?.morph?'shared-player':scene?'screen-scene':'none'),phase:gesture?.phase||(LibraryPageMotion.finish?.pending||ScreenDrag.settling?'settle':library||scene?'drag':'idle'),historyIndex:LibraryPageHistory.index,historyVisits:LibraryPageHistory.entries.length,version:InputLifecycle.version};
+    return {screen:Nav.cur,owner:gesture?.node?.id||(library?'library-page-motion':scene?.morph?'shared-player':scene?'screen-scene':'none'),phase:gesture?.phase||(LibraryPageMotion.finish?.pending||ScreenDrag.settling?'settle':library||scene?'drag':'idle'),historyIndex:LibraryPageHistory.index,historyVisits:LibraryPageHistory.entries.length,version:InputLifecycle.version,scene:scene?.morph?'shared-player':scene?'screen-scene':null,scene_phase:scene?ScreenDrag.phase:null,scene_progress:scene?.morph?Math.round(scene.morph.p*1000)/1000:null,direction:scene?.morph?(scene.morph.opening?'expand':'collapse'):null};
   },
+  phase(){
+    if(this.contexts.length)return this.contexts.at(-1);
+    const scene=ScreenDrag.state||ScreenDrag.settling;
+    if(scene?.morph)return 'shared:'+ScreenDrag.phase+':'+(scene.morph.opening?'expand':'collapse');
+    if(scene)return 'scene:'+ScreenDrag.phase;
+    if(LibraryPageMotion.state)return 'library:'+(LibraryPageMotion.finish?.pending?'settle':'drag');
+    return 'idle';
+  },
+  installMeasurements(){
+    const shared=typeof SharedPlayerMotion==='undefined'?null:SharedPlayerMotion,ui=typeof UI==='undefined'?null:UI;
+    const targets=[[shared,'create','shared.create','setup'],[shared,'clone','shared.clone'],[shared,'paint','shared.paint'],[shared,'refreshDynamic','shared.dynamic'],[shared,'refreshBackground','shared.background'],[shared,'settle','shared.settle'],[shared,'clean','shared.clean','cleanup'],[LibraryPageHistory,'save','history.save'],[LibraryPageMotion,'capture','history.capture'],[ui,'fitPlayer','player.fit'],[ui,'drawViz','player.draw'],[Nav,'go','navigation.go']];
+    for(const [object,key,label,stage] of targets){
+      if(typeof object?.[key]!=='function')continue;const original=object[key],diagnostics=this;
+      const wrapper=function(...args){
+        if(!diagnostics.active)return original.apply(this,args);
+        const phase=stage?'shared:'+stage+':'+(key==='create'?(args[0]?.target==='player'?'expand':'collapse'):(args[0]?.opening?'expand':'collapse')):diagnostics.phase(),at=performance.now();
+        if(stage)diagnostics.contexts.push(phase);
+        if(key==='settle')diagnostics.record('motion-settle',{direction:args[0]?.opening?'expand':'collapse',from:args[0]?.p,to:args[1],planned_ms:args[2]});
+        try{return original.apply(this,args);}finally{
+          if(stage)diagnostics.contexts.pop();const elapsed=Math.max(0,performance.now()-at),id=label+'|'+phase;
+          const value=diagnostics.operations.get(id)||{operation:label,phase,calls:0,total_ms:0,max_ms:0,over_8ms:0};
+          value.calls++;value.total_ms+=elapsed;value.max_ms=Math.max(value.max_ms,elapsed);if(elapsed>=8)value.over_8ms++;diagnostics.operations.set(id,value);
+          if(elapsed>=8){if(diagnostics.longOperations.length===60)diagnostics.longOperations.shift();diagnostics.longOperations.push({operation:label,phase,at_ms:Math.round(at-diagnostics.started),duration_ms:Math.round(elapsed*10)/10});}
+        }
+      };object[key]=wrapper;this.wrappers.push([object,key,original,wrapper]);
+    }
+  },
+  restoreMeasurements(){for(const [object,key,original,wrapper] of this.wrappers)if(object[key]===wrapper)object[key]=original;this.wrappers=[];this.contexts=[];},
   record(type,detail={}){if(!this.active)return;if(this.events.length===80)this.events.shift();this.events.push({ms:Math.round(performance.now()-this.started),type,...detail});},
-  observe(){if(!this.active)return;const owner=this.owner(),key=JSON.stringify(owner);if(key!==this.lastOwner){this.lastOwner=key;this.record('owner',owner);}},
+  observe(){if(!this.active)return;const owner=this.owner(),key=JSON.stringify({...owner,scene_progress:undefined});if(key!==this.lastOwner){this.lastOwner=key;this.record('owner',owner);}},
   start(){
-    if(!Preview.ready)return;this.stop('restarted');this.active=true;this.started=performance.now();this.last=0;this.gaps=[];this.gapCursor=0;this.count=this.sum=this.max=this.over33=this.over50=0;this.events=[];this.lastOwner='';this.result=null;this.initial=this.snapshot();
+    if(!Preview.ready)return;this.stop('restarted');this.active=true;this.started=performance.now();this.last=0;this.gaps=[];this.gapCursor=0;this.count=this.sum=this.max=this.over33=this.over50=0;this.events=[];this.lastOwner='';this.result=null;this.initial=this.snapshot();this.operations=new Map();this.longOperations=[];this.longGaps=[];this.phaseGaps=new Map();this.contactSamples=new Map();this.contexts=[];this.lastPhase='idle';this.installMeasurements();
     const help=document.getElementById('preview-help');if(help){help.textContent='●';help.title='Diagnostics recording for 30 seconds';}
     for(const type of ['pointerdown','pointerup','pointercancel','lostpointercapture','keydown']){
-      const fn=e=>{this.record(type,{target:e.target?.id||e.target?.tagName||'',pointerType:e.pointerType||''});Promise.resolve().then(()=>this.observe());};
+      const fn=e=>{
+        const x=Number.isFinite(e.clientX)?e.clientX:null,y=Number.isFinite(e.clientY)?e.clientY:null,id=e.pointerId;
+        if(type==='pointerdown')this.contactSamples.set(id,{x,y,lastX:x,lastY:y,moves:0,travel:0});
+        const sample=this.contactSamples.get(id),detail={target:e.target?.id||e.target?.tagName||'',pointerType:e.pointerType||''};
+        if(sample&&x!==null&&y!==null&&sample.x!==null&&sample.y!==null)sample.travel=Math.max(sample.travel,Math.hypot(x-sample.x,y-sample.y));
+        if(type!=='keydown'){detail.x=x;detail.y=y;detail.pointer=id;if(sample){detail.moves=sample.moves;detail.dx=x===null||sample.x===null?null:Math.round(x-sample.x);detail.dy=y===null||sample.y===null?null:Math.round(y-sample.y);detail.travel=Math.round(sample.travel);}}
+        if(type==='pointerup'||type==='pointercancel')this.contactSamples.delete(id);
+        this.record(type,detail);Promise.resolve().then(()=>this.observe());
+      };
       document.addEventListener(type,fn,true);this.handlers.push([document,type,fn]);
     }
+    const move=e=>{const sample=this.contactSamples.get(e.pointerId);if(!sample)return;sample.moves++;sample.lastX=e.clientX;sample.lastY=e.clientY;if(Number.isFinite(sample.x)&&Number.isFinite(sample.y))sample.travel=Math.max(sample.travel,Math.hypot(e.clientX-sample.x,e.clientY-sample.y));};document.addEventListener('pointermove',move,true);this.handlers.push([document,'pointermove',move]);
     const visibility=()=>{if(document.hidden)this.stop('page hidden');};document.addEventListener('visibilitychange',visibility,true);this.handlers.push([document,'visibilitychange',visibility]);
     const tick=now=>{
       if(!this.active)return;
       if(this.last){const gap=Math.max(0,now-this.last);this.count++;this.sum+=gap;this.max=Math.max(this.max,gap);if(gap>33)this.over33++;if(gap>50)this.over50++;
-        if(this.gaps.length<600)this.gaps.push(gap);else this.gaps[this.gapCursor++%600]=gap;}
-      this.last=now;this.observe();if(now-this.started>=30000){this.stop('30 seconds elapsed');toast('Diagnostics ready · open ? → Show diagnostics');return;}
+        if(this.gaps.length<600)this.gaps.push(gap);else this.gaps[this.gapCursor++%600]=gap;
+        const key=this.lastPhase,value=this.phaseGaps.get(key)||{phase:key,samples:0,total_ms:0,max_ms:0,over_33ms:0,over_50ms:0};value.samples++;value.total_ms+=gap;value.max_ms=Math.max(value.max_ms,gap);if(gap>33)value.over_33ms++;if(gap>50)value.over_50ms++;this.phaseGaps.set(key,value);
+        if(gap>33){if(this.longGaps.length===60)this.longGaps.shift();this.longGaps.push({at_ms:Math.round(now-this.started),gap_ms:Math.round(gap*10)/10,from_phase:key,to_phase:this.phase()});}
+      }
+      this.last=now;this.lastPhase=this.phase();this.observe();if(now-this.started>=30000){this.stop('30 seconds elapsed');toast('Diagnostics ready · open ? → Show diagnostics');return;}
       this.frame=requestAnimationFrame(tick);
     };
     this.observe();this.frame=requestAnimationFrame(tick);toast('Recording 30 seconds · try the laggy gesture · no data is sent',4500);
   },
   stop(reason='stopped'){
-    if(!this.active)return;this.observe();this.active=false;cancelAnimationFrame(this.frame);this.frame=0;
+    if(!this.active)return;this.observe();this.active=false;this.restoreMeasurements();this.contactSamples.clear();cancelAnimationFrame(this.frame);this.frame=0;
     for(const [node,type,fn] of this.handlers)node.removeEventListener(type,fn,true);this.handlers=[];
     const sorted=this.gaps.slice().sort((a,b)=>a-b),round=value=>Math.round(value*10)/10,percentile=f=>sorted.length?round(sorted[Math.min(sorted.length-1,Math.floor((sorted.length-1)*f))]):null;
-    this.result={...this.initial,elapsed_ms:Math.round(performance.now()-this.started),stop:reason,metric:'requestAnimationFrame callback gaps, not display frames or input latency',raf_gap_ms:{samples:this.count,recent_samples:sorted.length,mean:this.count?round(this.sum/this.count):null,p50_recent:percentile(.5),p95_recent:percentile(.95),max:round(this.max),over_33ms:this.over33,over_50ms:this.over50},final:this.owner(),events:this.events.slice()};
+    this.result={...this.initial,elapsed_ms:Math.round(performance.now()-this.started),stop:reason,metric:'requestAnimationFrame callback gaps, not display frames or input latency',raf_gap_ms:{samples:this.count,recent_samples:sorted.length,mean:this.count?round(this.sum/this.count):null,p50_recent:percentile(.5),p95_recent:percentile(.95),max:round(this.max),over_33ms:this.over33,over_50ms:this.over50},final:this.owner(),events:this.events.slice(),phase_gap_ms:[...this.phaseGaps.values()].map(v=>({phase:v.phase,samples:v.samples,mean:round(v.total_ms/v.samples),max:round(v.max_ms),over_33ms:v.over_33ms,over_50ms:v.over_50ms})),long_gaps:this.longGaps.slice(),operation_timing_note:'Synchronous inclusive function time. Nested durations overlap and must not be added together. Gap phase endpoints can span setup or another phase; they do not prove GPU/display latency.',operations:[...this.operations.values()].map(v=>({...v,total_ms:round(v.total_ms),mean_ms:round(v.total_ms/v.calls),max_ms:round(v.max_ms)})),long_operations:this.longOperations.slice()};
     const help=document.getElementById('preview-help');if(help){help.textContent='?';help.title='About this offline preview';}
   },
   show(){
@@ -310,7 +350,7 @@ body #app{top:28px}
 #preview-hint{position:fixed;top:30px;left:6px;right:6px;z-index:1001;font:10px/1.3 system-ui,sans-serif;pointer-events:none;color:#e9bc95;background:#211a16}
 #preview-hint:empty{display:none}
 `;
-const toolbar=`<aside id="preview-toolbar" aria-label="Offline UI preview controls"><span class="preview-label">UI preview v4 · simulated · no audio</span><span id="preview-count">60 tracks</span><button id="preview-size" aria-pressed="false" title="Switch between 60 and 5,000 fictional tracks">5,000 tracks</button><button id="preview-reset">Reset</button><button id="preview-help" aria-label="About this offline preview">?</button></aside><div id="preview-hint" role="status"></div><div id="preview-error" role="alert">Starting offline UI preview… If this stays visible, open the downloaded HTML directly in Chrome.</div>`;
+const toolbar=`<aside id="preview-toolbar" aria-label="Offline UI preview controls"><span class="preview-label">UI preview v5 · simulated · no audio</span><span id="preview-count">60 tracks</span><button id="preview-size" aria-pressed="false" title="Switch between 60 and 5,000 fictional tracks">5,000 tracks</button><button id="preview-reset">Reset</button><button id="preview-help" aria-label="About this offline preview">?</button></aside><div id="preview-hint" role="status"></div><div id="preview-error" role="alert">Starting offline UI preview… If this stays visible, open the downloaded HTML directly in Chrome.</div>`;
 const csp="default-src 'none'; script-src 'unsafe-inline' blob:; style-src 'unsafe-inline'; img-src data: blob:; media-src blob: data:; font-src data:; worker-src blob:; connect-src 'none'; base-uri 'none'; form-action 'none'";
 
 const once=(source,needle,replacement,label)=>{
@@ -346,7 +386,7 @@ export async function buildPreview(output=defaultOutput){
   const sourceHash=createHash('sha256').update([htmlInput,analysis,core,player].join('\0')).digest('hex');
   // Never carry a personalized embedded server credential into the preview.
   const safeInput=htmlInput.replace(/<script\b(?=[^>]*\bid=["']drawercast-defaults["'])[^>]*>[\s\S]*?<\/script>\s*/gi,'');
-  let html=once(safeInput,'<title>Poweramp</title>','<title>Poweramp · Offline UI Preview v4</title>','title');
+  let html=once(safeInput,'<title>Poweramp</title>','<title>Poweramp · Offline UI Preview v5</title>','title');
   html=once(html,'<meta charset="utf-8">',`<meta charset="utf-8">\n<meta http-equiv="Content-Security-Policy" content="${csp}">\n<meta name="poweramp-preview" content="fictional UI fixtures; simulated playback; no audio">\n<meta name="poweramp-preview-source-sha256" content="${sourceHash}">`,'charset');
   html=once(html,'</head>',`<style>${previewStyles}</style>\n</head>`,'head');
   const bodyTag=html.match(/<body\b[^>]*>/)?.[0];if(!bodyTag)throw Error('Missing body');

@@ -1,4 +1,4 @@
-import {readFile, stat} from 'node:fs/promises';
+import {mkdir, readFile, stat, writeFile} from 'node:fs/promises';
 import {createServer} from 'node:http';
 import {extname, join, resolve, sep} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -7,6 +7,41 @@ const defaultRoot=fileURLToPath(new URL('../../public/',import.meta.url));
 const mime={'.html':'text/html','.js':'text/javascript','.json':'application/json','.svg':'image/svg+xml','.woff2':'font/woff2'};
 export const sourceFlags={local:false,drive:false,r2:false,server:false};
 export const mobileContext={viewport:{width:393,height:852},isMobile:true,hasTouch:true};
+
+// Read-only, bounded evidence for real Chromium failures. Record targets and
+// ownership, never app text or any synthetic replacement input events.
+export function installFixtureInputTrace(){
+  const label=n=>n?((n.tagName||'').toLowerCase()+(n.id?'#'+n.id:'')+(n.classList?.length?'.'+Array.from(n.classList).slice(0,3).join('.'):'')+(n.dataset?.act?'[data-act='+n.dataset.act+']':'')):null;
+  const owner=()=>({screen:window.PA?.Nav.cur,gesture:typeof InputLifecycle!=='undefined'?label(InputLifecycle.gesture?.node):null,
+    phase:typeof ScreenDrag!=='undefined'?ScreenDrag.phase:null,shared:!!document.querySelector('.player-scene-input'),history:!!window.PA?.LibraryPageMotion.state,scrubbing:!!window.PA?.UI.seekDragging});
+  window.fixtureInputTrace=[];
+  for(const type of ['pointerdown','pointermove','pointerup','pointercancel','gotpointercapture','lostpointercapture','touchstart','touchmove','touchend','touchcancel'])document.addEventListener(type,e=>{
+    const p=e.touches?.[0]||e.changedTouches?.[0]||e,record={type,target:label(e.target),trusted:e.isTrusted,pointer:e.pointerId,x:p.clientX,y:p.clientY,before:owner()};
+    fixtureInputTrace.push(record);if(fixtureInputTrace.length>80)fixtureInputTrace.shift();
+    queueMicrotask(()=>{record.prevented=e.defaultPrevented;record.after=owner();});
+  },{capture:true,passive:true});
+}
+
+export async function reportFixtureFailure(h,error,name){
+  let evidence;
+  try{evidence={test:name,error:String(error),...await h.diagnostics()};}
+  catch(diagnosticError){evidence={test:name,error:String(error),diagnosticError:String(diagnosticError)};}
+  console.error('POWERAMP_BROWSER_FAILURE '+JSON.stringify(evidence));
+  if(process.env.POWERAMP_EVIDENCE_DIR){
+    const directory=resolve(process.env.POWERAMP_EVIDENCE_DIR),filename=String(name).toLowerCase().replace(/[^a-z0-9]+/g,'-').slice(0,120);
+    try{
+      await mkdir(directory,{recursive:true});await writeFile(join(directory,filename+'.json'),JSON.stringify(evidence,null,2)+'\n');
+      // Only this isolated, generated fixture is captured. A single viewport
+      // per failed contract keeps CI artifacts bounded and preserves animation.
+      if(h.page)await h.page.screenshot({path:join(directory,filename+'.png'),fullPage:false,animations:'allow',timeout:5000});
+    }catch(artifactError){console.error('POWERAMP_BROWSER_EVIDENCE_ERROR '+JSON.stringify({test:name,error:String(artifactError)}));}
+  }
+}
+
+export function fixtureSceneSettled(screen){
+  const current=document.querySelector('#sc-'+screen);
+  return PA.Nav.cur===screen&&current&&!current.hidden&&!current.inert&&!current.dataset.scene&&!document.querySelector('.player-scene-input')&&!PA.LibraryPageMotion.state&&!PA.LibraryPageMotion.finish;
+}
 
 // All names, covers, and audio in this fixture are generated test material.
 export function fixtureWav(index=0){
@@ -74,16 +109,35 @@ export async function openFixturePage(browser,fixture,options={}){
   const context=await browser.newContext(mobileContext);
   await context.route('**/*',route=>new URL(route.request().url()).origin===fixture.origin?route.continue():route.abort('blockedbyclient'));
   await context.addInitScript(flags=>localStorage.setItem('drawercast.sources.v1',JSON.stringify(flags)),sourceFlags);
+  await context.addInitScript(installFixtureInputTrace);
   const page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
+  page.setDefaultTimeout(5000);
   await page.goto(fixture.origin+'/drawercast/');await page.waitForFunction(()=>window.PA?.R2Source.manifestURL==='fixture-disabled');
   await page.evaluate(installPowerampFixture,{origin:fixture.origin,...options});
   const cdp=await context.newCDPSession(page),point=(x,y,id=1)=>({id,x,y,radiusX:1,radiusY:1,force:1});
-  const send=(type,points)=>cdp.send('Input.dispatchTouchEvent',{type,touchPoints:points});
+  let lastPoint=null,lastTarget=null;
+  const send=(type,points)=>{if(points.length)lastPoint={x:points[0].x,y:points[0].y};return cdp.send('Input.dispatchTouchEvent',{type,touchPoints:points});};
   const frame=()=>page.evaluate(()=>new Promise(r=>requestAnimationFrame(()=>r())));
   const start=(x,y)=>send('touchStart',[point(x,y)]),move=(x,y)=>send('touchMove',[point(x,y)]),end=()=>send('touchEnd',[]);
   const tap=async(x,y)=>{await start(x,y);await end();};
-  const center=async selector=>{const box=await page.locator(selector).boundingBox();if(!box)throw Error('Missing visible fixture target '+selector);return {x:box.x+box.width/2,y:box.y+box.height/2,box};};
+  const center=async selector=>{const box=await page.locator(selector).boundingBox();if(!box)throw Error('Missing visible fixture target '+selector);const p={x:box.x+box.width/2,y:box.y+box.height/2,box};lastTarget={selector,...p};return p;};
   const swipe=async(selector,dx,dy)=>{const p=await center(selector);await start(p.x,p.y);for(let i=1;i<=5;i++){await move(p.x+dx*i/5,p.y+dy*i/5);await frame();}await end();return p;};
-  const library=async()=>{await page.locator('[data-nav="library"]').tap();await page.getByRole('button',{name:'All Songs',exact:true}).tap();await page.waitForFunction(()=>PA.Nav.cur==='list'&&!document.querySelector('#sc-list').inert);await frame();};
-  return {context,page,cdp,errors,point,send,start,move,end,tap,frame,center,swipe,library,close:()=>context.close()};
+  const settled=async screen=>{
+    await page.waitForFunction(fixtureSceneSettled,screen);
+    await frame();await frame();
+  };
+  const library=async()=>{await page.locator('[data-nav="library"]').tap();await settled('library');await page.getByRole('button',{name:'All Songs',exact:true}).tap();await settled('list');};
+  const diagnostics=()=>page.evaluate(({lastPoint,lastTarget})=>{
+    const label=n=>n?((n.tagName||'').toLowerCase()+(n.id?'#'+n.id:'')+(n.classList?.length?'.'+Array.from(n.classList).slice(0,3).join('.'):'')+(n.dataset?.act?'[data-act='+n.dataset.act+']':'')):null;
+    const rect=n=>{const r=n.getBoundingClientRect(),cs=getComputedStyle(n);return {left:r.left,top:r.top,width:r.width,height:r.height,hidden:n.hidden,inert:n.inert,scene:n.dataset.scene,transform:cs.transform,pointerEvents:cs.pointerEvents,touchAction:cs.touchAction,scrollTop:n.scrollTop,scrollHeight:n.scrollHeight,clientHeight:n.clientHeight};};
+    const scene=typeof ScreenDrag!=='undefined'?(ScreenDrag.state||ScreenDrag.settling):null;
+    const history=PA.LibraryPageMotion.state;
+    return {lastPoint,lastTarget,viewport:{width:innerWidth,height:innerHeight},hit:lastPoint?document.elementsFromPoint(lastPoint.x,lastPoint.y).slice(0,6).map(label):[],screen:PA.Nav.cur,
+      gesture:typeof InputLifecycle!=='undefined'?{owner:label(InputLifecycle.gesture?.node),phase:InputLifecycle.gesture?.phase,contacts:Array.from(InputLifecycle.contacts),version:InputLifecycle.version}:null,
+      scene:scene?{from:scene.fromName,target:scene.target,phase:ScreenDrag.phase,progress:scene.progress,height:scene.height,commit:scene.commit,shared:scene.morph?.p,pending:!!ScreenDrag.finish?.pending}:null,
+      history:history?{index:PA.LibraryPageHistory.index,x:history.x,base:history.base,y:history.y,width:history.width,delta:history.delta,commit:history.commit,target:history.target?.screen,pending:!!PA.LibraryPageMotion.finish?.pending}:null,
+      time:PA.Engine.time(),scrubbing:PA.UI.seekDragging,pageErrors:[],nodes:Object.fromEntries(['#sc-player','#sc-library','#sc-list','#list-body','#mini','#mini-title','#mini-seek','#transport','.player-scene-input','.player-scene-art','#library-page-motion'].map(selector=>[selector,document.querySelector(selector)?rect(document.querySelector(selector)):null])),trace:window.fixtureInputTrace||[]};
+  },{lastPoint,lastTarget}).then(result=>({...result,pageErrors:errors.slice()}));
+  try{await settled('player');}catch(error){await reportFixtureFailure({diagnostics,page},error,'fixture player endpoint readiness');await context.close();throw error;}
+  return {context,page,cdp,errors,point,send,start,move,end,tap,frame,center,swipe,library,settled,diagnostics,close:()=>context.close()};
 }

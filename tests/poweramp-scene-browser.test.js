@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {existsSync} from 'node:fs';
 import {chromium} from 'playwright-core';
-import {servePowerampFixture,openFixturePage} from './helpers/poweramp-fixture.js';
+import {servePowerampFixture,openFixturePage,reportFixtureFailure} from './helpers/poweramp-fixture.js';
 
 const executablePath=[process.env.JARVIS_CHROME,'/usr/bin/chromium','/usr/bin/chromium-browser','/usr/bin/google-chrome',chromium.executablePath()].find(p=>p&&existsSync(p));
 const bounds=async(page,selector)=>page.locator(selector).evaluate(n=>{const r=n.getBoundingClientRect();return {left:r.left,top:r.top,width:r.width,height:r.height};});
@@ -17,7 +17,7 @@ test('Poweramp mandatory Chromium scene, seek, and art contracts',{timeout:12000
     browser=await chromium.launch({executablePath,headless:true,args:['--no-sandbox']});
     const run=async(name,fn,options={})=>t.test(name,async()=>{
       const h=await openFixturePage(browser,fixture,options);
-      try{await fn(h);assert.deepEqual(h.errors,[]);}finally{await h.close();}
+      try{await fn(h);assert.deepEqual(h.errors,[]);}catch(error){await reportFixtureFailure(h,error,name);throw error;}finally{await h.close();}
     });
 
     await run('real upward mini swipe blocks uncovered background rows during settling',async h=>{

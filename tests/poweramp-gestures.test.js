@@ -4,11 +4,11 @@ import vm from 'node:vm';
 import {readFileSync} from 'node:fs';
 const source=readFileSync(process.env.POWERAMP_PLAYER_FILE||new URL('../public/drawercast/player.js',import.meta.url),'utf8');
 function node(){
-  const handlers={},classes=new Set();
+  const handlers={},classes=new Set(),captures=new Set();
   return {handlers,style:{setProperty(){}},dataset:{},children:[],clientWidth:393,clientHeight:700,scrollTop:0,hidden:false,
     classList:{add(...s){s.forEach(x=>classes.add(x))},remove(...s){s.forEach(x=>classes.delete(x))},toggle(s){classes.has(s)?classes.delete(s):classes.add(s)},contains:s=>classes.has(s)},
     addEventListener(n,fn,options){(handlers[n]??=[]).push({fn,options})},removeEventListener(){},
-    setAttribute(k,v){(this.attrs??={})[k]=v},getAttribute(k){return this.attrs?.[k]??null},contains:()=>true,setPointerCapture(){},hasPointerCapture:()=>false,releasePointerCapture(){},
+    setAttribute(k,v){(this.attrs??={})[k]=v},getAttribute(k){return this.attrs?.[k]??null},contains:()=>true,setPointerCapture:id=>captures.add(id),hasPointerCapture:id=>captures.has(id),releasePointerCapture:id=>captures.delete(id),
     getBoundingClientRect:()=>({left:0,top:0,bottom:700,width:393,height:700}),closest:()=>null,
     appendChild(child){this.children.push(child);return child},remove(){},querySelector:()=>null,querySelectorAll:()=>[],cloneNode(){const n=node(),parts=new Map();n.removeAttribute=()=>{};n.setAttribute=()=>{};n.querySelector=s=>{if(!parts.has(s))parts.set(s,node());return parts.get(s)};return n;},
     fire(type,args={}){const e={type,pointerId:1,pointerType:'touch',isPrimary:true,button:0,clientX:150,clientY:250,target:this,cancelable:true,detail:1,preventDefault(){this.prevented=true},stopPropagation(){this.propagationStopped=true},stopImmediatePropagation(){this.stopped=true},...args};for(const {fn} of handlers[type]||[]){fn(e);if(e.stopped)break;}return e;}
@@ -47,6 +47,25 @@ test('vertical navigation: reversing past the origin must not commit the origina
 function mini(){const h=harness();motion(h);run(h,'function setupMiniGestures()','function setupPlayerSwipeDown()','\nsetupMiniGestures();');return h;}
 test('mini-player: tap opens player',()=>{const h=mini(),n=h.nodes.get('#mini');n.fire('pointerdown');h.advance(40);n.fire('pointerup');assert.deepEqual(h.calls,[['nav','player']]);});
 test('mini-player: upward swipe opens player',()=>{const h=mini();swipe(h,h.nodes.get('#mini'),0,-120);assert.deepEqual(h.calls,[['navigate',true,'player',-1]]);});
+test('mini-player: implicit child capture transfer retains tap and upward drag ownership',()=>{
+  for(const drag of [false,true]){
+    const h=mini(),n=h.nodes.get('#mini'),title=node();n.fire('pointerdown',{target:title});
+    assert.equal(n.hasPointerCapture(1),true);
+    n.fire('lostpointercapture',{target:title});
+    assert.equal(h.context.lifecycle.gesture?.node,n,'old title capture loss must preserve the mini owner');
+    h.advance(40);if(drag){n.fire('pointermove',{clientY:130});h.paint();}
+    n.fire('pointerup',{clientY:drag?130:250});
+    assert.deepEqual(h.calls,drag?[['navigate',true,'player',-1]]:[['nav','player']]);
+    assert.equal(h.context.lifecycle.gesture,null);
+  }
+});
+test('mini-player: actual owner loss and genuine child pointercancel still cancel navigation',()=>{
+  for(const [type,child] of [['lostpointercapture',false],['pointercancel',true]]){
+    const h=mini(),n=h.nodes.get('#mini'),title=node();n.fire('pointerdown',{target:title});
+    n.fire('pointermove',{clientY:130});h.paint();n.fire(type,{target:child?title:n});n.fire('pointerup',{clientY:130});
+    assert.deepEqual(h.calls,[]);assert.equal(h.context.lifecycle.gesture,null);
+  }
+});
 test('mini-player: play/seek children are excluded from navigation swipe',()=>{const h=mini(),n=h.nodes.get('#mini');n.fire('pointerdown',{target:{closest:()=>({})}});n.fire('pointerup');assert.deepEqual(h.calls,[]);});
 test('mini-player: left and right swipes change one track without opening player',()=>{for(const [dx,expected] of [[-120,'next'],[120,'prev']]){const h=mini();swipe(h,h.nodes.get('#mini'),dx);assert.deepEqual(h.calls,[expected]);}});
 test('artwork: a song change during animation prevents a stale swipe skip',()=>{const h=art(),n=h.nodes.get('#artstage');h.context.SET.animations='normal';swipe(h,n,-120);h.Engine.current={id:'changed'};h.advance(1000);assert.deepEqual(h.calls,[]);});

@@ -20,7 +20,20 @@ jobs:
       - name: Install pinned test dependencies
         run: npm ci
       - name: Run frontend regression tests
-        run: npm test
+        env:
+          POWERAMP_EVIDENCE_DIR: ${{ runner.temp }}/poweramp-browser
+        run: |
+          export JARVIS_CHROME="$(command -v google-chrome || command -v chromium)"
+          test -n "$JARVIS_CHROME"
+          npm test
+      - name: Preserve Poweramp trusted-input evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: poweramp-browser-${{ github.run_id }}
+          path: ${{ runner.temp }}/poweramp-browser
+          if-no-files-found: warn
+          retention-days: 14
       - name: Verify podcast listening and offline playback in Chromium
         run: |
           export JARVIS_CHROME="$(command -v google-chrome || command -v chromium)"

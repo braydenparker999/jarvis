@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {existsSync} from 'node:fs';
 import {chromium} from 'playwright-core';
-import {servePowerampFixture,openFixturePage} from './helpers/poweramp-fixture.js';
+import {servePowerampFixture,openFixturePage,reportFixtureFailure} from './helpers/poweramp-fixture.js';
 
 // Required trusted-input target: missing or broken Chromium fails, never skips.
 const executablePath=[process.env.JARVIS_CHROME,'/usr/bin/chromium','/usr/bin/chromium-browser','/usr/bin/google-chrome',chromium.executablePath()].find(p=>p&&existsSync(p));
@@ -11,7 +11,7 @@ test('Poweramp mandatory Chromium library history contracts',{timeout:120000},as
   const fixture=await servePowerampFixture();let browser;
   try{
     browser=await chromium.launch({executablePath,headless:true,args:['--no-sandbox']});
-    const run=(name,fn,options={})=>t.test(name,async()=>{const h=await openFixturePage(browser,fixture,options);try{await fn(h);assert.deepEqual(h.errors,[]);}finally{await h.close();}});
+    const run=(name,fn,options={})=>t.test(name,async()=>{const h=await openFixturePage(browser,fixture,options);try{await fn(h);assert.deepEqual(h.errors,[]);}catch(error){await reportFixtureFailure(h,error,name);throw error;}finally{await h.close();}});
     await run('trusted row-origin right/left restores Library and its just-left category',async h=>{
       const {page,library,swipe}=h;await library();await page.evaluate(()=>{window.pageTrace=[];document.addEventListener('pointerdown',e=>pageTrace.push({trusted:e.isTrusted,row:!!e.target.closest('.trow')}),true);});
       await swipe('#list-body .trow:nth-of-type(3)',120,0);await page.waitForFunction(()=>PA.Nav.cur==='library'&&document.querySelector('#library-page-motion').hidden);

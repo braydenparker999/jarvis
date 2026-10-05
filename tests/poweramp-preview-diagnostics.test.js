@@ -16,7 +16,8 @@ function harness(){
   vm.runInContext(previewHooks.slice(previewHooks.indexOf('const PreviewDiagnostics='),previewHooks.indexOf('Preview.prepare();'))+'\nglobalThis.diagnostics=PreviewDiagnostics;',context);
   const h={context,diagnostics:context.diagnostics,frames,events,help,toasts,dialogs,
     tick(ms=16){now+=ms;const first=frames.entries().next().value;if(first){frames.delete(first[0]);first[1](now);}},
-    fire(type,target={id:'sc-list',tagName:'SECTION'}){for(const {fn} of events.get(type)||[])fn({type,target,pointerType:'touch'});},
+    advance(ms){now+=ms;},
+    fire(type,target={id:'sc-list',tagName:'SECTION'},detail={}){for(const {fn} of events.get(type)||[])fn({type,target,pointerType:'touch',...detail});},
     listenerCount(){return [...events.values()].reduce((n,v)=>n+v.length,0);}};return h;
 }
 
@@ -47,6 +48,49 @@ test('report records owner/commit outcomes and callback gaps without collecting 
 test('hiding the page stops all work and restarting does not accumulate listeners',()=>{
   const h=harness();h.diagnostics.start();h.context.document.hidden=true;h.fire('visibilitychange');
   assert.equal(h.diagnostics.result.stop,'page hidden');assert.equal(h.frames.size,0);assert.equal(h.listenerCount(),0);
-  h.context.document.hidden=false;h.context.Preview.count=5000;h.diagnostics.start();assert.equal(h.listenerCount(),6);h.diagnostics.stop('fixture reset');
+  h.context.document.hidden=false;h.context.Preview.count=5000;h.diagnostics.start();assert.equal(h.listenerCount(),7);h.diagnostics.stop('fixture reset');
   assert.equal(h.diagnostics.result.tracks,5000);assert.equal(h.diagnostics.result.stop,'fixture reset');assert.equal(h.listenerCount(),0);
+});
+
+
+test('optional operation timings distinguish setup and release work and restore all wrappers',()=>{
+  const h=harness(),shared={
+    clone(){assert.equal(this,shared);h.advance(20);return {};},
+    create(){assert.equal(this,shared);this.clone();h.advance(40);return {};},
+    paint(){h.advance(3);},settle(){h.advance(2);},clean(){h.advance(2);}
+  };
+  h.context.SharedPlayerMotion=shared;h.context.UI={fitPlayer(){h.advance(1);},drawViz(){h.advance(4);}};
+  const save=function(){h.advance(53);return 'saved';};h.context.LibraryPageHistory.save=save;
+  const create=shared.create;assert.equal(shared.create,create,'inactive diagnostics do not patch functions');
+  h.diagnostics.start();assert.notEqual(shared.create,create);shared.create({target:'player'});
+  h.context.ScreenDrag.phase='settle';h.context.ScreenDrag.settling={morph:{opening:true,p:.2}};
+  assert.equal(h.context.LibraryPageHistory.save(),'saved');shared.settle({opening:true,p:.2},1,220);
+  h.context.UI.fitPlayer();h.diagnostics.stop();
+  assert.equal(shared.create,create);assert.equal(h.context.LibraryPageHistory.save,save);assert.equal(h.diagnostics.wrappers.length,0);
+  const operations=h.diagnostics.result.operations,setup=operations.find(v=>v.operation==='shared.create'),capture=operations.find(v=>v.operation==='history.save');
+  assert.equal(setup.phase,'shared:setup:expand');assert.equal(setup.max_ms,60);assert.equal(setup.calls,1);
+  assert.equal(capture.phase,'shared:settle:expand');assert.equal(capture.max_ms,53);
+  assert.ok(h.diagnostics.result.long_operations.some(v=>v.operation==='shared.clone'&&v.duration_ms===20));
+  assert.ok(h.diagnostics.result.events.some(v=>v.type==='motion-settle'&&v.planned_ms===220&&v.from===.2));
+  assert.match(h.diagnostics.result.operation_timing_note,/Nested durations overlap/);
+});
+
+test('gap timestamps and scene state retain their distinct phases without a GPU-latency claim',()=>{
+  const h=harness();h.diagnostics.start();h.tick(10);
+  h.context.InputLifecycle.gesture={node:{id:'mini'},phase:'drag'};
+  h.context.ScreenDrag.phase='drag';h.context.ScreenDrag.state={morph:{opening:true,p:.25}};
+  h.tick(72);h.diagnostics.stop();const report=h.diagnostics.result;
+  assert.equal(report.long_gaps.length,1);assert.equal(report.long_gaps[0].gap_ms,72);assert.equal(report.long_gaps[0].from_phase,'idle');assert.equal(report.long_gaps[0].to_phase,'shared:drag:expand');
+  assert.equal(report.final.owner,'mini');assert.equal(report.final.phase,'drag');assert.equal(report.final.scene,'shared-player');assert.equal(report.final.scene_phase,'drag');assert.equal(report.final.scene_progress,.25);
+  assert.equal(report.phase_gap_ms[0].max,72);assert.match(report.operation_timing_note,/do not prove GPU/);
+});
+
+test('contact displacement is sampled without logging pointer moves or typed input',()=>{
+  const h=harness();h.diagnostics.start();const target={id:'mini-title',tagName:'SPAN'};
+  h.fire('pointerdown',target,{pointerId:7,clientX:10,clientY:100});
+  h.fire('pointermove',target,{pointerId:7,clientX:10,clientY:60});
+  h.fire('pointermove',target,{pointerId:7,clientX:10,clientY:50});
+  h.fire('pointerup',target,{pointerId:7,clientX:10,clientY:30});h.diagnostics.stop();
+  const event=h.diagnostics.result.events.find(e=>e.type==='pointerup');assert.equal(event.moves,2);assert.equal(event.dx,0);assert.equal(event.dy,-70);assert.equal(event.travel,70);
+  assert.equal(h.diagnostics.result.events.some(e=>e.type==='pointermove'),false);assert.equal(h.diagnostics.contactSamples.size,0);
 });
