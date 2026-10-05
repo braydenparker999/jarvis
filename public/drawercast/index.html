@@ -140,11 +140,18 @@ body.no-bg #bg-art,body.no-bg #bg-art-next{display:none}
 
 /* Persistent live presentation. IDs, listeners, canvases and CSS ancestry stay
    intact; only these bounded transforms/opacities change during contact. */
-#player-live-mask,#player-live-content{position:absolute;inset:0;transform-origin:0 0}
-#player-live-mask[data-active]{z-index:21;overflow:hidden;contain:layout paint style;will-change:transform;pointer-events:none}
-#player-live-mask[data-active] #player-live-content{will-change:transform}
+#player-live-mask,#player-live-backdrop-mask{position:fixed;inset:0;top:var(--player-live-top,0px);z-index:1;transform-origin:0 0;pointer-events:none}
+#player-live-content,#player-live-backdrop-content{position:absolute;inset:0;transform-origin:0 0}
+#player-live-mask #sc-player:not([inert]){pointer-events:auto}
+#player-live-mask[data-active] #sc-player{pointer-events:none!important}
+#player-live-mask:not([data-active]):has(#sc-player[data-gesture-preview]){z-index:3}
+#player-live-mask:not([data-active]):has(#sc-player[data-scene]:not([data-gesture-preview])){z-index:0}
+#player-live-mask[data-active],#player-live-backdrop-mask[data-active]{z-index:21;overflow:hidden;contain:layout paint style;will-change:transform}
+#player-live-backdrop-mask[data-active]{z-index:19;background:var(--dock)}
+#player-live-backdrop-mask[hidden]{display:none}
+#player-live-mask[data-active] #player-live-content,#player-live-backdrop-mask[data-active] #player-live-backdrop-content{will-change:transform}
 #player-live-background{display:none;position:absolute;overflow:hidden;background:var(--bg0);pointer-events:none}
-#player-live-mask[data-active] #player-live-background{display:block;will-change:opacity}
+#player-live-backdrop-mask[data-active] #player-live-background{display:block;will-change:opacity}
 #player-live-background .player-live-bg-art,#player-live-background .player-live-bg-art-next{position:absolute;inset:-14%;background-size:cover;background-position:center;filter:blur(var(--bg-blur,16px)) saturate(var(--bg-sat,150%)) brightness(var(--bg-int,1));transform:scale(1.25);transition:opacity var(--dur-slow) var(--ease);will-change:opacity}
 #player-live-background .player-live-bg-art-next{opacity:0}
 #player-live-background .player-live-bg-grad{position:absolute;inset:0;background:linear-gradient(180deg,color-mix(in srgb,var(--grad-color,#000) 0%,transparent) 0%,color-mix(in srgb,var(--grad-color,#000) calc(var(--grad-strength,40) * 1%),transparent) 55%,color-mix(in srgb,var(--grad-color,#000) calc(var(--grad-strength,40) * 1.9%),transparent) 100%)}

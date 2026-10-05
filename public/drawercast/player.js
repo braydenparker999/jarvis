@@ -6379,11 +6379,12 @@ Object.assign(SharedPlayerMotion,{
   },
   install(){
     if(this.presenter)return;
-    const full=$('#sc-player'),mini=$('#mini'),mask=document.createElement('div'),content=document.createElement('div'),background=document.createElement('div'),input=document.createElement('div');
-    mask.id='player-live-mask';content.id='player-live-content';background.id='player-live-background';input.id='player-live-input';input.hidden=true;input.setAttribute('aria-hidden','true');
-    full.before(mask);mask.appendChild(content);content.appendChild(background);content.appendChild(full);document.body.appendChild(input);
+    const full=$('#sc-player'),mini=$('#mini'),mask=document.createElement('div'),content=document.createElement('div'),backgroundMask=document.createElement('div'),backgroundContent=document.createElement('div'),background=document.createElement('div'),input=document.createElement('div');
+    mask.id='player-live-mask';content.id='player-live-content';backgroundMask.id='player-live-backdrop-mask';backgroundContent.id='player-live-backdrop-content';background.id='player-live-background';input.id='player-live-input';input.hidden=backgroundMask.hidden=true;input.setAttribute('aria-hidden','true');
+    root.style.setProperty('--player-live-top',this.rect($('#app')).top+'px');
+    mini.before(backgroundMask);mini.before(mask);mask.appendChild(content);content.appendChild(full);backgroundMask.appendChild(backgroundContent);backgroundContent.appendChild(background);document.body.appendChild(input);
     const backgroundParts={};for(const name of ['art','art-next','grad','vig']){const node=document.createElement('div');node.className='player-live-bg-'+name;background.appendChild(node);backgroundParts[name]=node;}
-    this.presenter={full,mini,mask,content,background,input,backgroundParts};
+    this.presenter={full,mini,mask,content,backgroundMask,backgroundContent,background,input,backgroundParts};
     SnapshotReferenceMotion.bindInput.call(this,this.presenter);
     // Input listeners/contact plane are installed once and reused. Retirement
     // releases capture but does not remove/recreate the presentation.
@@ -6393,7 +6394,7 @@ Object.assign(SharedPlayerMotion,{
     const geometryObserver=new MutationObserver(()=>{if(this.active()&&this.active().trackId!==Engine.current?.id)ScreenDrag.abort();this.scheduleAppearance();});
     for(const selector of ['#p-title','#p-sub','.outinfo'])geometryObserver.observe($(selector),{childList:true,characterData:true,subtree:true});
     geometryObserver.observe(document.body,{attributes:true,attributeFilter:['class']});
-    window.addEventListener('resize',()=>this.scheduleAppearance());document.fonts?.ready.then(()=>this.scheduleAppearance());
+    window.addEventListener('resize',()=>{root.style.setProperty('--player-live-top',this.rect($('#app')).top+'px');this.scheduleAppearance();});document.fonts?.ready.then(()=>this.scheduleAppearance());
     this.updateBackground();this.scheduleAppearance();
   },
   updateBackground(){
@@ -6408,10 +6409,10 @@ Object.assign(SharedPlayerMotion,{
     const opening=scene.target==='player',other=opening?scene.fromName:scene.target;
     if((scene.fromName!=='player'&&!opening)||other==='settings'||!Engine.current||GestureMotion.reduced()||UI.instantNav)return null;
     const presenter=this.presenter;if(!presenter)return null;
-    const {mini,full,mask,content,input,background}=presenter,nav=$('#nav'),dim=$('#bg-dim');
+    const {mini,full,mask,content,backgroundMask,backgroundContent,input,background}=presenter,nav=$('#nav'),dim=$('#bg-dim');
     const original={miniHidden:mini.hidden,miniInert:mini.inert,miniAria:mini.getAttribute('aria-hidden'),fullHidden:full.hidden,fullInert:full.inert,fullAria:full.getAttribute('aria-hidden')};
     const pairs={art:{mini:$('#mini-art'),full:$('#artstage')},title:{mini:$('#mini-title'),full:$('#p-title')},sub:{mini:$('#mini-sub'),full:$('#p-sub')},play:{mini:$('#mini-play'),full:$('#btn-play')},seek:{mini:$('#mini-seek'),full:$('#seek')}};
-    const motionKeys=['transform','transform-origin','transition','opacity','will-change','z-index','border-radius'];
+    const motionKeys=['transform','transform-origin','transition','opacity','will-change','z-index','border-radius','background'];
     const styles=[mini,full,dim,nav,...Object.values(pairs).flatMap(pair=>[pair.mini,pair.full])].map(node=>this.styleSnapshot(node,motionKeys));
     let m=null;this.settingUp=true;
     try{
@@ -6424,11 +6425,11 @@ Object.assign(SharedPlayerMotion,{
       const navFull=[navMini[2],navMini[3],navMini[2],navMini[3]];
       m={...presenter,opening,p:opening?0:1,endpoints,pairs,miniRadius,navRadius:{mini:navMini,full:navFull},artRadius,nav,dim,styles,original,trackId:Engine.current.id,geometry:null,retired:false};
       this.transaction=m;
-      const base=endpoints.surface.mini,app=this.rect($('#app')),fullBox=endpoints.surface.full;
-      Object.assign(mask.style,{inset:'auto',left:(base.left-app.left)+'px',top:(base.top-app.top)+'px',width:base.width+'px',height:base.height+'px'});
-      Object.assign(content.style,{inset:'auto',left:'0',top:'0',width:fullBox.width+'px',height:fullBox.height+'px'});
+      const base=endpoints.surface.mini,fullBox=endpoints.surface.full;
+      for(const node of [mask,backgroundMask])Object.assign(node.style,{inset:'auto',left:base.left+'px',top:base.top+'px',width:base.width+'px',height:base.height+'px'});
+      for(const node of [content,backgroundContent])Object.assign(node.style,{inset:'auto',left:'0',top:'0',width:fullBox.width+'px',height:fullBox.height+'px'});
       Object.assign(background.style,{left:-fullBox.left+'px',top:-fullBox.top+'px',width:innerWidth+'px',height:innerHeight+'px'});
-      mini.dataset.sharedPlayer=full.dataset.sharedPlayer='1';mask.dataset.active='1';input.hidden=false;input.className='player-scene-input';
+      mini.dataset.sharedPlayer=full.dataset.sharedPlayer='1';mask.dataset.active=backgroundMask.dataset.active='1';input.hidden=backgroundMask.hidden=false;input.className='player-scene-input';mini.style.background='transparent';
       for(const nodes of Object.values(pairs))for(const node of Object.values(nodes)){node.style.transformOrigin='0 0';node.style.transition='none';node.style.willChange='transform,opacity';}
       mini.style.transformOrigin='0 0';mini.style.zIndex='20';full.style.zIndex='2';this.paint(m,m.p);return m;
     }catch(error){this.clean(m||{...presenter,styles,original,retired:false});throw error;}
@@ -6443,8 +6444,8 @@ Object.assign(SharedPlayerMotion,{
     p=clamp(p,0,1);if(m.geometry&&m.p===p)return;m.p=p;const g=this.sceneGeometry(m.endpoints,p);m.geometry=g;
     const base=m.endpoints.surface.mini,r=g.surface,full=m.endpoints.surface.full,sx=r.width/base.width,sy=r.height/base.height;
     const transform=`translate(${r.left-base.left}px,${r.top-base.top}px) scale(${sx},${sy})`,radius=m.miniRadius.map(value=>value*(1-p)/sx+'px').join(' ')+' / '+m.miniRadius.map(value=>value*(1-p)/sy+'px').join(' ');
-    m.mask.style.transform=transform;m.mask.style.borderRadius=radius;
-    m.content.style.transform=`translate(${(full.left-r.left)/sx}px,${(full.top-r.top)/sy}px) scale(${1/sx},${1/sy})`;
+    for(const node of [m.mask,m.backgroundMask]){node.style.transform=transform;node.style.borderRadius=radius;}
+    for(const node of [m.content,m.backgroundContent])node.style.transform=`translate(${(full.left-r.left)/sx}px,${(full.top-r.top)/sy}px) scale(${1/sx},${1/sy})`;
     m.background.style.opacity=String(p);m.full.style.opacity=String(p);
     m.mini.style.transform=transform;m.mini.style.borderRadius=radius;m.mini.style.opacity='1';
     for(const [key,nodes] of Object.entries(m.pairs))for(const end of ['mini','full']){
@@ -6462,7 +6463,7 @@ Object.assign(SharedPlayerMotion,{
     if(!m||m.retired)return;m.retired=true;
     // Reset every property we own even when construction/retarget/cancel throws.
     // The live library was never hidden, moved, cloned or detached by this owner.
-    m.releaseInput?.();m.input.hidden=true;m.input.className='';delete m.mask.dataset.active;m.mask.removeAttribute('style');m.content.removeAttribute('style');m.background.removeAttribute('style');
+    m.releaseInput?.();m.input.hidden=m.backgroundMask.hidden=true;m.input.className='';delete m.mask.dataset.active;delete m.backgroundMask.dataset.active;for(const node of [m.mask,m.content,m.backgroundMask,m.backgroundContent,m.background])node.removeAttribute('style');
     for(const snapshot of m.styles||[])this.restore(snapshot);
     delete m.mini.dataset.sharedPlayer;delete m.full.dataset.sharedPlayer;
     m.mini.style.removeProperty('opacity');m.full.style.removeProperty('opacity');m.mini.style.removeProperty('transform');m.full.style.removeProperty('transform');
