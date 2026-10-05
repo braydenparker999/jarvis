@@ -7,6 +7,7 @@ import {tmpdir} from 'node:os';
 import {resolve,join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {buildPreview} from '../scripts/build-poweramp-preview.mjs';
+import {chromium} from 'playwright-core';
 import {compareScreenshotPNG} from './helpers/poweramp-png.js';
 const profile={viewport:{width:519,height:988},deviceScaleFactor:2.0818214416503906,isMobile:true,hasTouch:true};
 const executablePath=[process.env.JARVIS_CHROME,'/usr/bin/chromium','/usr/bin/google-chrome',chromium.executablePath()].find(p=>p&&existsSync(p));

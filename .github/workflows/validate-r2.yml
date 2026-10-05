@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 3
+          fetch-depth: 4
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -25,12 +25,21 @@ jobs:
         if: always()
         env:
           POWERAMP_EVIDENCE_DIR: ${{ runner.temp }}/poweramp-browser
-          POWERAMP_BASELINE_REF: HEAD^2^
+          POWERAMP_BASELINE_REF: 8aa7fce4dd83d5417614ae112134631dd98df7b6
         run: |
           export JARVIS_CHROME="$(command -v google-chrome || command -v chromium)"
           test -n "$JARVIS_CHROME"
           node --test tests/poweramp-persistent-prototype-browser.mjs
+      - name: Verify actual library visibility after mini round trips
+        if: always()
+        env:
+          POWERAMP_EVIDENCE_DIR: ${{ runner.temp }}/poweramp-browser
+        run: |
+          export JARVIS_CHROME="$(command -v google-chrome || command -v chromium)"
+          test -n "$JARVIS_CHROME"
+          node --test tests/poweramp-blank-library-browser.test.js
       - name: Run frontend regression tests
+        if: always()
         env:
           POWERAMP_EVIDENCE_DIR: ${{ runner.temp }}/poweramp-browser
         run: |
