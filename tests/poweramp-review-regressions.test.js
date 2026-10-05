@@ -135,3 +135,12 @@ test('mini-player keyboard seeking retires a pending horizontal track step',()=>
   h.advance(500);assert.deepEqual(h.calls,[['seek',45]],'the old delayed track step cannot preempt the keyboard seek');
   assert.equal(h.context.lifecycle.motionSettle,null);
 });
+
+// Palette updates are explicit producers; a cached canvas accent cannot remain old.
+test('an explicit palette update invalidates the existing waveform accent immediately',()=>{
+  const vars={},UI={vizAccent:'old',vizAccentAt:1000,lastArtImg:null};
+  const context=vm.createContext({UI,SET:{accent:'amber'},ACCENTS:{amber:[32,38]},isLightUI:()=>true,setVars:value=>Object.assign(vars,value),document:{querySelector:()=>null},extractPalette:()=>null});
+  vm.runInContext(section('function applyPalette(img){','try{\n  window.matchMedia'),context);
+  vm.runInContext('applyPalette(null);',context);
+  assert.equal(UI.vizAccentAt,0,'next real draw must refresh its accent rather than waiting 250ms');assert.match(vars['--accent'],/^hsl/);
+});

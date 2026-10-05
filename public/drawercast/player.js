@@ -377,6 +377,8 @@ function applyPalette(img){
     });
   }
   if(!light&&SET.accent==='amber')setVars({'--accent':'#f4ddcb','--txt':'#f4ddcb','--accent-dim':'#bdaa99','--txt-dim':'#bbaa9b','--chip':'#201b16','--chip-hi':'#3d2d1e','--surface':'#1d1915','--surface-2':'#231a11'});
+  // An explicit palette producer update must be visible on its next canvas paint.
+  UI.vizAccentAt=0;
   const meta=document.querySelector('meta[name=theme-color]');
   if(meta) meta.setAttribute('content', light ? 'hsl('+h+',12%,94%)' : 'hsl('+h+',18%,6%)');
 }
@@ -3251,7 +3253,7 @@ const UI = {
     sub.innerHTML='<span>'+esc(trackSub(t))+'</span>';
     SharedPlayerMotion.setMiniLabel($('#mini-title'),t.title);
     SharedPlayerMotion.setMiniLabel($('#mini-sub'),trackSub(t));
-    $('#mini').hidden = (Nav.cur==='player');
+    $('#mini').hidden = Nav.cur==='player'&&!(SharedPlayerMotion.active?.()||SharedPlayerMotion.transaction);
     document.title = t.title + ' - ' + trackArtist(t);
     UI.renderRating();
     UI.renderMeta();
@@ -7738,7 +7740,8 @@ Nav.go=function(name,push){
   if(name==='player'&&['library','list','search'].includes(Nav.cur))Nav.lastLibrary=Nav.cur;
   navGoOriginal.call(Nav,name,push);
   document.body.classList.toggle('in-settings',name==='settings');
-  $('#mini').hidden=name==='player'||name==='settings'||!Engine.current;
+  // A live morph owns the real mini even after outer navigation wrappers return.
+  $('#mini').hidden=!(SharedPlayerMotion.active?.()||SharedPlayerMotion.transaction)&&(name==='player'||name==='settings'||!Engine.current);
 };
 Nav.returnToLibrary=function(){Nav.go(['list','search'].includes(Nav.lastLibrary)?Nav.lastLibrary:'library');};
 const viewsPushOriginal=Views.push;

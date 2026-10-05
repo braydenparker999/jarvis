@@ -451,3 +451,12 @@ test('persistent live progress retains its actual precise writer state without a
   h.shared.paint(m,.5);assert.equal(fill.style.transform,'translateX(1.59246%)');assert.equal(fill._sceneRawTransform,'translateX(1.592457341%)');
   h.resetCost();fill.style.transform='translateX(40%)';h.shared.refreshDynamic(m);h.shared.canvasPainted();assert.equal(fill.style.transform,'translateX(40%)');assert.equal(h.cost.styleWrites,1);assert.equal(h.cost.computedReads,0);assert.equal(h.cost.rectReads,0);assert.equal(h.cost.clones,0);assert.equal(h.draws(),0);
 });
+
+// Include the production outer wrapper, not only ScreenDrag's nested activation.
+test('outer tap navigation never hides the live mini before the first settling frame',()=>{
+  const h=harness();vm.runInContext(section("Nav.lastLibrary='library';",'const viewsPushOriginal='),h.context);
+  h.list();h.nav.go('player');const m=h.scene.settling.morph;
+  assert.ok(m);assert.equal(m.p,0);assert.equal(m.mini.hidden,false,'outer Nav.go must preserve the actual painted cover synchronously');
+  assert.equal(m.pairs.art.mini,h.$('#mini-art'));assert.equal(m.input.hidden,false);
+  h.frame(1000);assert.equal(m.retired,true);assert.equal(m.mini.hidden,true);
+});

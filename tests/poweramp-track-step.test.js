@@ -76,11 +76,11 @@ test('decoded neighbor cache remains bounded',async()=>{
   const h=artHarness();for(let i=0;i<12;i++){const t={id:String(i)},p=h.ctx.art.warm(t);h.requests.at(-1).resolve('cover'+i);await p;}
   assert.equal(h.ctx.art.ready.size,8);assert.equal(h.ctx.art.keys.size,8);
 });
-function renderHarness(){
+function renderHarness({active=false}={}){
   const nodes=new Map(),paint=[],pending=[],track={id:'A',title:'First'};
   const node=id=>{if(!nodes.has(id))nodes.set(id,{id,style:{setProperty(){}},classList:{remove(){},add(){}},innerHTML:'',textContent:''});return nodes.get(id);};
   const UI={setArtEl:(n,url)=>paint.push([n.id,url]),setBackground:url=>paint.push(['background',url]),refreshEmpty(){},fitPlayer(){},renderRating(){},renderMeta(){},renderProgress(){},cancelSeekGesture(){},artTrackId:'old'};
-  const ctx=vm.createContext({UI,SharedPlayerMotion:{setMiniLabel(node,text){node.textContent=text;}},Engine:{current:track,updateMediaSession(){}},Waveform:{load(){}},Views:{refreshQueueOrder(){},markPlaying(){}},Nav:{cur:'player'},SET:{},GestureMotion:{reduced:()=>true},SwipeArt:{cached:()=> 'decoded-A',warm:()=>new Promise(resolve=>pending.push(resolve)),decode:async url=>url,neighbors(){}},getArtURL:async()=> 'thumb-A',requestAnimationFrame:fn=>fn(),setTimeout,document:{},esc:String,trackSub:()=>'',trackArtist:()=>'',$:node});
+  const ctx=vm.createContext({UI,SharedPlayerMotion:{active:()=>active?{p:.5}:null,setMiniLabel(node,text){node.textContent=text;}},Engine:{current:track,updateMediaSession(){}},Waveform:{load(){}},Views:{refreshQueueOrder(){},markPlaying(){}},Nav:{cur:'player'},SET:{},GestureMotion:{reduced:()=>true},SwipeArt:{cached:()=> 'decoded-A',warm:()=>new Promise(resolve=>pending.push(resolve)),decode:async url=>url,neighbors(){}},getArtURL:async()=> 'thumb-A',requestAnimationFrame:fn=>fn(),setTimeout,document:{},esc:String,trackSub:()=>'',trackArtist:()=>'',$:node});
   const start=source.indexOf('  renderNowPlaying:async function('),end=source.indexOf('  renderRating:',start);
   vm.runInContext('UI.renderNowPlaying='+source.slice(start+'  renderNowPlaying:'.length,end).trim().replace(/,$/,'')+';',ctx);
   return {ctx,UI,track,paint,pending,nodes};
@@ -92,4 +92,11 @@ test('rendering a committed swipe seeds decoded artwork immediately without clea
 test('late same-track render work cannot overwrite a newer artwork refresh',async()=>{
   const h=renderHarness(),old=h.UI.renderNowPlaying(h.track),fresh=h.UI.renderNowPlaying(h.track);h.pending[1]('new-A');await fresh;h.pending[0]('old-A');await old;
   assert.equal(h.UI.curArtURL,'new-A');assert.equal(h.paint.some(([,url])=>url==='old-A'),false);
+});
+
+// The real shared widgets cannot be hidden by a canonical same-track writer.
+test('same-track artwork refresh keeps the actual mini owner visible during a live scene',async()=>{
+  const h=renderHarness({active:true}),p=h.UI.renderNowPlaying(h.track);
+  assert.equal(h.nodes.get('#mini').hidden,false);h.pending[0]('decoded-A');await p;
+  assert.equal(h.nodes.get('#mini').hidden,false);assert.equal(h.UI.curArtURL,'decoded-A');
 });
