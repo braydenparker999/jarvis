@@ -24,7 +24,6 @@ jobs:
       - name: Trace isolated unchanged Poweramp rendering
         if: always()
         env:
-          POWERAMP_LAYER_PICTURES_ONLY: "1"
           POWERAMP_EVIDENCE_DIR: ${{ runner.temp }}/poweramp-browser
         run: |
           export JARVIS_CHROME="$(command -v google-chrome || command -v chromium)"

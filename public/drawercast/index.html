@@ -108,9 +108,10 @@ body.tr-large .ctrls{gap:2px}
   pointer-events:none;
 }
 #bg-vig{position:absolute;inset:0;background:radial-gradient(120% 80% at 50% 40%,transparent 40%,rgba(0,0,0,.55) 100%);pointer-events:none}
-#bg-dim{position:absolute;inset:0;background:var(--dim-color,#000);opacity:0;pointer-events:none;will-change:opacity;transition:opacity var(--dur) var(--ease)}
+#bg-dim{position:absolute;inset:0;background:var(--dim-color,#000);opacity:0;pointer-events:none;transition:opacity var(--dur) var(--ease)}
 #bg-dim.on{opacity:.66}
 #bg-dim.full{opacity:.94}
+body:has(#player-live-mask[data-active]) #bg-dim{will-change:opacity}
 body.no-bg #bg-art,body.no-bg #bg-art-next{display:none}
 
 /* ============================ APP FRAME ============================ */
