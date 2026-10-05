@@ -177,6 +177,45 @@ test('Poweramp mandatory Chromium scene, seek, and art contracts',{timeout:12000
       assert.equal(fixture.requests.audio,requests);assert.equal(await page.evaluate(()=>PA.Engine.el().src),'');
     });
 
+
+    for(const mode of ['opening','closing','abort','regrab']){
+      await run('late canonical artwork survives '+mode+' scene cleanup',async h=>{
+        const {page,library,start,move,end,frame,center,settled}=h;
+        if(mode!=='closing')await library();
+        await page.evaluate(origin=>{
+          const track=PA.Engine.current;track.coverURL=null;track.artKey='fixture-scene-late-art';
+          PA.UI.setArtEl(document.querySelector('#artA'),null);PA.UI.setArtEl(document.querySelector('#mini-art'),null);
+          const get=PA.IDB.get;window.lateArtRequested=false;window.lateArtResolvers=[];
+          PA.IDB.get=function(store,key){
+            if(store==='art'&&String(key).startsWith('fixture-scene-late-art')){
+              lateArtRequested=true;return new Promise(resolve=>lateArtResolvers.push(resolve));
+            }return get.call(this,store,key);
+          };
+          window.releaseLateArt=async()=>{const blob=await(await fetch(origin+'/__fixture__/cover/1.svg')).blob();lateArtResolvers.forEach(resolve=>resolve(blob));};
+          window.lateArtRender=PA.UI.renderNowPlaying(track);
+        },fixture.origin);
+        await page.waitForFunction(()=>lateArtRequested);
+        const p=await center(mode==='closing'?'#artstage':'#mini-title'),direction=mode==='closing'?1:-1;
+        await start(p.x,p.y);for(let i=1;i<=6;i++){await move(p.x,p.y+direction*500*i/6);await frame();}
+        await page.waitForFunction(()=>document.querySelector('#player-live-mask').hasAttribute('data-active'));
+        let grab=null;
+        if(mode==='regrab'){
+          await end();await frame();grab=await center('.player-scene-input');await start(grab.x,grab.y);await frame();
+        }
+        await page.evaluate(async()=>{await releaseLateArt();await lateArtRender;});
+        assert.ok((await page.locator('#artA').evaluate(n=>n.style.backgroundImage)).includes('/__fixture__/cover/1.svg'),'cover resolves before retirement');
+        assert.equal(await page.locator('#player-live-mask').evaluate(n=>n.hasAttribute('data-active')),true,'exercise a live scene, not a post-settle write');
+        if(mode==='abort'){await page.evaluate(()=>window.dispatchEvent(new Event('blur')));await end();}
+        else if(mode==='regrab'){await move(grab.x,grab.y+300);await frame();await end();}
+        else await end();
+        const expected=mode==='closing'||mode==='abort'||mode==='regrab'?'list':'player';await settled(expected);
+        assert.ok((await page.locator('#artA').evaluate(n=>n.style.backgroundImage)).includes('/__fixture__/cover/1.svg'),'cleanup keeps latest producer artwork');
+        assert.ok((await page.locator('#mini-art').evaluate(n=>n.style.backgroundImage)).includes('/__fixture__/cover/1.svg'),'mini keeps latest producer artwork');
+        assert.equal(await page.locator('#artA').evaluate(n=>n.style.opacity),'');
+        assert.equal(await page.locator('#player-live-mask').evaluate(n=>n.hasAttribute('data-active')),false);
+      });
+    }
+
     await run('committed artwork remains decoded while a later art fetch is delayed',async h=>{
       const {page,swipe}=h;
       await page.waitForFunction(()=>document.querySelector('#artA').classList.contains('has'));

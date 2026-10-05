@@ -460,3 +460,30 @@ test('outer tap navigation never hides the live mini before the first settling f
   assert.equal(m.pairs.art.mini,h.$('#mini-art'));assert.equal(m.input.hidden,false);
   h.frame(1000);assert.equal(m.retired,true);assert.equal(m.mini.hidden,true);
 });
+
+test('late producer artwork survives opening, closing, abort and regrab cleanup',()=>{
+  const url='/assets/drive-catalog-v2/covers/late-producer.jpg';
+  for(const mode of ['opening','closing','abort','regrab']){
+    const h=harness(),A=h.$('#artA'),mini=h.$('#mini-art');h.context.Engine.current={id:'gd_late'};
+    h.context.UI.setArtEl(A,null);h.context.UI.setArtEl(mini,null);
+    if(mode!=='closing')h.list();
+    h.nav.go(mode==='closing'?'list':'player');const m=h.scene.settling.morph;assert.ok(m);
+    if(mode==='regrab'){h.frame(45);m.input.fire('pointerdown');h.advance(200);assert.equal(h.scene.phase,'possible');}
+    h.context.UI.setArtEl(A,url);h.context.UI.setArtEl(mini,url);
+    assert.ok(A.style.backgroundImage.includes(url),'producer finished while the scene owned opacity');
+    if(mode==='abort')h.scene.abort();
+    else if(mode==='regrab'){m.input.fire('pointermove',{clientY:410});h.frame(30);m.input.fire('pointerup',{clientY:410});h.advance(1000);}
+    else h.frame(1000);
+    assert.ok(A.style.backgroundImage.includes(url),mode+' cleanup must not restore obsolete canonical artwork');
+    assert.ok(mini.style.backgroundImage.includes(url),mode+' cleanup retains current mini artwork');
+    assert.equal(m.retired,true);assert.equal(m.mask.dataset.active,undefined);assert.equal(A.style.opacity,'');
+  }
+});
+
+test('new-track artwork supersedes a held old-track scene and survives idempotent cleanup',()=>{
+  const h=harness(),A=h.$('#artA'),mini=h.$('#mini-art');h.list();h.nav.go('player');h.frame(45);
+  const m=h.scene.settling.morph;h.scene.pause();h.context.Engine.current={id:'gd_new'};
+  h.context.UI.setArtEl(A,'/new-track.jpg');h.context.UI.setArtEl(mini,'/new-track.jpg');
+  assert.equal(m.retired,true);assert.ok(A.style.backgroundImage.includes('/new-track.jpg'));
+  h.shared.clean(m);assert.ok(A.style.backgroundImage.includes('/new-track.jpg'));assert.ok(mini.style.backgroundImage.includes('/new-track.jpg'));
+});
