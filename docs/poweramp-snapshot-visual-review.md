@@ -2,7 +2,7 @@
 
 October 5, 2026. Source reviewed: snapshot candidate `fdf7a2d` and theme-test
 correction `89c6c09` plus the live-pseudo/important-variable correction
-`772fdd05`, based on `bcb843d`. This review introduces only tests,
+`772fdd05` and the CSSOM activation repair `76330a5`, based on `bcb843d`. This review introduces only tests,
 a dependency-free screenshot reader, and this report. No publication, merge,
 deployment, old production-player copy, or production debug export.
 
@@ -97,7 +97,8 @@ threshold 2/255; changed pixels at most .05% of the viewport and .3% in each
 cover/label/control/backdrop region; mean viewport channel delta at most .05.
 Exact changed-pixel counts and maximum deltas are reported even below threshold.
 The scene must also prove its compact CSS payload is less than 70% of baseline.
-Failures retain paired PNG/JSON comparison evidence before enforcing limits.
+Failures retain all five pairs of PNG/JSON comparison evidence per theme before
+reporting any failed acceptance gates. Limits are never relaxed when a pair fails.
 
 The small PNG reader supports Chromium's non-interlaced 8-bit RGB/RGBA output
 with all five PNG row filters. It uses built-in zlib only, rejects unsupported
@@ -121,3 +122,32 @@ input, mismatched dimensions, and unsupported formats.
 This evidence does not establish phone FPS, touch latency, audio quality,
 performance improvement, or owner acceptance. End-to-end measured setup timings
 remain the separate downloaded-preview operation gate.
+
+## Early V6 real-browser evidence (run 37250691128)
+
+Both dark/light first .25 PNG pairs were opened and inspected directly after
+materialization. They show the actual held shared-player morph: generated cover,
+label/play crossfade, seeded waveform, full-control inverse reveal, library rows,
+background, and dock. They are not endpoints or an empty/hidden clone.
+
+The native raster is 1080 × 2057 for the requested 519 × 988/DPR
+2.0818214416503906 context. Both pairs are encoded-byte identical and independently
+recompute to zero exact/thresholded changed pixels. All twelve paired geometry
+deltas are zero, progress is exactly .25, and recomputed endpoint lerp error is
+below the unchanged .05 CSS-pixel limit. Both real sheets stay enabled, input is
+trusted, and playback stays paused at 42 seconds.
+
+This run does **not** establish compact-active parity. CSS payloads are identical
+for the two modes: 1,028,899 characters (dark) and 1,034,983 (light), with 148 clone
+nodes. Both variants selected the exhaustive fallback. The unchanged <70% CSS
+reduction assertion correctly rejected this misleadingly pixel-perfect outcome.
+The next gate must prove compact snapshots are active before visual acceptance.
+
+Activation repair `76330a5` was subsequently reviewed: indexed traversal removes
+CSSOM iterable assumptions, and readable selectors rejected by Element.matches
+conservatively contribute their authored keys for the current scene. Actual
+unreadable cssRules still selects exhaustive serialization, so the screenshot
+baseline remains intact. No scene geometry/appearance ownership change was
+introduced. The independent 387 non-browser Poweramp checks passed again against
+this activation repair. Active-compact renderer/raster acceptance is pending the
+next real-browser run.

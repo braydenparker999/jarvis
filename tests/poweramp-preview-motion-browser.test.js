@@ -60,7 +60,7 @@ test('Poweramp downloaded preview trusted mini motion and operation evidence',{t
           assert.ok(report.operations?.some(operation=>operation.operation==='shared.create'&&operation.phase==='shared:setup:expand'),'report includes the real shared-player setup work');
           assert.equal(report.final.screen,'player');assert.equal(report.final.scene,null);
           const trace=await page.evaluate(()=>fixtureInputTrace);assert.ok(trace.some(event=>event.type==='pointerdown'&&event.target.includes('#mini-title')&&event.trusted));assert.ok(trace.every(event=>event.trusted));
-          assert.ok(trace.some(event=>event.type==='click'&&event.target.includes('#preview-help')&&event.observation==='bubble'&&event.trusted),'readback uses a real trusted Help click');
+          assert.ok(trace.some(event=>event.type==='click'&&event.target.includes('#preview-help')&&event.trusted),'readback uses a real trusted Help click');
           reports.push({label,...report});
         };
         const id=await page.evaluate(()=>PA.Engine.current.id);
@@ -90,8 +90,10 @@ test('Poweramp downloaded preview trusted mini motion and operation evidence',{t
         // without a sleep, synthetic click, retry, or direct Help invocation.
         failureName='preview-help-touch-'+count;await library();p=await target();await page.evaluate(()=>{window.fixtureInputTrace=[];});
         await start(p.x,p.y);for(const dy of [16,40,75,110]){await move(p.x,p.y-dy);await frame();}await end();await settled('player');
+        const sheetRequest=await page.evaluate(()=>PA.Sheets.request);
         await page.locator('#preview-help').tap();await page.waitForFunction(()=>PA.Sheets.open==='sheet'&&!document.querySelector('#sheet').inert&&document.querySelector('#sheet').classList.contains('on'));
-        assert.ok(await page.evaluate(()=>fixtureInputTrace.some(event=>event.type==='click'&&event.target.includes('#preview-help')&&event.trusted)),'post-drag touch delivers the real Help compatibility click');
+        assert.ok(await page.evaluate(()=>fixtureInputTrace.some(event=>event.type==='pointerup'&&event.target.includes('#preview-help')&&event.pointerType==='touch'&&event.trusted&&event.observation==='bubble'&&event.prevented&&event.after.sheet==='sheet')),'post-drag trusted Help touch release opens the real sheet without depending on a compatibility click');
+        assert.equal(await page.evaluate(()=>PA.Sheets.request),sheetRequest+1,'one real Help touch opens one sheet');
         await page.getByRole('button',{name:'Show diagnostics',exact:true}).tap();await page.locator('#preview-diagnostics-report').waitFor({state:'visible'});await page.getByRole('button',{name:'Close',exact:true}).tap();assert.deepEqual(errors,[]);
         t.diagnostic('POWERAMP_BROWSER_TIMINGS '+JSON.stringify({source:built.sourceHash,tracks:count,reports:reports.map(report=>({label:report.label,operations:report.operations,phase_gap_ms:report.phase_gap_ms,raf_gap_ms:report.raf_gap_ms}))}));
       }catch(error){await reportFixtureFailure({page,diagnostics},error,failureName);throw error;}

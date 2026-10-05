@@ -208,7 +208,14 @@ test('Poweramp mandatory Chromium snapshot screenshot and geometry parity at own
         }
       }
       assert.equal(paired.baseline.length,5);assert.equal(paired.compact.length,5);
-      for(let i=0;i<paired.baseline.length;i++)await compareAndRecord(paired.baseline[i],paired.compact[i],theme,t);
+      // All five pairs are already captured. Keep their bounded evidence even
+      // if an early pair fails, then fail the unchanged acceptance gates.
+      const failures=[];
+      for(let i=0;i<paired.baseline.length;i++){
+        try{await compareAndRecord(paired.baseline[i],paired.compact[i],theme,t);}
+        catch(error){failures.push({case:paired.baseline[i].label,error:String(error)});}
+      }
+      assert.deepEqual(failures,[],theme+' all snapshot visual acceptance gates');
     });
     assert.equal(fixture.requests.audio,0,'visual QA never fetches or plays audio');
   }finally{await browser?.close();await fixture.close();}

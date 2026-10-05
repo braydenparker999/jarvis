@@ -52,12 +52,14 @@ from accessibility.
 The plan and appearance cache live only for one clone group/scene. Every new
 scene rereads CSSOM declarations and source inline values; no persistent cache
 needs speculative theme, class, artwork, inline, resize or stylesheet-edit
-invalidation. An unreadable stylesheet, absent stylesheet API, or uncertain
-selector match retains the previous exhaustive snapshot path.
+invalidation. An unreadable stylesheet or absent stylesheet API retains the previous
+exhaustive snapshot path. A readable selector rejected by Element.matches
+contributes its authored properties/references globally for that scene, rather
+than disabling compact capture for every source.
 
 ## Checks and remaining evidence
 
-- All 389 non-browser Poweramp checks passed locally, including compact
+- All 390 non-browser Poweramp checks passed locally, including compact
   vocabulary, shorthand expansion, inline/CSSOM changes, live pseudo/important
   local variables, missing-variable fallbacks and exhaustive fallback
 - The existing actual-runtime checks still cover accepted geometry, suppression,
@@ -77,3 +79,28 @@ Local Chromium was not relaunched after the verified environment EPERM blocker.
 The new renderer checks and after timings must run in the release owner's
 browser CI before any speedup or visual-parity claim. Screenshot review and
 phone acceptance are still required. No merge or production deploy is implied.
+
+
+## V6 activation failure follow-up
+
+The first real candidate renderer run found identical compact/exhaustive read
+counts (57,147) and CSS bytes (1,268,103 dark; 1,275,009 light). The local
+unused-variable gate also failed. Those numbers establish that the compact
+path silently fell back; equal pixels from that run are not compact visual
+acceptance and its 342–700 ms 60-track setup timings are not a speedup.
+
+The traversal used JavaScript iterators for stylesheet and CSSRule lists, while
+the API contract only requires indexed array-like CSSOM access. A realistic
+non-iterable nested-list regression fails against that candidate and passes
+with indexed traversal. A single readable selector rejected by matches also
+previously propagated a null key plan through every descendant. Such a selector
+now contributes only its authored property/reference names conservatively.
+Unreadable sheet access continues to select the exhaustive fallback.
+
+The mandatory real renderer report records optional fixture-provided failure
+reasons, CSSOM collection kinds/iterator availability and rejected selectors.
+It additionally requires an active compact plan and no source-node fallback;
+the original property-read/CSS-byte reduction gates remain unchanged. The next
+Chrome run must confirm the exact native failure trigger, property/pseudo
+parity, screenshots and actual setup improvement. There is no production
+logging, telemetry or new debug export.

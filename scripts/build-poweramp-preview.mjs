@@ -178,9 +178,11 @@ const Preview={
     const share=Selection.share;Selection.share=async t=>t?.preview?this.notice():share.call(Selection,t);
     exportTrack=async()=>this.notice();
     this.seed(60);
-    const help=document.getElementById('preview-help');help.onclick=()=>this.help();
-    document.getElementById('preview-reset').onclick=()=>this.reset(60);
-    document.getElementById('preview-size').onclick=()=>this.reset(this.count===5000?60:5000);
+    // Chrome may omit the post-drag compatibility click. Reuse the app's
+    // touch/pen release owner, including travel/cancel and duplicate guards.
+    const help=document.getElementById('preview-help');bindTapButton(help,()=>this.help());
+    bindTapButton(document.getElementById('preview-reset'),()=>this.reset(60));
+    bindTapButton(document.getElementById('preview-size'),()=>this.reset(this.count===5000?60:5000));
     document.addEventListener('click',e=>{
       const anchor=e.target.closest('a[href]');if(!anchor)return;
       const href=anchor.getAttribute('href')||'';if(!href.startsWith('#')&&!href.startsWith('blob:')&&!href.startsWith('data:')){e.preventDefault();e.stopImmediatePropagation();this.notice();}

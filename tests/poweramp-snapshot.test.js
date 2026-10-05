@@ -17,7 +17,7 @@ function harness(){
   const sheet={cssRules:[{selectorText:'.parent',style:declaration({font:'inherit',color:'red'})},{selectorText:'#source',style:declaration({margin:'0',mask:'var(--icon)'})},{selectorText:'#source::after',style:declaration({content:'""','box-shadow':'0 0 1px black'})},{selectorText:'.unrelated',style:declaration({'backdrop-filter':'blur(1px)'})}]};
   const document={styleSheets:[sheet],createElement:()=>({style:declaration()})};
   const context=vm.createContext({document});vm.runInContext(code+'\nglobalThis.motion=SharedPlayerMotion;',context);
-  const values={'font-family':'Test Font','font-size':'19px','font-weight':'750','line-height':'23px',color:'rgb(1, 2, 3)','margin-top':'1px','margin-right':'2px','margin-bottom':'3px','margin-left':'4px','mask-image':'url(data:image/png;base64,ICON)','mask-size':'contain','mask-position':'50% 50%',content:'none','letter-spacing':'0px','filter':'none','outline-color':'rgb(1, 2, 3)','box-shadow':'0 0 1px rgb(0, 0, 0)','pointer-events':'auto','animation-duration':'1s','transition-property':'all','--icon':'url(data:image/png;base64,ICON)'};
+  const values={'font-family':'Test Font','font-size':'19px','font-weight':'750','line-height':'23px',color:'rgb(1, 2, 3)','margin-top':'1px','margin-right':'2px','margin-bottom':'3px','margin-left':'4px','mask-image':'url(data:image/png;base64,ICON)','mask-size':'contain','mask-position':'50% 50%',content:'none','letter-spacing':'0px','filter':'none','outline-color':'rgb(1, 2, 3)','backdrop-filter':'none','box-shadow':'0 0 1px rgb(0, 0, 0)','pointer-events':'auto','animation-duration':'1s','transition-property':'all','--icon':'url(data:image/png;base64,ICON)'};
   for(let i=0;i<400;i++)values['unused-browser-'+i]='initial';
   const style=declaration(values),parent={style:declaration(),parentElement:null,matches:s=>s==='.parent'},node={style:declaration({'letter-spacing':'2px','--icon':values['--icon']}),parentElement:parent,matches:s=>s==='#source'};
   return {motion:context.motion,document,sheet,node,style};
@@ -40,13 +40,15 @@ test('new scenes rebuild their plan after inline and CSSOM changes',()=>{
 });
 
 test('unreadable or absent stylesheets retain the exhaustive snapshot path',()=>{
-  const h=harness();h.document.styleSheets=[{get cssRules(){throw Error('SecurityError');}}];assert.equal(h.motion.snapshotPlan(h.style),null);
+  const h=harness(),diagnostics={};h.document.styleSheets=[{get cssRules(){throw new Error('SecurityError');}}];assert.equal(h.motion.snapshotPlan(h.style,diagnostics),null);assert.equal(diagnostics.fallback.reason,'stylesheet-rules');assert.equal(diagnostics.fallback.message,'SecurityError');
   assert.equal(h.motion.snapshotKeys(h.node,null),null);assert.ok(h.motion.snapshotCSS(h.style,null).includes('unused-browser-399:initial;'));
   h.document.styleSheets=[];assert.equal(h.motion.snapshotPlan(h.style),null);
 });
 
-test('uncertain selector matching keeps the exhaustive snapshot path',()=>{
-  const h=harness(),plan=h.motion.snapshotPlan(h.style);h.node.matches=()=>{throw Error('Invalid selector');};assert.equal(h.motion.snapshotKeys(h.node,plan),null);
+test('a readable selector rejected by matches contributes only its authored keys globally',()=>{
+  const h=harness(),diagnostics={},plan=h.motion.snapshotPlan(h.style,diagnostics),matches=h.node.matches;
+  h.node.matches=selector=>{if(selector==='.unrelated')throw new SyntaxError('Unsupported selector');return matches(selector);};
+  const keys=h.motion.snapshotKeys(h.node,plan);assert.ok(keys.includes('backdrop-filter'));assert.equal(keys.some(key=>key.startsWith('unused-browser-')),false);assert.equal(diagnostics.selectorFallbacks[0].selector,'.unrelated');
 });
 
 
@@ -60,4 +62,11 @@ test('live class pseudos and important rules retain only referenced local variab
   for(const key of ['--local-mask','--local-color','--local-pseudo'])assert.ok(keys.includes(key),key);
   assert.equal(keys.includes('--unused-schema'),false);assert.equal(keys.includes('--icon'),false);
   assert.ok(css.includes('--local-mask:url(local-mask);'));assert.equal(css.includes('--missing:'),false,'an absent variable keeps the CSS fallback');
+});
+
+const cssList=items=>Object.assign(Object.create(null),{length:items.length,item:index=>items[index]||null},Object.fromEntries(items.map((item,index)=>[index,item])));
+test('stylesheet and nested CSS rule lists need only indexed CSSOM access, not array iterators',()=>{
+  const h=harness();h.sheet.cssRules=cssList([{cssRules:cssList(h.sheet.cssRules)}]);h.document.styleSheets=cssList([h.sheet]);h.document.adoptedStyleSheets=cssList([]);
+  const plan=h.motion.snapshotPlan(h.style);assert.ok(plan,'non-iterable CSSOM lists must not disable compact capture');
+  const keys=h.motion.snapshotKeys(h.node,plan);assert.ok(keys.includes('mask-image'));assert.equal(keys.some(key=>key.startsWith('unused-browser-')),false);
 });

@@ -26,7 +26,7 @@ test('Poweramp mandatory Chromium compact snapshot appearance parity',{timeout:1
           PA.SET.uiTheme=theme;PA.applySettings('uiTheme');PA.NativeSettings.apply();PA.UI.renderPlayState();PA.UI.renderProgress();
           const full=document.querySelector('#sc-player'),mini=document.querySelector('#mini');full.hidden=false;mini.hidden=false;mini.classList.remove('down');
           full.style.transform=mini.style.transform='none';full.style.opacity=mini.style.opacity='1';PA.UI.fitPlayer();
-          const motion=fixtureSnapshotMotion,selectors=['#bg','#sc-player','#mini-art','#artA','.art-ov','#mini-title','#p-title','#mini-sub','#p-sub','#mini-play','#btn-play','#mini-seek','#seek'];
+          const snapshotDiagnostics={fallback:null},motion={...fixtureSnapshotMotion,snapshotPlan(style){return fixtureSnapshotMotion.snapshotPlan(style,snapshotDiagnostics);}},selectors=['#bg','#sc-player','#mini-art','#artA','.art-ov','#mini-title','#p-title','#mini-sub','#p-sub','#mini-play','#btn-play','#mini-seek','#seek'];
           const host=document.createElement('div');host.className='player-scene-layer';host.style.visibility='hidden';document.body.appendChild(host);
           const fullMotion={...motion,snapshotPlan:()=>null},cache=new Map(),fullCache=new Map(),differences=[],coverage=[],counts={compactProperties:0,fullProperties:0,compactCSS:0,fullCSS:0,nodes:0,pseudos:0,icons:0};
           const computed=getComputedStyle;let reads=0;
@@ -62,11 +62,13 @@ test('Poweramp mandatory Chromium compact snapshot appearance parity',{timeout:1
           for(const pseudo of [null,'::before','::after']){const a=computed(actualEdge,pseudo),b=computed(expectedEdge,pseudo);for(let i=0;i<b.length;i++){const key=b[i];if(key.startsWith('--'))continue;if(a.getPropertyValue(key)!==b.getPropertyValue(key))differences.push({selector:'local-class-pseudo-important',pseudo,key,compact:a.getPropertyValue(key),full:b.getPropertyValue(key)});}}
           const localVariables={color:actualEdge.style.getPropertyValue('--edge-color').replace(/\s/g,''),pseudo:actualEdge.style.getPropertyValue('--edge-pseudo').replace(/\s/g,''),mask:!!actualEdge.style.getPropertyValue('--edge-mask'),unused:actualEdge.style.getPropertyValue('--unused-edge-schema'),missing:actualEdge.style.getPropertyValue('--missing-edge-color')};
           edgeHost.remove();edge.remove();edgeStyle.remove();
-          return {theme,light:document.body.classList.contains('theme-light'),coverage,counts,localVariables,differences};
+          return {theme,light:document.body.classList.contains('theme-light'),coverage,counts,snapshotDiagnostics,localVariables,differences};
         },theme);
         if(process.env.POWERAMP_EVIDENCE_DIR){const directory=resolve(process.env.POWERAMP_EVIDENCE_DIR);await mkdir(directory,{recursive:true});await writeFile(join(directory,'snapshot-parity-'+theme+'.json'),JSON.stringify(report,null,2)+'\n');}
         t.diagnostic('POWERAMP_SNAPSHOT_PARITY '+JSON.stringify(report));
         assert.equal(report.light,theme==='light','the requested theme is actually active');
+        assert.equal(report.snapshotDiagnostics.fallback,null,'compact plan must be active: '+JSON.stringify(report.snapshotDiagnostics));
+        assert.deepEqual(report.snapshotDiagnostics.nodeFallbacks||[],[],'every real source uses compact keys');
         assert.deepEqual(report.differences,[],'every standard computed property and live pseudo equals the exhaustive snapshot');
         assert.equal(report.localVariables.color,'rgb(20,30,40)');assert.equal(report.localVariables.pseudo,'rgb(50,60,70)');assert.equal(report.localVariables.mask,true);assert.equal(report.localVariables.unused,'');assert.equal(report.localVariables.missing,'');
         assert.ok(report.counts.icons>10,'actual native raster masks are compared');assert.ok(report.counts.pseudos>0,'actual generated pseudo appearance is compared');

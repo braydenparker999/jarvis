@@ -5857,13 +5857,16 @@ const SharedPlayerMotion={
       const context=copy.getContext('2d');context.clearRect(0,0,copy.width,copy.height);context.drawImage(source,0,0);
     }catch(_){}
   },
-  snapshotPlan(style){
+  snapshotPlan(style,diagnostics=null){
     // Freeze the properties the page actually authors, not hundreds of unused
     // browser defaults. Rules are re-read for every scene: theme classes,
     // stylesheet edits, inline artwork/seek values and CSSOM changes cannot
     // reuse a stale picture. Inaccessible sheets keep the exhaustive fallback.
-    if(!document.styleSheets?.length)return null;
+    const fail=(reason,error)=>{if(diagnostics)diagnostics.fallback={reason,name:error?.name||null,message:error?.message||null};return null;};
+    if(!document.styleSheets?.length&&!document.adoptedStyleSheets?.length)return fail('stylesheets-unavailable');
     const names=new Set(),rules=[],computed=new Set();
+    const listInfo=list=>{if(diagnostics){const name=list?.constructor?.name||'array-like',iterable=typeof list?.[Symbol.iterator]==='function';diagnostics.lists ||= [];if(!diagnostics.lists.some(item=>item.name===name&&item.iterable===iterable))diagnostics.lists.push({name,iterable});}};
+    const each=(list,visit)=>{if(!list)return;listInfo(list);for(let i=0;i<list.length;i++)visit(list[i]??list.item?.(i));};
     for(let i=0;i<style.length;i++)if(!style[i].startsWith('--'))computed.add(style[i]);
     const declaration=(style,pseudo)=>{
       const keys=[],variables=new Set();
@@ -5876,17 +5879,19 @@ const SharedPlayerMotion={
       }
       return {keys,variables:[...variables]};
     };
-    const visit=list=>{for(const rule of list){
+    let stage='stylesheet-rules';
+    const visit=list=>each(list,rule=>{
+      if(!rule)return;stage='rule-declarations';
       if(rule.style){
         // A pseudo's declarations also belong to its originating element's
         // vocabulary. Unknown pseudo types are conservative global entries.
         const selector=rule.selectorText?.replace(/::?(before|after)\b/g,'');
         rules.push({selector:selector&&!selector.includes('::')?selector:null,...declaration(rule.style,/::?(before|after)\b|::/.test(rule.selectorText||''))});
       }
-      if(rule.styleSheet)visit(rule.styleSheet.cssRules);
+      stage='nested-rules';if(rule.styleSheet)visit(rule.styleSheet.cssRules);
       if(rule.cssRules)visit(rule.cssRules);
-    }};
-    try{for(const sheet of [...document.styleSheets,...document.adoptedStyleSheets||[]])visit(sheet.cssRules);}catch(_){return null;}
+    });
+    try{for(const list of [document.styleSheets,document.adoptedStyleSheets])each(list,sheet=>{stage='stylesheet-rules';visit(sheet.cssRules);});}catch(error){return fail(stage,error);}
     const probe=document.createElement('span').style,expanded=new Map();
     const expand=key=>{
       if(expanded.has(key))return expanded.get(key);
@@ -5901,10 +5906,12 @@ const SharedPlayerMotion={
     };
     for(const key of names)expand(key);
     for(const rule of rules)rule.keys=[...new Set([...rule.keys.flatMap(expand),...rule.variables])];
-    return {rules,expand,nodes:new Map()};
+    if(diagnostics)diagnostics.rules=rules.length;
+    return {rules,expand,nodes:new Map(),diagnostics};
   },
   snapshotKeys(node,plan){
-    if(!plan||!node.matches)return null;
+    if(!plan)return null;
+    if(typeof node.matches!=='function'){if(plan.diagnostics)(plan.diagnostics.nodeFallbacks ||= []).push('matches-unavailable');return null;}
     if(plan.nodes.has(node))return plan.nodes.get(node);
     // Carry every ancestor's authored/inline property name conservatively.
     // This freezes inherited fonts/colors and variables' resolved longhands
@@ -5912,7 +5919,16 @@ const SharedPlayerMotion={
     // simply resolve to the child's own used value.
     const inherited=node.parentElement?this.snapshotKeys(node.parentElement,plan):[];if(inherited===null)return null;
     const keys=new Set(inherited);
-    try{for(const rule of plan.rules)if(!rule.selector||node.matches(rule.selector))for(const key of rule.keys)keys.add(key);}catch(_){return null;}
+    for(const rule of plan.rules){let matches=!rule.selector;
+      if(!matches)try{matches=node.matches(rule.selector);}catch(error){
+        // Some readable CSSOM selectors cannot be used by Element.matches.
+        // Include that rule conservatively instead of expanding every source
+        // to every browser default. Cache the decision for this scene only.
+        if(plan.diagnostics&&!(plan.diagnostics.selectorFallbacks?.length>=12))(plan.diagnostics.selectorFallbacks ||= []).push({selector:rule.selector,name:error.name,message:error.message});
+        rule.selector=null;matches=true;
+      }
+      if(matches)for(const key of rule.keys)keys.add(key);
+    }
     for(let i=0;i<node.style.length;i++){const key=node.style[i];if(!key.startsWith('--'))for(const property of plan.expand(key))keys.add(property);}
     const result=[...keys];plan.nodes.set(node,result);return result;
   },
