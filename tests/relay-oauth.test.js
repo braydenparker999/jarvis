@@ -13,9 +13,9 @@ const form = body => ({method: 'POST', headers: {'Content-Type': 'application/x-
 const browserCookie = response => response.headers.get('Set-Cookie')?.split(';')[0];
 const oauthRows = s => s.object(REGISTRY).ctx.storage.sql.exec('SELECT * FROM relay_oauth');
 const tokenRequest = (s, body) => s.request('/relay/oauth/token', form({resource: s.resource, ...body}));
-async function expectError(response, error, status = 400) {
+async function expectError(response, error, status = 400, description) {
   assert.equal(response.status, status);
-  assert.deepEqual(await response.json(), {error});
+  assert.deepEqual(await response.json(), {error, ...(description ? {error_description: description} : {})});
 }
 function fixture(t, options = {}) {
   const s = createRelayFixture({env: options.env});
@@ -58,10 +58,10 @@ async function register(s, extra = {}, ip = '192.0.2.1') {
   assert.match(client.client_id, /^[a-f0-9]{64}$/);
   return client.client_id;
 }
-async function start(s, {client = s.client, scope = FULL_SCOPE, overrides = {}, headers = {}} = {}) {
+async function start(s, {client = s.client, scope = FULL_SCOPE, verifier = VERIFIER, overrides = {}, headers = {}} = {}) {
   const params = {
     response_type: 'code', client_id: client, redirect_uri: RELAY_CALLBACK,
-    code_challenge_method: 'S256', code_challenge: await challenge(VERIFIER),
+    code_challenge_method: 'S256', code_challenge: await challenge(verifier),
     resource: s.resource, state: 'fixture-downstream-state&opaque', scope, ...overrides,
   };
   const response = await s.request('/relay/oauth/authorize?' + new URLSearchParams(params), {headers});
@@ -97,9 +97,9 @@ async function approve(s, consent, {decision = 'allow', csrf = consent.csrf, coo
   if (cookie) init.headers.Cookie = cookie;
   return s.request('/relay/oauth/approve', init);
 }
-async function ownerCode(s, {scope = FULL_SCOPE} = {}) {
+async function ownerCode(s, {scope = FULL_SCOPE, verifier = VERIFIER} = {}) {
   s.client ||= await register(s);
-  const login = await start(s, {scope});
+  const login = await start(s, {scope, verifier});
   assert.equal(login.response.status, 302);
   const consent = await callback(s, login);
   assert.equal(consent.response.status, 200);
@@ -277,21 +277,21 @@ test('approval rejects duplicate CSRF or decision fields before consuming consen
 test('authorize rejects redirect, resource, client, scope and PKCE mismatches without upstream fetches', async t => {
   const s = fixture(t);
   s.client = await register(s);
-  for (const overrides of [
-    {redirect_uri: 'https://evil.example.test/callback'},
-    {redirect_uri: RELAY_CALLBACK + '?extra=1'},
-    {resource: s.origin + '/other/mcp'},
-    {client_id: 'f'.repeat(64)},
-    {scope: 'relay:read account:admin'},
-    {scope: 'relay:read relay:read'},
-    {response_type: 'token'},
-    {code_challenge_method: 'plain'},
-    {code_challenge: 'A'.repeat(42)},
-    {state: ''},
-    {state: 'x'.repeat(2049)},
-  ]) await expectError((await start(s, {overrides})).response, 'invalid_request');
+  for (const [overrides, description] of [
+    [{redirect_uri: 'https://evil.example.test/callback'}, 'redirect_uri_mismatch'],
+    [{redirect_uri: RELAY_CALLBACK + '?extra=1'}, 'redirect_uri_mismatch'],
+    [{resource: s.origin + '/other/mcp'}, 'resource_mismatch'],
+    [{client_id: 'f'.repeat(64)}, 'client_not_registered'],
+    [{scope: 'relay:read account:admin'}, 'invalid_scope'],
+    [{scope: 'relay:read relay:read'}, 'invalid_scope'],
+    [{response_type: 'token'}, 'unsupported_response_type'],
+    [{code_challenge_method: 'plain'}, 'pkce_s256_required'],
+    [{code_challenge: 'A'.repeat(42)}, 'invalid_code_challenge'],
+    [{state: ''}, 'invalid_state'],
+    [{state: 'x'.repeat(2049)}, 'invalid_state'],
+  ]) await expectError((await start(s, {overrides})).response, 'invalid_request', 400, description);
   const params = (await start(s)).params;
-  await expectError(await s.request('/relay/oauth/authorize?' + new URLSearchParams(params) + '&client_id=' + s.client), 'invalid_request');
+  await expectError(await s.request('/relay/oauth/authorize?' + new URLSearchParams(params) + '&client_id=' + s.client), 'invalid_request', 400, 'duplicate_parameter');
   assert.equal(s.upstream.length, 0);
 });
 
@@ -494,19 +494,123 @@ test('DCR allows only the exact ChatGPT callback and unauthenticated code/refres
   assert.equal(s.objects.size, 0, 'invalid registrations should not allocate registry storage');
 });
 
-test('public registrations are limited per IP, globally bounded and expire without owner approval', async t => {
+test('public registrations retain cached client identity and remain rate/size bounded without granting access', async t => {
   const s = fixture(t);
-  for (let n = 0; n < 5; n++) await register(s);
+  s.client = await register(s);
+  for (let n = 1; n < 5; n++) await register(s);
   await expectError(await s.request('/relay/oauth/register', {method: 'POST', headers: {'Content-Type': 'application/json', 'CF-Connecting-IP': '192.0.2.1'}, body: JSON.stringify({redirect_uris: [RELAY_CALLBACK]})}), 'temporarily_unavailable', 429);
   for (let n = 5; n < 50; n++) await register(s, {}, '192.0.2.' + (n + 1));
-  await expectError(await s.request('/relay/oauth/register', {method: 'POST', headers: {'Content-Type': 'application/json', 'CF-Connecting-IP': '192.0.2.99'}, body: JSON.stringify({redirect_uris: [RELAY_CALLBACK]})}), 'temporarily_unavailable', 503);
-  assert.equal(oauthRows(s).filter(row => row.category === 'client').length, 50);
-  s.now += SESSION_MS;
-  s.client = await register(s);
+  assert.equal(await register(s, {}, '192.0.2.99'), s.client);
   assert.equal(oauthRows(s).filter(row => row.category === 'client').length, 1);
-  const expired = s.client;
   s.now += SESSION_MS;
-  await expectError((await start(s, {client: expired})).response, 'invalid_request');
+  assert.equal((await start(s)).response.status, 302, 'reused DCR must work after the old ten-minute deadline');
+  s.now += 31 * DAY_MS;
+  assert.equal((await start(s)).response.status, 302, 'public client identity must outlive bearer grants');
+  assert.equal(oauthRows(s).filter(row => row.category === 'client').length, 1);
+  assert.ok(oauthRows(s).filter(row => row.category === 'client').every(row => row.expires_at === Number.MAX_SAFE_INTEGER));
+  assert.equal(oauthRows(s).filter(row => ['grant', 'code', 'access', 'refresh'].includes(row.category)).length, 0);
+  assert.equal(await authenticate(s, s.client), null, 'a public client ID must not become a bearer credential');
+  assert.equal(await register(s, {}, '192.0.2.100'), s.client, 'fresh instances reuse the same fixed public identity');
+});
+
+test('concurrent DCR instances atomically reuse one fixed public registration', async t => {
+  const s = fixture(t);
+  const clients = await Promise.all(Array.from({length: 20}, (_, n) => register(s, {}, '192.0.2.' + (n + 1))));
+  assert.equal(new Set(clients).size, 1);
+  assert.equal(oauthRows(s).filter(row => row.category === 'client').length, 1);
+  assert.equal(oauthRows(s).filter(row => row.category === 'grant').length, 0);
+});
+
+test('DCR reuses a valid legacy registration even at the fifty-client creation cap', async t => {
+  const s = fixture(t), ctx = s.object(REGISTRY).ctx;
+  relayOAuthStore(ctx, {op: 'get', key: 'fixture-init'}, s.now);
+  for (let n = 0; n < 50; n++) ctx.storage.sql.exec('INSERT INTO relay_oauth VALUES(?,?,?,?)', 'client:' + n.toString(16).padStart(64, '0'), 'client', JSON.stringify({redirect: RELAY_CALLBACK}), s.now + SESSION_MS);
+  const client = await register(s);
+  assert.equal((await start(s, {client})).response.status, 302);
+  assert.equal(oauthRows(s).filter(row => row.category === 'client').length, 50);
+  const capped = await relayOAuthStore(ctx, {op: 'put', key: 'client:' + 'f'.repeat(64), category: 'client', value: {redirect: RELAY_CALLBACK}, expiresAt: s.now + SESSION_MS}, s.now).json();
+  assert.equal(capped.error, 'Registry full');
+  assert.equal(oauthRows(s).filter(row => row.category === 'client').length, 50);
+});
+
+test('shared public client identity keeps separate PKCE codes, grants and revocation families', async t => {
+  const s = fixture(t);
+  s.client = await register(s);
+  assert.equal(await register(s, {}, '192.0.2.2'), s.client);
+  const alternate = 'separate-fixture-S256-verifier-'.repeat(3);
+  const first = await ownerCode(s), second = await ownerCode(s, {verifier: alternate});
+  await expectError(await exchangeCode(s, first.code, {code_verifier: alternate}), 'invalid_grant');
+  await expectError(await exchangeCode(s, second.code), 'invalid_grant');
+  const firstResponse = await exchangeCode(s, first.code), secondResponse = await exchangeCode(s, second.code, {code_verifier: alternate});
+  assert.equal(firstResponse.status, 200);
+  assert.equal(secondResponse.status, 200);
+  const firstTokens = await firstResponse.json(), secondTokens = await secondResponse.json();
+  const firstPrincipal = await authenticate(s, firstTokens.access_token), secondPrincipal = await authenticate(s, secondTokens.access_token);
+  assert.notEqual(firstPrincipal.grantId, secondPrincipal.grantId);
+  assert.equal((await s.request('/relay/oauth/revoke', form({client_id: s.client, token: firstTokens.refresh_token}))).status, 200);
+  assert.equal(await authenticate(s, firstTokens.access_token), null);
+  assert.ok(await authenticate(s, secondTokens.access_token), 'revoking one connection must leave the other family active');
+  assert.equal((await refresh(s, secondTokens.refresh_token)).status, 200);
+});
+
+test('cached DCR survives cancelled initial login, delayed first consent and grant expiry', async t => {
+  const s = fixture(t);
+  s.client = await register(s);
+  const abandoned = await start(s);
+  assert.equal(abandoned.response.status, 302);
+  s.now += SESSION_MS;
+  await expectError((await callback(s, abandoned)).response, 'invalid_request', 400);
+  s.now += 54 * 60000;
+  const tokens = await ownerTokens(s);
+  assert.ok(await authenticate(s, tokens.access_token));
+  s.now += 31 * DAY_MS;
+  assert.equal(await authenticate(s, tokens.access_token), null, 'grant lifetime must remain thirty days');
+  assert.equal((await start(s)).response.status, 302, 'same connection can reauthorize after grant expiration');
+});
+
+test('valid legacy DCR migrates durably while expired or unknown identities are never resurrected', async t => {
+  const s = fixture(t), sql = s.object(REGISTRY).ctx.storage.sql;
+  // Production rows from the old schema have finite expiry and no bearer access.
+  sql.exec('CREATE TABLE IF NOT EXISTS relay_oauth (key TEXT PRIMARY KEY, category TEXT NOT NULL, value TEXT NOT NULL, expires_at INTEGER NOT NULL)');
+  const value = JSON.stringify({redirect: RELAY_CALLBACK});
+  const valid = 'a'.repeat(64), expired = 'b'.repeat(64);
+  sql.exec('INSERT INTO relay_oauth VALUES(?,?,?,?)', 'client:' + valid, 'client', value, s.now + SESSION_MS);
+  sql.exec('INSERT INTO relay_oauth VALUES(?,?,?,?)', 'client:' + expired, 'client', value, s.now);
+  assert.equal((await start(s, {client: valid})).response.status, 302);
+  s.now += 31 * DAY_MS;
+  assert.equal((await start(s, {client: valid})).response.status, 302);
+  for (const client of [expired, 'c'.repeat(64)]) await expectError((await start(s, {client})).response, 'invalid_request', 400, 'client_not_registered');
+  const rows = oauthRows(s).filter(row => row.category === 'client');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].key, 'client:' + valid);
+  assert.equal(rows[0].expires_at, Number.MAX_SAFE_INTEGER);
+});
+
+test('authorization diagnostics remain fixed and nonsecret on validation and storage failures', async t => {
+  const s = fixture(t);
+  s.client = await register(s);
+  const state = 'private-fixture-state', redirect_uri = 'https://private-fixture.invalid/callback';
+  const {response} = await start(s, {overrides: {state, redirect_uri}});
+  const text = await response.text();
+  assert.equal(text.includes(state), false);
+  assert.equal(text.includes(redirect_uri), false);
+  assert.equal(text.includes(s.client), false);
+  assert.deepEqual(JSON.parse(text), {error: 'invalid_request', error_description: 'redirect_uri_mismatch'});
+  const sql = s.object(REGISTRY).ctx.storage.sql;
+  t.mock.method(sql, 'exec', () => { throw new Error('fixture sensitive storage detail'); });
+  await expectError((await start(s)).response, 'invalid_request', 400, 'authorization_processing_failed');
+});
+
+test('durable public client migration never gives sessions or bearer rows a durable expiry', async t => {
+  const s = fixture(t), ctx = s.object(REGISTRY).ctx;
+  for (const category of ['session', 'access', 'refresh', 'grant']) {
+    const result = await relayOAuthStore(ctx, {op: 'put', key: category + ':fixture', category, value: {}, expiresAt: 0}, s.now).json();
+    assert.ok(result.error, category + ' must never accept an already-expired row');
+  }
+  // Cleanup also fails closed on a malformed legacy bearer row with expiry zero.
+  ctx.storage.sql.exec('INSERT INTO relay_oauth VALUES(?,?,?,?)', 'access:fixture', 'access', '{}', 0);
+  await relayOAuthStore(ctx, {op: 'get', key: 'access:fixture'}, s.now).json();
+  assert.equal(oauthRows(s).length, 0);
 });
 
 test('pending browser sessions and rate identities are independently bounded', async t => {

@@ -58,8 +58,29 @@ random values whose IDs are hashed in storage. Refresh is atomic, rotates both
 tokens, and detects reuse for the family lifetime. Revocation is checked on every
 MCP request, before write commits, and before each webhook delivery. Refresh-token
 scope narrowing also stops subscriptions whose event permission was removed.
-Only downstream client registration records that receive owner consent survive
-beyond ten minutes. Unapproved DCR is rate limited and bounded.
+Public downstream client registration identities remain valid for the connection,
+including retries after a cancelled first login. Registration grants no access;
+GitHub owner authentication, explicit consent, exact callback/resource binding and
+S256 PKCE are still required. DCR remains rate limited and capped at 50 client
+records; identical public instances of this fixed ChatGPT registration atomically
+reuse a surviving identity, so new unauthenticated registrations cannot fill a
+permanent pool. Per-consent grants, codes, PKCE and token families remain separate.
+Login, consent and authorization-code sessions still expire in ten minutes, and
+access/refresh grant lifetimes are unchanged.
+
+This preserves ChatGPT's documented one-registration-per-connection reuse:
+[OpenAI client registration requirements](https://developers.openai.com/plugins/build/auth#client-registration).
+Valid legacy registration rows migrate without extending bearer grants. Client
+metadata uses a far-future SQLite integer expiration to avoid immediate deletion
+if the old Worker is restored; old code can still shorten the registration to 30
+days after a new consent, so that rollback does not preserve durable behavior.
+Already expired or deleted registrations require a fresh DCR registration through the
+existing ChatGPT connection setup; the server never recreates an unknown client
+from an authorization request. Authorization errors include fixed, nonsecret
+`error_description` codes identifying the failed requirement, without echoing
+URLs, client IDs, state, PKCE values or credentials.
+Public-client reuse is allowed by
+[RFC 7591 sections 3.2.1 and 5](https://www.rfc-editor.org/rfc/rfc7591).
 
 ## Protocol and tools
 
