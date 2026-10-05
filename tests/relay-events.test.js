@@ -168,11 +168,46 @@ test('unsubscribe while webhook is in flight cannot resurrect the subscription',
   assert.equal(s.rows('SELECT COUNT(*) AS n FROM relay_subscriptions')[0].n, 0); assert.equal(s.rows('SELECT COUNT(*) AS n FROM relay_outbox')[0].n, 0);
 });
 test('egress adapter accepts a no-body 204 result', async () => {
-  const old = globalThis.fetch; globalThis.fetch = async () => Response.json({status: 204, body: ''});
+  const old = globalThis.fetch; globalThis.fetch = async (url, options) => {
+    assert.equal(url, 'https://egress.example/api/relay-egress');
+    assert.equal(options.redirect, 'manual');
+    return Response.json({status: 204, body: ''});
+  };
   try {
     const fetcher = webhookTransport({RELAY_WEBHOOK_EGRESS_URL: 'https://egress.example/api/relay-egress', RELAY_WEBHOOK_EGRESS_TOKEN: random()});
     const response = await fetcher('https://receiver.example/callback', {signal: AbortSignal.timeout(10000), headers: {}, body: '{}'}); assert.equal(response.status, 204);
   } finally {globalThis.fetch = old;}
+});
+test('trusted egress redirects fail closed without forwarding bearer or signatures or activating a subscription', async t => {
+  const s = setup(), auth = await grant(s), key = secret();
+  s.env.RELAY_WEBHOOK_EGRESS_URL = 'https://egress.example/api/relay-egress';
+  s.env.RELAY_WEBHOOK_EGRESS_TOKEN = 'fixture-egress-bearer-never-forward';
+  for (const status of [301, 302, 303, 307, 308]) {
+    const requests = [];
+    t.mock.method(globalThis, 'fetch', async (url, options) => {
+      requests.push(url);
+      assert.equal(url, s.env.RELAY_WEBHOOK_EGRESS_URL);
+      assert.equal(options.method, 'POST');
+      assert.equal(options.redirect, 'manual', 'Workers-supported mode must not follow an egress redirect');
+      assert.equal(options.headers.Authorization, 'Bearer fixture-egress-bearer-never-forward');
+      const envelope = JSON.parse(options.body), payload = JSON.parse(envelope.body);
+      assert.equal(envelope.url, params(key).delivery.url);
+      assert.equal(payload.type, 'verification');
+      const headers = envelope.headers;
+      const signed = createHmac('sha256', Buffer.from(key.slice(6), 'base64'))
+        .update(`${headers['webhook-id']}.${headers['webhook-timestamp']}.${envelope.body}`).digest('base64');
+      assert.equal(headers['webhook-signature'], 'v1,' + signed);
+      return new Response('fixture-private-redirect-body', {status,
+        headers: {Location: 'https://untrusted.example.invalid/credential-sink'}});
+    });
+    await assert.rejects(relaySubscribe(s.ctx, auth, params(key), s.env), error =>
+      error instanceof RelayError && error.code === -32015 && error.message === 'Callback endpoint verification failed'
+      && error.data.reason === 'connection_refused');
+    assert.deepEqual(requests, [s.env.RELAY_WEBHOOK_EGRESS_URL]);
+    for (const table of ['relay_subscriptions', 'relay_activations', 'relay_verified', 'relay_outbox']) {
+      assert.equal(s.rows('SELECT COUNT(*) AS n FROM ' + table)[0].n, 0);
+    }
+  }
 });
 test('revocation or access rotation during reply preparation cannot race a direct write',async t=>{
   for(const action of ['revoke','rotate']){

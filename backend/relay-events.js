@@ -86,7 +86,9 @@ export function webhookTransport(env) {
   if (!env.RELAY_WEBHOOK_EGRESS_URL || !env.RELAY_WEBHOOK_EGRESS_TOKEN) return null;
   const endpoint = httpsURL(env.RELAY_WEBHOOK_EGRESS_URL).href;
   return async (url, options) => {
-    const response = await fetch(endpoint, {method: 'POST', redirect: 'error', signal: options.signal, headers: {'Content-Type': 'application/json', Authorization: 'Bearer ' + env.RELAY_WEBHOOK_EGRESS_TOKEN}, body: JSON.stringify({url, headers: options.headers, body: options.body})});
+    // Workers supports manual redirects, not error. The !ok check below
+    // rejects every 3xx without forwarding the egress bearer or signed body.
+    const response = await fetch(endpoint, {method: 'POST', redirect: 'manual', signal: options.signal, headers: {'Content-Type': 'application/json', Authorization: 'Bearer ' + env.RELAY_WEBHOOK_EGRESS_TOKEN}, body: JSON.stringify({url, headers: options.headers, body: options.body})});
     const text = await boundedText(response, 65536);
     if (!response.ok) {
       let reason;try{reason=JSON.parse(text).reason;}catch{}
