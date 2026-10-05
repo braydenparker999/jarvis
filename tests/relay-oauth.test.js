@@ -89,6 +89,8 @@ async function callback(s, login, {query = {}, cookie = login.cookie} = {}) {
   assert.match(html, /Allow this connection/);
   assert.match(html, /value="deny"/);
   assert.match(response.headers.get('Content-Security-Policy'), /frame-ancestors 'none'/);
+  assert.equal(response.headers.get('Referrer-Policy'), 'same-origin');
+  assert.equal(response.headers.get('Content-Security-Policy'), `default-src 'none'; form-action 'self' ${RELAY_CALLBACK}; frame-ancestors 'none'; base-uri 'none'`);
   return {response, html, csrf, cookie: browserCookie(response)};
 }
 async function approve(s, consent, {decision = 'allow', csrf = consent.csrf, cookie = consent.cookie, origin = s.origin} = {}) {
@@ -110,6 +112,7 @@ async function ownerCode(s, {scope = FULL_SCOPE, verifier = VERIFIER} = {}) {
   assert.equal(location.searchParams.get('state'), login.params.state);
   assert.equal(location.searchParams.get('iss'), s.origin + '/relay');
   assert.match(response.headers.get('Set-Cookie'), /Max-Age=0/);
+  assert.equal(response.headers.get('Referrer-Policy'), 'no-referrer');
   const code = location.searchParams.get('code');
   assert.match(code, /^[a-f0-9]{64}$/);
   return {code, login, consent, response};
