@@ -1,4 +1,4 @@
-import {RELAY_PATH, RELAY_VERSION, RELAY_OWNER, RELAY_INBOX, RELAY_PUBLIC_SCOPES, RELAY_OWNER_SCOPE, RelayError, fields, inboxArgs, uuid, cursor, boundedText, isObject, json, relayEnabled, relayIssuer, relayResource, hash} from './relay-common.js';
+import {RELAY_PATH, RELAY_VERSION, RELAY_OWNER, RELAY_INBOX, RELAY_SCOPES, RELAY_PUBLIC_SCOPES, RELAY_OWNER_SCOPE, RelayError, fields, inboxArgs, uuid, cursor, boundedText, isObject, json, relayEnabled, relayIssuer, relayResource, hash} from './relay-common.js';
 import {relayAuthenticate, relayOAuth, relayTokenActiveInStore} from './relay-oauth.js';
 import {relayEventDefinition, relayOwnerEventDefinition, relaySubscribe, relayUnsubscribe, relayEventSchema} from './relay-events.js';
 import {sharedStore, SHARED_OBJECT} from './shared.js';
@@ -17,6 +17,15 @@ const entry = r => ({id: r.id, role: r.kind === 'user' ? 'user' : 'assistant', b
 const rows = (ctx, q, ...v) => [...ctx.storage.sql.exec(q, ...v)];
 const complete = x => ({resultType: 'complete', ...x});
 const toolResult = (data, isError = false) => complete({content: [{type: 'text', text: JSON.stringify(data)}], ...(isError ? {} : {structuredContent: data}), isError});
+function ownerScopeChallenge(ctx, env, principal) {
+  // Preserve only this live token's recognized capabilities when requesting
+  // explicit owner consent. Metadata/challenges never expand the stored grant.
+  const scope = RELAY_SCOPES.filter(s => s === RELAY_OWNER_SCOPE || relayTokenActiveInStore(ctx, env, principal, s)).join(' ');
+  const message = 'Authorize Owner chat access to use this tool';
+  return complete({content: [{type: 'text', text: message}], isError: true, _meta: {'mcp/www_authenticate': [
+    `Bearer resource_metadata="${relayIssuer(env)}/.well-known/oauth-protected-resource/relay/mcp", scope="${scope}", error="insufficient_scope", error_description="${message}"`
+  ]}});
+}
 function validateArgs(name, args) {
   if (name === 'relay_list_pending') {
     fields(args, ['inbox_id', 'cursor', 'limit'], ['inbox_id']); inboxArgs(args); cursor(args.cursor);
@@ -41,7 +50,9 @@ export async function relayRpc(ctx, env, principal, rpc) {
     fields(p, ['_meta', 'cursor'], ['_meta']);
     if (p.cursor !== undefined) throw new RelayError(-32602, 'This catalog has one page');
     return rpc.method === 'tools/list'
-      ? complete({tools: [...tools, ...(relayOwnerEnabled(env) ? relayOwnerTools : [])].filter(t => principal.scopes.includes(scopeFor[t.name])), ttlMs: 300000, cacheScope: 'private'})
+      // Enabled owner schemas are discoverable for explicit scope step-up;
+      // private data and every owner operation still require the live scope.
+      ? complete({tools: [...tools.filter(t => principal.scopes.includes(scopeFor[t.name])), ...(relayOwnerEnabled(env) ? relayOwnerTools : [])], ttlMs: 300000, cacheScope: 'private'})
       : complete({events: [...(principal.scopes.includes('relay:events') ? [relayEventDefinition] : []), ...(relayOwnerEnabled(env) && principal.scopes.includes(RELAY_OWNER_SCOPE) ? [relayOwnerEventDefinition] : [])], ttlMs: 300000, cacheScope: 'private'});
   }
   if (rpc.method === 'events/subscribe') return complete(await relaySubscribe(ctx, principal, p, env));
@@ -50,9 +61,12 @@ export async function relayRpc(ctx, env, principal, rpc) {
   fields(p, ['_meta', 'name', 'arguments'], ['_meta', 'name', 'arguments']);
   const name = p.name, args = p.arguments;
   if (!(name in scopeFor)) throw new RelayError(-32602, 'Unknown tool');
-  if (!principal.scopes.includes(scopeFor[name])||!relayTokenActiveInStore(ctx,env,principal,scopeFor[name])) throw new RelayError(-32012, 'Tool scope required');
+  if (scopeFor[name] === RELAY_OWNER_SCOPE && !relayOwnerEnabled(env)) throw new RelayError(-32012, 'Owner capability is not activated');
+  if (!principal.scopes.includes(scopeFor[name])||!relayTokenActiveInStore(ctx,env,principal,scopeFor[name])) {
+    if (scopeFor[name] === RELAY_OWNER_SCOPE) return ownerScopeChallenge(ctx, env, principal);
+    throw new RelayError(-32012, 'Tool scope required');
+  }
   if (scopeFor[name] === RELAY_OWNER_SCOPE) {
-    if (!relayOwnerEnabled(env)) throw new RelayError(-32012, 'Owner capability is not activated');
     return toolResult(await relayOwnerRpc(ctx, env, principal, name, args));
   }
   validateArgs(name, args);
