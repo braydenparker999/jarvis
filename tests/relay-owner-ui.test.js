@@ -8,12 +8,28 @@ import { extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRelayOwnerApi, OWNER_SESSION_KEY, OwnerApiError } from '../public/assets/relay-owner-api.js';
 import { createRelayOwnerController, createRelayOwnerUI } from '../public/assets/relay-owner-ui.js';
+import { API_ORIGIN } from '../public/assets/config.js';
 
 const tokenA = 'a'.repeat(64), tokenB = 'b'.repeat(64), requestId = 'c'.repeat(64);
 const idA = '11111111-1111-4111-8111-111111111111', idB = '22222222-2222-4222-8222-222222222222';
 const device = { id: idA, label: 'My phone', principal: 'github:183016859', expiresAt: '2027-10-05T12:00:00Z' };
 const privateMessage = { id: '33333333-3333-4333-8333-333333333333', body: 'Private text', role: 'user', createdAt: '2026-10-05T12:00:00Z', visibility: 'private', author_authenticated: true, principal: device.principal };
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+// Normalize the trailing slash supplied by fileURLToPath before prefix checks.
+const browserFixtureRoot = resolve(fileURLToPath(new URL('../public/', import.meta.url)));
+function browserFixturePath(pathname) {
+  const path = resolve(browserFixtureRoot, '.' + decodeURIComponent(pathname));
+  if (!path.startsWith(browserFixtureRoot + sep) && path !== browserFixtureRoot) throw Error('Invalid path');
+  return path;
+}
+const browserFixtureCors = origin => ({
+  'Access-Control-Allow-Origin': origin,
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+  'Access-Control-Max-Age': '0',
+  'Cache-Control': 'no-store',
+  Vary: 'Origin'
+});
 function storage(initial = {}) {
   const values = new Map(Object.entries(initial)), writes = [];
   return { values, writes, getItem: key => values.get(key) || null, setItem: (key, value) => { writes.push([key, value]); values.set(key, value); }, removeItem: key => { values.delete(key); } };
@@ -286,22 +302,36 @@ test('public integration guards submission and mounts a dedicated renderer witho
   assert.equal(/localStorage|sessionStorage|writeLocal|readLocal|submitMessage|shared\/messages/.test(owner.replace(/\/\/[^\n]*/g, '')), false);
 });
 
+test('browser fixture serves Relay and assets from a normalized root and uses fixed-origin bearer CORS', async () => {
+  assert.equal(browserFixtureRoot.endsWith(sep), false);
+  assert.equal(browserFixturePath('/jarvis/'), join(browserFixtureRoot, 'jarvis'));
+  assert.equal((await stat(join(browserFixturePath('/jarvis/'), 'index.html'))).isFile(), true);
+  assert.equal((await stat(browserFixturePath('/assets/app.js'))).isFile(), true);
+  assert.throws(() => browserFixturePath('/../../outside-root'), /Invalid path/);
+  const origin = 'http://127.0.0.1:43123', headers = browserFixtureCors(origin);
+  assert.equal(headers['Access-Control-Allow-Origin'], origin);
+  assert.equal(headers['Access-Control-Allow-Methods'], 'GET, POST, OPTIONS');
+  assert.equal(headers['Access-Control-Allow-Headers'], 'Authorization, Content-Type');
+  assert.equal(headers['Cache-Control'], 'no-store');
+  assert.equal('Access-Control-Allow-Credentials' in headers, false);
+});
+
 test('browser fixture: existing Relay URL, public draft and owner-private isolation survive pairing and logout', { timeout: 60000 }, async t => {
   let chromium;
   try { ({ chromium } = await import(process.env.JARVIS_PLAYWRIGHT_MODULE || 'playwright-core')); }
   catch { t.skip('Install playwright-core or set JARVIS_PLAYWRIGHT_MODULE for local browser checks'); return; }
   const executablePath = [process.env.JARVIS_CHROME, '/usr/bin/chromium', '/usr/bin/chromium-browser', chromium.executablePath()].find(path => path && existsSync(path));
   if (!executablePath) { t.skip('Install Chromium or set JARVIS_CHROME for local browser checks'); return; }
-  const publicRoot = fileURLToPath(new URL('../public/', import.meta.url)), mime = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json' };
+  const mime = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json' };
   const server = createServer(async (req, res) => {
     try {
-      let path = resolve(publicRoot, '.' + decodeURIComponent(new URL(req.url, 'http://localhost').pathname));
-      if (!path.startsWith(publicRoot + sep) && path !== publicRoot) throw Error('Invalid path');
+      let path = browserFixturePath(new URL(req.url, 'http://localhost').pathname);
       if ((await stat(path)).isDirectory()) path = join(path, 'index.html');
       res.writeHead(200, { 'Content-Type': mime[extname(path)] || 'application/octet-stream', 'Cache-Control': 'no-store' }); res.end(await readFile(path));
     } catch { res.writeHead(404); res.end('Not found'); }
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`, cors = browserFixtureCors(origin);
   let browser;
   try {
     try { browser = await chromium.launch({ executablePath, headless: true, args: ['--no-sandbox'] }); }
@@ -314,7 +344,9 @@ test('browser fixture: existing Relay URL, public draft and owner-private isolat
     // Fail closed: every nonlocal request is intercepted, never sent to live Relay.
     await context.route('**/*', async route => {
       const request = route.request(), url = new URL(request.url());
-      if (url.hostname === '127.0.0.1') return route.continue();
+      if (url.origin === origin) return route.continue();
+      if (url.origin !== API_ORIGIN) return route.abort('blockedbyclient');
+      if (request.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: cors, body: '' });
       let response;
       if (url.pathname.startsWith('/relay/owner/')) response = await (async () => {
         const options = { method: request.method(), body: request.postData() || undefined, headers: {} };
@@ -334,11 +366,11 @@ test('browser fixture: existing Relay URL, public draft and owner-private isolat
       else if (url.pathname === '/shared/state') response = json({ mode: 'github-publications', messages: [], posts: [], publisher: { ok: true }, nextCursor: null });
       else if (url.pathname === '/shared/messages') { publicSent.push(request.postDataJSON()); response = json({ ok: true }); }
       else return route.abort('blockedbyclient');
-      return route.fulfill({ status: response.status, contentType: 'application/json', body: await response.text() });
+      return route.fulfill({ status: response.status, headers: cors, contentType: 'application/json', body: await response.text() });
     });
     const page = await context.newPage(), errors = [], unexpectedNavigations = [];
     page.on('pageerror', error => errors.push(error.message));
-    const url = `http://127.0.0.1:${server.address().port}/jarvis/?restriction=1#same`;
+    const url = origin + '/jarvis/?restriction=1#same';
     await page.goto(url); await page.locator('#message-text').waitFor();
     page.on('framenavigated', frame => { if (frame === page.mainFrame()) unexpectedNavigations.push(frame.url()); });
     const originalHistory = await page.evaluate(() => history.length);
