@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createRelayFixture} from './relay-fixture.js';
 import {relayAuthenticate, relayGrantActive, relayOAuthStore} from '../backend/relay-oauth.js';
-import {RELAY_CALLBACK, RELAY_OWNER, RELAY_SCOPES, challenge, hash} from '../backend/relay-common.js';
+import {RELAY_CALLBACK, RELAY_OWNER, RELAY_SCOPES, RELAY_PUBLIC_SCOPES, RELAY_OWNER_SCOPE, challenge, hash} from '../backend/relay-common.js';
 import {PUBLIC_KEY} from '../backend/shared.js';
 
 const REGISTRY = 'jarvis-shared-v2';
@@ -164,6 +164,34 @@ test('complete public DCR, GitHub owner S256 login, consent and downstream S256 
   assert.ok(rows.some(row => row.key === accessKey));
   assert.ok(rows.some(row => row.key === refreshKey));
   assert.equal(rows.filter(row => ['login', 'consent', 'code'].includes(row.key.split(':')[0])).length, 0);
+});
+
+test('omitted authorization scope and refresh stay public; explicit owner reconsent displays owner access', async t => {
+  const s = fixture(t, {env: {RELAY_OWNER_ENABLED: 'true'}});
+  s.client = await register(s);
+  const params = new URLSearchParams({response_type: 'code', client_id: s.client, redirect_uri: RELAY_CALLBACK,
+    code_challenge_method: 'S256', code_challenge: await challenge(VERIFIER), resource: s.resource, state: 'fixture-default-scope'});
+  const response = await s.request('/relay/oauth/authorize?' + params);
+  assert.equal(response.status, 302);
+  const upstream = new URL(response.headers.get('Location'));
+  s.upstreamChallenge = upstream.searchParams.get('code_challenge');
+  const consent = await callback(s, {state: upstream.searchParams.get('state'), cookie: browserCookie(response)});
+  assert.doesNotMatch(consent.html, /Owner chat access:/);
+  const approved = await approve(s, consent), code = new URL(approved.headers.get('Location')).searchParams.get('code');
+  const publicTokens = await (await exchangeCode(s, code)).json();
+  assert.equal(publicTokens.scope, RELAY_PUBLIC_SCOPES.join(' '));
+  assert.ok(!(await authenticate(s, publicTokens.access_token)).scopes.includes(RELAY_OWNER_SCOPE));
+  await expectError(await refresh(s, publicTokens.refresh_token, {scope: FULL_SCOPE}), 'invalid_grant');
+  const rotated = await (await refresh(s, publicTokens.refresh_token)).json();
+  assert.equal(rotated.scope, RELAY_PUBLIC_SCOPES.join(' '));
+  const login = await start(s, {scope: FULL_SCOPE}), ownerConsent = await callback(s, login);
+  assert.match(ownerConsent.html, /Owner chat access:/);
+  assert.match(ownerConsent.html, /Each phone approval separately grants persistent device access with a 365-day inactivity expiry renewed on use/);
+  const ownerApproved = await approve(s, ownerConsent), ownerCode = new URL(ownerApproved.headers.get('Location')).searchParams.get('code');
+  const ownerTokens = await (await exchangeCode(s, ownerCode)).json();
+  assert.equal(ownerTokens.scope, FULL_SCOPE);
+  assert.deepEqual((await authenticate(s, ownerTokens.access_token)).scopes, RELAY_SCOPES);
+  assert.deepEqual((await authenticate(s, rotated.access_token)).scopes, RELAY_PUBLIC_SCOPES, 'new consent never silently expands the old token');
 });
 
 test('public browser keys cannot authenticate MCP, bypass GitHub, or approve without owner session', async t => {

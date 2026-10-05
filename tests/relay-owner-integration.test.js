@@ -7,7 +7,7 @@ import {relayOwnerRpc} from '../backend/relay-owner.js';
 import {relaySubscribe,drainRelayOutbox} from '../backend/relay-events.js';
 import {sharedStore,SHARED_OBJECT} from '../backend/shared.js';
 import {PRIMARY_SITE} from '../backend/origins.js';
-import {RELAY_OWNER,RELAY_CALLBACK,RELAY_PUBLIC_SCOPES,RELAY_OWNER_SCOPE,RELAY_OWNER_INBOX,RELAY_OWNER_EVENT,RELAY_INBOX,RELAY_EVENT,RELAY_VERSION,random,hash,challenge} from '../backend/relay-common.js';
+import {RELAY_OWNER,RELAY_CALLBACK,RELAY_SCOPES,RELAY_PUBLIC_SCOPES,RELAY_OWNER_SCOPE,RELAY_OWNER_INBOX,RELAY_OWNER_EVENT,RELAY_INBOX,RELAY_EVENT,RELAY_VERSION,random,hash,challenge} from '../backend/relay-common.js';
 
 async function grant(s,scope=RELAY_PUBLIC_SCOPES.join(' ')){
   const ctx=s.object(SHARED_OBJECT).ctx,client=random(),grantId=random(),verifier=random(),code=random(),access=random(),refresh=random();
@@ -39,12 +39,20 @@ async function pair(s,auth,label){
 const receiver=async (_url,init)=>{const body=JSON.parse(init.body);return body.type==='verification'?Response.json({challenge:body.challenge}):new Response(null,{status:204});};
 const subscription=(name,inbox_id,url)=>({name,arguments:{inbox_id},delivery:{mode:'webhook',url,secret:'whsec_'+Buffer.alloc(32,17).toString('base64')},cursor:'relay1:0'});
 
-test('owner capability is explicit, default challenge stays public and old grants never expand',async t=>{
+test('owner schemas are discoverable, capability is explicit and old grants never expand',async t=>{
   const s=fixture(t),ordinary=await grant(s),owner=await grant(s,RELAY_OWNER_SCOPE);
   const unauth=await s.request('/relay/mcp');assert.match(unauth.headers.get('WWW-Authenticate'),/scope="relay:read relay:reply relay:events"/);assert.doesNotMatch(unauth.headers.get('WWW-Authenticate'),/relay:owner/);
   const publicTools=(await s.rpc(ordinary,'tools/list')).result.tools;
-  assert.equal(publicTools.length,3);assert.ok(publicTools.every(x=>!x.name.startsWith('relay_owner_')));
+  assert.equal(publicTools.length,10);
+  const ownerTools=publicTools.filter(x=>x.name.startsWith('relay_owner_'));
+  assert.equal(ownerTools.length,7);
+  for(const tool of ownerTools){
+    assert.deepEqual(tool.securitySchemes,[{type:'oauth2',scopes:[RELAY_OWNER_SCOPE]}]);
+    assert.deepEqual(tool._meta.securitySchemes,tool.securitySchemes);
+    assert.ok(tool.inputSchema&&tool.outputSchema);
+  }
   assert.equal((await s.rpc(owner,'tools/list')).result.tools.length,7);
+  assert.deepEqual((await s.rpc(ordinary,'events/list')).result.events.map(x=>x.name),[RELAY_EVENT]);
   assert.deepEqual((await s.rpc(owner,'events/list')).result.events.map(x=>x.name),[RELAY_OWNER_EVENT]);
   await assert.rejects(relayOwnerRpc(s.ctx,s.env,ordinary,'relay_owner_devices_list',{}),e=>e.code===-32012);
   const widened=await ordinary.registry({op:'exchange',key:'refresh:'+await hash(ordinary.refresh),match:{client_id:ordinary.client,resource:ordinary.resource},scope:ordinary.scopes.join(' ')+' '+RELAY_OWNER_SCOPE,accessKey:'access:'+await hash(random()),refreshKey:'refresh:'+await hash(random())});
@@ -52,8 +60,95 @@ test('owner capability is explicit, default challenge stays public and old grant
   const stored=s.rows('SELECT value FROM relay_oauth WHERE key=?','grant:'+ordinary.grantId)[0];assert.equal(JSON.parse(stored.value).scope,ordinary.scopes.join(' '));
   s.env.RELAY_OWNER_ENABLED='false';
   assert.equal((await s.rpc(owner,'tools/list')).result.tools.length,0);
+  assert.equal((await s.rpc(ordinary,'tools/list')).result.tools.length,3);
   assert.deepEqual((await s.rpc(owner,'events/list')).result.events,[]);
+  const disabled=await s.rpc(ordinary,'tools/call',{name:'relay_owner_devices_list',arguments:{}});
+  assert.equal(disabled.error.code,-32012);assert.equal(disabled.result,undefined);
   assert.equal((await s.phone('/pair/start',{label:'Disabled'})).status,503);
+});
+
+test('old public grants get native owner step-up without private reads or owner mutations',async t=>{
+  const s=fixture(t),ordinary=await grant(s),owner=await grant(s,RELAY_OWNER_SCOPE),phone=await pair(s,owner,'Fixture approved phone');
+  const pending=await (await s.phone('/pair/start',{label:'Fixture pending private label'})).json();
+  const id=crypto.randomUUID(),body='Fixture private owner content';
+  assert.equal((await s.phone('/messages',{id,body},phone.device_token)).status,201);
+  const catalog=JSON.stringify((await s.rpc(ordinary,'tools/list')).result);
+  for(const secret of [body,phone.device_token,phone.device.id,pending.label,pending.request_id,pending.code].filter(Boolean))assert.ok(!catalog.includes(secret));
+  assert.ok(!catalog.includes('Fixture pending private label'));
+  const tables=['relay_owner_pairings','relay_owner_sessions','relay_owner_entries','relay_owner_meta','relay_owner_pair_rates'];
+  const snapshot=()=>tables.map(table=>s.rows('SELECT * FROM '+table));
+  const before=snapshot();
+  const calls=[
+    ['relay_owner_pairing_inspect',{code:pending.code}],
+    ['relay_owner_pairing_approve',{request_id:pending.request_id,code:pending.code,access_days:365,confirm:true}],
+    ['relay_owner_devices_list',{}],
+    ['relay_owner_device_revoke',{device_id:phone.device.id}],
+    ['relay_owner_list_pending',{inbox_id:RELAY_OWNER_INBOX}],
+    ['relay_owner_read_conversation',{inbox_id:RELAY_OWNER_INBOX,message_id:id}],
+    ['relay_owner_reply',{inbox_id:RELAY_OWNER_INBOX,message_id:id,body:'Unconsented private reply'}]
+  ];
+  const expected=`Bearer resource_metadata="${s.env.RELAY_MCP_ORIGIN}/.well-known/oauth-protected-resource/relay/mcp", scope="${RELAY_SCOPES.join(' ')}", error="insufficient_scope", error_description="Authorize Owner chat access to use this tool"`;
+  for(const [name,arguments_] of calls){
+    const response=await s.rpc(ordinary,'tools/call',{name,arguments:arguments_});
+    assert.equal(response.error,undefined);
+    assert.equal(response.result.resultType,'complete');assert.equal(response.result.isError,true);
+    assert.equal(response.result.structuredContent,undefined);
+    assert.deepEqual(response.result._meta,{'mcp/www_authenticate':[expected]});
+    assert.deepEqual(response.result.content,[{type:'text',text:'Authorize Owner chat access to use this tool'}]);
+    assert.deepEqual(snapshot(),before,'scope challenge must not approve, create, revoke or write owner state');
+    for(const secret of [body,phone.device_token,pending.request_id,pending.code])assert.ok(!JSON.stringify(response).includes(secret));
+  }
+  const status=await (await s.phone('/pair/status',{request_id:pending.request_id},pending.device_token)).json();
+  assert.equal(status.status,'pending');
+  assert.equal(s.rows('SELECT COUNT(*) AS n FROM relay_owner_sessions')[0].n,1);
+});
+
+test('owner step-up preserves only live verified scopes of a partial public grant',async t=>{
+  const s=fixture(t),narrow=await grant(s,'relay:read');
+  const catalog=(await s.rpc(narrow,'tools/list')).result.tools;
+  assert.equal(catalog.length,9);assert.ok(!catalog.some(x=>x.name==='relay_reply'));
+  assert.deepEqual((await s.rpc(narrow,'events/list')).result.events,[]);
+  const rpc={method:'tools/call',params:{_meta:{},name:'relay_owner_devices_list',arguments:{}}};
+  // A claimed scope does not count as an existing permission or bypass the
+  // live token/grant check, even through the internal RPC entry point.
+  for(const principal of [narrow,{...narrow,scopes:[...RELAY_SCOPES,'account:admin']}]){
+    const result=await relayRpc(s.ctx,s.env,principal,rpc);
+    assert.equal(result.isError,true);
+    const authenticate=result._meta['mcp/www_authenticate'][0];
+    assert.match(authenticate,/scope="relay:read relay:owner"/);
+    assert.ok(!authenticate.includes('relay:reply'));assert.ok(!authenticate.includes('relay:events'));assert.ok(!authenticate.includes('account:admin'));
+  }
+  const stored=JSON.parse(s.rows('SELECT value FROM relay_oauth WHERE key=?','grant:'+narrow.grantId)[0].value);
+  assert.equal(stored.scope,'relay:read');
+});
+
+test('a newly consented full owner grant retains public tools and owner operations',async t=>{
+  const s=fixture(t),owner=await grant(s,RELAY_SCOPES.join(' '));
+  assert.equal((await s.rpc(owner,'tools/list')).result.tools.length,10);
+  assert.deepEqual((await s.rpc(owner,'events/list')).result.events.map(x=>x.name),[RELAY_EVENT,RELAY_OWNER_EVENT]);
+  const devices=await s.rpc(owner,'tools/call',{name:'relay_owner_devices_list',arguments:{}});
+  assert.equal(devices.result.isError,false);assert.deepEqual(devices.result.structuredContent,{devices:[]});
+  const pending=await s.rpc(owner,'tools/call',{name:'relay_owner_list_pending',arguments:{inbox_id:RELAY_OWNER_INBOX}});
+  assert.equal(pending.result.isError,false);assert.deepEqual(pending.result.structuredContent.messages,[]);
+  const id=crypto.randomUUID();sharedStore(s.ctx,'/internal/shared/message',{id,body:'Fixture public visitor message'});
+  const read=await s.rpc(owner,'tools/call',{name:'relay_list_pending',arguments:{inbox_id:RELAY_INBOX}});
+  assert.equal(read.result.structuredContent.messages[0].id,id);
+  const reply=await s.rpc(owner,'tools/call',{name:'relay_reply',arguments:{inbox_id:RELAY_INBOX,message_id:id,body:'Fixture public answer'}});
+  assert.equal(reply.result.isError,false);assert.equal(reply.result.structuredContent.public_inbox,true);
+});
+
+test('revoked or expired tokens/grants cannot discover or invoke owner tools',async t=>{
+  let now=Date.now();t.mock.method(Date,'now',()=>now);
+  for(const scope of [RELAY_PUBLIC_SCOPES.join(' '),RELAY_OWNER_SCOPE])for(const mode of ['revoked','access-expired','grant-expired']){
+    const s=fixture(t),auth=await grant(s,scope);
+    if(mode==='revoked')await auth.registry({op:'revoke',tokenHash:auth.accessHash,client_id:auth.client});
+    else now+=mode==='access-expired'?3600000:30*86400000;
+    for(const [method,p] of [['tools/list',{}],['tools/call',{name:'relay_owner_devices_list',arguments:{}}]]){
+      const response=await s.rpc(auth,method,p);
+      assert.deepEqual(response,{error:'Connect the owner’s Relay account using OAuth'});
+      await assert.rejects(relayRpc(s.ctx,s.env,auth,{method,params:{...p,_meta:{}}}),e=>e.code===-32012);
+    }
+  }
 });
 
 test('two phone sessions and private replies stay isolated from all public reads/tools',async t=>{

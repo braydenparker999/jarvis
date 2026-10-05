@@ -84,10 +84,21 @@ request only `relay:read relay:reply relay:events`; refresh cannot add scope.
 When explicitly requested, the consent page describes owner access and its
 separate per-device approval requirement.
 
+When owner access is activated, authenticated public connections can discover
+the owner tool schemas and their exact `relay:owner` OAuth requirement. Calling
+one without that capability returns an error tool result with
+`_meta["mcp/www_authenticate"]`, the protected-resource metadata URL and an
+`insufficient_scope` challenge. The requested scopes preserve only the live
+token's existing recognized capabilities and add `relay:owner`, so reconsent
+does not drop public access or silently add unrelated scopes. The host must
+complete an explicit new consent flow; refresh and existing grants remain
+unchanged. Discovery and the challenge disclose no private inbox/device data.
+This follows [OpenAI's tool-level authentication guidance](https://developers.openai.com/plugins/build/auth).
+
 `RELAY_OWNER_ENABLED=true` must be separately approved before activation; it is
 not set in the checked-in Worker configuration. Both this flag and existing
-`RELAY_MCP_ENABLED=true` are required. Owner tools and events are absent from
-catalogs unless activated and granted. No new provider, hosting service, database
+`RELAY_MCP_ENABLED=true` are required. Owner tool schemas are absent unless
+activated; owner events remain absent unless activated and granted. No new provider, hosting service, database
 binding or provider secret is required.
 
 Before activating:
