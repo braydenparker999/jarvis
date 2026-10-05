@@ -4,11 +4,14 @@ const REGISTRY = RELAY_OAUTH_OBJECT;
 const SESSION_MS = 600000;
 const ACCESS_MS = 3600000;
 const REFRESH_MS = 30 * 86400000;
+// Public DCR identity is not a session or bearer credential. ChatGPT registers
+// once per connection and reuses the client even after a cancelled first login.
+const CLIENT_EXPIRY = Number.MAX_SAFE_INTEGER;
 const COOKIE = '__Host-jarvis-relay';
 const cookieHeader = (value, age = 600) => `${COOKIE}=${value}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${age}`;
 const cookie = request => request.headers.get('Cookie')?.split(';').map(x => x.trim()).find(x => x.startsWith(COOKIE + '='))?.slice(COOKIE.length + 1);
 const scopes = value => typeof value === 'string' && value.length > 0 && value.split(' ').every(x => RELAY_SCOPES.includes(x)) && new Set(value.split(' ')).size === value.split(' ').length;
-const err = (error = 'invalid_request', status = 400) => json({error}, status);
+const err = (error = 'invalid_request', status = 400, description) => json({error, ...(description ? {error_description: description} : {})}, status);
 const registry = async (env, body) => {
   const r = await env.HUBS.get(env.HUBS.idFromName(REGISTRY)).fetch(new Request('https://internal/internal/relay/oauth', {method: 'POST', body: JSON.stringify(body)}));
   if (!r.ok) throw Error('OAuth storage unavailable');
@@ -17,10 +20,17 @@ const registry = async (env, body) => {
 const read = (env, key) => registry(env, {op: 'get', key}).then(x => x.value);
 const put = (env, key, value, expiresAt, category) => registry(env, {op: 'put', key, value, expiresAt, category});
 const consume = (env, key, match = {}) => registry(env, {op: 'consume', key, match}).then(x => x.value);
-function authParams(b, client, env) {
-  return client && b.client_id && b.redirect_uri === client.redirect && b.response_type === 'code' && b.code_challenge_method === 'S256'
-    && typeof b.code_challenge === 'string' && /^[A-Za-z0-9_-]{43}$/.test(b.code_challenge)
-    && b.resource === relayResource(env) && typeof b.state === 'string' && b.state.length > 0 && b.state.length <= 2048 && scopes(b.scope);
+function authParamsError(b, client, env) {
+  // Fixed diagnostic codes only: never echo IDs, URIs, state, PKCE or input.
+  if (!client || !b.client_id) return 'client_not_registered';
+  if (b.redirect_uri !== client.redirect) return 'redirect_uri_mismatch';
+  if (b.response_type !== 'code') return 'unsupported_response_type';
+  if (b.code_challenge_method !== 'S256') return 'pkce_s256_required';
+  if (typeof b.code_challenge !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(b.code_challenge)) return 'invalid_code_challenge';
+  if (b.resource !== relayResource(env)) return 'resource_mismatch';
+  if (typeof b.state !== 'string' || b.state.length === 0 || b.state.length > 2048) return 'invalid_state';
+  if (!scopes(b.scope)) return 'invalid_scope';
+  return null;
 }
 const redirect = (url, headers = {}) => new Response(null, {status: 302, headers: {Location: url, 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer', ...headers}});
 function oauthRedirect(p, env, params) {
@@ -78,16 +88,20 @@ export async function relayOAuth(request, env, fetcher = fetch) {
         || b.response_types && (!Array.isArray(b.response_types) || b.response_types.some(x => x !== 'code'))) return err('invalid_client_metadata');
       const limited = await registry(env, {op: 'rate', identity: await hash(request.headers.get('CF-Connecting-IP') || 'unknown')});
       if (limited.error) return err('temporarily_unavailable', 429);
-      const client_id = random();
-      // Unapproved public registrations expire quickly. Extend only after owner consent.
-      const stored = await put(env, 'client:' + client_id, {redirect: RELAY_CALLBACK}, Date.now() + SESSION_MS, 'client');
-      if (stored.error) return err('temporarily_unavailable', 503);
+      // Keep this exact-callback public identity valid for the connection. Rate
+      // limits still bound DCR; identical public client instances share a known
+      // registered identity, never a grant. Reuse and creation are atomic.
+      const stored = await registry(env, {op: 'register', client_id: random()});
+      if (!stored.client_id) return err('temporarily_unavailable', 503);
+      const client_id = stored.client_id;
       return json({client_id, redirect_uris: [RELAY_CALLBACK], token_endpoint_auth_method: 'none', grant_types: ['authorization_code', 'refresh_token'], response_types: ['code']}, 201);
     }
     if (path === '/relay/oauth/authorize' && request.method === 'GET') {
       if (!env.RELAY_GITHUB_CLIENT_ID || !env.RELAY_GITHUB_CLIENT_SECRET) return err('temporarily_unavailable', 503);
       const p = Object.fromEntries(url.searchParams); p.scope ||= RELAY_SCOPES.join(' ');
-      if ([...url.searchParams.keys()].some(k => url.searchParams.getAll(k).length !== 1) || !authParams(p, await read(env, 'client:' + p.client_id), env)) return err();
+      if ([...url.searchParams.keys()].some(k => url.searchParams.getAll(k).length !== 1)) return err('invalid_request', 400, 'duplicate_parameter');
+      const issue = authParamsError(p, await read(env, 'client:' + p.client_id), env);
+      if (issue) return err('invalid_request', 400, issue);
       const state = random(), browser = random(), verifier = random();
       const stored = await put(env, 'login:' + await hash(state), {p, browser: await hash(browser), verifier}, Date.now() + SESSION_MS, 'session');
       if (stored.error) return err('temporarily_unavailable', 503);
@@ -163,7 +177,7 @@ export async function relayOAuth(request, env, fetcher = fetch) {
       return json({});
     }
     return err('not_found', 404);
-  } catch { return err('invalid_request'); }
+  } catch { return err('invalid_request', 400, path === '/relay/oauth/authorize' ? 'authorization_processing_failed' : undefined); }
 }
 
 // Every exchange/rotation and consume is atomic. Rows hold only hashed bearer IDs.
@@ -171,6 +185,9 @@ export function relayOAuthStore(ctx, b, now = Date.now()) {
   const sql = ctx.storage.sql;
   sql.exec('CREATE TABLE IF NOT EXISTS relay_oauth (key TEXT PRIMARY KEY, category TEXT NOT NULL, value TEXT NOT NULL, expires_at INTEGER NOT NULL)');
   return ctx.storage.transactionSync(() => {
+    // Preserve only still-valid legacy client rows. Already-expired/deleted
+    // identities must re-register, never be reconstructed from an authorize URL.
+    sql.exec("UPDATE relay_oauth SET expires_at=? WHERE category='client' AND expires_at>? AND expires_at<?", CLIENT_EXPIRY, now, CLIENT_EXPIRY);
     sql.exec('DELETE FROM relay_oauth WHERE expires_at<=?', now);
     const get = key => { const r = [...sql.exec('SELECT value FROM relay_oauth WHERE key=?', key)][0]; return r ? JSON.parse(r.value) : null; };
     const store = (key, category, value, expiration) => sql.exec('INSERT OR REPLACE INTO relay_oauth VALUES(?,?,?,?)', key, category, JSON.stringify(value), expiration);
@@ -188,10 +205,22 @@ export function relayOAuthStore(ctx, b, now = Date.now()) {
       if (rate.count>=5 || !get(key)&&count('rate')>=500) return json({error:'Rate limit'});
       store(key,'rate',{count:rate.count+1},now+SESSION_MS);return json({ok:true});
     }
+    if (b.op === 'register') {
+      // RFC 7591 permits reuse for instances with the same registration. This
+      // broker accepts only one fixed ChatGPT public callback/security policy.
+      // Reuse before the row cap so unauthenticated DCR cannot fill it forever.
+      const existing = [...sql.exec("SELECT key,value FROM relay_oauth WHERE category='client' ORDER BY key")]
+        .find(row => /^client:[a-f0-9]{64}$/.test(row.key) && JSON.parse(row.value).redirect === RELAY_CALLBACK);
+      if (existing) return json({client_id: existing.key.slice(7)});
+      if (!/^[a-f0-9]{64}$/.test(b.client_id || '') || count('client') >= 50) return json({error: 'Registry full'});
+      store('client:' + b.client_id, 'client', {redirect: RELAY_CALLBACK}, CLIENT_EXPIRY);
+      return json({client_id: b.client_id});
+    }
     if (b.op === 'put') {
       const limits = {client: 50, session: 100};
-      if (!(b.category in limits) || !Number.isFinite(b.expiresAt) || b.expiresAt <= now || count(b.category) >= limits[b.category]) return json({error: 'Registry full'});
-      store(b.key, b.category, b.value, b.expiresAt); return json({ok: true});
+      const validExpiry = Number.isFinite(b.expiresAt) && b.expiresAt > now;
+      if (!(b.category in limits) || !validExpiry || count(b.category) >= limits[b.category]) return json({error: 'Registry full'});
+      store(b.key, b.category, b.value, b.category === 'client' ? CLIENT_EXPIRY : b.expiresAt); return json({ok: true});
     }
     if (b.op === 'consume') {
       const value = get(b.key);
@@ -205,7 +234,6 @@ export function relayOAuthStore(ctx, b, now = Date.now()) {
       const p = b.params, expiration = now + REFRESH_MS;
       const client=get('client:'+p.client_id);
       if(!client)return json({error:'Client expired'});
-      store('client:'+p.client_id,'client',client,expiration);
       const grant = {principal: RELAY_OWNER, client_id: p.client_id, scope: p.scope, resource: b.resource, expiresAt: expiration, revoked: false};
       store('grant:' + b.grantId, 'grant', grant, expiration);
       store(b.codeKey, 'code', {grantId: b.grantId, client_id: p.client_id, redirect_uri: p.redirect_uri, challenge: p.code_challenge, resource: b.resource, scope: p.scope}, now + SESSION_MS);
