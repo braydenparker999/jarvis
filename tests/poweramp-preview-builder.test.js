@@ -39,7 +39,7 @@ test('preview builder emits parseable self-contained classic HTML without changi
     assert.doesNotMatch(html,/<script\b[^>]*\b(?:src|type)\s*=/i);
     assert.doesNotMatch(html,/<link\b[^>]*\bhref\s*=/i);
     assert.match(html,/Content-Security-Policy/);assert.match(html,/connect-src 'none'/);
-    assert.match(html,/UI preview v7 · simulated · no audio/);assert.match(html,/id="preview-reset"/);assert.match(html,/5,000 tracks/);
+    assert.match(html,/UI preview v8 · simulated · no audio/);assert.match(html,/id="preview-reset"/);assert.match(html,/5,000 tracks/);
     assert.doesNotMatch(scripts[0][1],/\bawait\s+import\s*\(/);
     assert.match(html,/const Audio=PreviewAudio/);assert.match(html,/Engine\.ensureCtx=\(\)=>null/);
     const current=await Promise.all(names.map(name=>readFile(new URL('../public/drawercast/'+name,import.meta.url))));

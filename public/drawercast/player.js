@@ -6404,6 +6404,7 @@ Object.assign(SharedPlayerMotion,{
     const geometryObserver=new MutationObserver(()=>{if(this.active()&&this.active().trackId!==Engine.current?.id)ScreenDrag.abort();this.scheduleAppearance();});
     for(const selector of ['#p-title','#p-sub','.outinfo'])geometryObserver.observe($(selector),{childList:true,characterData:true,subtree:true});
     geometryObserver.observe(document.body,{attributes:true,attributeFilter:['class']});
+    const paletteObserver=new MutationObserver(()=>{const m=this.active();if(!m){this.models=null;this.scheduleAppearance();return;}const color=getComputedStyle(m.mini).color;for(const key of ['title','sub','play']){const style=getComputedStyle(m.pairs[key].full);m.appearances[key].mini.color=color;m.appearances[key].full.color=style.color;m.appearances[key].full.background=style.backgroundColor;m.appearances[key].full.borderColor=style.borderTopColor;}m.geometry=null;this.paint(m,m.p);});paletteObserver.observe(root,{attributes:true,attributeFilter:['style']});
     window.addEventListener('resize',()=>{root.style.setProperty('--player-live-top',this.rect($('#app')).top+'px');this.scheduleAppearance();});document.fonts?.ready.then(()=>this.scheduleAppearance());
     this.updateBackground();this.scheduleAppearance();
   },
