@@ -73,7 +73,7 @@ async function openVisualPage(browser,fixture,{theme,baseline=false,art=true}){
   return {context,page,errors,start,move,end,frame,settled,center,library,quiet,diagnostics,close:()=>context.close()};
 }
 
-async function snapshot(h,{label,expectedProgress}){
+async function snapshot(h,{label,expectedProgress,cacheExpectation='prepared'}){
   const state=await h.page.evaluate(()=>{
     const layer=document.querySelector('.player-scene-layer'),plane=document.querySelector('.player-scene-input');
     if(!layer||!plane)throw Error('Expected actual owned shared scene and contact plane');
@@ -103,7 +103,7 @@ async function snapshot(h,{label,expectedProgress}){
       captureMode:fixtureActualMotion.captureMode,appearanceStats:{...fixtureActualMotion.appearanceStats},cssRulesReads:fixtureCSSRulesReads,sheet:{...fixtureSheet,stillEnabled:!document.styleSheets[0].disabled},viewport:{width:innerWidth,height:innerHeight,dpr:devicePixelRatio},trace:fixtureInputTrace.slice(-24)};
   });
   near(state.p,expectedProgress,label+' held progress',.00001);assert.equal(state.time,42);assert.equal(state.playing,false);
-  assert.equal(state.miniOpacity,'0');assert.equal(state.fullOpacity,'0');assert.equal(state.captureMode,'exhaustive','both visual modes use the identical exhaustive capture contract');if(!state.sheet.baseline)assert.ok(state.appearanceStats.hits>0,'prepared visual mode consumes a real one-use appearance cache');
+  assert.equal(state.miniOpacity,'0');assert.equal(state.fullOpacity,'0');assert.equal(state.captureMode,'exhaustive','both visual modes use the identical exhaustive capture contract');if(!state.sheet.baseline){if(cacheExpectation==='prepared')assert.ok(state.appearanceStats.hits>0,'prepared visual mode consumes a real one-use appearance cache');else assert.ok(state.appearanceStats.cold>0,'artwork invalidation requires a fresh exhaustive appearance');}
   assert.ok(state.sheet.enabled&&state.sheet.stillEnabled,'baseline never disables application CSS');
   assert.ok(state.trace.some(event=>event.type==='pointerdown'&&event.trusted));assert.ok(state.trace.every(event=>event.trusted),'all input is genuine CDP/browser input');
   for(const [key,pair] of Object.entries(state.canonical)){
@@ -153,7 +153,7 @@ async function standardSnapshots(h){
 }
 
 async function lateArtworkSnapshot(h,fixture){
-  await h.library();
+  await h.library();const cacheBefore=await h.page.evaluate(()=>({ready:!!fixtureActualMotion.preparedAppearance,...fixtureActualMotion.appearanceStats}));
   const art=fixtureCover(4);
   await h.page.evaluate(svg=>{
     const track=PA.Engine.current;track.artKey='snapshot-late-fixture';
@@ -168,7 +168,8 @@ async function lateArtworkSnapshot(h,fixture){
   await h.page.waitForFunction(()=>document.querySelector('#artA').classList.contains('has')&&document.querySelector('#mini-art').classList.contains('has')&&!!document.querySelector('#bg-art').style.backgroundImage);
   await h.page.waitForFunction(()=>document.getAnimations().every(a=>a.playState==='finished'||a.playState==='idle'));await h.frame();await h.frame();
   const after=await h.page.locator('.player-scene-art').boundingBox();for(const key of ['x','y','width','height'])near(after[key],before[key],'late art keeps held '+key);
-  const result=await snapshot(h,{label:'late-art-held-05',expectedProgress:.5});
+  const result=await snapshot(h,{label:'late-art-held-05',expectedProgress:.5,cacheExpectation:'invalidated'});
+  if(!result.state.sheet.baseline){assert.equal(cacheBefore.ready,true,'late-art mutation starts with an available one-use picture');assert.equal(result.state.appearanceStats.hits,cacheBefore.hits,'mutated artwork never uses the stale prepared picture');assert.ok(result.state.appearanceStats.cold>cacheBefore.cold,'late-art scene captures fresh exhaustive source appearance');}
   assert.equal(await h.page.evaluate(()=>{
     const nodes=[...document.querySelectorAll('.player-scene-art-appearance')];
     return nodes.length===2&&nodes.every(n=>getComputedStyle(n).backgroundImage!=='none'&&[...n.querySelectorAll('.ph')].every(ph=>getComputedStyle(ph).display==='none'));

@@ -373,7 +373,7 @@ test('idle exhaustive appearance is consumed once and the cold path stays explic
 });
 test('pending mutations and CSSOM edits reject prepared appearance without stale reuse',()=>{
   for(const reason of ['mutation','cssom','inline','resize','track','focus']){const h=appearanceHarness();h.prepare();const job=h.shared.preparedAppearance;
-    if(reason==='mutation')job.observer.records.push({target:h.$('#mini-title')});if(reason==='cssom')h.context.document.styleSheets[0].cssRules[0].cssText='body { color: blue; }';if(reason==='inline')h.$('#mini-title').style.color='blue';if(reason==='resize')h.context.innerWidth++;if(reason==='track')h.context.Engine.current={id:'changed'};if(reason==='focus')h.context.document.activeElement=h.$('#mini-title');
+    if(reason==='mutation')job.observer.records.push({target:h.$('#mini-title')});if(reason==='cssom')h.context.document.styleSheets[0].cssRules[0].cssText='body { color: blue; }';if(reason==='inline')h.$('#p-title').style.color='blue';if(reason==='resize')h.context.innerWidth++;if(reason==='track')h.context.Engine.current={id:'changed'};if(reason==='focus')h.context.document.activeElement=h.$('#btn-play');
     h.scene.begin('player',-1);assert.equal(h.shared.appearanceStats.hits,0,reason);assert.equal(h.shared.appearanceStats.cold,1,reason);
   }
 });
@@ -398,4 +398,8 @@ test('the actual mini gesture start retains and consumes prepared appearance',()
   slide.style=new Proxy(style,{set(target,key,value){const oldValue=target.cssText;target[key]=value;job.observer.records.push({type:'attributes',attributeName:'style',target:slide,oldValue});return true;}});
   mini.fire('pointerdown',{pointerType:'touch',target:h.$('#mini-title')});mini.fire('pointerup',{pointerType:'touch',target:h.$('#mini-title')});
   assert.equal(h.shared.appearanceStats.hits,1,'real start/end consume the same one-use entry');assert.equal(h.shared.appearanceStats.cold,0);assert.equal(h.nav.cur,'player');
+});
+
+test('mini and outside-toolbar focus remain live while prepared player focus stays guarded',()=>{
+  const h=appearanceHarness();h.prepare();assert.equal(h.shared.preparedAppearance.cache.has(h.$('#mini-title')),false,'mini appearance is never warmed');h.context.document.activeElement=h.$('#mini');h.scene.begin('player',-1);assert.equal(h.shared.appearanceStats.hits,1,'unrelated/mini focus cannot change prepared full-player CSS');
 });

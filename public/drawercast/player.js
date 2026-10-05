@@ -5880,7 +5880,7 @@ const SharedPlayerMotion={
     const dynamic=['#mini-seek','#seek','#t-cur','#t-dur'].map(selector=>$(selector)).filter(Boolean);
     // Progress/time and every ancestor affected by their layout are captured
     // live. Only invariant sibling/subtree CSS can be reused.
-    return [...nodes].filter(node=>!dynamic.some(root=>root===node||root.contains(node)||node.contains(root)));
+    const mini=$('#mini');return [...nodes].filter(node=>!mini?.contains(node)&&!dynamic.some(root=>root===node||root.contains(node)||node.contains(root)));
   },
   appearanceChanges(records){return records.filter(record=>{
     const target=record.target?.nodeType===3?record.target.parentElement:record.target,id=target?.id,parentMotion=!!target?.classList?.contains('mini-swipe-content');
@@ -5895,6 +5895,7 @@ const SharedPlayerMotion={
     if(['characterData','childList'].includes(record.type)&&['t-cur','t-dur'].includes(id))return false;
     return true;
   });},
+  appearanceFocus(nodes){const active=document.activeElement;if(!active||active===document.body||active===document.documentElement)return null;return nodes.some(node=>node===active||node.contains(active)||active.contains?.(node))?active:null;},
   appearanceInputs(nodes){return nodes.map(node=>{const style=node.style,values=[];if(typeof style.length==='number'){for(let i=0;i<style.length;i++){const key=style[i];values.push(key+':'+style.getPropertyValue(key)+'!'+style.getPropertyPriority(key));}}else values.push(...style.cssText.split(';'));return [node,node.getAttribute('class'),values.sort().join('\0'),node.textContent];});},
   appearanceStage(fn){
     const mini=$('#mini'),full=$('#sc-player'),hidden=[mini.hidden,full.hidden],styles=[this.styleSnapshot(mini,['opacity','transform','transition']),this.styleSnapshot(full,['opacity','transform','transition','z-index'])];
@@ -5905,7 +5906,7 @@ const SharedPlayerMotion={
   },
   scheduleAppearance(){
     this.clearAppearance();if(!this.appearanceEligible())return;
-    const job={cache:new Map(),nodes:null,index:0,track:Engine.current,trackId:Engine.current.id,screen:Nav.cur,width:innerWidth,height:innerHeight,dpr:devicePixelRatio,focus:document.activeElement};
+    const job={cache:new Map(),nodes:null,index:0,track:Engine.current,trackId:Engine.current.id,screen:Nav.cur,width:innerWidth,height:innerHeight,dpr:devicePixelRatio,focus:this.appearanceFocus(this.appearanceSources())};
     job.cache.snapshotPlan=null;
     const watch=()=>{
       for(const selector of ['#bg','#sc-player','#mini']){const node=$(selector);if(node)job.observer.observe(node,{attributes:true,attributeOldValue:true,childList:true,characterData:true,subtree:true});}
@@ -5938,9 +5939,9 @@ const SharedPlayerMotion={
   },
   claimAppearance(scene){
     const job=this.preparedAppearance,valid=job&&scene.target==='player'&&job.screen===scene.fromName&&job.track===Engine.current&&job.trackId===Engine.current.id&&
-      job.width===innerWidth&&job.height===innerHeight&&job.dpr===devicePixelRatio&&job.focus===document.activeElement&&
+      job.width===innerWidth&&job.height===innerHeight&&job.dpr===devicePixelRatio&&job.focus===this.appearanceFocus(job.nodes)&&
       !document.hidden&&!this.appearanceChanges(job.observer.takeRecords()).length&&!document.getAnimations?.().some(animation=>animation.playState==='running'||animation.playState==='pending')&&job.nodes.every(node=>node.isConnected);
-    if(job&&!valid)this.appearanceStats.lastMiss={reason:'claim',focusChanged:job.focus!==document.activeElement,screenChanged:job.screen!==scene.fromName,trackChanged:job.track!==Engine.current||job.trackId!==Engine.current.id,viewportChanged:job.width!==innerWidth||job.height!==innerHeight||job.dpr!==devicePixelRatio,animations:!!document.getAnimations?.().some(animation=>animation.playState==='running'||animation.playState==='pending')};
+    if(job&&!valid)this.appearanceStats.lastMiss={reason:'claim',focusChanged:job.focus!==this.appearanceFocus(job.nodes),screenChanged:job.screen!==scene.fromName,trackChanged:job.track!==Engine.current||job.trackId!==Engine.current.id,viewportChanged:job.width!==innerWidth||job.height!==innerHeight||job.dpr!==devicePixelRatio,animations:!!document.getAnimations?.().some(animation=>animation.playState==='running'||animation.playState==='pending')};
     this.clearAppearance();return valid?job:null;
   },
   consumeAppearance(job){
