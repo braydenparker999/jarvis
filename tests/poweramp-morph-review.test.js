@@ -183,7 +183,7 @@ function persistentMorph(){
   for(const key of ['title','sub'])pairNodes[key].mini.firstElementChild=fakeNode();
   const appearance={fontFamily:'Fixture Sans',fontSize:16,fontWeight:700,lineHeight:19.2,color:'white',background:'transparent',borderColor:'#666',borderWidth:0,padding:{left:0,top:0},radius:[0,0,0,0]};
   const appearances={};for(const key of ['title','sub','play'])appearances[key]={mini:{...appearance},full:{...appearance,fontSize:28,lineHeight:33.6}};
-  return {p:0,endpoints,pairs:pairNodes,appearances,mini:fakeNode(),full:fakeNode(),A:fakeNode(),B:fakeNode(),mask:fakeNode(),content:fakeNode(),backgroundMask:fakeNode(),backgroundContent:fakeNode(),background:fakeNode(),backgroundCover:fakeNode(),backdropBlend:{opaque:false},input:fakeNode(),dim:fakeNode(),nav:fakeNode(),styles:[],original:{},retired:false,
+  return {p:0,endpoints,pairs:pairNodes,appearances,mini:fakeNode(),full:fakeNode(),A:fakeNode(),B:fakeNode(),mask:fakeNode(),content:fakeNode(),backgroundMask:fakeNode(),backgroundContent:fakeNode(),background:fakeNode(),input:fakeNode(),dim:fakeNode(),nav:fakeNode(),styles:[],original:{},retired:false,
     miniRadius:[29,29,0,0],artRadius:{mini:[12,12,12,12],full:[60,60,60,60]},navRadius:{mini:[0,0,29,29],full:[29,29,29,29]},artMiniSize:'cover',artFullSize:'contain',nativeSeekVisible:true};
 }
 function persistentHarness(m){

@@ -64,7 +64,7 @@ function summarizeTrace(trace,probe){
 async function runCase(browser,built,{name,cpu,variant},environment){
   const context=await browser.newContext(profile),page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));page.setDefaultTimeout(12000);
   await context.route('**/*',route=>/^https?:/.test(route.request().url())?route.abort('blockedbyclient'):route.continue());
-  const result={name,cpu,variant,source:built.sourceHash,profile,environment,meaning:'Isolated pinned v8 versus opaque-backdrop candidate. Timings are not Android FPS or display latency.'};
+  const result={name,cpu,variant,source:built.sourceHash,profile,environment,meaning:'Isolated pinned v8 versus current source. Timings are not Android FPS or display latency.'};
   let cdp,complete,traceStarted=false;
   try{
     await page.goto(pathToFileURL(built.output).href);await page.waitForFunction(()=>powerampPreview?.ready);await page.locator('#preview-size').tap();await page.waitForFunction(()=>powerampPreview.ready&&powerampPreview.count===5000);
@@ -107,12 +107,12 @@ async function runCase(browser,built,{name,cpu,variant},environment){
   }catch(error){result.error=String(error);if(traceStarted){try{const bytes=await readTrace(cdp,complete);await save('render-trace-'+name+'-failure.json.gz',gzipSync(bytes));}catch(e){result.traceError=String(e);}}await save('render-trace-'+name+'-report.json',result);throw error;}
   finally{await context.close();}
 }
-test('serial pinned v8 versus opaque-backdrop candidate render attribution, reverse-order repeats and pixel parity',{timeout:240000},async t=>{
+test('serial pinned v8 versus current source render attribution, reverse-order repeats and pixel parity',{timeout:240000},async t=>{
   assert.ok(executablePath,'Chrome is mandatory');const directory=await mkdtemp(join(tmpdir(),'poweramp-render-trace-'));let browser;
   const report={source:sourceHash,cases:[],scope:'Pinned v8 versus candidate; fresh contexts, both orders, normal and 4x CPU, same 220ms duration. No phone FPS inference.'};
   try{
     const names=['index.html','audio-analysis.js','audio-core.js','player.js'],inputs=names.map(name=>execFileSync('git',['show',baselineRef+':public/drawercast/'+name],{encoding:'utf8',maxBuffer:4_000_000}));
-    const baseline=await buildPreview(join(directory,'v8-baseline.html'),{inputs}),candidate=await buildPreview(join(directory,'candidate.html'));assert.equal(baseline.sourceHash,sourceHash,'pinned production v8 baseline');assert.notEqual(candidate.sourceHash,sourceHash,'candidate is explicitly distinct');report.sources={baseline:baseline.sourceHash,candidate:candidate.sourceHash};report.previewSHA256={baseline:baseline.sha256,candidate:candidate.sha256};
+    const baseline=await buildPreview(join(directory,'v8-baseline.html'),{inputs}),candidate=await buildPreview(join(directory,'candidate.html'));assert.equal(baseline.sourceHash,sourceHash,'pinned production v8 baseline');assert.equal(candidate.sourceHash,sourceHash,'rejected presentation experiments are fully restored to qualified v8');report.sources={baseline:baseline.sourceHash,candidate:candidate.sourceHash};report.previewSHA256={baseline:baseline.sha256,candidate:candidate.sha256};
     for(const built of [baseline,candidate]){let html=await readFile(built.output,'utf8');assert.equal(html.split('window.PA = {').length,2);html=html.replace('window.PA = {','window.fixtureTraceMotion=SharedPlayerMotion;window.fixtureTraceScene=ScreenDrag;window.PA = {');await writeFile(built.output,html);}
     report.measuredSHA256={baseline:hash(await readFile(baseline.output)),candidate:hash(await readFile(candidate.output))};
     browser=await chromium.launch({executablePath,headless:true,args:['--no-sandbox']});const info=await browser.newBrowserCDPSession(),environment={version:await info.send('Browser.getVersion'),system:await info.send('SystemInfo.getInfo')};report.environment=environment;

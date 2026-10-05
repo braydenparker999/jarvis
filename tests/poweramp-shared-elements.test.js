@@ -460,26 +460,3 @@ test('outer tap navigation never hides the live mini before the first settling f
   assert.equal(m.pairs.art.mini,h.$('#mini-art'));assert.equal(m.input.hidden,false);
   h.frame(1000);assert.equal(m.retired,true);assert.equal(m.mini.hidden,true);
 });
-
-
-test('opaque backdrop blending moves alpha to one solid cover without changing geometry or hot-path reads',()=>{
-  for(const opening of [true,false]){const h=harness(),presenter=h.shared.presenter;presenter.backgroundMask.computed['background-color']='rgb(35, 26, 17)';presenter.background.computed['background-color']='rgb(10, 9, 8)';
-    if(opening)h.list();h.scene.begin(opening?'player':'list',opening?-1:1);const m=h.scene.state.morph;
-    assert.equal(m.backdropBlend.opaque,true);assert.equal(m.backgroundCover.hidden,false);assert.equal(m.background.style.willChange,'auto');
-    h.resetCost();for(const p of [0,.25,.5,.75,1]){h.shared.paint(m,p);assert.equal(m.background.style.opacity,'1');near(Number(m.backgroundCover.style.opacity),1-p);for(const [key,pair] of Object.entries(m.endpoints))for(const field of ['left','top','width','height'])near(m.geometry[key][field],pair.mini[field]+(pair.full[field]-pair.mini[field])*p);}
-    assert.equal(h.cost.computedReads,0);assert.equal(h.cost.rectReads,0);assert.equal(h.cost.layoutWrites,0);assert.equal(h.cost.clipWrites,0);assert.equal(h.cost.clones,0);assert.equal(h.cost.styleEnumerations,0);assert.ok(h.cost.styleWrites<=5*55);
-    h.shared.clean(m);assert.equal(m.backgroundCover.hidden,true);assert.equal(m.backgroundCover.style.opacity,'');assert.equal(m.backgroundCover.isConnected,true);assert.equal(m.background.style.willChange,'');
-  }
-});
-
-test('transparent or unrecognized computed palettes keep the exact original backdrop-opacity path',()=>{
-  for(const [dock,base] of [['rgba(35, 26, 17, 0.5)','rgb(10, 9, 8)'],['rgb(35, 26, 17)','rgba(10, 9, 8, 0.5)'],['color(display-p3 0.1 0.2 0.3)','rgb(10, 9, 8)']]){const h=harness(),presenter=h.shared.presenter;presenter.backgroundMask.computed['background-color']=dock;presenter.background.computed['background-color']=base;h.list();h.scene.begin('player',-1);const m=h.scene.state.morph;
-    assert.equal(m.backdropBlend.opaque,false);assert.equal(m.backgroundCover.hidden,true);assert.equal(m.background.style.willChange,'opacity');for(const p of [0,.25,.5,.75,1]){h.shared.paint(m,p);near(Number(m.background.style.opacity),p);}
-  }
-});
-
-test('held palette changes refresh the actual blending guard at identical progress with no ownership jump',()=>{
-  const h=harness(),presenter=h.shared.presenter;presenter.backgroundMask.computed['background-color']='rgb(35, 26, 17)';presenter.background.computed['background-color']='rgb(10, 9, 8)';h.list();h.scene.begin('player',-1);const m=h.scene.state.morph;h.shared.paint(m,.5);const geometry=plain(m.geometry),cover=m.backgroundCover;
-  presenter.backgroundMask.computed['background-color']='rgba(232, 223, 214, 0.5)';h.notify(h.context.root);assert.equal(m.backdropBlend.opaque,false);assert.equal(cover.hidden,true);near(Number(m.background.style.opacity),.5);assert.deepEqual(plain(m.geometry),geometry);
-  presenter.backgroundMask.computed['background-color']='rgb(232, 223, 214)';presenter.background.computed['background-color']='rgb(249, 246, 242)';h.notify(h.context.root);assert.equal(m.backdropBlend.opaque,true);assert.equal(cover.hidden,false);assert.equal(m.backgroundCover,cover);near(Number(cover.style.opacity),.5);assert.equal(m.background.style.opacity,'1');assert.deepEqual(plain(m.geometry),geometry);
-});
