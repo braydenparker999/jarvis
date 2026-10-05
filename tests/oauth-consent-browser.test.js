@@ -1,0 +1,411 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {existsSync} from 'node:fs';
+import {createHash} from 'node:crypto';
+import {fileURLToPath} from 'node:url';
+import {build} from 'esbuild';
+import {chromium} from 'playwright-core';
+import {Miniflare, convertV4MiniflareOptions, Response as FixtureResponse} from 'miniflare';
+import {RELAY_CALLBACK, RELAY_EVENT, RELAY_INBOX, RELAY_SCOPES, RELAY_VERSION} from '../backend/relay-common.js';
+
+const ISSUER = 'https://relay.example.test';
+const CHATGPT = 'https://chatgpt.com';
+const GITHUB = 'https://github.com';
+const ATTACKER = 'https://untrusted.example.test';
+const WORKER_NAME = 'relay-browser-fixture';
+const RESOURCE = ISSUER + '/relay/mcp';
+const COOKIE = '__Host-jarvis-relay';
+const VERIFIER = 'browser-fixture-S256-verifier-'.repeat(3);
+const STATE = 'browser-fixture-downstream-state&opaque';
+const s256 = value => createHash('sha256').update(value).digest('base64url');
+const escape = value => String(value).replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;');
+const executablePath = [process.env.JARVIS_CHROME, '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome', chromium.executablePath()].find(path => path && existsSync(path));
+const form = body => ({method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: new URLSearchParams(body).toString(), redirect: 'manual'});
+const approvePath = request => new URL(request.url()).pathname === '/relay/oauth/approve' && request.method() === 'POST';
+const metadata = {'io.modelcontextprotocol/protocolVersion': RELAY_VERSION, 'io.modelcontextprotocol/clientCapabilities': {}};
+
+test('CI has Chromium for the real Relay OAuth browser regression', () => {
+  if (process.env.CI) assert.ok(executablePath, 'Install Chromium or set JARVIS_CHROME; CI must not silently skip this regression');
+});
+
+test('Relay OAuth navigation uses browser-generated origins and real workerd SQLite Durable Objects', {
+  skip: executablePath ? false : 'Install Chromium or set JARVIS_CHROME to run browser checks', timeout: 180000,
+}, async t => {
+  // HTTPS document URLs are fulfilled before any network connection. This does
+  // not disable certificate validation, downgrade secure cookies, or use live
+  // GitHub/ChatGPT accounts. Workerd's entire outbound service is also a fixture.
+  const bundled = await build({entryPoints: [fileURLToPath(new URL('../backend/worker.js', import.meta.url))], bundle: true, write: false, format: 'esm', platform: 'browser', target: 'es2022'});
+  const upstreamChallenges = new Map(), outbound = [], unexpectedOutbound = [];
+  let githubSequence = 0;
+  const options = convertV4MiniflareOptions({
+    name: WORKER_NAME, modules: true, script: bundled.outputFiles[0].text,
+    compatibilityDate: '2026-09-19', cf: false, telemetry: {enabled: false},
+    durableObjects: {HUBS: {className: 'Hub', useSQLite: true}},
+    bindings: {RELAY_MCP_ENABLED: 'true', RELAY_MCP_ORIGIN: ISSUER, RELAY_GITHUB_CLIENT_ID: 'fixture-github-client', RELAY_GITHUB_CLIENT_SECRET: 'fixture-github-secret'},
+    outboundService: async request => {
+      const url = new URL(request.url);
+      if (url.href === GITHUB + '/login/oauth/access_token' && request.method === 'POST') {
+        const params = new URLSearchParams(await request.text());
+        assert.equal(params.get('client_id'), 'fixture-github-client');
+        assert.equal(params.get('client_secret'), 'fixture-github-secret');
+        assert.equal(params.get('redirect_uri'), ISSUER + '/relay/oauth/github/callback');
+        assert.equal(s256(params.get('code_verifier')), upstreamChallenges.get(params.get('code')), 'real Worker sends its own upstream S256 verifier');
+        outbound.push('github-token');
+        return FixtureResponse.json({access_token: 'fixture-upstream-token-never-persist', token_type: 'bearer'});
+      }
+      if (url.href === 'https://api.github.com/user' && request.method === 'GET') {
+        assert.equal(request.headers.get('Authorization'), 'Bearer fixture-upstream-token-never-persist');
+        outbound.push('github-identity');
+        return FixtureResponse.json({id: 183016859, login: 'fixture-owner'});
+      }
+      unexpectedOutbound.push(url.origin + url.pathname);
+      throw Error('Blocked unrecognized Worker outbound fixture request');
+    },
+  });
+  const mf = new Miniflare(options);
+  let browser;
+  try {
+    await mf.ready;
+    browser = await chromium.launch({executablePath, headless: true, args: ['--no-sandbox', '--disable-background-networking', '--disable-component-update', '--disable-sync', '--no-first-run']});
+    const dcr = await mf.dispatchFetch(ISSUER + '/relay/oauth/register', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({redirect_uris: [RELAY_CALLBACK], token_endpoint_auth_method: 'none'}), redirect: 'manual'});
+    assert.equal(dcr.status, 201);
+    const {client_id: client} = await dcr.json();
+    const authorize = ISSUER + '/relay/oauth/authorize?' + new URLSearchParams({response_type: 'code', client_id: client, redirect_uri: RELAY_CALLBACK, code_challenge_method: 'S256', code_challenge: s256(VERIFIER), resource: RESOURCE, state: STATE, scope: RELAY_SCOPES.join(' ')});
+    const exchange = code => mf.dispatchFetch(ISSUER + '/relay/oauth/token', form({grant_type: 'authorization_code', client_id: client, redirect_uri: RELAY_CALLBACK, code, code_verifier: VERIFIER, resource: RESOURCE}));
+    async function rpc(method, params, token) {
+      return mf.dispatchFetch(RESOURCE, {method: 'POST', headers: {'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', Authorization: 'Bearer ' + token, 'MCP-Protocol-Version': RELAY_VERSION, 'Mcp-Method': method, ...(method === 'tools/call' ? {'Mcp-Name': params.name} : {})}, body: JSON.stringify({jsonrpc: '2.0', id: 1, method, params: {_meta: metadata, ...params}}), redirect: 'manual'});
+    }
+    async function open({legacyReferrer = false, legacyCsp = false, githubCancel = false, automaticGithub = false} = {}) {
+      const context = await browser.newContext({serviceWorkers: 'block'});
+      const records = [], callbacks = [], errors = [], blocked = [], consoleMessages = [];
+      const session = {context, records, callbacks, errors, blocked, consoleMessages, githubCancel, automaticGithub};
+      await context.route('**/*', async route => {
+        const request = route.request(), url = new URL(request.url());
+        try {
+          // allHeaders includes Cookie, unlike request.headers(). Never add,
+          // replace, synthesize, or replay Origin/Cookie/Referer in this bridge.
+          const requestHeaders = await request.allHeaders();
+          const record = {origin: url.origin, path: url.pathname, method: request.method(), headers: requestHeaders};
+          records.push(record);
+          if ([ISSUER, CHATGPT, GITHUB, ATTACKER].includes(url.origin) && url.pathname === '/favicon.ico') return await route.fulfill({status: 204});
+          if (url.origin === CHATGPT && url.pathname === '/__relay_fixture/connect') {
+            return await route.fulfill({status: 200, headers: {'Content-Type': 'text/html', 'Referrer-Policy': 'no-referrer'}, body: `<!doctype html><title>Fixture ChatGPT Connect</title><h1>Fixture ChatGPT Connect</h1><a href="${escape(authorize)}">Connect Relay</a>`});
+          }
+          if (url.origin + url.pathname === RELAY_CALLBACK) {
+            callbacks.push(url);
+            return await route.fulfill({status: 200, contentType: 'text/html', body: '<!doctype html><title>Fixture ChatGPT OAuth complete</title><h1>OAuth callback received</h1>'});
+          }
+          if (url.origin === GITHUB && url.pathname === '/login/oauth/authorize') {
+            if (request.method() === 'POST') {
+              assert.equal(requestHeaders.origin, GITHUB, 'fixture GitHub owner authorizes with a real same-origin form POST');
+              const posted = new URLSearchParams(request.postData());
+              assert.equal(posted.get('state'), session.githubAuthorization.state);
+              return await route.fulfill({status: 302, headers: {Location: session.githubAuthorization.callback, 'Referrer-Policy': 'no-referrer'}});
+            }
+            assert.equal(request.method(), 'GET');
+            assert.equal(url.searchParams.get('client_id'), 'fixture-github-client');
+            assert.equal(url.searchParams.get('redirect_uri'), ISSUER + '/relay/oauth/github/callback');
+            assert.equal(url.searchParams.get('code_challenge_method'), 'S256');
+            assert.equal(url.searchParams.get('scope'), '');
+            assert.equal(url.searchParams.get('allow_signup'), 'false');
+            const code = 'fixture-github-code-' + ++githubSequence;
+            upstreamChallenges.set(code, url.searchParams.get('code_challenge'));
+            const state = url.searchParams.get('state');
+            session.githubAuthorization = {state, callback: ISSUER + '/relay/oauth/github/callback?' + new URLSearchParams({state, ...(githubCancel ? {error: 'access_denied'} : {code})})};
+            if (automaticGithub) return await route.fulfill({status: 302, headers: {Location: session.githubAuthorization.callback, 'Referrer-Policy': 'no-referrer'}});
+            return await route.fulfill({status: 200, headers: {'Content-Type': 'text/html', 'Referrer-Policy': 'same-origin'}, body: `<!doctype html><title>Fixture GitHub consent</title><h1>Fixture GitHub consent</h1><form method="post" action="${GITHUB}/login/oauth/authorize"><input type="hidden" name="state" value="${escape(state)}"><button>Continue as fixture owner</button></form>`});
+          }
+          if (url.origin === ATTACKER && url.pathname === '/__relay_fixture/attack') {
+            return await route.fulfill({status: 200, contentType: 'text/html', body: `<!doctype html><title>Untrusted form fixture</title><form method="post" action="${ISSUER}/relay/oauth/approve"><input type="hidden" name="csrf" value="${escape(session.attackCsrf)}"><button name="decision" value="allow">Submit untrusted form</button></form>`});
+          }
+          if (url.origin === ISSUER && url.pathname === '/__relay_fixture/stale-form') {
+            const consent = records.find(r => r.path === '/relay/oauth/github/callback' && r.status === 200);
+            return await route.fulfill({status: 200, headers: {'Content-Type': 'text/html', 'Referrer-Policy': 'same-origin',
+              'Content-Security-Policy': consent.responseHeaders['content-security-policy']}, body: session.consentHtml});
+          }
+          const workerPaths = new Set(['/relay/oauth/authorize', '/relay/oauth/github/callback', '/relay/oauth/approve']);
+          if (url.origin === ISSUER && workerPaths.has(url.pathname)) {
+            const response = await mf.dispatchFetch(request.url(), {method: request.method(), headers: requestHeaders, body: request.postDataBuffer() ?? undefined, redirect: 'manual'});
+            const headers = Object.fromEntries(response.headers);
+            const cookies = response.headers.getSetCookie();
+            if (cookies.length) headers['set-cookie'] = cookies.join('\n');
+            const body = Buffer.from(await response.arrayBuffer());
+            record.status = response.status;
+            record.responseHeaders = headers;
+            if (url.pathname === '/relay/oauth/github/callback' && response.status === 200) {
+              session.consentHtml = body.toString('utf8');
+              if (legacyReferrer) headers['referrer-policy'] = 'no-referrer';
+              if (legacyCsp) {
+                assert.ok(headers['content-security-policy'].includes("form-action 'self' " + RELAY_CALLBACK));
+                headers['content-security-policy'] = headers['content-security-policy'].replace("form-action 'self' " + RELAY_CALLBACK, "form-action 'self'");
+              }
+            }
+            // The browser, not Node/Miniflare, follows every redirect. Keep the
+            // Worker status, body and headers (especially Set-Cookie) intact.
+            return await route.fulfill({status: response.status, headers, body});
+          }
+          blocked.push(url.origin + url.pathname);
+          await route.abort('blockedbyclient');
+        } catch (error) {
+          errors.push(error);
+          await route.abort('failed').catch(() => {});
+        }
+      });
+      const page = await context.newPage();
+      page.setDefaultTimeout(10000);
+      page.on('pageerror', error => errors.push(error));
+      page.on('console', message => consoleMessages.push(message.text()));
+      session.page = page;
+      return session;
+    }
+    async function close(session) {
+      await session.context.close();
+      assert.deepEqual(session.blocked, [], 'No unrecognized browser request can reach the network');
+      assert.equal(session.errors.length, 0, session.errors[0]?.message);
+      assert.deepEqual(unexpectedOutbound, [], 'No unrecognized workerd request can reach the network');
+    }
+    async function begin(session) {
+      const {page, context, records} = session;
+      await page.goto(CHATGPT + '/__relay_fixture/connect');
+      if (session.automaticGithub) await page.getByRole('link', {name: 'Connect Relay', exact: true}).click();
+      else await Promise.all([page.waitForURL(GITHUB + '/login/oauth/authorize**'), page.getByRole('link', {name: 'Connect Relay', exact: true}).click()]);
+      const login = records.find(r => r.path === '/relay/oauth/authorize');
+      assert.equal(login.status, 302);
+      assert.match(login.responseHeaders['set-cookie'], /^__Host-jarvis-relay=[a-f0-9]{64}; Path=\/; HttpOnly; Secure; SameSite=Lax; Max-Age=600$/);
+      session.loginCookie = login.responseHeaders['set-cookie'].split(';')[0].slice(COOKIE.length + 1);
+      const [cookie] = (await context.cookies(ISSUER)).filter(c => c.name === COOKIE);
+      assert.ok(cookie, 'Chromium accepts the actual Secure __Host cookie on the fixture HTTPS origin');
+      assert.equal(cookie.domain, 'relay.example.test');
+      assert.equal(cookie.path, '/');
+      assert.equal(cookie.secure, true);
+      assert.equal(cookie.httpOnly, true);
+      assert.equal(cookie.sameSite, 'Lax');
+      assert.equal((await context.cookies(GITHUB)).some(c => c.name === COOKIE), false);
+      if (!session.automaticGithub) {
+        assert.equal(cookie.value, session.loginCookie);
+        await page.getByRole('button', {name: 'Continue as fixture owner', exact: true}).click();
+      }
+      if (session.githubCancel) { await page.waitForURL(RELAY_CALLBACK + '**'); return; }
+      await page.getByRole('button', {name: 'Allow this connection', exact: true}).waitFor();
+      const callback = records.find(r => r.path === '/relay/oauth/github/callback');
+      assert.equal(callback.status, 200);
+      assert.equal(callback.method, 'GET', 'GitHub POST authorization redirects to a top-level GET callback');
+      assert.equal(callback.headers.origin, undefined, 'Chromium strips the form Origin after the POST to GET redirect');
+      assert.equal(callback.headers.referer, undefined);
+      assert.ok(callback.headers.cookie?.includes(COOKIE + '='), 'SameSite=Lax allows GitHub top-level GET callback');
+      const [consentCookie] = (await context.cookies(ISSUER)).filter(c => c.name === COOKIE);
+      assert.notEqual(consentCookie.value, session.loginCookie, 'consent rotates the owner-login cookie');
+      assert.equal(consentCookie.secure, true);
+      assert.equal(consentCookie.httpOnly, true);
+      assert.equal(consentCookie.sameSite, 'Lax');
+      assert.equal(await page.evaluate(() => document.cookie), '', 'HttpOnly prevents JavaScript reading the session');
+      session.consentUrl = page.url();
+    }
+    async function complete(session, decision = 'Allow this connection') {
+      await Promise.all([session.page.waitForURL(RELAY_CALLBACK + '**'), session.page.getByRole('button', {name: decision, exact: true}).click()]);
+      assert.equal(session.callbacks.length, 1, 'the final real browser navigation reaches the exact ChatGPT callback');
+      const callback = session.callbacks[0];
+      assert.equal(callback.origin + callback.pathname, RELAY_CALLBACK);
+      assert.equal(callback.searchParams.get('state'), STATE);
+      assert.equal(callback.searchParams.get('iss'), ISSUER + '/relay');
+      const approval = session.records.findLast(r => r.path === '/relay/oauth/approve');
+      assert.equal(approval.method, 'POST');
+      assert.equal(approval.headers.origin, ISSUER, 'Origin comes from Chromium, not test-supplied headers');
+      assert.equal(approval.headers.referer, session.consentUrl, 'same-origin retains the form referrer');
+      assert.ok(approval.headers.cookie?.includes(COOKIE + '='), 'Chromium supplies the rotated consent cookie');
+      assert.equal(approval.status, 302);
+      assert.match(approval.responseHeaders['set-cookie'], /Max-Age=0$/);
+      assert.equal((await session.context.cookies(ISSUER)).some(c => c.name === COOKIE), false);
+      for (const record of session.records.filter(r => [CHATGPT, GITHUB].includes(r.origin))) {
+        if (record.origin === GITHUB && record.method === 'POST') assert.equal(new URL(record.headers.referer).origin, GITHUB, 'GitHub POST has only its own same-origin referrer');
+        else assert.equal(record.headers.referer, undefined, 'Relay state/code/CSRF must not leak as a cross-origin referrer');
+        assert.equal(record.headers.cookie?.includes(COOKIE + '='), undefined, 'Relay session must not cross origins');
+      }
+      return callback;
+    }
+
+    await t.test('old no-referrer consent recreates Chromium Origin:null and the deployed 403', async () => {
+      const session = await open({legacyReferrer: true});
+      try {
+        await begin(session);
+        const responsePromise = session.page.waitForResponse(r => approvePath(r.request()));
+        await session.page.getByRole('button', {name: 'Allow this connection', exact: true}).click();
+        const response = await responsePromise;
+        assert.equal(response.status(), 403);
+        assert.deepEqual(await response.json(), {error: 'Origin not allowed'});
+        const approval = session.records.find(r => r.path === '/relay/oauth/approve');
+        assert.equal(approval.headers.origin, 'null', 'actual old-policy form submission creates the opaque Origin');
+        assert.equal(approval.headers.referer, undefined);
+        assert.ok(approval.headers.cookie?.includes(COOKIE + '='));
+        assert.equal(session.callbacks.length, 0);
+        t.diagnostic('Legacy consent: browser Origin=null, HTTP 403, no downstream callback');
+      } finally { await close(session); }
+    });
+
+    await t.test('old self-only form CSP blocks the real cross-origin ChatGPT redirect after a valid POST', async () => {
+      const session = await open({legacyCsp: true});
+      try {
+        await begin(session);
+        const responsePromise = session.page.waitForResponse(r => approvePath(r.request()));
+        await session.page.getByRole('button', {name: 'Allow this connection', exact: true}).click({noWaitAfter: true});
+        const response = await responsePromise;
+        assert.equal(response.status(), 302);
+        assert.equal(session.records.find(r => r.path === '/relay/oauth/approve').headers.origin, ISSUER);
+        // Chromium reports a refused form redirect on the original document.
+        await assertEventually(() => session.consoleMessages.some(message => /form-action/.test(message)), 'Chromium must report the self-only CSP redirect refusal');
+        assert.equal(session.callbacks.length, 0, 'server-side 302 success alone is not OAuth browser success');
+        assert.notEqual(session.page.url().split('?')[0], RELAY_CALLBACK);
+        t.diagnostic('Legacy self-only form CSP: issuer Origin, HTTP 302, browser blocks final ChatGPT callback');
+      } finally { await close(session); }
+    });
+
+    await t.test('fresh Allow reaches ChatGPT, exchanges S256 once, discovers tools/events and reads real SQLite conversation', async () => {
+      const session = await open();
+      try {
+        const callsBefore = outbound.length;
+        await begin(session);
+        const consent = session.records.find(r => r.path === '/relay/oauth/github/callback');
+        assert.equal(consent.responseHeaders['referrer-policy'], 'same-origin');
+        assert.equal(consent.responseHeaders['content-security-policy'], "default-src 'none'; form-action 'self' " + RELAY_CALLBACK + "; frame-ancestors 'none'; base-uri 'none'");
+        const callback = await complete(session);
+        const code = callback.searchParams.get('code');
+        assert.match(code, /^[a-f0-9]{64}$/);
+        assert.equal(callback.searchParams.has('error'), false);
+        assert.deepEqual(outbound.slice(callsBefore), ['github-token', 'github-identity']);
+        const response = await exchange(code);
+        assert.equal(response.status, 200);
+        const tokens = await response.json();
+        assert.equal(tokens.token_type, 'Bearer');
+        assert.equal(tokens.scope, RELAY_SCOPES.join(' '));
+        assert.equal(tokens.expires_in, 3600);
+        assert.match(tokens.access_token, /^[a-f0-9]{64}$/);
+        assert.match(tokens.refresh_token, /^[a-f0-9]{64}$/);
+        const replay = await exchange(code);
+        assert.equal(replay.status, 400);
+        assert.deepEqual(await replay.json(), {error: 'invalid_grant'});
+        const discovery = await rpc('server/discover', {}, tokens.access_token);
+        assert.equal(discovery.status, 200);
+        assert.deepEqual((await discovery.json()).result.supportedVersions, [RELAY_VERSION]);
+        const tools = await rpc('tools/list', {}, tokens.access_token);
+        assert.equal(tools.status, 200);
+        assert.deepEqual((await tools.json()).result.tools.map(tool => tool.name), ['relay_list_pending', 'relay_read_conversation', 'relay_reply']);
+        const events = await rpc('events/list', {}, tokens.access_token);
+        assert.equal(events.status, 200);
+        assert.deepEqual((await events.json()).result.events.map(event => event.name), [RELAY_EVENT]);
+        const message = {id: '00000000-0000-4000-8000-000000000001', body: 'Browser-only fixture conversation'};
+        const saved = await mf.dispatchFetch(ISSUER + '/shared/messages', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(message), redirect: 'manual'});
+        assert.equal(saved.status, 201);
+        const pending = await rpc('tools/call', {name: 'relay_list_pending', arguments: {inbox_id: RELAY_INBOX}}, tokens.access_token);
+        assert.equal(pending.status, 200);
+        assert.equal((await pending.json()).result.structuredContent.messages[0].id, message.id);
+        const read = await rpc('tools/call', {name: 'relay_read_conversation', arguments: {inbox_id: RELAY_INBOX, message_id: message.id}}, tokens.access_token);
+        assert.equal(read.status, 200);
+        const conversation = (await read.json()).result.structuredContent;
+        assert.equal(conversation.message.body, message.body);
+        assert.equal(conversation.public_inbox, true);
+        assert.equal(conversation.author_authenticated, false);
+        // A stale consent form still submits through Chromium. The actual
+        // Worker cookie clearing prevents a second grant, without header mocks.
+        await session.page.goto(ISSUER + '/__relay_fixture/stale-form');
+        const stalePromise = session.page.waitForResponse(r => approvePath(r.request()));
+        await session.page.getByRole('button', {name: 'Allow this connection', exact: true}).click();
+        const stale = await stalePromise;
+        assert.equal(stale.status(), 400);
+        assert.deepEqual(await stale.json(), {error: 'invalid_request', error_description: 'consent_cookie_missing'});
+        assert.equal(session.callbacks.length, 1);
+        t.diagnostic('Candidate Allow: issuer Origin, exact callback with no cross-origin referrer, one-use S256 exchange, authenticated tool read/event discovery');
+      } finally { await close(session); }
+    });
+
+    await t.test('Cancel reaches the exact ChatGPT callback without creating a grant; a fresh retry still works', async () => {
+      const session = await open();
+      try {
+        await begin(session);
+        const callback = await complete(session, 'Cancel');
+        assert.equal(callback.searchParams.get('error'), 'access_denied');
+        assert.equal(callback.searchParams.has('code'), false);
+      } finally { await close(session); }
+      const retry = await open();
+      try {
+        await begin(retry);
+        const callback = await complete(retry);
+        assert.equal((await exchange(callback.searchParams.get('code'))).status, 200, 'same registered ChatGPT client survives a cancelled first login');
+      } finally { await close(retry); }
+    });
+
+    await t.test('upstream GitHub cancellation returns access_denied without token exchange', async () => {
+      const session = await open({githubCancel: true});
+      try {
+        const callsBefore = outbound.length;
+        await begin(session);
+        await session.page.waitForURL(RELAY_CALLBACK + '**');
+        assert.equal(session.callbacks.length, 1);
+        const callback = session.callbacks[0];
+        assert.equal(callback.searchParams.get('error'), 'access_denied');
+        assert.equal(callback.searchParams.get('state'), STATE);
+        assert.equal(callback.searchParams.get('iss'), ISSUER + '/relay');
+        assert.equal(callback.searchParams.has('code'), false);
+        assert.equal(outbound.length, callsBefore);
+      } finally { await close(session); }
+    });
+
+    await t.test('previously granted GitHub GET auto-redirect also completes a fresh Relay consent', async () => {
+      const session = await open({automaticGithub: true});
+      try {
+        await begin(session);
+        assert.equal(session.records.filter(r => r.origin === GITHUB && r.method === 'POST').length, 0);
+        const callback = await complete(session);
+        assert.equal((await exchange(callback.searchParams.get('code'))).status, 200);
+      } finally { await close(session); }
+    });
+
+    await t.test('real browser cross-origin form is rejected without weakening the Origin allowlist', async () => {
+      const session = await open();
+      try {
+        await begin(session);
+        session.attackCsrf = await session.page.locator('input[name="csrf"]').inputValue();
+        await session.page.goto(ATTACKER + '/__relay_fixture/attack');
+        const responsePromise = session.page.waitForResponse(r => approvePath(r.request()));
+        await session.page.getByRole('button', {name: 'Submit untrusted form', exact: true}).click();
+        const response = await responsePromise;
+        assert.equal(response.status(), 403);
+        assert.deepEqual(await response.json(), {error: 'Origin not allowed'});
+        const approval = session.records.find(r => r.path === '/relay/oauth/approve');
+        assert.equal(approval.headers.origin, ATTACKER);
+        assert.equal(approval.headers.cookie, undefined, 'SameSite=Lax blocks the cross-site POST cookie');
+        assert.equal(session.callbacks.length, 0);
+      } finally { await close(session); }
+    });
+
+    await t.test('browser-generated same-origin CSRF mismatch is rejected without consuming the valid consent', async () => {
+      const session = await open();
+      try {
+        await begin(session);
+        // Keep the production CSP intact: default-src:none forbids fetch(),
+        // so submit the real form after altering only its fixture CSRF field.
+        await session.page.evaluate(() => { document.querySelector('input[name="csrf"]').value = 'f'.repeat(64); });
+        const responsePromise = session.page.waitForResponse(r => approvePath(r.request()));
+        await session.page.getByRole('button', {name: 'Allow this connection', exact: true}).click();
+        const response = await responsePromise;
+        assert.equal(response.status(), 400);
+        assert.deepEqual(await response.json(), {error: 'invalid_request', error_description: 'consent_csrf_mismatch'});
+        const invalid = session.records.find(r => r.path === '/relay/oauth/approve');
+        assert.equal(invalid.headers.origin, ISSUER);
+        assert.ok(invalid.headers.cookie?.includes(COOKIE + '='));
+        await session.page.goto(ISSUER + '/__relay_fixture/stale-form');
+        session.consentUrl = session.page.url();
+        await complete(session);
+        assert.ok(session.callbacks[0].searchParams.has('code'), 'failed CSRF must leave valid owner approval possible');
+      } finally { await close(session); }
+    });
+  } finally {
+    await browser?.close();
+    await mf.dispose();
+  }
+});
+
+async function assertEventually(predicate, message) {
+  const until = Date.now() + 5000;
+  while (!predicate() && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 25));
+  assert.ok(predicate(), message);
+}

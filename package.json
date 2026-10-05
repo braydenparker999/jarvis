@@ -15,6 +15,7 @@
   },
   "devDependencies": {
     "esbuild": "0.25.10",
+    "miniflare": "5.20260921.0-alpha",
     "playwright-core": "1.56.1"
   }
 }
