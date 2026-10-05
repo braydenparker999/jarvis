@@ -171,7 +171,7 @@ test('public browser keys cannot authenticate MCP, bypass GitHub, or approve wit
   const login = await start(s, {headers: {Authorization: 'Bearer ' + PUBLIC_KEY}});
   assert.equal(login.response.status, 302);
   assert.equal(s.upstream.length, 0);
-  await expectError(await approve(s, {csrf: 'a'.repeat(64), cookie: '__Host-jarvis-relay=' + PUBLIC_KEY}), 'invalid_request');
+  await expectError(await approve(s, {csrf: 'a'.repeat(64), cookie: '__Host-jarvis-relay=' + PUBLIC_KEY}), 'invalid_request', 400, 'consent_session_expired_or_used');
   assert.equal(oauthRows(s).filter(row => row.category === 'grant').length, 0);
 });
 
@@ -181,7 +181,7 @@ test('GitHub numeric owner ID is mandatory; names, string IDs and other accounts
   for (const owner of [183016860, '183016859', null]) {
     s.githubOwner = owner;
     const login = await start(s), result = await callback(s, login);
-    await expectError(result.response, 'access_denied', 403);
+    await expectError(result.response, 'access_denied', 403, 'github_owner_not_allowed');
   }
   assert.equal(oauthRows(s).filter(row => ['grant', 'code'].includes(row.category)).length, 0);
 });
@@ -190,17 +190,17 @@ test('upstream login state is bound to its browser cookie, one-use, and expires 
   const s = fixture(t);
   s.client = await register(s);
   const login = await start(s);
-  for (const cookie of [null, '__Host-jarvis-relay=' + 'a'.repeat(64)]) {
-    await expectError((await callback(s, login, {cookie})).response, 'invalid_request');
+  for (const [cookie, description] of [[null, 'login_cookie_missing'], ['__Host-jarvis-relay=' + 'a'.repeat(64), 'login_cookie_mismatch']]) {
+    await expectError((await callback(s, login, {cookie})).response, 'invalid_request', 400, description);
     assert.equal(s.upstream.length, 0);
   }
-  await expectError((await callback(s, {...login, state: 'b'.repeat(64)})).response, 'invalid_request');
+  await expectError((await callback(s, {...login, state: 'b'.repeat(64)})).response, 'invalid_request', 400, 'login_state_expired_or_used');
   assert.equal((await callback(s, login)).response.status, 200, 'bad cookies must not consume the legitimate login');
-  await expectError((await callback(s, login)).response, 'invalid_request');
+  await expectError((await callback(s, login)).response, 'invalid_request', 400, 'login_state_expired_or_used');
   assert.equal(s.upstream.length, 2);
   const expired = await start(s);
   s.now += SESSION_MS;
-  await expectError((await callback(s, expired)).response, 'invalid_request');
+  await expectError((await callback(s, expired)).response, 'invalid_request', 400, 'login_state_expired_or_used');
   assert.equal(s.upstream.length, 2);
 });
 
@@ -221,10 +221,84 @@ test('callback rejects duplicate state, code and error parameters before consumi
   s.client = await register(s);
   const login = await start(s), base = new URLSearchParams({state: login.state, code: 'fixture-github-code'});
   for (const extra of ['&state=' + login.state, '&code=fixture-github-code', '&error=access_denied&error=access_denied']) {
-    await expectError(await s.request('/relay/oauth/github/callback?' + base + extra, {headers: {Cookie: login.cookie}}), 'invalid_request');
+    await expectError(await s.request('/relay/oauth/github/callback?' + base + extra, {headers: {Cookie: login.cookie}}), 'invalid_request', 400, 'callback_duplicate_parameter');
     assert.equal(s.upstream.length, 0);
   }
   assert.equal((await callback(s, login)).response.status, 200);
+});
+
+test('GitHub issuer-present callback succeeds and fixed cookie collisions remain bound to their original state', async t => {
+  const s = fixture(t);
+  s.client = await register(s);
+  const first = await start(s), second = await start(s);
+  assert.notEqual(first.cookie, second.cookie);
+  await expectError((await callback(s, first, {cookie: second.cookie, query: {iss: 'https://github.com/login/oauth'}})).response, 'invalid_request', 400, 'login_cookie_mismatch');
+  assert.equal(s.upstream.length, 0, 'a mismatched browser must not exchange a GitHub code');
+  const consent = await callback(s, second, {query: {iss: 'https://github.com/login/oauth'}});
+  assert.equal(consent.response.status, 200);
+  await expectError((await callback(s, first, {cookie: consent.cookie})).response, 'invalid_request', 400, 'login_cookie_mismatch');
+  s.upstreamChallenge = new URL(first.response.headers.get('Location')).searchParams.get('code_challenge');
+  assert.equal((await callback(s, first)).response.status, 200, 'failed cookie matches must not consume the original login');
+});
+
+test('callback malformed state/cookie/code diagnostics never echo temporary values', async t => {
+  const s = fixture(t);
+  s.client = await register(s);
+  const login = await start(s);
+  await expectError((await callback(s, {...login, state: 'fixture-private-state-value'})).response, 'invalid_request', 400, 'callback_state_invalid');
+  await expectError((await callback(s, login, {cookie: '__Host-jarvis-relay=fixture-private-cookie-value'})).response, 'invalid_request', 400, 'login_cookie_invalid');
+  const response = (await callback(s, login, {query: {code: 'fixture-private-code?value'}})).response;
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), {error: 'invalid_request', error_description: 'github_code_invalid'});
+  assert.equal(s.upstream.length, 0);
+  await expectError((await callback(s, login)).response, 'invalid_request', 400, 'login_state_expired_or_used');
+});
+
+test('fixed callback processing stages distinguish upstream exceptions without exposing bodies or replaying state', async t => {
+  const s = fixture(t);
+  s.client = await register(s);
+  const originalFetch = globalThis.fetch;
+  for (const [fault, description] of [
+    ['token-fetch', 'github_token_exchange_unavailable'],
+    ['token-json', 'github_token_response_invalid'],
+    ['identity-fetch', 'github_identity_lookup_unavailable'],
+    ['identity-json', 'github_identity_response_invalid'],
+  ]) {
+    let requests = 0;
+    t.mock.method(globalThis, 'fetch', async (url, init) => {
+      requests++;
+      const token = url === 'https://github.com/login/oauth/access_token';
+      if ((token && fault === 'token-fetch') || (!token && fault === 'identity-fetch')) throw new Error('fixture-private-upstream-detail');
+      if ((token && fault === 'token-json') || (!token && fault === 'identity-json')) return new Response('fixture-private-invalid-json', {status: 200});
+      return originalFetch(url, init);
+    });
+    const login = await start(s);
+    const response = (await callback(s, login, {query: {iss: 'https://github.com/login/oauth'}})).response;
+    await expectError(response, 'invalid_request', 400, description);
+    const completed = requests;
+    await expectError((await callback(s, login)).response, 'invalid_request', 400, 'login_state_expired_or_used');
+    assert.equal(requests, completed, 'replayed callback must never repeat an upstream request');
+    assert.equal(oauthRows(s).filter(row => ['grant', 'code', 'access', 'refresh'].includes(row.category)).length, 0);
+  }
+});
+
+test('callback storage failures expose only a fixed stage and preserve atomic bindings', async t => {
+  const s = fixture(t);
+  s.client = await register(s);
+  const login = await start(s), sql = s.object(REGISTRY).ctx.storage.sql, original = sql.exec;
+  sql.exec = () => { throw new Error('fixture-private-storage-detail'); };
+  await expectError((await callback(s, login)).response, 'invalid_request', 400, 'login_registry_unavailable');
+  sql.exec = original;
+  assert.equal((await callback(s, login)).response.status, 200);
+  const next = await start(s);
+  sql.exec = function(query, ...parameters) {
+    if (query.startsWith('INSERT OR REPLACE INTO relay_oauth') && String(parameters[0]).startsWith('consent:')) throw new Error('fixture-private-storage-detail');
+    return original(query, ...parameters);
+  };
+  await expectError((await callback(s, next)).response, 'invalid_request', 400, 'consent_registry_unavailable');
+  sql.exec = original;
+  await expectError((await callback(s, next)).response, 'invalid_request', 400, 'login_state_expired_or_used');
+  assert.equal(oauthRows(s).filter(row => ['grant', 'code'].includes(row.category)).length, 0);
 });
 
 test('consent requires exact origin, bound cookie and CSRF; failed guesses do not consume it', async t => {
@@ -233,12 +307,12 @@ test('consent requires exact origin, bound cookie and CSRF; failed guesses do no
   const consent = await callback(s, await start(s));
   await expectError(await approve(s, consent, {origin: 'https://evil.example.test'}), 'Origin not allowed', 403);
   await expectError(await approve(s, consent, {origin: 'null'}), 'Origin not allowed', 403);
-  await expectError(await approve(s, consent, {origin: 'https://chatgpt.com'}), 'access_denied', 403);
-  await expectError(await approve(s, consent, {cookie: null}), 'invalid_request');
-  await expectError(await approve(s, consent, {cookie: '__Host-jarvis-relay=' + 'a'.repeat(64)}), 'invalid_request');
-  await expectError(await approve(s, consent, {csrf: 'b'.repeat(64)}), 'invalid_request');
+  await expectError(await approve(s, consent, {origin: 'https://chatgpt.com'}), 'access_denied', 403, 'consent_origin_or_content_type_invalid');
+  await expectError(await approve(s, consent, {cookie: null}), 'invalid_request', 400, 'consent_cookie_missing');
+  await expectError(await approve(s, consent, {cookie: '__Host-jarvis-relay=' + 'a'.repeat(64)}), 'invalid_request', 400, 'consent_session_expired_or_used');
+  await expectError(await approve(s, consent, {csrf: 'b'.repeat(64)}), 'invalid_request', 400, 'consent_csrf_mismatch');
   assert.equal((await approve(s, consent)).status, 302);
-  await expectError(await approve(s, consent), 'invalid_request');
+  await expectError(await approve(s, consent), 'invalid_request', 400, 'consent_session_expired_or_used');
   assert.equal(oauthRows(s).filter(row => row.category === 'grant').length, 1);
 });
 
@@ -252,10 +326,10 @@ test('explicit deny consumes consent without minting any code or grant; consent 
   assert.equal(url.searchParams.get('state'), 'fixture-downstream-state&opaque');
   assert.equal(url.searchParams.get('iss'), s.origin + '/relay');
   assert.equal(url.searchParams.has('code'), false);
-  await expectError(await approve(s, consent), 'invalid_request');
+  await expectError(await approve(s, consent), 'invalid_request', 400, 'consent_session_expired_or_used');
   const expired = await callback(s, await start(s));
   s.now += SESSION_MS;
-  await expectError(await approve(s, expired), 'invalid_request');
+  await expectError(await approve(s, expired), 'invalid_request', 400, 'consent_session_expired_or_used');
   assert.equal(oauthRows(s).filter(row => ['code', 'grant'].includes(row.category)).length, 0);
 });
 
@@ -268,9 +342,19 @@ test('approval rejects duplicate CSRF or decision fields before consuming consen
     init.body += extra;
     init.headers.Origin = s.origin;
     init.headers.Cookie = consent.cookie;
-    await expectError(await s.request('/relay/oauth/approve', init), 'invalid_request');
+    await expectError(await s.request('/relay/oauth/approve', init), 'invalid_request', 400, 'consent_duplicate_parameter');
     assert.equal(oauthRows(s).filter(row => row.category === 'grant').length, 0);
   }
+  assert.equal((await approve(s, consent)).status, 302);
+});
+
+test('consent input diagnostics preserve exact origin, cookie, CSRF and decision checks', async t => {
+  const s = fixture(t);
+  s.client = await register(s);
+  const consent = await callback(s, await start(s));
+  await expectError(await approve(s, consent, {cookie: '__Host-jarvis-relay=fixture-private-cookie'}), 'invalid_request', 400, 'consent_cookie_invalid');
+  await expectError(await approve(s, consent, {csrf: 'fixture-private-csrf'}), 'invalid_request', 400, 'consent_csrf_invalid');
+  await expectError(await approve(s, consent, {decision: 'fixture-private-decision'}), 'invalid_request', 400, 'consent_decision_invalid');
   assert.equal((await approve(s, consent)).status, 302);
 });
 
@@ -466,7 +550,7 @@ test('owner authorization has a bounded ten-active-grant capacity', async t => {
   const s = fixture(t);
   for (let n = 0; n < 10; n++) await ownerTokens(s);
   const consent = await callback(s, await start(s));
-  await expectError(await approve(s, consent), 'temporarily_unavailable', 503);
+  await expectError(await approve(s, consent), 'temporarily_unavailable', 503, 'consent_grant_capacity_unavailable');
   assert.equal(oauthRows(s).filter(row => row.category === 'grant' && !JSON.parse(row.value).revoked).length, 10);
 });
 
@@ -559,7 +643,7 @@ test('cached DCR survives cancelled initial login, delayed first consent and gra
   const abandoned = await start(s);
   assert.equal(abandoned.response.status, 302);
   s.now += SESSION_MS;
-  await expectError((await callback(s, abandoned)).response, 'invalid_request', 400);
+  await expectError((await callback(s, abandoned)).response, 'invalid_request', 400, 'login_state_expired_or_used');
   s.now += 54 * 60000;
   const tokens = await ownerTokens(s);
   assert.ok(await authenticate(s, tokens.access_token));
