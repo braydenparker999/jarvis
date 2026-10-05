@@ -98,8 +98,8 @@ This follows [OpenAI's tool-level authentication guidance](https://developers.op
 `RELAY_OWNER_ENABLED=true` must be separately approved before activation; it is
 not set in the checked-in Worker configuration. Both this flag and existing
 `RELAY_MCP_ENABLED=true` are required. Owner tool schemas are absent unless
-activated; owner events remain absent unless activated and granted. No new provider, hosting service, database
-binding or provider secret is required.
+activated; owner events remain absent unless activated and granted. No new
+provider, hosting service, database binding or provider secret is required.
 
 Before activating:
 

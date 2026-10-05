@@ -24,7 +24,8 @@ function fixture(t){
   s.ctx=s.object(SHARED_OBJECT).ctx;
   s.rows=(q,...v)=>[...s.ctx.storage.sql.exec(q,...v)];
   s.phone=(path,body,token)=>s.request('/relay/owner'+path,{method:body===undefined?'GET':'POST',headers:{Origin:PRIMARY_SITE,...(body===undefined?{}:{'Content-Type':'application/json'}),...(token?{Authorization:'Bearer '+token}:{})},body:body===undefined?undefined:JSON.stringify(body)});
-  s.rpc=(auth,method,p={})=>s.request('/relay/mcp',{method:'POST',headers:{Authorization:'Bearer '+auth.access,Accept:'application/json, text/event-stream','Content-Type':'application/json','MCP-Protocol-Version':RELAY_VERSION,'Mcp-Method':method,...(method==='tools/call'?{'Mcp-Name':p.name}:{})},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params:{...p,_meta:{'io.modelcontextprotocol/protocolVersion':RELAY_VERSION,'io.modelcontextprotocol/clientCapabilities':{}}}})}).then(r=>r.json());
+  s.rpcResponse=(auth,method,p={})=>s.request('/relay/mcp',{method:'POST',headers:{Authorization:'Bearer '+auth.access,Accept:'application/json, text/event-stream','Content-Type':'application/json','MCP-Protocol-Version':RELAY_VERSION,'Mcp-Method':method,...(method==='tools/call'?{'Mcp-Name':p.name}:{})},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params:{...p,_meta:{'io.modelcontextprotocol/protocolVersion':RELAY_VERSION,'io.modelcontextprotocol/clientCapabilities':{}}}})});
+  s.rpc=(auth,method,p={})=>s.rpcResponse(auth,method,p).then(r=>r.json());
   return s;
 }
 async function pair(s,auth,label){
@@ -137,15 +138,16 @@ test('a newly consented full owner grant retains public tools and owner operatio
   assert.equal(reply.result.isError,false);assert.equal(reply.result.structuredContent.public_inbox,true);
 });
 
-test('revoked or expired tokens/grants cannot discover or invoke owner tools',async t=>{
+test('revoked, rotated or expired tokens/grants cannot discover or invoke owner tools',async t=>{
   let now=Date.now();t.mock.method(Date,'now',()=>now);
-  for(const scope of [RELAY_PUBLIC_SCOPES.join(' '),RELAY_OWNER_SCOPE])for(const mode of ['revoked','access-expired','grant-expired']){
+  for(const scope of [RELAY_PUBLIC_SCOPES.join(' '),RELAY_OWNER_SCOPE])for(const mode of ['revoked','rotated','access-expired','grant-expired']){
     const s=fixture(t),auth=await grant(s,scope);
     if(mode==='revoked')await auth.registry({op:'revoke',tokenHash:auth.accessHash,client_id:auth.client});
+    else if(mode==='rotated')await auth.registry({op:'exchange',key:'refresh:'+await hash(auth.refresh),match:{client_id:auth.client,resource:auth.resource},accessKey:'access:'+await hash(random()),refreshKey:'refresh:'+await hash(random())});
     else now+=mode==='access-expired'?3600000:30*86400000;
     for(const [method,p] of [['tools/list',{}],['tools/call',{name:'relay_owner_devices_list',arguments:{}}]]){
-      const response=await s.rpc(auth,method,p);
-      assert.deepEqual(response,{error:'Connect the owner’s Relay account using OAuth'});
+      const response=await s.rpcResponse(auth,method,p);assert.equal(response.status,401);
+      assert.deepEqual(await response.json(),{error:'Connect the owner’s Relay account using OAuth'});
       await assert.rejects(relayRpc(s.ctx,s.env,auth,{method,params:{...p,_meta:{}}}),e=>e.code===-32012);
     }
   }

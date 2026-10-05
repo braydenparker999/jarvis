@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createRelayFixture} from './relay-fixture.js';
 import {relayAuthenticate, relayGrantActive, relayOAuthStore} from '../backend/relay-oauth.js';
-import {RELAY_CALLBACK, RELAY_OWNER, RELAY_SCOPES, RELAY_PUBLIC_SCOPES, RELAY_OWNER_SCOPE, challenge, hash} from '../backend/relay-common.js';
+import {RELAY_CALLBACK, RELAY_OWNER, RELAY_SCOPES, RELAY_PUBLIC_SCOPES, RELAY_OWNER_SCOPE, RELAY_VERSION, challenge, hash} from '../backend/relay-common.js';
 import {PUBLIC_KEY} from '../backend/shared.js';
 
 const REGISTRY = 'jarvis-shared-v2';
@@ -168,6 +168,13 @@ test('complete public DCR, GitHub owner S256 login, consent and downstream S256 
 
 test('omitted authorization scope and refresh stay public; explicit owner reconsent displays owner access', async t => {
   const s = fixture(t, {env: {RELAY_OWNER_ENABLED: 'true'}});
+  const rpc = async (token, method, p = {}) => {
+    const response = await s.request('/relay/mcp', {method: 'POST', headers: {Authorization: 'Bearer ' + token,
+      Accept: 'application/json, text/event-stream', 'Content-Type': 'application/json', 'MCP-Protocol-Version': RELAY_VERSION,
+      'Mcp-Method': method, ...(method === 'tools/call' ? {'Mcp-Name': p.name} : {})}, body: JSON.stringify({jsonrpc: '2.0', id: 1, method,
+      params: {...p, _meta: {'io.modelcontextprotocol/protocolVersion': RELAY_VERSION, 'io.modelcontextprotocol/clientCapabilities': {}}}})});
+    assert.equal(response.status, 200); return response.json();
+  };
   s.client = await register(s);
   const params = new URLSearchParams({response_type: 'code', client_id: s.client, redirect_uri: RELAY_CALLBACK,
     code_challenge_method: 'S256', code_challenge: await challenge(VERIFIER), resource: s.resource, state: 'fixture-default-scope'});
@@ -184,13 +191,21 @@ test('omitted authorization scope and refresh stay public; explicit owner recons
   await expectError(await refresh(s, publicTokens.refresh_token, {scope: FULL_SCOPE}), 'invalid_grant');
   const rotated = await (await refresh(s, publicTokens.refresh_token)).json();
   assert.equal(rotated.scope, RELAY_PUBLIC_SCOPES.join(' '));
-  const login = await start(s, {scope: FULL_SCOPE}), ownerConsent = await callback(s, login);
+  assert.equal((await rpc(rotated.access_token, 'tools/list')).result.tools.length, 10);
+  const stepUp = await rpc(rotated.access_token, 'tools/call', {name: 'relay_owner_devices_list', arguments: {}});
+  assert.equal(stepUp.result.isError, true);
+  const requestedScope = stepUp.result._meta['mcp/www_authenticate'][0].match(/scope="([^"]+)"/)[1];
+  assert.equal(requestedScope, FULL_SCOPE);
+  const login = await start(s, {scope: requestedScope}), ownerConsent = await callback(s, login);
   assert.match(ownerConsent.html, /Owner chat access:/);
   assert.match(ownerConsent.html, /Each phone approval separately grants persistent device access with a 365-day inactivity expiry renewed on use/);
   const ownerApproved = await approve(s, ownerConsent), ownerCode = new URL(ownerApproved.headers.get('Location')).searchParams.get('code');
   const ownerTokens = await (await exchangeCode(s, ownerCode)).json();
   assert.equal(ownerTokens.scope, FULL_SCOPE);
   assert.deepEqual((await authenticate(s, ownerTokens.access_token)).scopes, RELAY_SCOPES);
+  assert.equal((await rpc(ownerTokens.access_token, 'tools/list')).result.tools.length, 10);
+  const devices = await rpc(ownerTokens.access_token, 'tools/call', {name: 'relay_owner_devices_list', arguments: {}});
+  assert.equal(devices.result.isError, false); assert.deepEqual(devices.result.structuredContent, {devices: []});
   assert.deepEqual((await authenticate(s, rotated.access_token)).scopes, RELAY_PUBLIC_SCOPES, 'new consent never silently expands the old token');
 });
 
