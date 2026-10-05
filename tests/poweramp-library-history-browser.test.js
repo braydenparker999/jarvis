@@ -42,6 +42,23 @@ test('Poweramp mandatory Chromium library history contracts',{timeout:120000},as
       await swipe('#lib-cats',-120,0);await page.waitForFunction(()=>PA.Nav.cur==='list'&&document.querySelector('#library-page-motion').hidden);await h.frame();
       assert.ok(Math.abs((await page.locator('#list-body').evaluate(n=>n.scrollTop))-saved)<2);assert.ok(await page.locator('#list-body .trow').count()<100);assert.equal(await page.locator('#list-body .zoom-list').evaluate(n=>n.__items.length),5000);
     },{count:5000,art:false});
+    await run('distant saved viewport survives leaving for player and visiting another category',async h=>{
+      const {page,library,swipe,settled,center,tap,frame}=h;await library();
+      await page.locator('#list-body').evaluate(body=>{body.scrollTop=120000;});await frame();await frame();
+      const before=await page.locator('#list-body').evaluate(body=>({top:body.scrollTop,ids:Array.from(body.querySelectorAll('.trow')).map(row=>row.dataset.id)}));
+      assert.ok(before.top>100000);assert.ok(before.ids.length>0&&before.ids.length<100);
+      const mini=await center('#mini-title');await tap(mini.x,mini.y);await settled('player');
+      assert.ok(await page.evaluate(()=>fixtureInputTrace.some(event=>event.type==='pointerdown'&&event.target.includes('#mini-title')&&event.trusted)),'leaving the saved viewport uses a real trusted mini title contact');
+      await page.locator('[data-nav="library"]').tap();await settled('library');
+      await page.getByRole('button',{name:'Albums',exact:true}).tap();await settled('list');
+      assert.equal(await page.evaluate(()=>PA.Views.currentSpec.kind),'albums');
+      await swipe('#list-body',120,0);await settled('library');
+      await swipe('#lib-cats',120,0);await settled('list');await frame();
+      assert.equal(await page.evaluate(()=>PA.Views.currentSpec.kind),'all');
+      const after=await page.locator('#list-body').evaluate(body=>({top:body.scrollTop,ids:Array.from(body.querySelectorAll('.trow')).map(row=>row.dataset.id)}));
+      assert.ok(Math.abs(after.top-before.top)<2,'a different category must not replace the saved distant viewport: '+JSON.stringify({before:before.top,after:after.top}));
+      assert.deepEqual(after.ids,before.ids,'the same windowed rows return after the cross-scene visit');assert.ok(after.ids.length<100);
+    },{count:5000,art:false});
     await run('real native vertical scrolling and long press retain the existing owners',async h=>{
       const {page,library,center,start,move,end,frame}=h;await library();const p=await center('#list-body .trow[data-i="2"]');const index=await page.evaluate(()=>PA.LibraryPageHistory.index);
       await start(p.x,p.y);for(let i=1;i<=5;i++){await move(p.x,p.y-120*i/5);await frame();}await end();await page.waitForTimeout(100);

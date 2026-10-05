@@ -113,6 +113,25 @@ test('deferred pictures cannot outlive visit eviction through asynchronous jobs'
   for(let i=0;i<12;i++){h.Nav.go('player');const leaving=h.history.current();const count=captures.length;h.advance(10000);h.paint();assert.equal(captures.length,count);h.Views.push({kind:'tree',path:'folder/'+i});assert.equal(leaving.snapshotDeferred,false);assert.ok(h.history.entries.length<=5);}
   assert.equal(h.frames.size,0);assert.equal(h.timers.size,0);assert.ok(h.history.entries.every(entry=>!entry.snapshotDeferred));
 });
+
+test('deferred capture keeps its last valid picture if the retained source was replaced or removed',()=>{
+  for(const mode of ['replaced','removed']){const h=nested();h.history.save();const entry=h.history.current(),previous=entry.snapshot;h.Nav.go('player');const captures=recordCaptures(h);
+    if(mode==='replaced'){h.Views.currentSpec={kind:'albums'};h.Views.stack=[h.Views.currentSpec];}else h.list.remove();
+    h.history.captureDeferred();assert.equal(entry.snapshot,previous,mode);assert.equal(entry.snapshotDeferred,false,mode);assert.equal(captures.length,mode==='replaced'?0:1,mode);
+  }
+});
+
+test('production TrackWindow ignores hidden ResizeObserver refreshes without changing mounted distant rows or spacers',()=>{
+  const h=nested(),box=h.listBody.appendChild(new Element('div'));box.classList.add('list');box.__items=Array.from({length:5000},(_,i)=>({id:'track-'+i}));box.__spec={kind:'all'};
+  for(const i of [1180,1181]){const row=box.appendChild(new Element());row.dataset.i=String(i);}
+  const rows=box.children.slice();box.closest=selector=>selector==='.scroll'?h.listBody:null;box.getBoundingClientRect=()=>({width:393});box.prepend=node=>{node.parentElement=box;box.children.unshift(node);};box.append=node=>box.appendChild(node);
+  h.context.el=(tag,classes)=>{const n=new Element(tag);n.classList.add(classes);return n;};let resized;
+  h.context.ResizeObserver=class{constructor(fn){resized=fn;}observe(){}disconnect(){}};
+  vm.runInContext(source.slice(source.indexOf('const TrackWindow='),source.indexOf('/* lazy album art loading */'))+'\nglobalThis.trackWindow=TrackWindow;',h.context);
+  h.Nav.go('player');const window=h.context.trackWindow.create(box);h.paint();const before=box.children.slice(),spaces=box.children.filter(n=>n.classList.contains('track-spacer')).map(n=>({...n.style}));
+  for(let i=0;i<3;i++){resized();h.paint();window.refresh();}
+  assert.deepEqual(box.children,before);assert.deepEqual(box.children.filter(n=>n.classList.contains('track-spacer')).map(n=>({...n.style})),spaces);assert.ok(rows.every(row=>box.children.includes(row)));assert.deepEqual(rows.map(row=>row.dataset.i),['1180','1181']);window.destroy();
+});
 test('bounded visits retain a deeply nested Back parent and its Forward destination',()=>{const h=harness();h.history.limit=5;for(let i=0;i<20;i++)h.Views.push({kind:'tree',path:'folder/'.repeat(i),title:'Folder '+i});assert.equal(h.history.entries.length,5);for(let i=0;i<12;i++){const before=h.Views.currentSpec.path;h.Views.back();assert.equal(h.history.entries.length,5);assert.equal(h.history.peek(1).spec.path,before);}assert.equal(h.Views.stack.length,8);});
 test('page specs including queue view survive Back/Forward and refresh',()=>{const h=harness();h.Views.push({kind:'queue',queueView:'added'});h.Views.currentSpec.queueView='upcoming';h.Views.render(h.Views.currentSpec);h.listBody.scrollTop=225;h.Views.push({kind:'playlists'});h.history.move(-1);assert.equal(h.Views.currentSpec.queueView,'upcoming');assert.equal(h.listBody.scrollTop,225);});
 test('Back exits selection without changing visits or scroll',()=>{const h=nested();h.Selection.mode=true;h.Views.back();assert.equal(h.history.index,2);assert.equal(h.listBody.scrollTop,618);assert.equal(h.Selection.mode,false);});

@@ -46,6 +46,13 @@ hidden source elements have no CSSOM scrolling box and can otherwise report
 zero. Snapshots remain inert, source-mapped and bounded by the existing
 32-visit ring.
 
+The production virtual window already returns before measuring its range or
+mounting rows when its screen is hidden. ResizeObserver refreshes therefore
+retain the distant mounted rows and spacers. A focused test exercises that
+early return. Deferred capture also checks the current category and ancestry
+against the saved visit; a mismatched or removed source keeps the last valid
+snapshot instead of replacing it with unrelated DOM.
+
 There is no background or idle callback for this capture. Cancellation,
 repeated detours and eviction cannot leave an asynchronous job holding an old
 visit or compete with the active player morph. Release duration, approved
@@ -53,9 +60,11 @@ appearance, player clones, masks and compositor hints are unchanged.
 
 ## Validation
 
-- 111 focused non-browser checks passed across library history, shared
+- 113 focused non-browser checks passed across library history, shared
   elements, morph review and library review
-- The eight new regressions fail against the previous production runtime
+- The eight deferral regressions and the valid-picture fallback regression
+  fail against the previous production runtime; the hidden virtual-window
+  early return is existing behavior and is checked on both runtimes
 - Real production drag and tap integration checks count zero history captures
   on opening; cleanup and same-page return also count zero
 - Later horizontal capture preserves a newly changed scroll position; a new

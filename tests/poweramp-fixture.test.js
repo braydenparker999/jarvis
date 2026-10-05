@@ -26,6 +26,11 @@ test('browser input evidence stays bounded, preserves trusted capture targets, a
   const trace=context.window.fixtureInputTrace;assert.equal(trace.length,80);
   assert.equal(trace.at(-1).target,'div#mini-title.t1');assert.equal(trace.at(-1).trusted,true);
   assert.equal(trace.at(-1).before.gesture,'div#mini');assert.equal(trace.at(-1).after.gesture,'div#mini');
+  listeners.get('gotpointercapture')({type:'gotpointercapture',target:mini,isTrusted:true,pointerId:1});
+  listeners.get('lostpointercapture')({type:'lostpointercapture',target:title,isTrusted:true,pointerId:1});pending.splice(0).forEach(fn=>fn());
+  assert.equal(trace.at(-1).after.captureOwner,'div#mini','old child loss cannot erase the observed parent capture');
+  listeners.get('lostpointercapture')({type:'lostpointercapture',target:mini,isTrusted:true,pointerId:1});pending.splice(0).forEach(fn=>fn());
+  assert.equal(trace.at(-1).after.captureOwner,null);
   assert.equal(lifecycle.gesture.node,mini);assert.equal(lifecycle.contacts.size,1);
   assert.doesNotMatch(JSON.stringify(trace),/should never be collected/);
 });

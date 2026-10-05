@@ -11,14 +11,17 @@ export const mobileContext={viewport:{width:393,height:852},isMobile:true,hasTou
 // Read-only, bounded evidence for real Chromium failures. Record targets and
 // ownership, never app text or any synthetic replacement input events.
 export function installFixtureInputTrace(){
+  const captures=new Map();
   const label=n=>n?((n.tagName||'').toLowerCase()+(n.id?'#'+n.id:'')+(n.classList?.length?'.'+Array.from(n.classList).slice(0,3).join('.'):'')+(n.dataset?.act?'[data-act='+n.dataset.act+']':'')):null;
-  const owner=()=>({screen:window.PA?.Nav.cur,gesture:typeof InputLifecycle!=='undefined'?label(InputLifecycle.gesture?.node):null,
+  const owner=pointer=>({screen:window.PA?.Nav.cur,captureOwner:captures.get(pointer)||null,gesture:typeof InputLifecycle!=='undefined'?label(InputLifecycle.gesture?.node):null,
     phase:typeof ScreenDrag!=='undefined'?ScreenDrag.phase:null,shared:!!document.querySelector('.player-scene-input'),history:!!window.PA?.LibraryPageMotion.state,scrubbing:!!window.PA?.UI.seekDragging});
   window.fixtureInputTrace=[];
   for(const type of ['pointerdown','pointermove','pointerup','pointercancel','gotpointercapture','lostpointercapture','touchstart','touchmove','touchend','touchcancel'])document.addEventListener(type,e=>{
-    const p=e.touches?.[0]||e.changedTouches?.[0]||e,record={type,target:label(e.target),trusted:e.isTrusted,pointer:e.pointerId,x:p.clientX,y:p.clientY,before:owner()};
+    const p=e.touches?.[0]||e.changedTouches?.[0]||e,record={type,target:label(e.target),trusted:e.isTrusted,pointer:e.pointerId,x:p.clientX,y:p.clientY,before:owner(e.pointerId)};
+    if(type==='gotpointercapture')captures.set(e.pointerId,label(e.target));
+    if(type==='lostpointercapture'&&captures.get(e.pointerId)===label(e.target))captures.delete(e.pointerId);
     fixtureInputTrace.push(record);if(fixtureInputTrace.length>80)fixtureInputTrace.shift();
-    queueMicrotask(()=>{record.prevented=e.defaultPrevented;record.after=owner();});
+    queueMicrotask(()=>{record.prevented=e.defaultPrevented;record.after=owner(e.pointerId);});
   },{capture:true,passive:true});
 }
 

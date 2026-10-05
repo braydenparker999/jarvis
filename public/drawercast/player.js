@@ -8867,7 +8867,12 @@ const LibraryPageHistory={
   },
   captureDeferred(){
     const entry=this.current();if(!entry?.snapshotDeferred)return;
-    entry.snapshot=LibraryPageMotion.capture(entry.screen,{id:entry.screen==='list'?'list-body':'lib-cats',top:entry.scrollTop,left:entry.scrollLeft});
+    // Never replace a valid prior picture with a newer category's live DOM.
+    // The wrappers below flush before replacement, but a direct caller may
+    // already have changed the spec or removed the source.
+    const sameSource=entry.screen!=='list'||this.same(entry,'list',Views.currentSpec,Views.stack);
+    const snapshot=sameSource?LibraryPageMotion.capture(entry.screen,{id:entry.screen==='list'?'list-body':'lib-cats',top:entry.scrollTop,left:entry.scrollLeft}):null;
+    if(snapshot)entry.snapshot=snapshot;
     entry.snapshotDeferred=false;
   },
   visit(screen,spec,stack=[]){
