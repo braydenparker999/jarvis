@@ -383,3 +383,9 @@ test('live progress transforms do not invalidate invariant siblings and remain f
   const progress={type:'attributes',attributeName:'style',target:fill,oldValue};assert.equal(h.shared.appearanceChanges([progress]).length,0);job.observer.records.push(progress);h.scene.begin('player',-1);assert.equal(h.shared.appearanceStats.hits,1);assert.equal(h.scene.state.morph.pairs.seek.mini._sceneNodes.get(fill).style.transform,'translateX(77%)','progress CSS is read live on activation');
   h.scene.abort();h.prepare();const before=fill.style.cssText;fill.style.color='blue';assert.equal(h.shared.appearanceChanges([{...progress,oldValue:before}]).length,1,'other styling on a progress node still invalidates');
 });
+
+test('a mini contact restamp cannot invalidate prepared invariant child CSS',()=>{
+  const h=appearanceHarness(),slide=h.context.document.createElement('div');slide.id='mini-slide';slide.style.transform='';slide.style.transition='none';h.prepare();const oldValue=slide.style.cssText;slide.style.transition='none';
+  const same={type:'attributes',attributeName:'style',target:slide,oldValue};assert.equal(h.shared.appearanceChanges([same]).length,0,'motion-owned restamp does not change cached child appearance');h.shared.preparedAppearance.observer.records.push(same);h.scene.begin('player',-1);assert.equal(h.shared.appearanceStats.hits,1);
+  const before=slide.style.cssText;slide.style.color='blue';assert.equal(h.shared.appearanceChanges([{...same,oldValue:before}]).length,1,'inherited style changes still invalidate');
+});

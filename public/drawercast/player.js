@@ -5850,7 +5850,7 @@ const SharedPlayerMotion={
   // Exhaustive capture is the measured faster, conservative production path.
   // The compact planner remains available only to the independent QA probes.
   captureMode:'exhaustive',appearanceEnabled:true,appearanceJob:null,preparedAppearance:null,
-  appearanceStats:{prepared:0,hits:0,cold:0,invalidated:0},
+  appearanceStats:{prepared:0,hits:0,cold:0,invalidated:0,lastMiss:null},
   clearAppearance(){
     const job=this.appearanceJob||this.preparedAppearance;
     if(job){clearTimeout(job.timer);if(job.idle&&typeof cancelIdleCallback==='function')cancelIdleCallback(job.idle);job.observer?.disconnect();}
@@ -5884,11 +5884,12 @@ const SharedPlayerMotion={
   },
   appearanceChanges(records){return records.filter(record=>{
     const target=record.target?.nodeType===3?record.target.parentElement:record.target,id=target?.id;
-    if(record.type==='attributes'&&record.attributeName==='style'&&['mini-fill','seek-fill','seek-knob'].includes(id)){
+    if(record.type==='attributes'&&record.oldValue!==undefined&&target?.getAttribute(record.attributeName)===record.oldValue)return false;
+    if(record.type==='attributes'&&record.attributeName==='style'&&['mini-fill','seek-fill','seek-knob','mini-slide'].includes(id)){
       // Only compositor progress transforms are exempt; another declaration
       // on the same node still invalidates the invariant sibling cache.
       const old=document.createElement('span').style;old.cssText=record.oldValue||'';const current=target.style;
-      const rest=style=>{const values=[];for(let i=0;i<style.length;i++){const key=style[i];if(key!=='transform')values.push(key+':'+style.getPropertyValue(key)+'!'+style.getPropertyPriority(key));}return values.sort().join('\0');};return rest(old)!==rest(current);
+      const rest=style=>{const values=[];for(let i=0;i<style.length;i++){const key=style[i];if(key!=='transform'&&!(id==='mini-slide'&&(key==='transition'||key.startsWith('transition-'))))values.push(key+':'+style.getPropertyValue(key)+'!'+style.getPropertyPriority(key));}return values.sort().join('\0');};return rest(old)!==rest(current);
     }
     if(record.type==='attributes'&&['mini-seek','seek'].includes(id)&&['aria-valuenow','aria-valuetext','aria-valuemax'].includes(record.attributeName))return false;
     if(['characterData','childList'].includes(record.type)&&['t-cur','t-dur'].includes(id))return false;
@@ -5910,7 +5911,7 @@ const SharedPlayerMotion={
       for(const selector of ['#bg','#sc-player','#mini']){const node=$(selector);if(node)job.observer.observe(node,{attributes:true,attributeOldValue:true,childList:true,characterData:true,subtree:true});}
       for(const node of [document.head,document.documentElement,document.body,$('#app')].filter(Boolean))job.observer.observe(node,node===document.head?{attributes:true,childList:true,characterData:true,subtree:true}:{attributes:true,childList:true});
     };
-    job.observer=new MutationObserver(records=>{if(!this.appearanceChanges(records).length||this.appearanceJob!==job&&this.preparedAppearance!==job)return;this.appearanceStats.invalidated++;this.scheduleAppearance();});
+    job.observer=new MutationObserver(records=>{const changed=this.appearanceChanges(records);if(!changed.length||this.appearanceJob!==job&&this.preparedAppearance!==job)return;this.appearanceStats.lastMiss={reason:'mutation',node:changed[0].target?.id||changed[0].target?.parentElement?.id||null,attribute:changed[0].attributeName||changed[0].type};this.appearanceStats.invalidated++;this.scheduleAppearance();});
     const step=deadline=>{
       job.idle=0;if(this.appearanceJob!==job||!this.appearanceEligible()){this.clearAppearance();return;}
       if(document.getAnimations?.().some(animation=>animation.playState==='running'||animation.playState==='pending')){job.nodes=null;job.index=0;job.cache.clear();job.timer=setTimeout(()=>{job.timer=0;if(this.appearanceJob===job)job.idle=requestIdleCallback(step);},100);return;}
@@ -5939,12 +5940,14 @@ const SharedPlayerMotion={
     const job=this.preparedAppearance,valid=job&&scene.target==='player'&&job.screen===scene.fromName&&job.track===Engine.current&&job.trackId===Engine.current.id&&
       job.width===innerWidth&&job.height===innerHeight&&job.dpr===devicePixelRatio&&job.focus===document.activeElement&&
       !document.hidden&&!this.appearanceChanges(job.observer.takeRecords()).length&&!document.getAnimations?.().some(animation=>animation.playState==='running'||animation.playState==='pending')&&job.nodes.every(node=>node.isConnected);
+    if(job&&!valid)this.appearanceStats.lastMiss={reason:'claim',focusChanged:job.focus!==document.activeElement,screenChanged:job.screen!==scene.fromName,trackChanged:job.track!==Engine.current||job.trackId!==Engine.current.id,viewportChanged:job.width!==innerWidth||job.height!==innerHeight||job.dpr!==devicePixelRatio,animations:!!document.getAnimations?.().some(animation=>animation.playState==='running'||animation.playState==='pending')};
     this.clearAppearance();return valid?job:null;
   },
   consumeAppearance(job){
     if(job)try{
       const nodes=this.appearanceSources(),inputs=this.appearanceInputs(nodes),sheets=this.appearanceSheets(),fonts=this.appearanceFonts();
-      if(nodes.length===job.nodes.length&&inputs.every((values,i)=>values.every((value,j)=>value===job.inputs[i][j]))&&sheets.length===job.sheets.length&&sheets.every((value,i)=>value===job.sheets[i])&&fonts.length===job.fonts.length&&fonts.every((value,i)=>value===job.fonts[i])){this.appearanceStats.hits++;return job.cache;}
+      if(nodes.length===job.nodes.length&&inputs.every((values,i)=>values.every((value,j)=>value===job.inputs[i][j]))&&sheets.length===job.sheets.length&&sheets.every((value,i)=>value===job.sheets[i])&&fonts.length===job.fonts.length&&fonts.every((value,i)=>value===job.fonts[i])){this.appearanceStats.hits++;this.appearanceStats.lastMiss=null;return job.cache;}
+      const at=inputs.findIndex((values,i)=>!job.inputs[i]||values.some((value,j)=>value!==job.inputs[i][j]));this.appearanceStats.lastMiss={reason:'validation',node:at<0?null:nodes[at]?.id||nodes[at]?.tagName,field:at<0?null:inputs[at].findIndex((value,j)=>value!==job.inputs[at]?.[j]),sheetsChanged:sheets.length!==job.sheets.length||sheets.some((value,i)=>value!==job.sheets[i]),fontsChanged:fonts.length!==job.fonts.length||fonts.some((value,i)=>value!==job.fonts[i])};
     }catch(_){}
     this.appearanceStats.cold++;const cache=new Map();cache.snapshotPlan=null;return cache;
   },
