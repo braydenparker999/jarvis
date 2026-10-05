@@ -6455,7 +6455,9 @@ Object.assign(SharedPlayerMotion,{
     const motionKeys=['position','inset','left','top','width','height','margin','overflow','max-width','max-height','min-width','min-height','padding','border-width','border-color','border-style','color','transform','transform-origin','transition','opacity','will-change','z-index','border-radius','border-top-left-radius','border-top-right-radius','border-bottom-right-radius','border-bottom-left-radius','background','background-image','background-size','box-shadow'];
     const slide=mini.querySelector('.mini-swipe-content'),overlay=$('.art-ov'),A=$('#artA'),B=$('#artB');
     const focus=[mini,...mini.querySelectorAll('button,input,select,textarea,a[href],[tabindex]'),...full.querySelectorAll('button,input,select,textarea,a[href],[tabindex]')].filter(node=>node===mini||node.tabIndex>=0||['BUTTON','INPUT','SELECT','TEXTAREA','A'].includes(node.tagName)).map(node=>({node,tabindex:node.getAttribute('tabindex')}));
-    const styles=[mini,full,dim,nav,slide,overlay,A,B,...Object.values(pairs).flatMap(pair=>[pair.mini,pair.full])].filter(Boolean).map(node=>this.styleSnapshot(node,motionKeys));
+    // Canonical art is produced asynchronously. The scene borrows only its opacity;
+    // restoring an old background here would erase a cover resolved mid-motion.
+    const styles=[mini,full,dim,nav,slide,overlay,A,B,...Object.values(pairs).flatMap(pair=>[pair.mini,pair.full])].filter(Boolean).map(node=>this.styleSnapshot(node,node===A||node===B?['opacity']:motionKeys));
     let m=null;this.settingUp=true;
     try{
       mini.hidden=full.hidden=false;mini.style.transition=full.style.transition='none';mini.style.transform=full.style.transform='none';mini.style.opacity=full.style.opacity='1';
