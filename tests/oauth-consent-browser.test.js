@@ -93,10 +93,13 @@ test('Relay OAuth navigation uses browser-generated origins and real workerd SQL
       // Independent egress guard, installed before the bridge. Even a missing
       // Fetch pause/handler cannot connect to any real GitHub/ChatGPT endpoint.
       // A reserved .invalid name keeps this safety probe non-live as well.
+      // Chromium commits its error document after goto() rejects. Keep that
+      // navigation on a disposable page so it cannot interrupt the journey.
+      const canary = await context.newPage();
       try {
-        await assert.rejects(page.goto('https://unhandled.example.invalid/__relay_fixture/offline-canary'), /net::ERR_INTERNET_DISCONNECTED/);
-        await page.goto('about:blank');
+        await assert.rejects(canary.goto('https://unhandled.example.invalid/__relay_fixture/offline-canary'), /net::ERR_INTERNET_DISCONNECTED/);
       } catch (error) { await context.close(); throw error; }
+      finally { await canary.close().catch(() => {}); }
       session.offlineCanaryPassed = true;
       // Direct CDP interception receives *every* HTTP redirect hop. Playwright
       // routing automatically continues redirects, so must not be used here.
