@@ -6417,7 +6417,7 @@ Object.assign(SharedPlayerMotion,{
     try{
       mini.hidden=full.hidden=false;mini.style.transition=full.style.transition='none';mini.style.transform=full.style.transform='none';mini.style.opacity=full.style.opacity='1';
       const endpoints={surface:{mini:this.rect(mini),full:this.rect(full)}};
-      for(const [key,nodes] of Object.entries(pairs))endpoints[key]={mini:this.rect(nodes.mini),full:this.rect(nodes.full)};
+      for(const [key,nodes] of Object.entries(pairs)){const fullRect=this.rect(nodes.full);endpoints[key]={mini:this.rect(nodes.mini),full:fullRect.width&&fullRect.height?fullRect:this.rect($('.seekrow'))};}
       if(!endpoints.surface.mini.width||!endpoints.surface.mini.height||!endpoints.surface.full.width)return null;
       const miniRadius=this.radius(mini),navMini=this.radius(nav),artRadius={mini:this.radius(pairs.art.mini),full:this.radius(pairs.art.full)};
       // The authored joined dock has square top corners only while mini shows.

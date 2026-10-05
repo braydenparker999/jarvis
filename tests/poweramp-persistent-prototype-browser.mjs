@@ -30,7 +30,7 @@ async function open(browser,built,theme){
   const cdp=await context.newCDPSession(page);await cdp.send('Emulation.setCPUThrottlingRate',{rate:4});
   const point=(x,y)=>({id:1,x,y,radiusX:1,radiusY:1,force:1}),start=(x,y)=>cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[point(x,y)]}),move=(x,y)=>cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[point(x,y)]}),end=()=>cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
   const frame=()=>page.evaluate(()=>new Promise(done=>requestAnimationFrame(done)));
-  const settled=async screen=>{await page.waitForFunction(screen=>PA.Nav.cur===screen&&!fixtureScene.state&&!fixtureScene.settling&&!PA.LibraryPageMotion.state&&!PA.LibraryPageMotion.finish&&!fixtureLifecycle.gesture&&!document.querySelector('.player-scene-input'),screen);await frame();};
+  const settled=async screen=>{await page.waitForFunction(screen=>PA.Nav.cur===screen&&!fixtureScene.state&&!fixtureScene.settling&&!PA.LibraryPageMotion.state&&!PA.LibraryPageMotion.finish&&!fixtureLifecycle.gesture&&!document.querySelector('.player-scene-input'),screen);await page.waitForFunction(screen=>{const root=document.querySelector('#sc-'+screen),mini=document.querySelector('#mini');return Number(getComputedStyle(root).opacity)>.9999&&(screen==='player'||Number(getComputedStyle(mini).opacity)>.9999);},screen);await frame();};
   const center=selector=>page.locator(selector).evaluate(n=>{const r=n.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2};});
   const library=async()=>{await page.locator('[data-nav="library"]').tap();await settled('library');await page.getByRole('button',{name:'All Songs',exact:true}).tap();await settled('list');};
   await page.evaluate(()=>{
@@ -47,8 +47,8 @@ async function visible(h){
   assert.equal(result.screen,'list');assert.equal(result.hidden,false);assert.equal(result.inert,false);assert.equal(result.visibility,'visible');assert.equal(result.opacity,'1');assert.equal(result.covered,false);assert.ok(result.rows>0);assert.ok(result.width>0&&result.height>0);assert.equal(result.mini.hidden,false);assert.equal(result.mini.opacity,'1');assert.equal(result.mini.visibility,'visible');assert.equal(result.plane,false);assert.equal(result.historyHost,true);return result;
 }
 async function measure(h,label,perform){await h.page.evaluate(()=>{fixtureProbe.operations=[];fixtureMotion.clearAppearance();});await perform();return {label,...await h.page.evaluate(()=>({operations:fixtureProbe.operations,screen:PA.Nav.cur}))};}
-async function timings(h){
-  const results=[];await h.library();
+async function timings(h,results=[]){
+  await h.library();
   for(const label of ['first-tap','repeat-tap','repeat-playing']){
     if(label==='repeat-playing')await h.page.evaluate(()=>PA.Engine.play());
     const point=await h.center('#mini-title');results.push(await measure(h,label,async()=>{await h.start(point.x,point.y);await h.end();await h.settled('player');}));
@@ -76,13 +76,13 @@ test('persistent live-node prototype: exact-profile 4x CPU cold/repeat/collapse/
     const baseline=await build(directory,true),candidate=await build(directory,false);report.sources={baseline:baseline.sourceHash,candidate:candidate.sourceHash};browser=await chromium.launch({executablePath,headless:true,args:['--no-sandbox']});
     for(const theme of ['dark','light']){
       const a=await open(browser,baseline,theme),b=await open(browser,candidate,theme);const group={theme};report.results.push(group);
-      try{group.baselineTimings=await timings(a);group.candidateTimings=await timings(b);t.diagnostic('POWERAMP_PERSISTENT_TIMINGS '+JSON.stringify({theme,sources:report.sources,baseline:group.baselineTimings,candidate:group.candidateTimings}));await save('persistent-prototype-report.json',report);
-        const oldShots=await shots(a),newShots=await shots(b);group.pairs=[];
+      try{group.baselineTimings=[];await timings(a,group.baselineTimings);group.candidateTimings=[];await timings(b,group.candidateTimings);t.diagnostic('POWERAMP_PERSISTENT_TIMINGS '+JSON.stringify({theme,sources:report.sources,baseline:group.baselineTimings,candidate:group.candidateTimings}));await save('persistent-prototype-report.json',report);
+        await a.page.evaluate(()=>{fixtureProbe.operations=[];});await b.page.evaluate(()=>{fixtureProbe.operations=[];});const oldShots=await shots(a),newShots=await shots(b);group.heldRegrab={baseline:await a.page.evaluate(()=>fixtureProbe.operations),candidate:await b.page.evaluate(()=>fixtureProbe.operations)};group.pairs=[];
         for(let i=0;i<oldShots.length;i++){const old=oldShots[i],next=newShots[i],pixels=compareScreenshotPNG(old.png,next.png);const pair={label:old.label,baseline:old.state,candidate:next.state,pixels};group.pairs.push(pair);await save('persistent-'+theme+'-'+old.label+'-v7.png',old.png);await save('persistent-'+theme+'-'+old.label+'-live.png',next.png);await save('persistent-prototype-report.json',report);
           for(const key of Object.keys(old.state.geometry))for(const property of ['left','top','width','height'])if(Math.abs(old.state.geometry[key][property]-next.state.geometry[key][property])>.05)failures.push(theme+' '+old.label+' '+key+'.'+property+': '+old.state.geometry[key][property]+' vs '+next.state.geometry[key][property]);
           if(pixels.changedFraction>report.thresholds.pixelChangedFraction)failures.push(theme+' '+old.label+' changed fraction '+pixels.changedFraction);if(pixels.meanChannelDelta>report.thresholds.pixelMeanDelta)failures.push(theme+' '+old.label+' mean delta '+pixels.meanChannelDelta);
         }
-        const setup=group.candidateTimings.flatMap(r=>r.operations).filter(r=>r.operation==='create');assert.equal(setup.length,6);for(const value of setup){assert.equal(value.deepClones,0);assert.equal(value.styleEnumerations,0);assert.equal(value.cssRulesReads,0);assert.ok(value.ms<=33,'absolute 4x setup budget: '+JSON.stringify(value));}
+        const setup=group.candidateTimings.flatMap(r=>r.operations).filter(r=>r.operation==='create');assert.equal(setup.length,6);for(const value of [...setup,...group.heldRegrab.candidate.filter(r=>r.operation==='create')]){assert.equal(value.deepClones,0);assert.equal(value.styleEnumerations,0);assert.equal(value.cssRulesReads,0);assert.ok(value.ms<=33,'absolute 4x setup budget: '+JSON.stringify(value));}
         assert.deepEqual(a.errors,[]);assert.deepEqual(b.errors,[]);
       }catch(error){group.error=String(error);await save('persistent-prototype-report.json',report);await save('persistent-'+theme+'-failure.png',await b.page.screenshot());throw error;}finally{await a.context.close();await b.context.close();}
     }
