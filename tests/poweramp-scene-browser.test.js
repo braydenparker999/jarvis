@@ -80,7 +80,7 @@ test('Poweramp mandatory Chromium scene, seek, and art contracts',{timeout:12000
         assertRectClose(await bounds(page,'#player-live-mask[data-active]'),lerp(miniPanel,endpoint.surface),3,'surface@'+progress);
         for(const selector of ['#player-live-background','#sc-player']){
           assertRectClose(await bounds(page,selector),selector==='#player-live-background'?background:endpoint.surface,2,'inverse content remains viewport-stationary@'+progress);
-          const mask=await page.locator(selector).evaluate(n=>{const b=n.closest('#player-live-mask,#player-live-backdrop-mask').getBoundingClientRect(),cs=getComputedStyle(n.parentElement);return {bounds:{left:b.left,top:b.top,width:b.width,height:b.height},clip:cs.clipPath,hint:cs.willChange};});
+          const mask=await page.locator(selector).evaluate(n=>{const mask=n.closest('#player-live-mask,#player-live-backdrop-mask'),b=mask.getBoundingClientRect(),cs=getComputedStyle(n.parentElement),style=getComputedStyle(mask),bounds={left:b.left,top:b.top,width:b.width,height:b.height};if(mask.id==='player-live-backdrop-mask'){const part=style.clipPath.match(/^inset\((.+?)(?: round |\))/);if(!part)throw Error('Expected rounded stationary backdrop inset');const values=part[1].split(' ').map(parseFloat),top=values[0],right=values[1]??top,bottom=values[2]??top,left=values[3]??right;bounds.left+=left;bounds.top+=top;bounds.width-=left+right;bounds.height-=top+bottom;if(style.transform!=='none')throw Error('Backdrop raster must stay unscaled');}return {bounds,clip:cs.clipPath,hint:cs.willChange};});
           assertRectClose(mask.bounds,lerp(miniPanel,endpoint.surface),2,'mask shares exact shell@'+progress);assert.equal(mask.clip,'none');assert.ok(mask.hint.includes('transform'),'the live content retains its compositor transform hint');
         }
         assert.equal(await page.evaluate(()=>document.querySelector('#mini').style.opacity),'1');
@@ -207,3 +207,4 @@ test('Poweramp mandatory Chromium scene, seek, and art contracts',{timeout:12000
     });
   }finally{await browser?.close();await fixture.close();}
 });
+

@@ -8,7 +8,8 @@ const section=(start,end)=>source.slice(source.indexOf(start),source.indexOf(end
 const plain=value=>JSON.parse(JSON.stringify(value));
 const near=(actual,expected)=>assert.ok(Math.abs(actual-expected)<1e-7,`${actual} != ${expected}`);
 const transform=node=>{const parts=/translate\(([-\d.e+]+)px,([-\d.e+]+)px\) scale\(([-\d.e+]+),([-\d.e+]+)\)/.exec(node.style.transform);assert.ok(parts,node.style.transform);return parts.slice(1).map(Number);};
-const revealBounds=reveal=>{const {mask,node}=reveal,[mx,my,sx,sy]=transform(mask),[nx,ny,ix,iy]=transform(node);return {
+const clipValues=mask=>{const [insets,radii]=mask.style.clipPath.slice(6,-1).split(' round ');return {insets:insets.split(' ').map(parseFloat),radii:radii.split(' ').map(parseFloat)};};
+const revealBounds=reveal=>{const {mask,node}=reveal;if(mask.style.clipPath){const {insets:[top,right,bottom,left],radii}=clipValues(mask);const origin={left:parseFloat(mask.style.left),top:parseFloat(mask.style.top)},width=parseFloat(mask.style.width),height=parseFloat(mask.style.height);return {mask:{left:origin.left+left,top:origin.top+top,width:width-left-right,height:height-top-bottom},content:{left:origin.left+parseFloat(node.style.left),top:origin.top+parseFloat(node.style.top),width:parseFloat(node.style.width),height:parseFloat(node.style.height)},radii};}const [mx,my,sx,sy]=transform(mask),[nx,ny,ix,iy]=transform(node);return {
   mask:{left:parseFloat(mask.style.left)+mx,top:parseFloat(mask.style.top)+my,width:parseFloat(mask.style.width)*sx,height:parseFloat(mask.style.height)*sy},
   content:{left:parseFloat(mask.style.left)+mx+sx*(parseFloat(node.style.left)+nx),top:parseFloat(mask.style.top)+my+sy*(parseFloat(node.style.top)+ny),width:parseFloat(node.style.width)*sx*ix,height:parseFloat(node.style.height)*sy*iy}
 };};
@@ -263,10 +264,12 @@ test('snapshot reference: live backdrop transitions keep sampling only their own
   animation.playState='running';h.observers.at(-1).callback([{target:bg,type:'attributes',attributeName:'style'}]);assert.ok(m.appearanceFrame);h.scene.abort();assert.equal(m.appearanceFrame,0);assert.equal(h.frames.size,0);
 });
 
-test('persistent shell masks retain exact circular painted corners through non-uniform expansion',()=>{
+test('the scaled player mask and stationary backdrop clip retain exact circular painted corners',()=>{
   const h=harness();h.list();h.scene.begin('player',-1);const m=h.scene.state.morph;
-  for(const p of [0,.25,.5,.75,1]){h.shared.paint(m,p);for(const node of [m.mask,m.backgroundMask]){const [x,y]=node.style.borderRadius.split(' / ').map(part=>part.split(' ').map(parseFloat)),g=m.geometry.surface,base=m.endpoints.surface.mini;
-    for(let i=0;i<4;i++){near(x[i]*g.width/base.width,m.miniRadius[i]*(1-p));near(y[i]*g.height/base.height,m.miniRadius[i]*(1-p));}}}
+  for(const p of [0,.25,.5,.75,1]){h.shared.paint(m,p);const [x,y]=m.mask.style.borderRadius.split(' / ').map(part=>part.split(' ').map(parseFloat)),g=m.geometry.surface,base=m.endpoints.surface.mini,clip=clipValues(m.backgroundMask);
+    for(let i=0;i<4;i++){near(x[i]*g.width/base.width,m.miniRadius[i]*(1-p));near(y[i]*g.height/base.height,m.miniRadius[i]*(1-p));near(clip.radii[i],m.miniRadius[i]*(1-p));}
+    assert.equal(m.backgroundMask.style.transform,'');assert.equal(m.backgroundContent.style.transform,'');assert.equal(m.backgroundMask.style.width,'393px');assert.equal(m.backgroundMask.style.height,'852px');
+  }
 });
 
 test('render-cost reduction preserves the existing settle timing instead of hiding work with shorter duration',()=>{
@@ -336,10 +339,10 @@ test('snapshot reference: frozen will-change:auto cannot disable the transient t
 test('both persistent masks retain every corner and full-content origin through an offset scene',()=>{
   const h=harness();h.list();h.$('#sc-player').rect={left:5,top:28,width:383,height:824};h.scene.begin('player',-1);const m=h.scene.state.morph;
   for(const p of [0,.001,.25,.5,.75,.999,1,.5,0]){h.shared.paint(m,p);
-    for(const [mask,node] of [[m.mask,m.content],[m.backgroundMask,m.backgroundContent]]){const result=revealBounds({mask,node}),[,,sx,sy]=transform(mask),[horizontal,vertical]=mask.style.borderRadius.split(' / ').map(value=>value.split(' ').map(parseFloat));
+    for(const [mask,node] of [[m.mask,m.content],[m.backgroundMask,m.backgroundContent]]){const result=revealBounds({mask,node});
       for(const key of ['left','top','width','height']){near(result.mask[key],m.geometry.surface[key]);near(result.content[key],m.endpoints.surface.full[key]);}
-      for(let i=0;i<4;i++){near(horizontal[i]*sx,m.miniRadius[i]*(1-p));near(vertical[i]*sy,m.miniRadius[i]*(1-p));}
-      assert.equal(mask.style.clipPath,'');
+      if(mask.style.clipPath){for(let i=0;i<4;i++)near(result.radii[i],m.miniRadius[i]*(1-p));assert.equal(mask.style.transform,'');assert.equal(node.style.transform,'');}
+      else{const [,,sx,sy]=transform(mask),[horizontal,vertical]=mask.style.borderRadius.split(' / ').map(value=>value.split(' ').map(parseFloat));for(let i=0;i<4;i++){near(horizontal[i]*sx,m.miniRadius[i]*(1-p));near(vertical[i]*sy,m.miniRadius[i]*(1-p));}}
     }
   }
   assert.equal(m.full.parentElement,m.content);assert.equal(m.background.parentElement,m.backgroundContent);assert.notEqual(m.mask,m.backgroundMask);
@@ -438,7 +441,7 @@ test('persistent cold and warm setup and steady frames never clone or inventory 
     assert.ok(h.cost.rectReads<=14,'only six endpoint pairs and glyph models are measured');assert.ok(h.cost.computedReads<=48,'setup reads bounded known-widget fields');
     h.resetCost();for(const p of [.25,.5,.75,1,.75,.5,.25,0])h.shared.paint(m,p);
     t.diagnostic((cold?'cold':'warm')+' persistent eight-frame counts: '+JSON.stringify({...h.cost,canvasCopies:h.draws()}));
-    assert.equal(h.cost.computedReads,0);assert.equal(h.cost.rectReads,0);assert.equal(h.cost.layoutWrites,0);assert.equal(h.cost.clipWrites,0);assert.equal(h.cost.clones,0);assert.equal(h.cost.styleEnumerations,0);assert.equal(h.cost.cssSerializations,0);assert.equal(h.draws(),0);
+    assert.equal(h.cost.computedReads,0);assert.equal(h.cost.rectReads,0);assert.equal(h.cost.layoutWrites,0);assert.equal(h.cost.clipWrites,8,'one rounded reveal-clip write per changed frame');assert.equal(h.cost.clones,0);assert.equal(h.cost.styleEnumerations,0);assert.equal(h.cost.cssSerializations,0);assert.equal(h.draws(),0);
     assert.ok(h.cost.styleWrites<=8*55,'eight fixed-widget frames have bounded presentation writes');assert.ok(h.cost.attributeWrites<=8*2,'only canonical accessibility roots are restamped');
     const geometry=plain(m.geometry),writes=h.cost.styleWrites;h.shared.paint(m,-1);assert.deepEqual(plain(m.geometry),geometry);assert.equal(h.cost.styleWrites-writes,6,'repeated clamped progress only reasserts duplicate suppression');
     h.scene.abort();h.frame(16);assert.equal(m.retired,true);assert.equal(h.frames.size,0);assert.equal(h.timers.size,0);assert.equal(h.shared.presenter,presenter);
@@ -460,3 +463,4 @@ test('outer tap navigation never hides the live mini before the first settling f
   assert.equal(m.pairs.art.mini,h.$('#mini-art'));assert.equal(m.input.hidden,false);
   h.frame(1000);assert.equal(m.retired,true);assert.equal(m.mini.hidden,true);
 });
+

@@ -6466,11 +6466,13 @@ Object.assign(SharedPlayerMotion,{
       // The authored joined dock has square top corners only while mini shows.
       const navFull=[navMini[2],navMini[3],navMini[2],navMini[3]];
       const model=this.models?.key===this.modelKey()?this.models:this.readModels(pairs,A),{appearances,artMiniSize,artFullSize,nativeSeekVisible}=model;
-      m={...presenter,opening,p:opening?0:1,endpoints,pairs,appearances,slide,overlay,A,B,artMiniSize,artFullSize,nativeSeekVisible,producerMiniArt:pairs.art.mini.style.backgroundImage,miniRadius,navRadius:{mini:navMini,full:navFull},artRadius,nav,dim,styles,focus,original,trackId:Engine.current.id,geometry:null,retired:false};
+      m={...presenter,opening,p:opening?0:1,endpoints,pairs,appearances,slide,overlay,A,B,artMiniSize,artFullSize,nativeSeekVisible,viewport:{width:innerWidth,height:innerHeight},producerMiniArt:pairs.art.mini.style.backgroundImage,miniRadius,navRadius:{mini:navMini,full:navFull},artRadius,nav,dim,styles,focus,original,trackId:Engine.current.id,geometry:null,retired:false};
       this.transaction=m;
       const base=endpoints.surface.mini,fullBox=endpoints.surface.full;
-      for(const node of [mask,backgroundMask])Object.assign(node.style,{inset:'auto',left:base.left+'px',top:base.top+'px',width:base.width+'px',height:base.height+'px'});
-      for(const node of [content,backgroundContent])Object.assign(node.style,{inset:'auto',left:'0',top:'0',width:fullBox.width+'px',height:fullBox.height+'px'});
+      Object.assign(mask.style,{inset:'auto',left:base.left+'px',top:base.top+'px',width:base.width+'px',height:base.height+'px'});
+      Object.assign(backgroundMask.style,{inset:'auto',left:'0',top:'0',width:innerWidth+'px',height:innerHeight+'px',borderRadius:'0'});
+      Object.assign(content.style,{inset:'auto',left:'0',top:'0',width:fullBox.width+'px',height:fullBox.height+'px'});
+      Object.assign(backgroundContent.style,{inset:'auto',left:fullBox.left+'px',top:fullBox.top+'px',width:fullBox.width+'px',height:fullBox.height+'px'});
       Object.assign(background.style,{left:-fullBox.left+'px',top:-fullBox.top+'px',width:innerWidth+'px',height:innerHeight+'px'});
       mini.dataset.sharedPlayer=full.dataset.sharedPlayer='1';mask.dataset.active=backgroundMask.dataset.active='1';input.hidden=backgroundMask.hidden=false;input.className='player-scene-input';mini.style.background='transparent';
       for(const [key,nodes] of Object.entries(pairs)){const node=nodes.mini,box=endpoints[key].mini;Object.assign(node.style,{position:'absolute',inset:'auto',left:(box.left-base.left)+'px',top:(box.top-base.top)+'px',width:box.width+'px',height:box.height+'px',margin:'0',minWidth:'0',minHeight:'0',maxWidth:'none',maxHeight:'none',transformOrigin:'0 0',transition:'none',willChange:'transform,opacity',zIndex:key==='art'?'20':'23'});if(key!=='art')nodes.full.style.opacity='0';}
@@ -6491,8 +6493,10 @@ Object.assign(SharedPlayerMotion,{
     p=clamp(p,0,1);if(m.geometry&&m.p===p)return;m.p=p;const g=this.sceneGeometry(m.endpoints,p);m.geometry=g;
     const base=m.endpoints.surface.mini,r=g.surface,full=m.endpoints.surface.full,sx=r.width/base.width,sy=r.height/base.height;
     const transform=`translate(${r.left-base.left}px,${r.top-base.top}px) scale(${sx},${sy})`,radius=m.miniRadius.map(value=>value*(1-p)/sx+'px').join(' ')+' / '+m.miniRadius.map(value=>value*(1-p)/sy+'px').join(' ');
-    for(const node of [m.mask,m.backgroundMask]){node.style.transform=transform;node.style.borderRadius=radius;}
-    for(const node of [m.content,m.backgroundContent])node.style.transform=`translate(${(full.left-r.left)/sx}px,${(full.top-r.top)/sy}px) scale(${1/sx},${1/sy})`;
+    m.mask.style.transform=transform;m.mask.style.borderRadius=radius;
+    m.content.style.transform=`translate(${(full.left-r.left)/sx}px,${(full.top-r.top)/sy}px) scale(${1/sx},${1/sy})`;
+    // The backdrop keeps one raster scale. Only its rounded reveal clip moves.
+    m.backgroundMask.style.clipPath=`inset(${r.top}px ${m.viewport.width-r.left-r.width}px ${m.viewport.height-r.top-r.height}px ${r.left}px round ${m.miniRadius.map(value=>value*(1-p)+'px').join(' ')})`;
     m.background.style.opacity=String(p);m.full.style.opacity=String(clamp((p-.8)/.2,0,1));m.mini.style.opacity='1';
     for(const [key,nodes] of Object.entries(m.pairs)){
       const node=nodes.mini,box=m.endpoints[key].mini,target=g[key];if(!box.width||!box.height){node.style.opacity='0';continue;}
