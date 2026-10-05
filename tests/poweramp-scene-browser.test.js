@@ -27,40 +27,44 @@ test('Poweramp mandatory Chromium scene, seek, and art contracts',{timeout:12000
         PA.Engine.playIndex=function(...args){rowPlayCalls.push(args);return original.apply(this,args);};
         window.touchTrace=[];document.addEventListener('pointerdown',e=>touchTrace.push({trusted:e.isTrusted,target:e.target.closest('[id]')?.id,row:!!e.target.closest('.trow')}),true);
       });
+      const tabstops=await page.evaluate(()=>({mini:document.querySelector('#mini').getAttribute('tabindex'),play:document.querySelector('#btn-play').getAttribute('tabindex')}));
       const miniArt=await bounds(page,'#mini-art'),p=await center('#mini-title');await start(p.x,p.y);
       for(const dy of [-20,-40,-60,-90]){await move(p.x,p.y+dy);await frame();}
       const duringDrag=await page.evaluate(()=>{const r=document.querySelector('#artstage').getBoundingClientRect();return {top:document.querySelector('#sc-player').getBoundingClientRect().top,height:document.querySelector('#sc-list').clientHeight,full:{left:r.left,top:r.top,width:r.width,height:r.height},miniOpacity:document.querySelector('#mini').style.opacity,fullOpacity:document.querySelector('#sc-player').style.opacity};});
       assertClose(duringDrag.top,0,1,'the canonical player does not slide in as an unrelated screen');
       const progress=90/duringDrag.height,expected=Object.fromEntries(['left','top','width','height'].map(key=>[key,miniArt[key]+(duringDrag.full[key]-miniArt[key])*progress]));
-      assertRectClose(await bounds(page,'.player-scene-art'),expected,3,'cover follows mini-to-player geometry');
-      assert.equal(duringDrag.miniOpacity,'0');assert.equal(duringDrag.fullOpacity,'0','only the shared layer paints the player');
+      assertRectClose(await bounds(page,'#mini[data-shared-player] #mini-art'),expected,3,'cover follows mini-to-player geometry');
+      assert.equal(duringDrag.miniOpacity,'1','the real mini widgets own the shared pixels');assert.equal(duringDrag.fullOpacity,'0','full-only controls stay hidden early in the morph');
+      assert.equal(await page.locator('#artA').evaluate(n=>n.style.opacity),'0','canonical artwork cannot duplicate the shared real cover');
+      assert.equal(await page.locator('#mini').evaluate(n=>n.getAttribute('tabindex')),'-1','captured mini remains event-capable without a competing keyboard stop');assert.equal(await page.locator('#btn-play').evaluate(n=>n.getAttribute('tabindex')),'-1');
       await end();
       const settling=await page.evaluate(()=>{
         const row=document.querySelector('#list-body .trow[data-i="2"]'),r=row.getBoundingClientRect(),x=r.x+r.width*.45,y=r.y+r.height/2;
         const hit=document.elementFromPoint(x,y);
-        return {cur:PA.Nav.cur,listInert:document.querySelector('#sc-list').inert,morphing:!!document.querySelector('.player-scene-layer'),x,y,hitRow:!!hit?.closest('.trow'),id:PA.Engine.current.id};
+        return {cur:PA.Nav.cur,listInert:document.querySelector('#sc-list').inert,morphing:!!document.querySelector('#player-live-mask[data-active]'),x,y,hitRow:!!hit?.closest('.trow'),id:PA.Engine.current.id};
       });
       assert.equal(settling.cur,'player','incoming player owns navigation as soon as release commits');
       assert.equal(settling.listInert,true,'outgoing list is inert throughout the settle');
       assert.equal(settling.morphing,true,'hit testing is checked while the shared morph is in flight');
       assert.equal(settling.hitRow,false,'uncovered outgoing rows cannot receive pointer input');
       const requests=fixture.requests.audio;await h.tap(settling.x,settling.y);
-      await page.waitForFunction(()=>document.querySelector('#sc-list').hidden&&!document.querySelector('.player-scene-layer'));
+      await page.waitForFunction(()=>document.querySelector('#sc-list').hidden&&!document.querySelector('#player-live-mask[data-active]'));
       assert.equal(await page.evaluate(()=>PA.Engine.current.id),settling.id);
       assert.deepEqual(await page.evaluate(()=>rowPlayCalls),[],'settling touch cannot play a background row');
       assert.equal(fixture.requests.audio,requests,'background touch cannot load audio');
+      assert.deepEqual(await page.evaluate(()=>({mini:document.querySelector('#mini').getAttribute('tabindex'),play:document.querySelector('#btn-play').getAttribute('tabindex')})),tabstops,'cleanup restores exact canonical keyboard stops');
       assert.equal(await page.evaluate(()=>touchTrace.every(e=>e.trusted)),true,'input comes from CDP touch, not synthetic JS events');
     });
 
     await run('mini tap and drag both start from the same mini cover and expanding surface',async h=>{
       const {page,library,center,tap}=h;await library();
       const mini=await bounds(page,'#mini'),art=await bounds(page,'#mini-art');
-      await page.evaluate(()=>{window.releasePosition=null;document.addEventListener('pointerup',e=>{if(e.target.closest('#mini')){const rect=n=>{const r=n.getBoundingClientRect();return {left:r.left,top:r.top,width:r.width,height:r.height};};releasePosition={cur:PA.Nav.cur,cover:rect(document.querySelector('.player-scene-art')),surface:rect(document.querySelector('.player-scene-surface')),inert:document.querySelector('#sc-list').inert,trusted:e.isTrusted};}});});
+      await page.evaluate(()=>{window.releasePosition=null;document.addEventListener('pointerup',e=>{if(e.target.closest('#mini')){const rect=n=>{const r=n.getBoundingClientRect();return {left:r.left,top:r.top,width:r.width,height:r.height};};releasePosition={cur:PA.Nav.cur,cover:rect(document.querySelector('#mini[data-shared-player] #mini-art')),surface:rect(document.querySelector('#player-live-mask[data-active]')),inert:document.querySelector('#sc-list').inert,trusted:e.isTrusted};}});});
       const p=await center('#mini-title');await tap(p.x,p.y);
       const release=await page.evaluate(()=>releasePosition);
       assert.ok(release?.trusted);assert.equal(release.cur,'player');assert.equal(release.inert,true);
       assertRectClose(release.cover,art,2,'tap starts with the actual mini cover');assertRectClose(release.surface,mini,2,'tap starts with the actual mini panel');
-      await page.waitForFunction(()=>document.querySelector('#sc-list').hidden&&!document.querySelector('.player-scene-layer'));
+      await page.waitForFunction(()=>document.querySelector('#sc-list').hidden&&!document.querySelector('#player-live-mask[data-active]'));
       assert.equal(await page.evaluate(()=>PA.Engine.current.id),'r2_fixture_0');
     });
 
@@ -72,39 +76,39 @@ test('Poweramp mandatory Chromium scene, seek, and art contracts',{timeout:12000
       for(const progress of [.25,.5,.75]){
         await move(p.x,p.y-endpoint.height*progress);await frame();
         const lerp=(a,b)=>Object.fromEntries(['left','top','width','height'].map(key=>[key,a[key]+(b[key]-a[key])*progress]));
-        assertRectClose(await bounds(page,'.player-scene-art'),lerp(miniArt,endpoint.art),3,'cover@'+progress);
-        assertRectClose(await bounds(page,'.player-scene-surface'),lerp(miniPanel,endpoint.surface),3,'surface@'+progress);
-        for(const selector of ['.player-scene-background','.player-scene-full']){
-          assertRectClose(await bounds(page,selector),selector.endsWith('background')?background:endpoint.surface,2,'inverse content remains viewport-stationary@'+progress);
-          const mask=await page.locator(selector).evaluate(n=>{const b=n.parentElement.getBoundingClientRect(),cs=getComputedStyle(n);return {bounds:{left:b.left,top:b.top,width:b.width,height:b.height},clip:cs.clipPath,hint:cs.willChange};});
-          assertRectClose(mask.bounds,lerp(miniPanel,endpoint.surface),2,'mask shares exact shell@'+progress);assert.equal(mask.clip,'none');assert.deepEqual(mask.hint.split(',').map(s=>s.trim()),['transform','opacity']);
+        assertRectClose(await bounds(page,'#mini[data-shared-player] #mini-art'),lerp(miniArt,endpoint.art),3,'cover@'+progress);
+        assertRectClose(await bounds(page,'#player-live-mask[data-active]'),lerp(miniPanel,endpoint.surface),3,'surface@'+progress);
+        for(const selector of ['#player-live-background','#sc-player']){
+          assertRectClose(await bounds(page,selector),selector==='#player-live-background'?background:endpoint.surface,2,'inverse content remains viewport-stationary@'+progress);
+          const mask=await page.locator(selector).evaluate(n=>{const b=n.closest('#player-live-mask,#player-live-backdrop-mask').getBoundingClientRect(),cs=getComputedStyle(n.parentElement);return {bounds:{left:b.left,top:b.top,width:b.width,height:b.height},clip:cs.clipPath,hint:cs.willChange};});
+          assertRectClose(mask.bounds,lerp(miniPanel,endpoint.surface),2,'mask shares exact shell@'+progress);assert.equal(mask.clip,'none');assert.ok(mask.hint.includes('transform'),'the live content retains its compositor transform hint');
         }
-        assert.equal(await page.evaluate(()=>document.querySelector('#mini').style.opacity),'0');
+        assert.equal(await page.evaluate(()=>document.querySelector('#mini').style.opacity),'1');
       }
-      await end();await page.waitForFunction(()=>!document.querySelector('.player-scene-layer'));
+      await end();await page.waitForFunction(()=>!document.querySelector('#player-live-mask[data-active]'));
       assertRectClose(await bounds(page,'#artstage'),endpoint.art,2,'canonical endpoint');assert.equal(await page.evaluate(()=>PA.Nav.cur),'player');
     });
 
     await run('shared-scene regrab freezes the painted cover and held release resumes destination',async h=>{
       const {page,library,center,start,move,end,frame}=h;await library();
-      const p=await center('#mini-title');await start(p.x,p.y);await move(p.x,p.y-100);await frame();await end();
+      const p=await center('#mini-title');await start(p.x,p.y);await move(p.x,p.y-100);await frame();
       await page.evaluate(()=>{
         window.interruption=null;document.addEventListener('pointerdown',e=>{
           if(!e.target.closest('.player-scene-input'))return;
-          const rect=()=>{const r=document.querySelector('.player-scene-art').getBoundingClientRect();return {left:r.left,top:r.top,width:r.width,height:r.height};};
+          const rect=()=>{const r=document.querySelector('#mini[data-shared-player] #mini-art').getBoundingClientRect();return {left:r.left,top:r.top,width:r.width,height:r.height};};
           interruption={before:rect(),trusted:e.isTrusted};
         },true);
       });
-      await page.evaluate(()=>document.addEventListener('pointerdown',e=>{if(!e.target.closest('.player-scene-input')||!interruption)return;const r=document.querySelector('.player-scene-art').getBoundingClientRect();interruption.after={left:r.left,top:r.top,width:r.width,height:r.height};}));
-      await start(3,100);const capture=await page.evaluate(()=>interruption);
+      await page.evaluate(()=>document.addEventListener('pointerdown',e=>{if(!e.target.closest('.player-scene-input')||!interruption)return;const r=document.querySelector('#mini[data-shared-player] #mini-art').getBoundingClientRect();interruption.after={left:r.left,top:r.top,width:r.width,height:r.height};}));
+      const release=end(),regrab=start(3,100);await Promise.all([release,regrab]);const capture=await page.evaluate(()=>interruption);
       assert.ok(capture?.trusted,'new contact reaches the shared scene plane while settling');
       assertRectClose(capture.after,capture.before,2,'regrab preserves painted cover');
-      const held=await bounds(page,'.player-scene-art');await page.waitForTimeout(280);assertRectClose(await bounds(page,'.player-scene-art'),held,1,'held scene remains frozen');
+      const held=await bounds(page,'#mini[data-shared-player] #mini-art');await page.waitForTimeout(280);assertRectClose(await bounds(page,'#mini[data-shared-player] #mini-art'),held,1,'held scene remains frozen');
       assert.equal(await page.evaluate(()=>PA.Nav.cur),'player');await end();
-      await page.waitForFunction(()=>!document.querySelector('.player-scene-layer'));
+      await page.waitForFunction(()=>!document.querySelector('#player-live-mask[data-active]'));
       assert.equal(await page.evaluate(()=>PA.Nav.cur),'player');assert.equal(await page.locator('#sc-list').evaluate(n=>n.hidden),true);
       await library();await h.swipe('#mini-title',0,-110);
-      await page.waitForFunction(()=>PA.Nav.cur==='player'&&document.querySelector('#sc-list').hidden&&!document.querySelector('.player-scene-layer'));
+      await page.waitForFunction(()=>PA.Nav.cur==='player'&&document.querySelector('#sc-list').hidden&&!document.querySelector('#player-live-mask[data-active]'));
       assert.equal(await page.evaluate(()=>PA.Engine.current.id),'r2_fixture_0');
     });
 

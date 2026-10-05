@@ -18,7 +18,7 @@ export function installFixtureInputTrace(){
   window.fixtureInputTrace=[];
   for(const type of ['pointerdown','pointermove','pointerup','pointercancel','gotpointercapture','lostpointercapture','touchstart','touchmove','touchend','touchcancel','click']){
     document.addEventListener(type,e=>{
-      const p=e.touches?.[0]||e.changedTouches?.[0]||e,record={type,target:label(e.target),trusted:e.isTrusted,pointer:e.pointerId,pointerType:e.pointerType||(e.touches?'touch':null),x:p.clientX,y:p.clientY,at_ms:performance.now(),observation:'capture',before:owner(e.pointerId)};
+      const p=e.touches?.[0]||e.changedTouches?.[0]||e,record={type,target:label(e.target),miniTitle:!!e.target.closest?.('#mini-title'),trusted:e.isTrusted,pointer:e.pointerId,pointerType:e.pointerType||(e.touches?'touch':null),x:p.clientX,y:p.clientY,at_ms:performance.now(),observation:'capture',before:owner(e.pointerId)};
       if(type==='gotpointercapture')captures.set(e.pointerId,label(e.target));
       if(type==='lostpointercapture'&&captures.get(e.pointerId)===label(e.target))captures.delete(e.pointerId);
       records.set(e,record);fixtureInputTrace.push(record);if(fixtureInputTrace.length>80)fixtureInputTrace.shift();
@@ -145,7 +145,7 @@ export async function openFixturePage(browser,fixture,options={}){
       gesture:typeof InputLifecycle!=='undefined'?{owner:label(InputLifecycle.gesture?.node),phase:InputLifecycle.gesture?.phase,contacts:Array.from(InputLifecycle.contacts),version:InputLifecycle.version}:null,
       scene:scene?{from:scene.fromName,target:scene.target,phase:ScreenDrag.phase,progress:scene.progress,height:scene.height,commit:scene.commit,shared:scene.morph?.p,pending:!!ScreenDrag.finish?.pending}:null,
       history:history?{index:PA.LibraryPageHistory.index,x:history.x,base:history.base,y:history.y,width:history.width,delta:history.delta,commit:history.commit,target:history.target?.screen,pending:!!PA.LibraryPageMotion.finish?.pending}:null,
-      time:PA.Engine.time(),scrubbing:PA.UI.seekDragging,pageErrors:[],probes:{libraryInterruption:window.libraryInterruption||null,crossAxisTrace:window.crossAxisTrace||null},nodes:Object.fromEntries(['#sc-player','#sc-library','#sc-list','#list-body','#mini','#mini-title','#mini-seek','#transport','.player-scene-input','.player-scene-art','#library-page-motion'].map(selector=>[selector,document.querySelector(selector)?rect(document.querySelector(selector)):null])),trace:window.fixtureInputTrace||[]};
+      time:PA.Engine.time(),scrubbing:PA.UI.seekDragging,pageErrors:[],probes:{libraryInterruption:window.libraryInterruption||null,crossAxisTrace:window.crossAxisTrace||null},nodes:Object.fromEntries(['#sc-player','#sc-library','#sc-list','#list-body','#mini','#mini-title','#mini-seek','#transport','.player-scene-input','#mini[data-shared-player] #mini-art','#player-live-mask','#player-live-backdrop-mask','#library-page-motion'].map(selector=>[selector,document.querySelector(selector)?rect(document.querySelector(selector)):null])),trace:window.fixtureInputTrace||[]};
   },{lastPoint,lastTarget}).then(result=>({...result,pageErrors:errors.slice()}));
   try{await settled('player');}catch(error){await reportFixtureFailure({diagnostics,page},error,'fixture player endpoint readiness');await context.close();throw error;}
   return {context,page,cdp,errors,point,send,start,move,end,tap,frame,center,swipe,library,settled,diagnostics,close:()=>context.close()};

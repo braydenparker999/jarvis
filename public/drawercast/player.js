@@ -6450,8 +6450,9 @@ Object.assign(SharedPlayerMotion,{
     const {mini,full,mask,content,backgroundMask,backgroundContent,input,background}=presenter,nav=$('#nav'),dim=$('#bg-dim');
     const original={miniHidden:mini.hidden,miniInert:mini.inert,miniAria:mini.getAttribute('aria-hidden'),fullHidden:full.hidden,fullInert:full.inert,fullAria:full.getAttribute('aria-hidden')};
     const pairs={art:{mini:$('#mini-art'),full:$('#artstage')},title:{mini:$('#mini-title'),full:$('#p-title')},sub:{mini:$('#mini-sub'),full:$('#p-sub')},play:{mini:$('#mini-play'),full:$('#btn-play')},seek:{mini:$('#mini-seek'),full:$('#seek')}};
-    const motionKeys=['position','inset','left','top','width','height','margin','overflow','max-width','max-height','min-width','min-height','padding','border-width','border-color','border-style','color','transform','transform-origin','transition','opacity','will-change','z-index','border-radius','background','background-image','background-size','box-shadow'];
+    const motionKeys=['position','inset','left','top','width','height','margin','overflow','max-width','max-height','min-width','min-height','padding','border-width','border-color','border-style','color','transform','transform-origin','transition','opacity','will-change','z-index','border-radius','border-top-left-radius','border-top-right-radius','border-bottom-right-radius','border-bottom-left-radius','background','background-image','background-size','box-shadow'];
     const slide=mini.querySelector('.mini-swipe-content'),overlay=$('.art-ov'),A=$('#artA'),B=$('#artB');
+    const focus=[mini,...mini.querySelectorAll('button,input,select,textarea,a[href],[tabindex]'),...full.querySelectorAll('button,input,select,textarea,a[href],[tabindex]')].filter(node=>node===mini||node.tabIndex>=0||['BUTTON','INPUT','SELECT','TEXTAREA','A'].includes(node.tagName)).map(node=>({node,tabindex:node.getAttribute('tabindex')}));
     const styles=[mini,full,dim,nav,slide,overlay,A,B,...Object.values(pairs).flatMap(pair=>[pair.mini,pair.full])].filter(Boolean).map(node=>this.styleSnapshot(node,motionKeys));
     let m=null;this.settingUp=true;
     try{
@@ -6463,7 +6464,7 @@ Object.assign(SharedPlayerMotion,{
       // The authored joined dock has square top corners only while mini shows.
       const navFull=[navMini[2],navMini[3],navMini[2],navMini[3]];
       const model=this.models?.key===this.modelKey()?this.models:this.readModels(pairs,A),{appearances,artMiniSize,artFullSize,nativeSeekVisible}=model;
-      m={...presenter,opening,p:opening?0:1,endpoints,pairs,appearances,slide,overlay,A,B,artMiniSize,artFullSize,nativeSeekVisible,producerMiniArt:pairs.art.mini.style.backgroundImage,miniRadius,navRadius:{mini:navMini,full:navFull},artRadius,nav,dim,styles,original,trackId:Engine.current.id,geometry:null,retired:false};
+      m={...presenter,opening,p:opening?0:1,endpoints,pairs,appearances,slide,overlay,A,B,artMiniSize,artFullSize,nativeSeekVisible,producerMiniArt:pairs.art.mini.style.backgroundImage,miniRadius,navRadius:{mini:navMini,full:navFull},artRadius,nav,dim,styles,focus,original,trackId:Engine.current.id,geometry:null,retired:false};
       this.transaction=m;
       const base=endpoints.surface.mini,fullBox=endpoints.surface.full;
       for(const node of [mask,backgroundMask])Object.assign(node.style,{inset:'auto',left:base.left+'px',top:base.top+'px',width:base.width+'px',height:base.height+'px'});
@@ -6475,12 +6476,13 @@ Object.assign(SharedPlayerMotion,{
       if(slide){slide.style.transform='none';slide.style.willChange='auto';}A.style.opacity=B.style.opacity='0';pairs.art.full.style.overflow='visible';
       for(const key of ['title','sub']){const node=pairs[key].mini,span=node.firstElementChild;m.styles.push(this.styleSnapshot(span,['position','left','top','display','transform','transform-origin','font-family','font-size','font-weight','line-height','letter-spacing','white-space','max-width']));Object.assign(span.style,{position:'absolute',left:'0',top:'0',display:'block',transformOrigin:'0 0',fontSize:appearances[key].mini.fontSize+'px',whiteSpace:'nowrap',maxWidth:'none'});node.style.padding='0';node.style.overflow='hidden';}
       if(overlay){overlay.style.transformOrigin='0 0';overlay.style.transition='none';}full.style.zIndex='2';this.paint(m,m.p);this.ownGlyph(m);this.paintArtwork(m);return m;
-    }catch(error){this.clean(m||{...presenter,styles,original,retired:false});throw error;}
+    }catch(error){this.clean(m||{...presenter,styles,focus,original,retired:false});throw error;}
     finally{this.settingUp=false;if(!m){for(const snapshot of styles)this.restore(snapshot);mini.hidden=original.miniHidden;full.hidden=original.fullHidden;}}
   },
   lockOriginals(m){
     const gesture=typeof InputLifecycle!=='undefined'?InputLifecycle.gesture:null,owner=gesture?.node;
     for(const node of [m.mini,m.full]){const held=owner&&(owner===node||node.contains?.(owner))&&owner.hasPointerCapture?.(gesture.id);node.inert=!held;node.setAttribute('aria-hidden','true');}
+    for(const item of m.focus||[])if(item.node.getAttribute('tabindex')!=='-1')item.node.setAttribute('tabindex','-1');
   },
   paint(m,p){
     if(m.retired)return;this.lockOriginals(m);m.mini.hidden=m.full.hidden=false;m.A.style.opacity=m.B.style.opacity='0';for(const [key,nodes] of Object.entries(m.pairs))if(key!=='art')nodes.full.style.opacity='0';
@@ -6508,6 +6510,7 @@ Object.assign(SharedPlayerMotion,{
     // The live library was never hidden, moved, cloned or detached by this owner.
     m.releaseInput?.();m.input.hidden=m.backgroundMask.hidden=true;m.input.className='';delete m.mask.dataset.active;delete m.backgroundMask.dataset.active;for(const node of [m.mask,m.content,m.backgroundMask,m.backgroundContent,m.background])node.removeAttribute('style');
     for(const snapshot of m.styles||[])this.restore(snapshot);
+    for(const item of m.focus||[])if(item.tabindex==null)item.node.removeAttribute('tabindex');else item.node.setAttribute('tabindex',item.tabindex);
     if(m.pairs?.art?.mini){const node=m.pairs.art.mini;node.style.backgroundImage=m.producerMiniArt||'';const ph=node.querySelector('.ph');if(ph)ph.style.display=m.producerMiniArt?'none':'grid';}
     delete m.mini.dataset.sharedPlayer;delete m.full.dataset.sharedPlayer;
     m.mini.style.removeProperty('opacity');m.full.style.removeProperty('opacity');m.mini.style.removeProperty('transform');m.full.style.removeProperty('transform');

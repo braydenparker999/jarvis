@@ -66,7 +66,7 @@ test('Poweramp mandatory Chromium library history contracts',{timeout:120000},as
       const before=await page.locator('#list-body').evaluate(body=>({top:body.scrollTop,ids:Array.from(body.querySelectorAll('.trow')).map(row=>row.dataset.id)}));
       assert.ok(before.top>100000);assert.ok(before.ids.length>0&&before.ids.length<100);
       const mini=await center('#mini-title');await tap(mini.x,mini.y);await settled('player');
-      assert.ok(await page.evaluate(()=>fixtureInputTrace.some(event=>event.type==='pointerdown'&&event.target.includes('#mini-title')&&event.trusted)),'leaving the saved viewport uses a real trusted mini title contact');
+      assert.ok(await page.evaluate(()=>fixtureInputTrace.some(event=>event.type==='pointerdown'&&event.miniTitle&&event.trusted)),'leaving the saved viewport uses a real trusted mini title contact');
       await page.locator('[data-nav="library"]').tap();await settled('library');
       await page.getByRole('button',{name:'Albums',exact:true}).tap();await settled('list');
       assert.equal(await page.evaluate(()=>PA.Views.currentSpec.kind),'albums');

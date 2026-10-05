@@ -46,7 +46,7 @@ jobs:
           export JARVIS_CHROME="$(command -v google-chrome || command -v chromium)"
           test -n "$JARVIS_CHROME"
           npm test
-      - name: Measure isolated Poweramp snapshot setup
+      - name: Measure isolated cold and playing Poweramp input setup
         if: always()
         env:
           POWERAMP_EVIDENCE_DIR: ${{ runner.temp }}/poweramp-browser

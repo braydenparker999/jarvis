@@ -59,7 +59,7 @@ test('Poweramp downloaded preview trusted mini motion and operation evidence',{t
           await page.getByRole('button',{name:'Close',exact:true}).click();
           assert.ok(report.operations?.some(operation=>operation.operation==='shared.create'&&operation.phase==='shared:setup:expand'),'report includes the real shared-player setup work');
           assert.equal(report.final.screen,'player');assert.equal(report.final.scene,null);
-          const trace=await page.evaluate(()=>fixtureInputTrace);assert.ok(trace.some(event=>event.type==='pointerdown'&&event.target.includes('#mini-title')&&event.trusted));assert.ok(trace.every(event=>event.trusted));
+          const trace=await page.evaluate(()=>fixtureInputTrace);assert.ok(trace.some(event=>event.type==='pointerdown'&&event.miniTitle&&event.trusted));assert.ok(trace.every(event=>event.trusted));
           assert.ok(trace.some(event=>event.type==='click'&&event.target.includes('#preview-help')&&event.trusted),'readback uses a real trusted Help click');
           reports.push({label,...report});
         };
@@ -70,15 +70,15 @@ test('Poweramp downloaded preview trusted mini motion and operation evidence',{t
         await library();let p=await target();
         await measure('held-mini-drag',async()=>{
           await start(p.x,p.y);for(const dy of [16,40,75,110]){await move(p.x,p.y-dy);await frame();}
-          assert.ok(await page.locator('.player-scene-art').count(),'held real mini drag must create the shared painted layer');
+          assert.equal(await page.locator('#mini[data-shared-player] #mini-art').count(),1,'held drag keeps exactly one real shared artwork owner');
           assert.equal(await page.evaluate(()=>PA.Nav.cur),'list');await end();assert.equal(await page.evaluate(()=>PA.Nav.cur),'player');
         });
         await library();p=await target();
         await measure('regrab-mini-settle',async()=>{
-          await start(p.x,p.y);await move(p.x,p.y-110);await frame();await end();
-          assert.equal(await page.evaluate(()=>PA.Nav.cur),'player');await start(3,100);
-          const frozen=await page.locator('.player-scene-art').boundingBox();assert.ok(frozen);
-          await page.waitForTimeout(280);const held=await page.locator('.player-scene-art').boundingBox();assert.ok(held);
+          await start(p.x,p.y);await move(p.x,p.y-110);await frame();const release=end(),regrab=start(3,100);await Promise.all([release,regrab]);
+          assert.equal(await page.evaluate(()=>PA.Nav.cur),'player');
+          const frozen=await page.locator('#mini[data-shared-player] #mini-art').boundingBox();assert.ok(frozen);
+          await page.waitForTimeout(280);const held=await page.locator('#mini[data-shared-player] #mini-art').boundingBox();assert.ok(held);
           for(const key of ['x','y','width','height'])assert.ok(Math.abs(frozen[key]-held[key])<2,'regrab freezes '+key);
           const trace=await page.evaluate(()=>fixtureInputTrace);assert.ok(trace.some(event=>event.type==='pointerdown'&&event.target.includes('player-scene-input')&&event.trusted),'regrab hits the actual shared scene plane');await end();
         });

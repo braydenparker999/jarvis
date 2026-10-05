@@ -6,10 +6,10 @@ import {readFileSync} from 'node:fs';
 const source=readFileSync(process.env.POWERAMP_PLAYER_FILE||new URL('../public/drawercast/player.js',import.meta.url),'utf8');
 const start=source.indexOf('const SharedPlayerMotion=');
 const end=source.indexOf('const ScreenDrag=',start);
-function motionHarness(extra={}){
+function motionHarness({reference=false,...extra}={}){
   assert.ok(start>=0&&end>start,'The shared-player motion implementation is present');
   const context=vm.createContext({clamp:(v,a,b)=>Math.max(a,Math.min(b,v)),...extra});
-  vm.runInContext(source.slice(start,end)+'\nglobalThis.motion=SharedPlayerMotion;',context);
+  vm.runInContext(source.slice(start,end)+'\nglobalThis.motion='+(reference?'SnapshotReferenceMotion':'SharedPlayerMotion')+';',context);
   return {context,motion:context.motion};
 }
 const rect=(left,top,width,height)=>({left,top,width,height});
@@ -121,7 +121,7 @@ function fakeNode(){
     removeProperty(key){values.delete(key);priorities.delete(key);}};
   const style=new Proxy(methods,{get(object,key){return key in object?object[key]:values.get(property(key))||'';},
     set(object,key,value){values.set(property(key),String(value));priorities.set(property(key),'');return true;}});
-  return {style,hidden:false,inert:false,dataset:{},setAttribute:(key,value)=>attrs.set(key,String(value)),getAttribute:key=>attrs.get(key)??null,removeAttribute:key=>attrs.delete(key),remove(){this.removed=true;}};
+  return {style,hidden:false,inert:false,dataset:{},setAttribute:(key,value)=>attrs.set(key,String(value)),getAttribute:key=>attrs.get(key)??null,removeAttribute(key){attrs.delete(key);if(key==='style'){values.clear();priorities.clear();}},querySelector(){return null;},remove(){this.removed=true;}};
 }
 function paintedRect(node){
   const r=rect(parseFloat(node.style.left),parseFloat(node.style.top),parseFloat(node.style.width),parseFloat(node.style.height));
@@ -138,8 +138,8 @@ function paintedMorph(){
     miniRadius:[29,29,0,0],artRadius:{mini:[12,12,12,12],full:[60,60,60,60]},navRadius:{mini:[0,0,29,29],full:[29,29,29,29]}};
 }
 
-test('runtime paint applies shared geometry and suppresses every canonical duplicate at each checkpoint',()=>{
-  const {motion}=motionHarness({SET:{listBg:true}}),m=paintedMorph();
+test('snapshot reference: runtime paint applies shared geometry and suppresses every canonical duplicate at each checkpoint',()=>{
+  const {motion}=motionHarness({reference:true,SET:{listBg:true}}),m=paintedMorph();
   for(const p of [0,.25,.5,.75,1]){
     motion.paint(m,p);
     expectRect(paintedRect(m.surface),endpoints.surface.mini,endpoints.surface.full,p,`painted shell@${p}`);
@@ -151,8 +151,8 @@ test('runtime paint applies shared geometry and suppresses every canonical dupli
   }
 });
 
-test('invisible canonical controls remain inert and excluded from accessibility while the morph owns display',()=>{
-  const {motion}=motionHarness({SET:{listBg:true}}),m=paintedMorph();
+test('snapshot reference: invisible canonical controls remain inert and excluded from accessibility while the morph owns display',()=>{
+  const {motion}=motionHarness({reference:true,SET:{listBg:true}}),m=paintedMorph();
   motion.paint(m,.5);
   for(const node of [m.mini,m.full]){
     assert.equal(node.inert,true,'canonical controls cannot receive keyboard focus behind the shared paint');
@@ -160,8 +160,8 @@ test('invisible canonical controls remain inert and excluded from accessibility 
   }
 });
 
-test('cleanup retires transient layers and restores preserved inline styles and mini ownership',()=>{
-  const {motion}=motionHarness({Nav:{cur:'list'},Engine:{current:{id:'fixture'}},SET:{listBg:true}}),m=paintedMorph();
+test('snapshot reference: cleanup retires transient layers and restores preserved inline styles and mini ownership',()=>{
+  const {motion}=motionHarness({reference:true,Nav:{cur:'list'},Engine:{current:{id:'fixture'}},SET:{listBg:true}}),m=paintedMorph();
   m.layer=fakeNode();m.input=fakeNode();m.original={miniInert:false,miniAria:null};
   m.mini.style.setProperty('opacity','.85','important');m.dim.style.setProperty('opacity','.2');
   m.styles=[motion.styleSnapshot(m.mini,['opacity','transform']),motion.styleSnapshot(m.dim,['opacity'])];
@@ -172,4 +172,54 @@ test('cleanup retires transient layers and restores preserved inline styles and 
   assert.equal(m.dim.style.getPropertyValue('opacity'),'.2');assert.equal(m.mini.style.getPropertyValue('transform'),'');
   assert.equal(m.mini.dataset.sharedPlayer,undefined);assert.equal(m.full.dataset.sharedPlayer,undefined);
   assert.equal(m.mini.hidden,false);assert.equal(m.mini.inert,false);assert.equal(m.mini.getAttribute('aria-hidden'),null);
+});
+
+
+// The production transaction borrows the actual mini widgets and the mounted
+// full screen. Snapshot-shaped fixtures above deliberately exercise only the
+// retained visual-baseline implementation.
+function persistentMorph(){
+  const pairNodes={};for(const key of ['art','title','sub','play','seek']){pairNodes[key]={mini:fakeNode(),full:fakeNode()};const box=endpoints[key].mini;Object.assign(pairNodes[key].mini.style,{left:box.left+'px',top:box.top+'px',width:box.width+'px',height:box.height+'px'});}
+  for(const key of ['title','sub'])pairNodes[key].mini.firstElementChild=fakeNode();
+  const appearance={fontFamily:'Fixture Sans',fontSize:16,fontWeight:700,lineHeight:19.2,color:'white',background:'transparent',borderColor:'#666',borderWidth:0,padding:{left:0,top:0},radius:[0,0,0,0]};
+  const appearances={};for(const key of ['title','sub','play'])appearances[key]={mini:{...appearance},full:{...appearance,fontSize:28,lineHeight:33.6}};
+  return {p:0,endpoints,pairs:pairNodes,appearances,mini:fakeNode(),full:fakeNode(),A:fakeNode(),B:fakeNode(),mask:fakeNode(),content:fakeNode(),backgroundMask:fakeNode(),backgroundContent:fakeNode(),background:fakeNode(),input:fakeNode(),dim:fakeNode(),nav:fakeNode(),styles:[],original:{},retired:false,
+    miniRadius:[29,29,0,0],artRadius:{mini:[12,12,12,12],full:[60,60,60,60]},navRadius:{mini:[0,0,29,29],full:[29,29,29,29]},artMiniSize:'cover',artFullSize:'contain',nativeSeekVisible:true};
+}
+function persistentHarness(m){
+  return motionHarness({SET:{listBg:true},Nav:{cur:'list'},Engine:{current:{id:'fixture'}},DockLayout:{schedule(){}},$:selector=>selector==='#artA'?m.A:null});
+}
+function transformedBox(node,base){
+  const match=/translate\(([-\d.e+]+)px,([-\d.e+]+)px\) scale\(([-\d.e+]+),([-\d.e+]+)\)/.exec(node.style.transform||'');assert.ok(match,node.style.transform);
+  return rect(base.left+ +match[1],base.top+ +match[2],base.width* +match[3],base.height* +match[4]);
+}
+
+test('persistent paint has one actual widget owner and exact geometry at every checkpoint',()=>{
+  const m=persistentMorph(),{motion}=persistentHarness(m),owners=Object.fromEntries(Object.entries(m.pairs).map(([key,pair])=>[key,pair.mini]));
+  for(const p of [0,.001,.25,.5,.75,.8,.9,.999,1,.5,0]){
+    motion.paint(m,p);
+    for(const mask of [m.mask,m.backgroundMask])expectRect(transformedBox(mask,endpoints.surface.mini),endpoints.surface.mini,endpoints.surface.full,p,`persistent shell@${p}`);
+    for(const [key,pair] of Object.entries(m.pairs)){assert.equal(pair.mini,owners[key]);expectRect(paintedRect(pair.mini),endpoints[key].mini,endpoints[key].full,p,`actual ${key}@${p}`);assert.equal(pair.mini.style.opacity,'1');if(key!=='art')assert.equal(pair.full.style.opacity,'0');}
+    assert.equal(m.A.style.opacity,'0');assert.equal(m.B.style.opacity,'0');assert.equal(m.mini.style.opacity,'1');assert.equal(m.background.style.opacity,String(p));
+    assert.ok(Math.abs(Number(m.full.style.opacity)-Math.max(0,Math.min(1,(p-.8)/.2)))<1e-9,'full-only controls reveal late without exposing shared duplicates');
+  }
+});
+
+test('persistent canonical controls stay inert and inaccessible while the shared owner paints',()=>{
+  const m=persistentMorph(),{motion}=persistentHarness(m);motion.paint(m,.5);
+  for(const node of [m.mini,m.full]){assert.equal(node.inert,true);assert.equal(node.getAttribute('aria-hidden'),'true');}
+  for(const pair of Object.values(m.pairs))assert.equal(pair.mini.removed,undefined,'actual widgets remain mounted');
+});
+
+test('persistent cleanup is idempotent and resets presentation without removing live nodes',()=>{
+  const m=persistentMorph(),{motion}=persistentHarness(m);let releases=0;
+  m.releaseInput=()=>releases++;m.mini.style.setProperty('width','375px','important');m.dim.style.setProperty('opacity','.2');m.styles=[motion.styleSnapshot(m.mini,['width']),motion.styleSnapshot(m.dim,['opacity'])];
+  m.mini.dataset.sharedPlayer=m.full.dataset.sharedPlayer='1';m.mask.dataset.active=m.backgroundMask.dataset.active='1';
+  motion.paint(m,.4);motion.clean(m);motion.clean(m);
+  assert.equal(m.retired,true);assert.equal(releases,1);assert.equal(m.input.hidden,true);assert.equal(m.backgroundMask.hidden,true);assert.equal(m.mask.dataset.active,undefined);assert.equal(m.backgroundMask.dataset.active,undefined);
+  for(const node of [m.mask,m.content,m.backgroundMask,m.backgroundContent,m.background,m.input,m.mini,m.full,...Object.values(m.pairs).flatMap(pair=>[pair.mini,pair.full])])assert.equal(node.removed,undefined);
+  assert.equal(m.mask.style.transform,'');assert.equal(m.content.style.transform,'');assert.equal(m.mini.style.width,'375px');assert.equal(m.mini.style.getPropertyPriority('width'),'important');assert.equal(m.dim.style.opacity,'.2');
+  assert.equal(m.mini.style.opacity,'');assert.equal(m.full.style.opacity,'');assert.equal(m.mini.dataset.sharedPlayer,undefined);assert.equal(m.full.dataset.sharedPlayer,undefined);
+  assert.equal(m.mini.hidden,false);assert.equal(m.mini.inert,false);assert.equal(m.mini.getAttribute('aria-hidden'),'false');assert.equal(m.full.hidden,true);assert.equal(m.full.inert,true);assert.equal(m.full.getAttribute('aria-hidden'),'true');
+  const transform=m.pairs.art.mini.style.transform;motion.paint(m,1);assert.equal(m.pairs.art.mini.style.transform,transform,'a retired owner cannot repaint live widgets');
 });
