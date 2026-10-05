@@ -182,6 +182,8 @@ test('Poweramp mandatory Chromium scene, seek, and art contracts',{timeout:12000
       await run('late canonical artwork survives '+mode+' scene cleanup',async h=>{
         const {page,library,start,move,end,frame,center,settled}=h;
         if(mode!=='closing')await library();
+        else{await library();await page.locator('#mini-title').tap();await settled('player');}
+        const canonicalOpacity=await page.locator('#artA').evaluate(n=>n.style.opacity);
         await page.evaluate(origin=>{
           const track=PA.Engine.current;track.coverURL=null;track.artKey='fixture-scene-late-art';
           PA.UI.setArtEl(document.querySelector('#artA'),null);PA.UI.setArtEl(document.querySelector('#mini-art'),null);
@@ -214,7 +216,7 @@ test('Poweramp mandatory Chromium scene, seek, and art contracts',{timeout:12000
         const expected=mode==='closing'||mode==='abort'||mode==='regrab'?'list':'player';await settled(expected);
         assert.equal(await page.locator('#artA').evaluate(n=>n.style.backgroundImage),produced.full,'cleanup keeps exact latest producer artwork');
         assert.equal(await page.locator('#mini-art').evaluate(n=>n.style.backgroundImage),produced.mini,'mini keeps exact latest producer artwork');
-        assert.equal(await page.locator('#artA').evaluate(n=>n.style.opacity),'');
+        assert.equal(await page.locator('#artA').evaluate(n=>n.style.opacity),canonicalOpacity,'restore exact borrowed canonical opacity');
         assert.equal(await page.locator('#player-live-mask').evaluate(n=>n.hasAttribute('data-active')),false);
       });
     }
