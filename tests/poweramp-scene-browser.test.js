@@ -92,9 +92,10 @@ test('Poweramp mandatory Chromium scene, seek, and art contracts',{timeout:12000
         window.interruption=null;document.addEventListener('pointerdown',e=>{
           if(!e.target.closest('.player-scene-input'))return;
           const rect=()=>{const r=document.querySelector('.player-scene-art').getBoundingClientRect();return {left:r.left,top:r.top,width:r.width,height:r.height};};
-          interruption={before:rect(),trusted:e.isTrusted};queueMicrotask(()=>interruption.after=rect());
+          interruption={before:rect(),trusted:e.isTrusted};
         },true);
       });
+      await page.evaluate(()=>document.addEventListener('pointerdown',e=>{if(!e.target.closest('.player-scene-input')||!interruption)return;const r=document.querySelector('.player-scene-art').getBoundingClientRect();interruption.after={left:r.left,top:r.top,width:r.width,height:r.height};}));
       await start(3,100);const capture=await page.evaluate(()=>interruption);
       assert.ok(capture?.trusted,'new contact reaches the shared scene plane while settling');
       assertRectClose(capture.after,capture.before,2,'regrab preserves painted cover');

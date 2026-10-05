@@ -11,18 +11,24 @@ export const mobileContext={viewport:{width:393,height:852},isMobile:true,hasTou
 // Read-only, bounded evidence for real Chromium failures. Record targets and
 // ownership, never app text or any synthetic replacement input events.
 export function installFixtureInputTrace(){
-  const captures=new Map();
+  const captures=new Map(),records=new WeakMap();
   const label=n=>n?((n.tagName||'').toLowerCase()+(n.id?'#'+n.id:'')+(n.classList?.length?'.'+Array.from(n.classList).slice(0,3).join('.'):'')+(n.dataset?.act?'[data-act='+n.dataset.act+']':'')):null;
   const owner=pointer=>({screen:window.PA?.Nav.cur,captureOwner:captures.get(pointer)||null,gesture:typeof InputLifecycle!=='undefined'?label(InputLifecycle.gesture?.node):null,
-    phase:typeof ScreenDrag!=='undefined'?ScreenDrag.phase:null,shared:!!document.querySelector('.player-scene-input'),history:!!window.PA?.LibraryPageMotion.state,scrubbing:!!window.PA?.UI.seekDragging});
+    phase:typeof ScreenDrag!=='undefined'?ScreenDrag.phase:null,shared:!!document.querySelector('.player-scene-input'),history:!!window.PA?.LibraryPageMotion.state,scrubbing:!!window.PA?.UI.seekDragging,sheet:window.PA?.Sheets?.open||null});
   window.fixtureInputTrace=[];
-  for(const type of ['pointerdown','pointermove','pointerup','pointercancel','gotpointercapture','lostpointercapture','touchstart','touchmove','touchend','touchcancel'])document.addEventListener(type,e=>{
-    const p=e.touches?.[0]||e.changedTouches?.[0]||e,record={type,target:label(e.target),trusted:e.isTrusted,pointer:e.pointerId,x:p.clientX,y:p.clientY,before:owner(e.pointerId)};
-    if(type==='gotpointercapture')captures.set(e.pointerId,label(e.target));
-    if(type==='lostpointercapture'&&captures.get(e.pointerId)===label(e.target))captures.delete(e.pointerId);
-    fixtureInputTrace.push(record);if(fixtureInputTrace.length>80)fixtureInputTrace.shift();
-    queueMicrotask(()=>{record.prevented=e.defaultPrevented;record.after=owner(e.pointerId);});
-  },{capture:true,passive:true});
+  for(const type of ['pointerdown','pointermove','pointerup','pointercancel','gotpointercapture','lostpointercapture','touchstart','touchmove','touchend','touchcancel','click']){
+    document.addEventListener(type,e=>{
+      const p=e.touches?.[0]||e.changedTouches?.[0]||e,record={type,target:label(e.target),trusted:e.isTrusted,pointer:e.pointerId,pointerType:e.pointerType||(e.touches?'touch':null),x:p.clientX,y:p.clientY,at_ms:performance.now(),observation:'capture',before:owner(e.pointerId)};
+      if(type==='gotpointercapture')captures.set(e.pointerId,label(e.target));
+      if(type==='lostpointercapture'&&captures.get(e.pointerId)===label(e.target))captures.delete(e.pointerId);
+      records.set(e,record);fixtureInputTrace.push(record);if(fixtureInputTrace.length>80)fixtureInputTrace.shift();
+    },{capture:true,passive:true});
+    // Native Chromium events run microtask checkpoints between listeners. A
+    // capture-listener microtask therefore cannot observe the target owner's
+    // completed work. Read it at document bubble; stopped events stay marked
+    // capture-only instead of claiming an unobserved final state.
+    document.addEventListener(type,e=>{const record=records.get(e);if(record){record.prevented=e.defaultPrevented;record.after=owner(e.pointerId);record.after_ms=performance.now();record.observation='bubble';}},{passive:true});
+  }
 }
 
 export async function reportFixtureFailure(h,error,name){
@@ -139,7 +145,7 @@ export async function openFixturePage(browser,fixture,options={}){
       gesture:typeof InputLifecycle!=='undefined'?{owner:label(InputLifecycle.gesture?.node),phase:InputLifecycle.gesture?.phase,contacts:Array.from(InputLifecycle.contacts),version:InputLifecycle.version}:null,
       scene:scene?{from:scene.fromName,target:scene.target,phase:ScreenDrag.phase,progress:scene.progress,height:scene.height,commit:scene.commit,shared:scene.morph?.p,pending:!!ScreenDrag.finish?.pending}:null,
       history:history?{index:PA.LibraryPageHistory.index,x:history.x,base:history.base,y:history.y,width:history.width,delta:history.delta,commit:history.commit,target:history.target?.screen,pending:!!PA.LibraryPageMotion.finish?.pending}:null,
-      time:PA.Engine.time(),scrubbing:PA.UI.seekDragging,pageErrors:[],nodes:Object.fromEntries(['#sc-player','#sc-library','#sc-list','#list-body','#mini','#mini-title','#mini-seek','#transport','.player-scene-input','.player-scene-art','#library-page-motion'].map(selector=>[selector,document.querySelector(selector)?rect(document.querySelector(selector)):null])),trace:window.fixtureInputTrace||[]};
+      time:PA.Engine.time(),scrubbing:PA.UI.seekDragging,pageErrors:[],probes:{libraryInterruption:window.libraryInterruption||null,crossAxisTrace:window.crossAxisTrace||null},nodes:Object.fromEntries(['#sc-player','#sc-library','#sc-list','#list-body','#mini','#mini-title','#mini-seek','#transport','.player-scene-input','.player-scene-art','#library-page-motion'].map(selector=>[selector,document.querySelector(selector)?rect(document.querySelector(selector)):null])),trace:window.fixtureInputTrace||[]};
   },{lastPoint,lastTarget}).then(result=>({...result,pageErrors:errors.slice()}));
   try{await settled('player');}catch(error){await reportFixtureFailure({diagnostics,page},error,'fixture player endpoint readiness');await context.close();throw error;}
   return {context,page,cdp,errors,point,send,start,move,end,tap,frame,center,swipe,library,settled,diagnostics,close:()=>context.close()};

@@ -75,17 +75,39 @@ test('Poweramp mandatory Chromium library history contracts',{timeout:120000},as
       await start(p.x,p.y);for(let i=1;i<=5;i++){await move(p.x,p.y-i*24);await frame();}await end();await page.waitForTimeout(80);assert.equal(await page.evaluate(()=>PA.Nav.cur),'library');assert.equal(await page.evaluate(()=>PA.LibraryPageHistory.index),index);assert.ok(await page.locator('#lib-cats').evaluate(n=>n.scrollTop)>0);
     });
     await run('trusted horizontal intent during generic vertical arrival leaves its geometry continuous',async h=>{
-      const {page,start,move,end}=h;await page.evaluate(()=>{PA.SET.animations='disabled';PA.Nav.go('settings');PA.SET.animations='normal';PA.Nav.go('library');window.crossAxisTrace=null;document.addEventListener('pointermove',e=>{if(!e.target.closest('#sc-library'))return;const n=document.querySelector('#sc-library');crossAxisTrace={trusted:e.isTrusted,before:new DOMMatrixReadOnly(getComputedStyle(n).transform).m42};queueMicrotask(()=>crossAxisTrace.after=new DOMMatrixReadOnly(getComputedStyle(PA.LibraryPageMotion.state?.from||n).transform).m42);},true);});
+      const {page,start,move,end}=h;await page.evaluate(()=>{
+        PA.SET.animations='disabled';PA.Nav.go('settings');PA.SET.animations='normal';PA.Nav.go('library');window.crossAxisTrace=null;
+        document.addEventListener('pointermove',e=>{if(!e.target.closest('#sc-library'))return;const n=document.querySelector('#sc-library');crossAxisTrace={trusted:e.isTrusted,read_at_ms:performance.now(),before:new DOMMatrixReadOnly(getComputedStyle(n).transform).m42};},true);
+        document.addEventListener('pointermove',e=>{if(!e.target.closest('#sc-library')||!crossAxisTrace)return;crossAxisTrace.after=new DOMMatrixReadOnly(getComputedStyle(PA.LibraryPageMotion.state?.from||document.querySelector('#sc-library')).transform).m42;crossAxisTrace.after_at_ms=performance.now();});
+      });
       await page.waitForFunction(()=>document.querySelector('#sc-library').getBoundingClientRect().bottom>350&&document.querySelector('#sc-library').getBoundingClientRect().top<-35);await start(120,100);await move(240,100);
       const trace=await page.evaluate(()=>crossAxisTrace);assert.ok(trace?.trusted);assert.ok(Math.abs(trace.before-trace.after)<3);assert.equal(await page.evaluate(()=>PA.LibraryPageMotion.state?.backdrop?.node.dataset.librarySnapshot),'settings');await end();await page.waitForFunction(()=>document.querySelector('#library-page-motion').hidden);assert.equal(await page.evaluate(()=>PA.Nav.cur),'library');
     });
     await run('trusted settle regrab freezes displayed pages, stays inert, and reverses once',async h=>{
-      const {page,library,start,move,end,frame,center}=h;await library();const p=await center('#list-body .trow[data-i="2"]');await start(p.x,p.y);await move(p.x+100,p.y);await frame();await page.waitForTimeout(125);await end();
-      assert.equal(await page.evaluate(()=>PA.Nav.cur),'library');const initial=await page.evaluate(()=>({index:PA.LibraryPageHistory.index}));
-      await page.evaluate(()=>{window.libraryInterruption=null;document.addEventListener('pointerdown',e=>{if(e.target.id!=='library-page-motion')return;const s=PA.LibraryPageMotion.state;libraryInterruption={trusted:e.isTrusted,before:new DOMMatrixReadOnly(getComputedStyle(s.commit?s.to:s.from).transform).m41};queueMicrotask(()=>libraryInterruption.after=new DOMMatrixReadOnly(getComputedStyle(PA.LibraryPageMotion.state.from).transform).m41);},true);});
-      await start(160,200);const interrupted=await page.evaluate(()=>libraryInterruption);assert.ok(interrupted?.trusted);assert.ok(Math.abs(interrupted.before-interrupted.after)<3);const held=interrupted.after;await page.waitForTimeout(280);
+      const {page,library,start,move,end,frame,center}=h;await library();const initial=await page.evaluate(()=>({index:PA.LibraryPageHistory.index}));
+      // Install before release, leaving no page-evaluate round trips between
+      // touchEnd and the next trusted touchStart while the CSS settle is live.
+      await page.evaluate(()=>{
+        window.libraryInterruption=null;
+        const read=n=>{const at_ms=performance.now(),matrix=new DOMMatrixReadOnly(getComputedStyle(n).transform);return {id:n.id,x:matrix.m41,y:matrix.m42,read_at_ms:at_ms,read_done_ms:performance.now()};};
+        document.addEventListener('pointerdown',e=>{if(e.target.id!=='library-page-motion')return;const s=PA.LibraryPageMotion.state;libraryInterruption={trusted:e.isTrusted,event_timestamp:e.timeStamp,contact_at_ms:performance.now(),pending:!!PA.LibraryPageMotion.finish?.pending,before:read(s.commit?s.to:s.from),pages_before:[s.from,s.to,s.backdrop?.node].filter(Boolean).map(read)};},true);
+        document.addEventListener('pointerdown',e=>{if(e.target.id!=='library-page-motion'||!libraryInterruption)return;const s=PA.LibraryPageMotion.state;libraryInterruption.after=read(s.from);libraryInterruption.pages_after=[s.from,s.to,s.backdrop?.node].filter(Boolean).map(read);libraryInterruption.event_done_ms=performance.now();});
+        const pause=PA.LibraryPageMotion.pause;
+        PA.LibraryPageMotion.pause=function(...args){
+          const evidence=window.libraryInterruption,finish=this.finish;if(!evidence||!finish?.pending)return pause.apply(this,args);
+          evidence.pause_before=read(this.state.commit?this.state.to:this.state.from);
+          const cancel=finish.cancel;finish.cancel=function(...cancelArgs){evidence.cancel_at_ms=performance.now();try{return cancel.apply(this,cancelArgs);}finally{evidence.cancel_done_ms=performance.now();}};
+          try{const result=pause.apply(this,args);evidence.pause_returned=result;evidence.pause_after=read(this.state.from);return result;}finally{finish.cancel=cancel;}
+        };
+      });
+      const p=await center('#list-body .trow[data-i="2"]');await start(p.x,p.y);await move(p.x+100,p.y);await frame();await page.waitForTimeout(125);await end();await start(160,200);
+      assert.equal(await page.evaluate(()=>PA.Nav.cur),'library');assert.equal(await page.evaluate(()=>PA.LibraryPageHistory.index),initial.index-1);const interrupted=await page.evaluate(()=>libraryInterruption),detail=JSON.stringify(interrupted);
+      assert.ok(interrupted?.trusted,detail);assert.equal(interrupted.pending,true,detail);assert.equal(interrupted.pause_returned,true,detail);assert.equal(interrupted.before.id,interrupted.after.id,detail);
+      assert.ok(Math.abs(interrupted.before.x-interrupted.after.x)<3,'incoming page continuity: '+detail);
+      for(const before of interrupted.pages_before){const after=interrupted.pages_after.find(page=>page.id===before.id);assert.ok(after&&Math.abs(before.x-after.x)<3&&Math.abs(before.y-after.y)<3,'all painted pages retain their positions: '+detail);}
+      const held=interrupted.after.x;await page.waitForTimeout(280);
       assert.ok(Math.abs((await page.evaluate(()=>new DOMMatrixReadOnly(getComputedStyle(PA.LibraryPageMotion.state.from).transform).m41))-held)<2);assert.equal(await page.evaluate(()=>document.querySelector('#sc-library').inert),true);
-      await move(40,200);await frame();await end();await page.waitForFunction(()=>document.querySelector('#library-page-motion').hidden);assert.equal(await page.evaluate(()=>PA.Nav.cur),'list');assert.equal(await page.evaluate(()=>PA.LibraryPageHistory.index),initial.index+1);
+      await move(40,200);await frame();await end();await page.waitForFunction(()=>document.querySelector('#library-page-motion').hidden);assert.equal(await page.evaluate(()=>PA.Nav.cur),'list');assert.equal(await page.evaluate(()=>PA.LibraryPageHistory.index),initial.index);
       assert.equal(await page.evaluate(()=>{const ids=[...document.querySelectorAll('[id]')].map(n=>n.id);return new Set(ids).size===ids.length;}),true);
     });
   }finally{await browser?.close();await fixture.close();}

@@ -244,7 +244,7 @@ const Preview={
     }catch(error){this.fail(error);}
   },
   help(){
-    dialog('Offline UI Preview v5','<p>Fictional placeholder songs, artwork, playlists, and queue. Play, pause, seek, track changes, and progress are simulated. No sound is generated.</p><p>Drag up from the mini player to grow the same cover, title and controls into the full player. Drag down to reverse it, including halfway through a transition.</p><p>In library pages, swipe right to the previously visited page and left to return forward. Vertical scrolling stays native. Try top versus scrolled action buttons, the alphabet rail, album pages and List Options. “5,000 tracks” exercises the large-library renderer.</p><p>Optional diagnostics measures callback gaps and gesture outcomes for 30 seconds. It is off by default, stays in this file, and sends nothing. These callback gaps are not touch latency or display-frame measurements.</p><p>Nothing connects to your accounts or touches the real app’s library. Changes last only while this file is open. Reset restores the fixture.</p><p>If Android opens a file viewer, choose Open with Chrome. Use in-app Back if this local file does not support browser history.</p>',[{label:'Measure 30 seconds',fn:()=>PreviewDiagnostics.start()},{label:'Show diagnostics',fn:()=>PreviewDiagnostics.show()},{label:'Close'}]);
+    dialog('Offline UI Preview v6','<p>Fictional placeholder songs, artwork, playlists, and queue. Play, pause, seek, track changes, and progress are simulated. No sound is generated.</p><p>Drag up from the mini player to grow the same cover, title and controls into the full player. Drag down to reverse it, including halfway through a transition.</p><p>In library pages, swipe right to the previously visited page and left to return forward. Vertical scrolling stays native. Try top versus scrolled action buttons, the alphabet rail, album pages and List Options. “5,000 tracks” exercises the large-library renderer.</p><p>Optional diagnostics measures callback gaps and gesture outcomes for 30 seconds. It is off by default, stays in this file, and sends nothing. These callback gaps are not touch latency or display-frame measurements.</p><p>Nothing connects to your accounts or touches the real app’s library. Changes last only while this file is open. Reset restores the fixture.</p><p>If Android opens a file viewer, choose Open with Chrome. Use in-app Back if this local file does not support browser history.</p>',[{label:'Measure 30 seconds',fn:()=>PreviewDiagnostics.start()},{label:'Show diagnostics',fn:()=>PreviewDiagnostics.show()},{label:'Close'}]);
   },
   fail(error){
     console.error('Offline UI preview could not start',error);
@@ -256,7 +256,7 @@ const Preview={
 // until requested; no layout reads, console stream, storage or networking.
 const PreviewDiagnostics={
   active:false,frame:0,started:0,last:0,gaps:[],gapCursor:0,count:0,sum:0,max:0,over33:0,over50:0,events:[],handlers:[],lastOwner:'',result:null,wrappers:[],contexts:[],operations:new Map(),longOperations:[],longGaps:[],phaseGaps:new Map(),contactSamples:new Map(),lastPhase:'idle',
-  snapshot(){return {preview:'v5',source:document.querySelector('meta[name="poweramp-preview-source-sha256"]')?.content||'',tracks:Preview.count,viewport:{width:innerWidth,height:innerHeight,dpr:devicePixelRatio},settings:{animations:SET.animations,playerLayout:SET.playerLayout,bgBlur:SET.bgBlur,vizOnPlayer:SET.vizOnPlayer,listZoom:JSON.parse(JSON.stringify(SET.listZoom||{})),headerButtons:NativeSettings.values.list_header_buttons}};},
+  snapshot(){return {preview:'v6',source:document.querySelector('meta[name="poweramp-preview-source-sha256"]')?.content||'',tracks:Preview.count,viewport:{width:innerWidth,height:innerHeight,dpr:devicePixelRatio},settings:{animations:SET.animations,playerLayout:SET.playerLayout,bgBlur:SET.bgBlur,vizOnPlayer:SET.vizOnPlayer,listZoom:JSON.parse(JSON.stringify(SET.listZoom||{})),headerButtons:NativeSettings.values.list_header_buttons}};},
   owner(){
     const gesture=InputLifecycle.gesture,library=LibraryPageMotion.state,scene=ScreenDrag.state||ScreenDrag.settling;
     return {screen:Nav.cur,owner:gesture?.node?.id||(library?'library-page-motion':scene?.morph?'shared-player':scene?'screen-scene':'none'),phase:gesture?.phase||(LibraryPageMotion.finish?.pending||ScreenDrag.settling?'settle':library||scene?'drag':'idle'),historyIndex:LibraryPageHistory.index,historyVisits:LibraryPageHistory.entries.length,version:InputLifecycle.version,scene:scene?.morph?'shared-player':scene?'screen-scene':null,scene_phase:scene?ScreenDrag.phase:null,scene_progress:scene?.morph?Math.round(scene.morph.p*1000)/1000:null,direction:scene?.morph?(scene.morph.opening?'expand':'collapse'):null};
@@ -302,9 +302,13 @@ const PreviewDiagnostics={
         if(sample&&x!==null&&y!==null&&sample.x!==null&&sample.y!==null)sample.travel=Math.max(sample.travel,Math.hypot(x-sample.x,y-sample.y));
         if(type!=='keydown'){detail.x=x;detail.y=y;detail.pointer=id;if(sample){detail.moves=sample.moves;detail.dx=x===null||sample.x===null?null:Math.round(x-sample.x);detail.dy=y===null||sample.y===null?null:Math.round(y-sample.y);detail.travel=Math.round(sample.travel);}}
         if(type==='pointerup'||type==='pointercancel')this.contactSamples.delete(id);
-        this.record(type,detail);Promise.resolve().then(()=>this.observe());
+        this.record(type,detail);
       };
-      document.addEventListener(type,fn,true);this.handlers.push([document,type,fn]);
+      document.addEventListener(type,fn,true);this.handlers.push([document,type,fn,true]);
+      // Native event dispatch may checkpoint microtasks between listeners.
+      // Observe at bubble after the app target handlers, with RAF fallback
+      // when an action intentionally stops propagation.
+      const observed=()=>this.observe();document.addEventListener(type,observed,false);this.handlers.push([document,type,observed,false]);
     }
     const move=e=>{const sample=this.contactSamples.get(e.pointerId);if(!sample)return;sample.moves++;sample.lastX=e.clientX;sample.lastY=e.clientY;if(Number.isFinite(sample.x)&&Number.isFinite(sample.y))sample.travel=Math.max(sample.travel,Math.hypot(e.clientX-sample.x,e.clientY-sample.y));};document.addEventListener('pointermove',move,true);this.handlers.push([document,'pointermove',move]);
     const visibility=()=>{if(document.hidden)this.stop('page hidden');};document.addEventListener('visibilitychange',visibility,true);this.handlers.push([document,'visibilitychange',visibility]);
@@ -322,7 +326,7 @@ const PreviewDiagnostics={
   },
   stop(reason='stopped'){
     if(!this.active)return;this.observe();this.active=false;this.restoreMeasurements();this.contactSamples.clear();cancelAnimationFrame(this.frame);this.frame=0;
-    for(const [node,type,fn] of this.handlers)node.removeEventListener(type,fn,true);this.handlers=[];
+    for(const [node,type,fn,capture=true] of this.handlers)node.removeEventListener(type,fn,capture);this.handlers=[];
     const sorted=this.gaps.slice().sort((a,b)=>a-b),round=value=>Math.round(value*10)/10,percentile=f=>sorted.length?round(sorted[Math.min(sorted.length-1,Math.floor((sorted.length-1)*f))]):null;
     this.result={...this.initial,elapsed_ms:Math.round(performance.now()-this.started),stop:reason,metric:'requestAnimationFrame callback gaps, not display frames or input latency',raf_gap_ms:{samples:this.count,recent_samples:sorted.length,mean:this.count?round(this.sum/this.count):null,p50_recent:percentile(.5),p95_recent:percentile(.95),max:round(this.max),over_33ms:this.over33,over_50ms:this.over50},final:this.owner(),events:this.events.slice(),phase_gap_ms:[...this.phaseGaps.values()].map(v=>({phase:v.phase,samples:v.samples,mean:round(v.total_ms/v.samples),max:round(v.max_ms),over_33ms:v.over_33ms,over_50ms:v.over_50ms})),long_gaps:this.longGaps.slice(),operation_timing_note:'Synchronous inclusive function time. Nested durations overlap and must not be added together. Gap phase endpoints can span setup or another phase; they do not prove GPU/display latency.',operations:[...this.operations.values()].map(v=>({...v,total_ms:round(v.total_ms),mean_ms:round(v.total_ms/v.calls),max_ms:round(v.max_ms)})),long_operations:this.longOperations.slice()};
     const help=document.getElementById('preview-help');if(help){help.textContent='?';help.title='About this offline preview';}
@@ -350,7 +354,7 @@ body #app{top:28px}
 #preview-hint{position:fixed;top:30px;left:6px;right:6px;z-index:1001;font:10px/1.3 system-ui,sans-serif;pointer-events:none;color:#e9bc95;background:#211a16}
 #preview-hint:empty{display:none}
 `;
-const toolbar=`<aside id="preview-toolbar" aria-label="Offline UI preview controls"><span class="preview-label">UI preview v5 · simulated · no audio</span><span id="preview-count">60 tracks</span><button id="preview-size" aria-pressed="false" title="Switch between 60 and 5,000 fictional tracks">5,000 tracks</button><button id="preview-reset">Reset</button><button id="preview-help" aria-label="About this offline preview">?</button></aside><div id="preview-hint" role="status"></div><div id="preview-error" role="alert">Starting offline UI preview… If this stays visible, open the downloaded HTML directly in Chrome.</div>`;
+const toolbar=`<aside id="preview-toolbar" aria-label="Offline UI preview controls"><span class="preview-label">UI preview v6 · simulated · no audio</span><span id="preview-count">60 tracks</span><button id="preview-size" aria-pressed="false" title="Switch between 60 and 5,000 fictional tracks">5,000 tracks</button><button id="preview-reset">Reset</button><button id="preview-help" aria-label="About this offline preview">?</button></aside><div id="preview-hint" role="status"></div><div id="preview-error" role="alert">Starting offline UI preview… If this stays visible, open the downloaded HTML directly in Chrome.</div>`;
 const csp="default-src 'none'; script-src 'unsafe-inline' blob:; style-src 'unsafe-inline'; img-src data: blob:; media-src blob: data:; font-src data:; worker-src blob:; connect-src 'none'; base-uri 'none'; form-action 'none'";
 
 const once=(source,needle,replacement,label)=>{
@@ -386,7 +390,7 @@ export async function buildPreview(output=defaultOutput){
   const sourceHash=createHash('sha256').update([htmlInput,analysis,core,player].join('\0')).digest('hex');
   // Never carry a personalized embedded server credential into the preview.
   const safeInput=htmlInput.replace(/<script\b(?=[^>]*\bid=["']drawercast-defaults["'])[^>]*>[\s\S]*?<\/script>\s*/gi,'');
-  let html=once(safeInput,'<title>Poweramp</title>','<title>Poweramp · Offline UI Preview v5</title>','title');
+  let html=once(safeInput,'<title>Poweramp</title>','<title>Poweramp · Offline UI Preview v6</title>','title');
   html=once(html,'<meta charset="utf-8">',`<meta charset="utf-8">\n<meta http-equiv="Content-Security-Policy" content="${csp}">\n<meta name="poweramp-preview" content="fictional UI fixtures; simulated playback; no audio">\n<meta name="poweramp-preview-source-sha256" content="${sourceHash}">`,'charset');
   html=once(html,'</head>',`<style>${previewStyles}</style>\n</head>`,'head');
   const bodyTag=html.match(/<body\b[^>]*>/)?.[0];if(!bodyTag)throw Error('Missing body');

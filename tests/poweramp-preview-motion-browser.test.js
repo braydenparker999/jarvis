@@ -9,6 +9,10 @@ import {chromium} from 'playwright-core';
 import {buildPreview} from '../scripts/build-poweramp-preview.mjs';
 import {fixtureSceneSettled,installFixtureInputTrace,mobileContext,reportFixtureFailure} from './helpers/poweramp-fixture.js';
 
+// Match the owner's report geometry/raster scale for timing evidence. The
+// mandatory scene contracts retain their independent 393×852 touch coverage.
+const previewProfile={...mobileContext,viewport:{width:519,height:988},deviceScaleFactor:2.0818214416503906};
+
 const executablePath=[process.env.JARVIS_CHROME,'/usr/bin/chromium','/usr/bin/chromium-browser','/usr/bin/google-chrome',chromium.executablePath()].find(p=>p&&existsSync(p));
 
 // Real generated HTML and trusted CDP contacts. These reports measure inclusive
@@ -20,11 +24,13 @@ test('Poweramp downloaded preview trusted mini motion and operation evidence',{t
     const built=await buildPreview(join(directory,'preview.html'));
     browser=await chromium.launch({executablePath,headless:true,args:['--no-sandbox']});
     for(const count of [60,5000])await t.test(count+'-song first and repeated mini opens, held drag, and regrab',async()=>{
-      const context=await browser.newContext(mobileContext),page=await context.newPage(),errors=[],reports=[];
+      const context=await browser.newContext(previewProfile),page=await context.newPage(),errors=[],reports=[];
+      let failureName='preview-mini-motion-'+count;
       page.setDefaultTimeout(5000);page.on('pageerror',error=>errors.push(error.message));
       await context.addInitScript(installFixtureInputTrace);
       const diagnostics=()=>page.evaluate(()=>({screen:PA.Nav.cur,preview:powerampPreview.count,mini:{inert:document.querySelector('#mini').inert,hidden:document.querySelector('#mini').hidden},
-        sharedPlane:!!document.querySelector('.player-scene-input'),history:{active:!!PA.LibraryPageMotion.state,pending:!!PA.LibraryPageMotion.finish},trace:window.fixtureInputTrace}));
+        sharedPlane:!!document.querySelector('.player-scene-input'),history:{active:!!PA.LibraryPageMotion.state,pending:!!PA.LibraryPageMotion.finish},
+        viewport:{width:innerWidth,height:innerHeight,dpr:devicePixelRatio},sheet:{open:PA.Sheets.open,inert:document.querySelector('#sheet').inert,on:document.querySelector('#sheet').classList.contains('on')},help:{text:document.querySelector('#preview-help').textContent,handler:typeof document.querySelector('#preview-help').onclick},trace:window.fixtureInputTrace}));
       try{
         await context.route('**/*',route=>/^https?:/.test(route.request().url())?route.abort('blockedbyclient'):route.continue());
         await page.goto(pathToFileURL(built.output).href);await page.waitForFunction(()=>window.powerampPreview?.ready);
@@ -45,14 +51,16 @@ test('Poweramp downloaded preview trusted mini motion and operation evidence',{t
           await page.waitForFunction(()=>document.getElementById('preview-help').textContent==='●');
           await page.evaluate(()=>{window.fixtureInputTrace=[];});await frame();
           await perform();await settled('player');
-          // Read the shipped local report through its actual Help dialog. No
-          // new production debug exports or private runtime access are needed.
-          await page.locator('#preview-help').tap();await page.getByRole('button',{name:'Show diagnostics',exact:true}).tap();
+          // Inspect through the actual dialog using trusted native mouse clicks,
+          // keeping post-drag touch compatibility-click timing out of the motion
+          // report. A separate trusted touch Help path is checked below.
+          await page.locator('#preview-help').click();await page.getByRole('button',{name:'Show diagnostics',exact:true}).click();
           const report=JSON.parse(await page.locator('#preview-diagnostics-report').inputValue());
-          await page.getByRole('button',{name:'Close',exact:true}).tap();
+          await page.getByRole('button',{name:'Close',exact:true}).click();
           assert.ok(report.operations?.some(operation=>operation.operation==='shared.create'&&operation.phase==='shared:setup:expand'),'report includes the real shared-player setup work');
           assert.equal(report.final.screen,'player');assert.equal(report.final.scene,null);
           const trace=await page.evaluate(()=>fixtureInputTrace);assert.ok(trace.some(event=>event.type==='pointerdown'&&event.target.includes('#mini-title')&&event.trusted));assert.ok(trace.every(event=>event.trusted));
+          assert.ok(trace.some(event=>event.type==='click'&&event.target.includes('#preview-help')&&event.observation==='bubble'&&event.trusted),'readback uses a real trusted Help click');
           reports.push({label,...report});
         };
         const id=await page.evaluate(()=>PA.Engine.current.id);
@@ -75,10 +83,18 @@ test('Poweramp downloaded preview trusted mini motion and operation evidence',{t
           const trace=await page.evaluate(()=>fixtureInputTrace);assert.ok(trace.some(event=>event.type==='pointerdown'&&event.target.includes('player-scene-input')&&event.trusted),'regrab hits the actual shared scene plane');await end();
         });
         assert.equal(await page.evaluate(()=>PA.Engine.current.id),id);assert.deepEqual(errors,[]);
-        const evidence={source:built.sourceHash,tracks:count,metric:'Synchronous inclusive operation times and RAF callback gaps. Nested costs overlap; these are not phone FPS or touch latency.',reports};
+        const evidence={source:built.sourceHash,tracks:count,profile:previewProfile,metric:'Synchronous inclusive operation times and RAF callback gaps. Nested costs overlap; these are not phone FPS or touch latency.',reports};
         if(process.env.POWERAMP_EVIDENCE_DIR){const output=resolve(process.env.POWERAMP_EVIDENCE_DIR);await mkdir(output,{recursive:true});await writeFile(join(output,'preview-mini-motion-'+count+'.json'),JSON.stringify(evidence,null,2)+'\n');}
+        // This control regression is distinct from timing readback. It uses
+        // the same trusted held mini drag followed by a fresh real touch tap,
+        // without a sleep, synthetic click, retry, or direct Help invocation.
+        failureName='preview-help-touch-'+count;await library();p=await target();await page.evaluate(()=>{window.fixtureInputTrace=[];});
+        await start(p.x,p.y);for(const dy of [16,40,75,110]){await move(p.x,p.y-dy);await frame();}await end();await settled('player');
+        await page.locator('#preview-help').tap();await page.waitForFunction(()=>PA.Sheets.open==='sheet'&&!document.querySelector('#sheet').inert&&document.querySelector('#sheet').classList.contains('on'));
+        assert.ok(await page.evaluate(()=>fixtureInputTrace.some(event=>event.type==='click'&&event.target.includes('#preview-help')&&event.trusted)),'post-drag touch delivers the real Help compatibility click');
+        await page.getByRole('button',{name:'Show diagnostics',exact:true}).tap();await page.locator('#preview-diagnostics-report').waitFor({state:'visible'});await page.getByRole('button',{name:'Close',exact:true}).tap();assert.deepEqual(errors,[]);
         t.diagnostic('POWERAMP_BROWSER_TIMINGS '+JSON.stringify({source:built.sourceHash,tracks:count,reports:reports.map(report=>({label:report.label,operations:report.operations,phase_gap_ms:report.phase_gap_ms,raf_gap_ms:report.raf_gap_ms}))}));
-      }catch(error){await reportFixtureFailure({page,diagnostics},error,'preview-mini-motion-'+count);throw error;}
+      }catch(error){await reportFixtureFailure({page,diagnostics},error,failureName);throw error;}
       finally{await context.close();}
     });
   }finally{await browser?.close();await rm(directory,{recursive:true,force:true});}

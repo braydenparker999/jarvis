@@ -17,7 +17,7 @@ function harness(){
   const h={context,diagnostics:context.diagnostics,frames,events,help,toasts,dialogs,
     tick(ms=16){now+=ms;const first=frames.entries().next().value;if(first){frames.delete(first[0]);first[1](now);}},
     advance(ms){now+=ms;},
-    fire(type,target={id:'sc-list',tagName:'SECTION'},detail={}){for(const {fn} of events.get(type)||[])fn({type,target,pointerType:'touch',...detail});},
+    fire(type,target={id:'sc-list',tagName:'SECTION'},detail={},targetHandler=()=>{}){const event={type,target,pointerType:'touch',...detail};for(const {fn,capture} of events.get(type)||[])if(capture)fn(event);targetHandler(event);for(const {fn,capture} of events.get(type)||[])if(!capture)fn(event);},
     listenerCount(){return [...events.values()].reduce((n,v)=>n+v.length,0);}};return h;
 }
 
@@ -48,7 +48,7 @@ test('report records owner/commit outcomes and callback gaps without collecting 
 test('hiding the page stops all work and restarting does not accumulate listeners',()=>{
   const h=harness();h.diagnostics.start();h.context.document.hidden=true;h.fire('visibilitychange');
   assert.equal(h.diagnostics.result.stop,'page hidden');assert.equal(h.frames.size,0);assert.equal(h.listenerCount(),0);
-  h.context.document.hidden=false;h.context.Preview.count=5000;h.diagnostics.start();assert.equal(h.listenerCount(),7);h.diagnostics.stop('fixture reset');
+  h.context.document.hidden=false;h.context.Preview.count=5000;h.diagnostics.start();assert.equal(h.listenerCount(),12);h.diagnostics.stop('fixture reset');
   assert.equal(h.diagnostics.result.tracks,5000);assert.equal(h.diagnostics.result.stop,'fixture reset');assert.equal(h.listenerCount(),0);
 });
 
@@ -93,4 +93,15 @@ test('contact displacement is sampled without logging pointer moves or typed inp
   h.fire('pointerup',target,{pointerId:7,clientX:10,clientY:30});h.diagnostics.stop();
   const event=h.diagnostics.result.events.find(e=>e.type==='pointerup');assert.equal(event.moves,2);assert.equal(event.dx,0);assert.equal(event.dy,-70);assert.equal(event.travel,70);
   assert.equal(h.diagnostics.result.events.some(e=>e.type==='pointermove'),false);assert.equal(h.diagnostics.contactSamples.size,0);
+});
+
+
+test('owner snapshots occur after target handlers while contact timestamps remain before synchronous work',()=>{
+  const h=harness();h.diagnostics.start();
+  h.fire('pointerup',{id:'mini',tagName:'DIV'},{pointerId:3,clientX:20,clientY:100},()=>{
+    h.advance(53);h.context.Nav.cur='player';h.context.ScreenDrag.phase='settle';h.context.ScreenDrag.settling={morph:{opening:true,p:.4}};
+  });
+  const contact=h.diagnostics.events.find(e=>e.type==='pointerup'),owner=h.diagnostics.events.find(e=>e.type==='owner'&&e.scene==='shared-player');
+  assert.equal(contact.ms,0);assert.equal(owner.ms,53);assert.equal(owner.scene_phase,'settle');assert.equal(owner.scene_progress,.4);
+  h.diagnostics.stop();assert.equal(h.listenerCount(),0);
 });

@@ -5857,6 +5857,77 @@ const SharedPlayerMotion={
       const context=copy.getContext('2d');context.clearRect(0,0,copy.width,copy.height);context.drawImage(source,0,0);
     }catch(_){}
   },
+  snapshotPlan(style){
+    // Freeze the properties the page actually authors, not hundreds of unused
+    // browser defaults. Rules are re-read for every scene: theme classes,
+    // stylesheet edits, inline artwork/seek values and CSSOM changes cannot
+    // reuse a stale picture. Inaccessible sheets keep the exhaustive fallback.
+    if(!document.styleSheets?.length)return null;
+    const names=new Set(),rules=[],computed=new Set();
+    for(let i=0;i<style.length;i++)if(!style[i].startsWith('--'))computed.add(style[i]);
+    const declaration=(style,pseudo)=>{
+      const keys=[],variables=new Set();
+      for(let i=0;i<style.length;i++){
+        const key=style[i];if(!key.startsWith('--')){keys.push(key);names.add(key);}
+        // Classes survive ID removal. A live class pseudo or !important rule
+        // can outrank the frozen longhands and still consume a local variable.
+        // Keep only its referenced variables, not the whole inherited schema.
+        if(pseudo||style.getPropertyPriority(key)==='important')for(const match of style.getPropertyValue(key).matchAll(/\bvar\(\s*(--[^\s,)]+)/g))variables.add(match[1]);
+      }
+      return {keys,variables:[...variables]};
+    };
+    const visit=list=>{for(const rule of list){
+      if(rule.style){
+        // A pseudo's declarations also belong to its originating element's
+        // vocabulary. Unknown pseudo types are conservative global entries.
+        const selector=rule.selectorText?.replace(/::?(before|after)\b/g,'');
+        rules.push({selector:selector&&!selector.includes('::')?selector:null,...declaration(rule.style,/::?(before|after)\b|::/.test(rule.selectorText||''))});
+      }
+      if(rule.styleSheet)visit(rule.styleSheet.cssRules);
+      if(rule.cssRules)visit(rule.cssRules);
+    }};
+    try{for(const sheet of [...document.styleSheets,...document.adoptedStyleSheets||[]])visit(sheet.cssRules);}catch(_){return null;}
+    const probe=document.createElement('span').style,expanded=new Map();
+    const expand=key=>{
+      if(expanded.has(key))return expanded.get(key);
+      // Computed CSS enumerates longhands. Ask the browser to expand any
+      // authored shorthand/alias with a valid universal value, avoiding empty
+      // computed shorthands (e.g. unequal borders) or handwritten property lists.
+      let keys;
+      if(computed.has(key))keys=[key];
+      else{probe.cssText='';probe.setProperty(key,'initial');keys=[...computed].filter(candidate=>probe.getPropertyValue(candidate));}
+      keys=keys.filter(key=>!key.startsWith('animation-')&&!key.startsWith('transition-')&&key!=='pointer-events');
+      expanded.set(key,keys);return keys;
+    };
+    for(const key of names)expand(key);
+    for(const rule of rules)rule.keys=[...new Set([...rule.keys.flatMap(expand),...rule.variables])];
+    return {rules,expand,nodes:new Map()};
+  },
+  snapshotKeys(node,plan){
+    if(!plan||!node.matches)return null;
+    if(plan.nodes.has(node))return plan.nodes.get(node);
+    // Carry every ancestor's authored/inline property name conservatively.
+    // This freezes inherited fonts/colors and variables' resolved longhands
+    // without guessing an inheritance or paint whitelist. Non-inherited names
+    // simply resolve to the child's own used value.
+    const inherited=node.parentElement?this.snapshotKeys(node.parentElement,plan):[];if(inherited===null)return null;
+    const keys=new Set(inherited);
+    try{for(const rule of plan.rules)if(!rule.selector||node.matches(rule.selector))for(const key of rule.keys)keys.add(key);}catch(_){return null;}
+    for(let i=0;i<node.style.length;i++){const key=node.style[i];if(!key.startsWith('--'))for(const property of plan.expand(key))keys.add(property);}
+    const result=[...keys];plan.nodes.set(node,result);return result;
+  },
+  snapshotCSS(style,keys){
+    if(!keys){keys=[];for(let i=0;i<style.length;i++)keys.push(style[i]);}
+    // Resolved longhands need no duplicate custom-variable payload. Only live
+    // pseudo/important references retain variables. An absent variable must
+    // stay absent so var(--missing, fallback) does not become a defined empty.
+    const css=[];
+    for(const key of keys){const value=style.getPropertyValue(key);
+      if(key.startsWith('--')&&!value){let present=false;for(let i=0;i<style.length;i++)if(style[i]===key){present=true;break;}if(!present)continue;}
+      css.push(key+':'+value+';');
+    }
+    return css.join('');
+  },
   clone(node,cache=new Map(),suppressed=[]){
     // Cache each source's frozen CSS once per scene. Shared parts are painted
     // separately, so invisible duplicate descendants need no CSS/canvas
@@ -5870,13 +5941,12 @@ const SharedPlayerMotion={
       if(!hidden||suppressed.includes(original)){
         let appearance=cache.get(original);
         if(!appearance){
-          const style=getComputedStyle(original);let css='';
-          for(let i=0;i<style.length;i++){const key=style[i];css+=key+':'+style.getPropertyValue(key)+';';}
-          const pseudos=[];
+          const style=getComputedStyle(original);
+          if(!Object.prototype.hasOwnProperty.call(cache,'snapshotPlan'))cache.snapshotPlan=this.snapshotPlan(style);
+          const keys=this.snapshotKeys(original,cache.snapshotPlan),css=this.snapshotCSS(style,keys),pseudos=[];
           for(const pseudo of ['::before','::after']){
             const ps=getComputedStyle(original,pseudo);if(!ps.content||ps.content==='none'||ps.content==='normal')continue;
-            let css='';for(let i=0;i<ps.length;i++){const key=ps[i];css+=key+':'+ps.getPropertyValue(key)+';';}
-            pseudos.push({css,text:ps.content==='""'||ps.content==="''"?'':ps.content.replace(/^['"]|['"]$/g,'')});
+            pseudos.push({css:this.snapshotCSS(ps,keys),text:ps.content==='""'||ps.content==="''"?'':ps.content.replace(/^['"]|['"]$/g,'')});
           }
           appearance={css,pseudos};cache.set(original,appearance);
         }
