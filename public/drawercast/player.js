@@ -3249,8 +3249,8 @@ const UI = {
     }
     title.innerHTML='<span>'+esc(t.title)+'</span>';
     sub.innerHTML='<span>'+esc(trackSub(t))+'</span>';
-    $('#mini-title').textContent=t.title;
-    $('#mini-sub').textContent=trackSub(t);
+    SharedPlayerMotion.setMiniLabel($('#mini-title'),t.title);
+    SharedPlayerMotion.setMiniLabel($('#mini-sub'),trackSub(t));
     $('#mini').hidden = (Nav.cur==='player');
     document.title = t.title + ' - ' + trackArtist(t);
     UI.renderRating();
@@ -3260,7 +3260,7 @@ const UI = {
     const [url,thumb] = await Promise.all([SwipeArt.warm(t),getArtURL(t,true).then(url=>SwipeArt.decode(url))]);
     if(Engine.current?.id!==t.id||artToken!==UI.artRenderToken)return;
     title.innerHTML='<span>'+esc(t.title)+'</span>';sub.innerHTML='<span>'+esc(trackSub(t))+'</span>';
-    $('#mini-title').textContent=t.title;$('#mini-sub').textContent=trackSub(t);
+    SharedPlayerMotion.setMiniLabel($('#mini-title'),t.title);SharedPlayerMotion.setMiniLabel($('#mini-sub'),trackSub(t));
     UI.renderMeta();
     UI.curArtURL=url;
     const cardA=$('#artA');
@@ -3333,7 +3333,7 @@ const UI = {
     if(document.visibilityState==='hidden')return;
     const cur=Engine.time(), dur=Engine.duration();
     const pct = dur>0 ? clamp(cur/dur*100,0,100) : 0;
-    const onPlayer=Nav.cur==='player',miniVisible=!$('#mini').hidden;
+    const onPlayer=Nav.cur==='player'||!!(typeof SharedPlayerMotion!=='undefined'&&(SharedPlayerMotion.active?.()||SharedPlayerMotion.transaction)),miniVisible=!$('#mini').hidden;
     const text=(selector,value)=>{const node=$(selector);if(node.textContent!==value)node.textContent=value;};
     const attribute=(node,name,value)=>{if(node.getAttribute(name)!==value)node.setAttribute(name,value);};
     if(!UI.seekDragging){
@@ -6368,13 +6368,20 @@ Object.assign(SharedPlayerMotion,{
   clone:SnapshotReferenceMotion.clone,snapshotCSS:SnapshotReferenceMotion.snapshotCSS,snapshotPlan:SnapshotReferenceMotion.snapshotPlan,snapshotKeys:SnapshotReferenceMotion.snapshotKeys,copyCanvas:SnapshotReferenceMotion.copyCanvas,
   clearAppearance(){if(this.geometryFrame)cancelAnimationFrame(this.geometryFrame);this.geometryFrame=0;},
   claimAppearance(){return null;},
+  modelKey(){return [innerWidth,innerHeight,devicePixelRatio,document.body.className,SET.playerLayout,SET.playerFont,SET.fontScale,SET.nativeSeekbar,UI.lastFitArt].join('|');},
+  readModels(pairs,A){
+    const appearances={};for(const key of ['title','sub','play'])appearances[key]={mini:this.appearance(pairs[key].mini),full:this.appearance(pairs[key].full)};
+    for(const end of ['mini','full']){const glyph=pairs.play[end].firstElementChild,style=getComputedStyle(glyph),r=this.rect(glyph);appearances.play[end+'Glyph']={width:r.width||parseFloat(style.width)||1,height:r.height||parseFloat(style.height)||1,opacity:parseFloat(style.opacity)||1};}
+    return {key:this.modelKey(),appearances,artMiniSize:getComputedStyle(pairs.art.mini).backgroundSize,artFullSize:getComputedStyle(A).backgroundSize,nativeSeekVisible:getComputedStyle(pairs.seek.full).display!=='none'};
+  },
   scheduleAppearance(){
     this.geometryDirty=true;if(!this.presenter||this.active()||this.geometryFrame)return;
     this.geometryFrame=requestAnimationFrame(()=>{this.geometryFrame=0;if(this.active()||InputLifecycle.contacts.size||document.hidden)return;
-      const full=this.presenter.full,hidden=full.hidden,opacity=full.style.opacity;
-      // Layout fitting belongs to settled playback/settings, never first input.
-      try{this.settingUp=true;full.hidden=false;full.style.opacity='0';UI.fitPlayer();this.geometryDirty=false;}
-      finally{full.hidden=hidden;full.style.opacity=opacity;this.settingUp=false;}
+      const {full,mini}=this.presenter,hidden=[full.hidden,mini.hidden],opacity=[full.style.opacity,mini.style.opacity];
+      // Renderer typography/colour primitives are prepared outside contact.
+      // This is bounded known-widget state, never a style inventory or clone.
+      try{this.settingUp=true;full.hidden=mini.hidden=false;full.style.opacity=mini.style.opacity='0';UI.fitPlayer();const pairs={art:{mini:$('#mini-art'),full:$('#artstage')},title:{mini:$('#mini-title'),full:$('#p-title')},sub:{mini:$('#mini-sub'),full:$('#p-sub')},play:{mini:$('#mini-play'),full:$('#btn-play')},seek:{mini:$('#mini-seek'),full:$('#seek')}};this.models=this.readModels(pairs,$('#artA'));this.geometryDirty=false;}
+      finally{full.hidden=hidden[0];mini.hidden=hidden[1];full.style.opacity=opacity[0];mini.style.opacity=opacity[1];this.settingUp=false;}
     });
   },
   install(){
@@ -6385,6 +6392,9 @@ Object.assign(SharedPlayerMotion,{
     mini.before(backgroundMask);mini.before(mask);mask.appendChild(content);content.appendChild(full);backgroundMask.appendChild(backgroundContent);backgroundContent.appendChild(background);document.body.appendChild(input);
     const backgroundParts={};for(const name of ['art','art-next','grad','vig']){const node=document.createElement('div');node.className='player-live-bg-'+name;background.appendChild(node);backgroundParts[name]=node;}
     this.presenter={full,mini,mask,content,backgroundMask,backgroundContent,background,input,backgroundParts};
+    for(const selector of ['#mini-title','#mini-sub']){const node=$(selector);this.setMiniLabel(node,node.textContent);}
+    const artWriter=UI.setArtEl;UI.setArtEl=function(node,url){const m=SharedPlayerMotion.active()||SharedPlayerMotion.transaction;if(m&&m.trackId!==Engine.current?.id){ScreenDrag.abort();return artWriter.call(UI,node,url);}if(m&&node===m.pairs.art.mini)m.producerMiniArt=url?'url("'+url+'")':'';const result=artWriter.call(UI,node,url);if(m&&(node.id==='mini-art'||node.id==='artA'))SharedPlayerMotion.paintArtwork(m);return result;};
+    const playWriter=UI.renderPlayState;UI.renderPlayState=function(...args){const result=playWriter.apply(UI,args),m=SharedPlayerMotion.active()||SharedPlayerMotion.transaction;if(m&&!m.retired)SharedPlayerMotion.ownGlyph(m);return result;};
     SnapshotReferenceMotion.bindInput.call(this,this.presenter);
     // Input listeners/contact plane are installed once and reused. Retirement
     // releases capture but does not remove/recreate the presentation.
@@ -6396,6 +6406,33 @@ Object.assign(SharedPlayerMotion,{
     geometryObserver.observe(document.body,{attributes:true,attributeFilter:['class']});
     window.addEventListener('resize',()=>{root.style.setProperty('--player-live-top',this.rect($('#app')).top+'px');this.scheduleAppearance();});document.fonts?.ready.then(()=>this.scheduleAppearance());
     this.updateBackground();this.scheduleAppearance();
+  },
+  setMiniLabel(node,text){
+    let span=node.firstElementChild;
+    if(!span?.classList.contains('player-live-label-text')){span=document.createElement('span');span.className='player-live-label-text';node.replaceChildren(span);}
+    span.textContent=text;
+  },
+  appearance(node){
+    const style=getComputedStyle(node),number=key=>parseFloat(style.getPropertyValue(key))||0;
+    return {fontFamily:style.fontFamily,fontSize:number('font-size'),fontWeight:parseFloat(style.fontWeight)||700,lineHeight:number('line-height')||number('font-size')*1.2,color:style.color,background:style.backgroundColor,borderColor:style.borderTopColor,borderWidth:number('border-top-width'),padding:{left:number('padding-left'),top:number('padding-top'),right:number('padding-right'),bottom:number('padding-bottom')},radius:this.radius(node)};
+  },
+  blend(a,b,p){return `color-mix(in srgb,${a} ${(1-p)*100}%,${b} ${p*100}%)`;},
+  ownGlyph(m){
+    const node=m.pairs.play.mini.firstElementChild;if(!node||node===m.glyph)return;
+    m.glyph=node;m.styles.push(this.styleSnapshot(node,['transform','transform-origin','opacity']));node.style.transformOrigin='50% 50%';
+    this.paintGlyph(m);
+  },
+  paintGlyph(m){
+    if(!m.glyph||!m.geometry)return;
+    const model=m.appearances.play,p=m.p,box=m.endpoints.play.mini,g=m.geometry.play,scaleX=g.width/box.width,scaleY=g.height/box.height;
+    const width=model.miniGlyph.width+(model.fullGlyph.width-model.miniGlyph.width)*p,height=model.miniGlyph.height+(model.fullGlyph.height-model.miniGlyph.height)*p;
+    m.glyph.style.transform=`scale(${width/model.miniGlyph.width/scaleX},${height/model.miniGlyph.height/scaleY})`;m.glyph.style.opacity=String(model.miniGlyph.opacity+(model.fullGlyph.opacity-model.miniGlyph.opacity)*p);
+  },
+  paintArtwork(m){
+    if(!m||m.retired)return;
+    const node=m.pairs.art.mini,full=$('#artA'),image=full.style.backgroundImage||m.producerMiniArt||'';
+    node.style.backgroundImage=image;node.style.backgroundSize=m.p>.001?m.artFullSize:m.artMiniSize;
+    const ph=node.querySelector('.ph');if(ph)ph.style.display=image?'none':'grid';
   },
   updateBackground(){
     const presenter=this.presenter;if(!presenter)return;
@@ -6412,8 +6449,9 @@ Object.assign(SharedPlayerMotion,{
     const {mini,full,mask,content,backgroundMask,backgroundContent,input,background}=presenter,nav=$('#nav'),dim=$('#bg-dim');
     const original={miniHidden:mini.hidden,miniInert:mini.inert,miniAria:mini.getAttribute('aria-hidden'),fullHidden:full.hidden,fullInert:full.inert,fullAria:full.getAttribute('aria-hidden')};
     const pairs={art:{mini:$('#mini-art'),full:$('#artstage')},title:{mini:$('#mini-title'),full:$('#p-title')},sub:{mini:$('#mini-sub'),full:$('#p-sub')},play:{mini:$('#mini-play'),full:$('#btn-play')},seek:{mini:$('#mini-seek'),full:$('#seek')}};
-    const motionKeys=['transform','transform-origin','transition','opacity','will-change','z-index','border-radius','background'];
-    const styles=[mini,full,dim,nav,...Object.values(pairs).flatMap(pair=>[pair.mini,pair.full])].map(node=>this.styleSnapshot(node,motionKeys));
+    const motionKeys=['position','inset','left','top','width','height','margin','overflow','max-width','max-height','min-width','min-height','padding','border-width','border-color','border-style','color','transform','transform-origin','transition','opacity','will-change','z-index','border-radius','background','background-image','background-size','box-shadow'];
+    const slide=mini.querySelector('.mini-swipe-content'),overlay=$('.art-ov'),A=$('#artA'),B=$('#artB');
+    const styles=[mini,full,dim,nav,slide,overlay,A,B,...Object.values(pairs).flatMap(pair=>[pair.mini,pair.full])].filter(Boolean).map(node=>this.styleSnapshot(node,motionKeys));
     let m=null;this.settingUp=true;
     try{
       mini.hidden=full.hidden=false;mini.style.transition=full.style.transition='none';mini.style.transform=full.style.transform='none';mini.style.opacity=full.style.opacity='1';
@@ -6423,15 +6461,19 @@ Object.assign(SharedPlayerMotion,{
       const miniRadius=this.radius(mini),navMini=this.radius(nav),artRadius={mini:this.radius(pairs.art.mini),full:this.radius(pairs.art.full)};
       // The authored joined dock has square top corners only while mini shows.
       const navFull=[navMini[2],navMini[3],navMini[2],navMini[3]];
-      m={...presenter,opening,p:opening?0:1,endpoints,pairs,miniRadius,navRadius:{mini:navMini,full:navFull},artRadius,nav,dim,styles,original,trackId:Engine.current.id,geometry:null,retired:false};
+      const model=this.models?.key===this.modelKey()?this.models:this.readModels(pairs,A),{appearances,artMiniSize,artFullSize,nativeSeekVisible}=model;
+      m={...presenter,opening,p:opening?0:1,endpoints,pairs,appearances,slide,overlay,A,B,artMiniSize,artFullSize,nativeSeekVisible,producerMiniArt:pairs.art.mini.style.backgroundImage,miniRadius,navRadius:{mini:navMini,full:navFull},artRadius,nav,dim,styles,original,trackId:Engine.current.id,geometry:null,retired:false};
       this.transaction=m;
       const base=endpoints.surface.mini,fullBox=endpoints.surface.full;
       for(const node of [mask,backgroundMask])Object.assign(node.style,{inset:'auto',left:base.left+'px',top:base.top+'px',width:base.width+'px',height:base.height+'px'});
       for(const node of [content,backgroundContent])Object.assign(node.style,{inset:'auto',left:'0',top:'0',width:fullBox.width+'px',height:fullBox.height+'px'});
       Object.assign(background.style,{left:-fullBox.left+'px',top:-fullBox.top+'px',width:innerWidth+'px',height:innerHeight+'px'});
       mini.dataset.sharedPlayer=full.dataset.sharedPlayer='1';mask.dataset.active=backgroundMask.dataset.active='1';input.hidden=backgroundMask.hidden=false;input.className='player-scene-input';mini.style.background='transparent';
-      for(const nodes of Object.values(pairs))for(const node of Object.values(nodes)){node.style.transformOrigin='0 0';node.style.transition='none';node.style.willChange='transform,opacity';}
-      mini.style.transformOrigin='0 0';mini.style.zIndex='20';full.style.zIndex='2';this.paint(m,m.p);return m;
+      for(const [key,nodes] of Object.entries(pairs)){const node=nodes.mini,box=endpoints[key].mini;Object.assign(node.style,{position:'absolute',inset:'auto',left:(box.left-base.left)+'px',top:(box.top-base.top)+'px',width:box.width+'px',height:box.height+'px',margin:'0',minWidth:'0',minHeight:'0',maxWidth:'none',maxHeight:'none',transformOrigin:'0 0',transition:'none',willChange:'transform,opacity',zIndex:key==='art'?'20':'23'});if(key!=='art')nodes.full.style.opacity='0';}
+      Object.assign(mini.style,{position:'absolute',inset:'auto',left:base.left+'px',top:base.top+'px',width:base.width+'px',height:base.height+'px',margin:'0',transform:'none',willChange:'auto',zIndex:'auto',overflow:'visible',boxShadow:'none'});
+      if(slide){slide.style.transform='none';slide.style.willChange='auto';}A.style.opacity=B.style.opacity='0';pairs.art.full.style.overflow='visible';
+      for(const key of ['title','sub']){const node=pairs[key].mini,span=node.firstElementChild;m.styles.push(this.styleSnapshot(span,['position','left','top','display','transform','transform-origin','font-family','font-size','font-weight','line-height','letter-spacing','white-space','max-width']));Object.assign(span.style,{position:'absolute',left:'0',top:'0',display:'block',transformOrigin:'0 0',fontSize:appearances[key].mini.fontSize+'px',whiteSpace:'nowrap',maxWidth:'none'});node.style.padding='0';node.style.overflow='hidden';}
+      if(overlay){overlay.style.transformOrigin='0 0';overlay.style.transition='none';}full.style.zIndex='2';this.paint(m,m.p);this.ownGlyph(m);this.paintArtwork(m);return m;
     }catch(error){this.clean(m||{...presenter,styles,original,retired:false});throw error;}
     finally{this.settingUp=false;if(!m){for(const snapshot of styles)this.restore(snapshot);mini.hidden=original.miniHidden;full.hidden=original.fullHidden;}}
   },
@@ -6440,21 +6482,21 @@ Object.assign(SharedPlayerMotion,{
     for(const node of [m.mini,m.full]){const held=owner&&(owner===node||node.contains?.(owner))&&owner.hasPointerCapture?.(gesture.id);node.inert=!held;node.setAttribute('aria-hidden','true');}
   },
   paint(m,p){
-    if(m.retired)return;this.lockOriginals(m);m.mini.hidden=m.full.hidden=false;
+    if(m.retired)return;this.lockOriginals(m);m.mini.hidden=m.full.hidden=false;m.A.style.opacity=m.B.style.opacity='0';for(const [key,nodes] of Object.entries(m.pairs))if(key!=='art')nodes.full.style.opacity='0';
     p=clamp(p,0,1);if(m.geometry&&m.p===p)return;m.p=p;const g=this.sceneGeometry(m.endpoints,p);m.geometry=g;
     const base=m.endpoints.surface.mini,r=g.surface,full=m.endpoints.surface.full,sx=r.width/base.width,sy=r.height/base.height;
     const transform=`translate(${r.left-base.left}px,${r.top-base.top}px) scale(${sx},${sy})`,radius=m.miniRadius.map(value=>value*(1-p)/sx+'px').join(' ')+' / '+m.miniRadius.map(value=>value*(1-p)/sy+'px').join(' ');
     for(const node of [m.mask,m.backgroundMask]){node.style.transform=transform;node.style.borderRadius=radius;}
     for(const node of [m.content,m.backgroundContent])node.style.transform=`translate(${(full.left-r.left)/sx}px,${(full.top-r.top)/sy}px) scale(${1/sx},${1/sy})`;
-    m.background.style.opacity=String(p);m.full.style.opacity=String(p);
-    m.mini.style.transform=transform;m.mini.style.borderRadius=radius;m.mini.style.opacity='1';
-    for(const [key,nodes] of Object.entries(m.pairs))for(const end of ['mini','full']){
-      const node=nodes[end],box=m.endpoints[key][end],target=g[key];if(!box.width||!box.height){node.style.opacity='0';continue;}
-      if(end==='mini')node.style.transform=`translate(${(target.left-r.left)/sx-(box.left-base.left)}px,${(target.top-r.top)/sy-(box.top-base.top)}px) scale(${target.width/box.width/sx},${target.height/box.height/sy})`;
-      else node.style.transform=`translate(${target.left-box.left}px,${target.top-box.top}px) scale(${target.width/box.width},${target.height/box.height})`;
-      node.style.opacity=String(end==='mini'?1-p:1);
-      if(key==='art'){const scaleX=target.width/box.width/(end==='mini'?sx:1),scaleY=target.height/box.height/(end==='mini'?sy:1),radii=m.artRadius.mini.map((value,i)=>value+(m.artRadius.full[i]-value)*p);node.style.borderRadius=radii.map(value=>value/scaleX+'px').join(' ')+' / '+radii.map(value=>value/scaleY+'px').join(' ');}
+    m.background.style.opacity=String(p);m.full.style.opacity=String(p);m.mini.style.opacity='1';
+    for(const [key,nodes] of Object.entries(m.pairs)){
+      const node=nodes.mini,box=m.endpoints[key].mini,target=g[key];if(!box.width||!box.height){node.style.opacity='0';continue;}
+      const scaleX=target.width/box.width,scaleY=target.height/box.height;node.style.transform=`translate(${target.left-box.left}px,${target.top-box.top}px) scale(${scaleX},${scaleY})`;node.style.opacity=String(key==='seek'&&!m.nativeSeekVisible?1-p:1);
+      if(key==='art'){const radii=m.artRadius.mini.map((value,i)=>value+(m.artRadius.full[i]-value)*p);node.style.borderRadius=radii.map(value=>value/scaleX+'px').join(' ')+' / '+radii.map(value=>value/scaleY+'px').join(' ');}
+      if(key==='title'||key==='sub'){const model=m.appearances[key],span=node.firstElementChild,font=model.mini.fontSize+(model.full.fontSize-model.mini.fontSize)*p,fontScale=font/model.mini.fontSize,padding={};for(const side of ['left','top'])padding[side]=model.mini.padding[side]+(model.full.padding[side]-model.mini.padding[side])*p;span.style.transform=`translate(${padding.left/scaleX}px,${padding.top/scaleY}px) scale(${fontScale/scaleX},${fontScale/scaleY})`;span.style.fontFamily=p<.5?model.mini.fontFamily:model.full.fontFamily;span.style.fontWeight=String(model.mini.fontWeight+(model.full.fontWeight-model.mini.fontWeight)*p);span.style.lineHeight=(model.mini.lineHeight+(model.full.lineHeight-model.mini.lineHeight)*p)/fontScale+'px';node.style.color=this.blend(model.mini.color,model.full.color,p);node.style.backgroundColor=this.blend(model.mini.background,model.full.background,p);const radii=model.mini.radius.map((value,i)=>value+(model.full.radius[i]-value)*p);node.style.borderRadius=radii.map(value=>value/scaleX+'px').join(' ')+' / '+radii.map(value=>value/scaleY+'px').join(' ');}
+      if(key==='play'){const model=m.appearances.play;node.style.backgroundColor=this.blend(model.mini.background,model.full.background,p);node.style.borderStyle='solid';node.style.borderColor=this.blend(model.mini.borderColor,model.full.borderColor,p);node.style.borderWidth=(model.mini.borderWidth+(model.full.borderWidth-model.mini.borderWidth)*p)/scaleX+'px';}
     }
+    if(m.overlay){const art=m.endpoints.art.full;m.overlay.style.transform=`translate(${g.art.left-art.left}px,${g.art.top-art.top}px) scale(${g.art.width/art.width},${g.art.height/art.height})`;}this.paintGlyph(m);this.paintArtwork(m);
     m.dim.style.transition='none';m.dim.style.opacity=String((SET.listBg===false?.94:.66)*(1-p));
     ['border-top-left-radius','border-top-right-radius','border-bottom-right-radius','border-bottom-left-radius'].forEach((key,i)=>m.nav.style.setProperty(key,(m.navRadius.mini[i]+(m.navRadius.full[i]-m.navRadius.mini[i])*p)+'px'));
   },
@@ -6465,6 +6507,7 @@ Object.assign(SharedPlayerMotion,{
     // The live library was never hidden, moved, cloned or detached by this owner.
     m.releaseInput?.();m.input.hidden=m.backgroundMask.hidden=true;m.input.className='';delete m.mask.dataset.active;delete m.backgroundMask.dataset.active;for(const node of [m.mask,m.content,m.backgroundMask,m.backgroundContent,m.background])node.removeAttribute('style');
     for(const snapshot of m.styles||[])this.restore(snapshot);
+    if(m.pairs?.art?.mini){const node=m.pairs.art.mini;node.style.backgroundImage=m.producerMiniArt||'';const ph=node.querySelector('.ph');if(ph)ph.style.display=m.producerMiniArt?'none':'grid';}
     delete m.mini.dataset.sharedPlayer;delete m.full.dataset.sharedPlayer;
     m.mini.style.removeProperty('opacity');m.full.style.removeProperty('opacity');m.mini.style.removeProperty('transform');m.full.style.removeProperty('transform');
     m.mini.hidden=Nav.cur==='player'||Nav.cur==='settings'||!Engine.current;m.mini.inert=false;m.mini.setAttribute('aria-hidden',m.mini.hidden?'true':'false');
