@@ -19,7 +19,7 @@ function harness({reduced=false,width=393,height=852,mutations=false}={}){
   function style(initial={}){
     const values=new Map(Object.entries(initial).map(([key,value])=>[dashed(key),String(value)])),priorities=new Map();
     return new Proxy({getPropertyValue:key=>values.get(key)||'',getPropertyPriority:key=>priorities.get(key)||'',setProperty(key,value,priority=''){countStyle(key);values.set(key,String(value));priorities.set(key,priority);},removeProperty(key){const previous=values.get(key);values.delete(key);priorities.delete(key);return previous;}},{
-      get(target,key){if(key==='cssText')return [...values].map(([a,b])=>`${a}:${b}`).join(';');return key in target?target[key]:values.get(dashed(key))||'';},
+      get(target,key){if(key==='length')return values.size;if(/^\d+$/.test(String(key)))return [...values.keys()][+key];if(key==='cssText')return [...values].map(([a,b])=>`${a}:${b}`).join(';');return key in target?target[key]:values.get(dashed(key))||'';},
       set(target,key,value){countStyle(dashed(key));if(key==='cssText'){values.clear();for(const entry of String(value).split(';')){const at=entry.indexOf(':');if(at>0)values.set(entry.slice(0,at),entry.slice(at+1));}}else values.set(dashed(key),String(value));return true;}
     });
   }
@@ -358,4 +358,28 @@ test('playback RAF keeps progress live but makes no periodic canvas draw/copy in
   t.diagnostic('first 150 ms tap settle periodic work: '+JSON.stringify({...calls,progress}));assert.equal(h.lifecycle.contacts.size,0);assert.equal(calls.viz,0);assert.ok(progress>0);assert.equal(m.vizDeferred,true);assert.equal(h.context.UI.loopId>0,true,'audio UI chain remains live');
   h.scene.pause();const p=m.p;h.frame(30);assert.equal(m.p,p);assert.equal(calls.viz,0,'a regrab/held scene retains display ownership');
   h.scene.abort();h.frame(30);assert.ok(calls.viz>=1,'periodic visualization resumes after scene cleanup');assert.equal(h.scene.state,null);assert.equal(h.scene.settling,null);h.context.UI.stopLoop();
+});
+
+function appearanceHarness(){
+  const h=harness(),idle=new Map();let serial=0;
+  h.list();Object.assign(h.context,{innerWidth:393,devicePixelRatio:1,LibraryPageMotion:{state:null,finish:null},requestIdleCallback:fn=>{idle.set(++serial,fn);return serial;},cancelIdleCallback:id=>idle.delete(id)});
+  h.context.document.styleSheets=[{cssRules:[{cssText:'body { color: red; }'}],disabled:false}];h.context.document.activeElement=h.body;h.context.document.fonts={status:'loaded'};
+  h.context.MutationObserver=class{constructor(callback){this.callback=callback;this.records=[];h.observers.push(this);}observe(){}disconnect(){}takeRecords(){const records=this.records;this.records=[];return records;}};
+  h.prepare=()=>{h.shared.scheduleAppearance();assert.equal(h.shared.preparedAppearance,null,'preparation never runs on the requesting/input stack');h.advance(200);for(let i=0;i<100&&idle.size;i++)for(const [id,fn] of [...idle]){idle.delete(id);fn({timeRemaining:()=>50});}assert.ok(h.shared.preparedAppearance,'idle preparation completed');};return h;
+}
+test('idle exhaustive appearance is consumed once and the cold path stays explicit',()=>{
+  const h=appearanceHarness();h.prepare();h.resetCost();h.scene.begin('player',-1);assert.equal(h.shared.appearanceStats.hits,1);assert.equal(h.shared.preparedAppearance,null);assert.equal(h.shared.appearanceStats.cold,0);const preparedReads=h.cost.computedReads;
+  h.scene.abort();h.shared.clearAppearance();h.resetCost();h.scene.begin('player',-1);assert.equal(h.shared.appearanceStats.cold,1,'no synchronous warming replaces the unprepared contact');assert.ok(preparedReads<h.cost.computedReads,'prepared invariant CSS reduces reads while progress/time remain live');
+});
+test('pending mutations and CSSOM edits reject prepared appearance without stale reuse',()=>{
+  for(const reason of ['mutation','cssom','inline','resize','track','focus']){const h=appearanceHarness();h.prepare();const job=h.shared.preparedAppearance;
+    if(reason==='mutation')job.observer.records.push({target:h.$('#mini-title')});if(reason==='cssom')h.context.document.styleSheets[0].cssRules[0].cssText='body { color: blue; }';if(reason==='inline')h.$('#mini-title').style.color='blue';if(reason==='resize')h.context.innerWidth++;if(reason==='track')h.context.Engine.current={id:'changed'};if(reason==='focus')h.context.document.activeElement=h.$('#mini-title');
+    h.scene.begin('player',-1);assert.equal(h.shared.appearanceStats.hits,0,reason);assert.equal(h.shared.appearanceStats.cold,1,reason);
+  }
+});
+
+test('live progress transforms do not invalidate invariant siblings and remain freshly captured',()=>{
+  const h=appearanceHarness();h.context.Engine.playing=true;h.prepare();const job=h.shared.preparedAppearance,fill=h.$('#mini-fill'),oldValue=fill.style.cssText;fill.style.transform='translateX(77%)';
+  const progress={type:'attributes',attributeName:'style',target:fill,oldValue};assert.equal(h.shared.appearanceChanges([progress]).length,0);job.observer.records.push(progress);h.scene.begin('player',-1);assert.equal(h.shared.appearanceStats.hits,1);assert.equal(h.scene.state.morph.pairs.seek.mini._sceneNodes.get(fill).style.transform,'translateX(77%)','progress CSS is read live on activation');
+  h.scene.abort();h.prepare();const before=fill.style.cssText;fill.style.color='blue';assert.equal(h.shared.appearanceChanges([{...progress,oldValue:before}]).length,1,'other styling on a progress node still invalidates');
 });

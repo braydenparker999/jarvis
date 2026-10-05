@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {existsSync} from 'node:fs';
-import {mkdir,writeFile} from 'node:fs/promises';
+import {mkdir,writeFile,readFile} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {chromium} from 'playwright-core';
 import {fixtureCover,fixtureSceneSettled,installFixtureInputTrace,installPowerampFixture,reportFixtureFailure,servePowerampFixture,sourceFlags} from './helpers/poweramp-fixture.js';
@@ -25,6 +25,9 @@ async function openVisualPage(browser,fixture,{theme,baseline=false,art=true}){
   await context.route('**/*',route=>new URL(route.request().url()).origin===fixture.origin?route.continue():route.abort('blockedbyclient'));
   await context.addInitScript(flags=>localStorage.setItem('drawercast.sources.v1',JSON.stringify(flags)),sourceFlags);
   await context.addInitScript(installFixtureInputTrace);
+  const playerSource=await readFile(new URL('../public/drawercast/player.js',import.meta.url),'utf8');
+  // Fixture-only read access; production PA exports and runtime behavior stay unchanged.
+  await context.route('**/drawercast/player.js*',route=>route.fulfill({contentType:'application/javascript',body:playerSource.replace('window.PA = {',"window.fixtureActualMotion=SharedPlayerMotion;window.fixtureRawScene=()=>{const scene=ScreenDrag.state||ScreenDrag.settling;return {p:scene?.morph?.p,height:scene?.height};};window.PA = {")}));
   await page.goto(fixture.origin+'/drawercast/');await page.waitForFunction(()=>window.PA?.R2Source.manifestURL==='fixture-disabled');
   await page.evaluate(installPowerampFixture,{origin:fixture.origin,count:60,art});
   await page.evaluate(async theme=>{
@@ -50,11 +53,12 @@ async function openVisualPage(browser,fixture,{theme,baseline=false,art=true}){
     await page.waitForFunction(()=>document.getAnimations().every(animation=>animation.playState==='finished'||animation.playState==='idle'));
     await frame();await frame();
   };
-  const library=async()=>{await page.locator('[data-nav="library"]').tap();await settled('library');await page.getByRole('button',{name:'All Songs',exact:true}).tap();await settled('list');await quiet();};
+  const library=async()=>{await page.locator('[data-nav="library"]').tap();await settled('library');await page.getByRole('button',{name:'All Songs',exact:true}).tap();await settled('list');await quiet();if(!baseline)await page.waitForFunction(()=>!!fixtureActualMotion.preparedAppearance);};
   const diagnostics=()=>page.evaluate(()=>({theme:PA.SET.uiTheme,screen:PA.Nav.cur,time:PA.Engine.time(),viewport:{width:innerWidth,height:innerHeight,dpr:devicePixelRatio},
     cssRulesReads:window.fixtureCSSRulesReads||0,scene:{plane:!!document.querySelector('.player-scene-input'),layer:!!document.querySelector('.player-scene-layer'),miniOpacity:document.querySelector('#mini').style.opacity,fullOpacity:document.querySelector('#sc-player').style.opacity},trace:window.fixtureInputTrace})).then(result=>({...result,errors}));
   const mode=async()=>{
     await page.evaluate(baseline=>{
+      fixtureActualMotion.appearanceEnabled=!baseline;fixtureActualMotion.clearAppearance();
       // Only introspection of one real sheet is made unreadable after boot.
       // The same sheet remains enabled and continues painting the original UI.
       // Production snapshotPlan catches this and selects the old exhaustive CSS.
@@ -96,10 +100,10 @@ async function snapshot(h,{label,expectedProgress}){
     const elements=[layer,...layer.querySelectorAll('*')],canvases=[...fullClone._sceneNodes].filter(([source])=>source.tagName==='CANVAS'&&!fullClone._sceneSuppressed?.has(source)).map(([source,copy])=>({sourceWidth:source.width,sourceHeight:source.height,copyWidth:copy.width,copyHeight:copy.height}));
     return {p,geometry,appearance,canonical,canvases,cssCharacters:elements.reduce((n,e)=>n+e.style.cssText.length,0),clonedNodes:elements.length,
       theme:PA.SET.uiTheme,time:PA.Engine.time(),playing:PA.Engine.wantsPlayback(),track:PA.Engine.current.id,miniOpacity:mini.style.opacity,fullOpacity:full.style.opacity,
-      cssRulesReads:fixtureCSSRulesReads,sheet:{...fixtureSheet,stillEnabled:!document.styleSheets[0].disabled},viewport:{width:innerWidth,height:innerHeight,dpr:devicePixelRatio},trace:fixtureInputTrace.slice(-24)};
+      captureMode:fixtureActualMotion.captureMode,appearanceStats:{...fixtureActualMotion.appearanceStats},cssRulesReads:fixtureCSSRulesReads,sheet:{...fixtureSheet,stillEnabled:!document.styleSheets[0].disabled},viewport:{width:innerWidth,height:innerHeight,dpr:devicePixelRatio},trace:fixtureInputTrace.slice(-24)};
   });
   near(state.p,expectedProgress,label+' held progress',.00001);assert.equal(state.time,42);assert.equal(state.playing,false);
-  assert.equal(state.miniOpacity,'0');assert.equal(state.fullOpacity,'0');assert.ok(state.cssRulesReads>0,'candidate used the stylesheet-plan/fallback path');
+  assert.equal(state.miniOpacity,'0');assert.equal(state.fullOpacity,'0');assert.equal(state.captureMode,'exhaustive','both visual modes use the identical exhaustive capture contract');if(!state.sheet.baseline)assert.ok(state.appearanceStats.hits>0,'prepared visual mode consumes a real one-use appearance cache');
   assert.ok(state.sheet.enabled&&state.sheet.stillEnabled,'baseline never disables application CSS');
   assert.ok(state.trace.some(event=>event.type==='pointerdown'&&event.trusted));assert.ok(state.trace.every(event=>event.trusted),'all input is genuine CDP/browser input');
   for(const [key,pair] of Object.entries(state.canonical)){
@@ -135,7 +139,7 @@ async function standardSnapshots(h){
     const surface=document.querySelector('.player-scene-surface'),mini=document.querySelector('#mini'),full=document.querySelector('#sc-player');
     if(!surface||!document.querySelector('.player-scene-input'))throw Error('Regrab did not reach a live shared scene');
     const rect=n=>{const r=n.getBoundingClientRect();return {left:r.left,top:r.top,width:r.width,height:r.height};},a=rect(mini),b=rect(full);
-    const geometryP=(rect(surface).height-a.height)/(b.height-a.height),p=Number(document.querySelector('.player-scene-full').style.opacity);
+    const geometryP=(rect(surface).height-a.height)/(b.height-a.height),p=fixtureRawScene().p;
     if(!Number.isFinite(p)||Math.abs(p-geometryP)>.00001)throw Error('Painted DOM opacity disagrees with held geometry');
     return {p,geometryP,height:document.querySelector('#sc-list').clientHeight,art:rect(document.querySelector('.player-scene-art'))};
   });
@@ -177,7 +181,7 @@ async function compareAndRecord(baseline,compact,theme,t){
   const geometryDeltas=Object.fromEntries(Object.entries(baseline.state.geometry).map(([name,rect])=>[name,Object.fromEntries(rectKeys.map(key=>[key,compact.state.geometry[name][key]-rect[key]]))]));
   const regions=Object.fromEntries(Object.entries(baseline.state.geometry).map(([name,r])=>[name,Object.fromEntries(rectKeys.map(key=>[key,r[key]*ownerViewport.deviceScaleFactor]))]));
   const pixels=compareScreenshotPNG(baseline.png,compact.png,{channelTolerance:pixelLimits.channelTolerance,regions});
-  const report={name,scope:'Same candidate, exhaustive fallback vs compact snapshots. Generated paused tracks/art/waveforms and trusted input; no live network or audio-fidelity claim.',limits:{geometryTolerance,pixelLimits},baseline:baseline.state,compact:compact.state,geometryDeltas,pixels};
+  const report={name,scope:'Same candidate, cold exhaustive versus prepared invariant CSS with live progress/time capture. Generated paused tracks/art/waveforms and trusted input; no live network or audio-fidelity claim.',limits:{geometryTolerance,pixelLimits},baseline:baseline.state,compact:compact.state,geometryDeltas,pixels};
   if(process.env.POWERAMP_EVIDENCE_DIR){
     const directory=resolve(process.env.POWERAMP_EVIDENCE_DIR);await mkdir(directory,{recursive:true});
     await Promise.all([writeFile(join(directory,name+'-baseline.png'),baseline.png),writeFile(join(directory,name+'-compact.png'),compact.png),writeFile(join(directory,name+'.json'),JSON.stringify(report,null,2)+'\n')]);
@@ -187,7 +191,7 @@ async function compareAndRecord(baseline,compact,theme,t){
   assert.deepEqual(compact.state.appearance,baseline.state.appearance,name+' opacity, corners, masks, and visibility');
   assert.deepEqual(compact.state.canvases,baseline.state.canvases,name+' canvas bitmap dimensions');
   assert.equal(compact.state.clonedNodes,baseline.state.clonedNodes,name+' identical source/clone topology');
-  assert.ok(compact.state.cssCharacters<baseline.state.cssCharacters*.7,name+' proves the compact path actually reduced inline CSS');
+  assert.equal(compact.state.captureMode,baseline.state.captureMode,name+' both paths retain exhaustive CSS; byte reduction is not this experiment');
   assert.ok(pixels.changedFraction<=pixelLimits.changedFraction,name+' bounded changed pixels: '+pixels.changedFraction);
   assert.ok(pixels.meanChannelDelta<=pixelLimits.meanChannelDelta,name+' bounded mean channel delta: '+pixels.meanChannelDelta);
   for(const [region,result] of Object.entries(pixels.regions))assert.ok(result.changedFraction<=pixelLimits.regionChangedFraction,name+' '+region+' bounded changed pixels: '+result.changedFraction);

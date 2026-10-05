@@ -26,7 +26,7 @@ test('Poweramp mandatory Chromium compact snapshot appearance parity',{timeout:1
           PA.SET.uiTheme=theme;PA.applySettings('uiTheme');PA.NativeSettings.apply();PA.UI.renderPlayState();PA.UI.renderProgress();
           const full=document.querySelector('#sc-player'),mini=document.querySelector('#mini');full.hidden=false;mini.hidden=false;mini.classList.remove('down');
           full.style.transform=mini.style.transform='none';full.style.opacity=mini.style.opacity='1';PA.UI.fitPlayer();
-          const snapshotDiagnostics={fallback:null},motion={...fixtureSnapshotMotion,snapshotPlan(style){return fixtureSnapshotMotion.snapshotPlan(style,snapshotDiagnostics);}},selectors=['#bg','#sc-player','#mini-art','#artA','.art-ov','#mini-title','#p-title','#mini-sub','#p-sub','#mini-play','#btn-play','#mini-seek','#seek'];
+          const snapshotDiagnostics={fallback:null},motion={...fixtureSnapshotMotion,captureMode:'compact',snapshotPlan(style){return fixtureSnapshotMotion.snapshotPlan(style,snapshotDiagnostics);}},selectors=['#bg','#sc-player','#mini-art','#artA','.art-ov','#mini-title','#p-title','#mini-sub','#p-sub','#mini-play','#btn-play','#mini-seek','#seek'];
           const host=document.createElement('div');host.className='player-scene-layer';host.style.visibility='hidden';document.body.appendChild(host);
           const fullMotion={...motion,snapshotPlan:()=>null},cache=new Map(),fullCache=new Map(),differences=[],coverage=[],counts={compactProperties:0,fullProperties:0,compactCSS:0,fullCSS:0,nodes:0,pseudos:0,icons:0};
           const computed=getComputedStyle;let reads=0;

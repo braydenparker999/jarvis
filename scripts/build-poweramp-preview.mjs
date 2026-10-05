@@ -87,6 +87,7 @@ const Audio=PreviewAudio;
 export const previewHooks=String.raw`
 /* Everything below is injected ONLY into the downloadable preview. */
 const Preview={
+  appearanceStatus(){return {ready:!!SharedPlayerMotion.preparedAppearance,pending:!!SharedPlayerMotion.appearanceJob,...SharedPlayerMotion.appearanceStats};},
   count:60,ready:false,defaults:null,nativeDefaults:null,presetDefaults:[],stores:new Map(),blockedRequests:0,
   store(name){if(!this.stores.has(name))this.stores.set(name,new Map());return this.stores.get(name);},
   track(id){return LIB.map.get(id)||this.store('tracks').get(id);},
@@ -273,7 +274,7 @@ const PreviewDiagnostics={
   },
   installMeasurements(){
     const shared=typeof SharedPlayerMotion==='undefined'?null:SharedPlayerMotion,ui=typeof UI==='undefined'?null:UI;
-    const targets=[[shared,'create','shared.create','setup'],[shared,'clone','shared.clone'],[shared,'snapshotPlan','shared.snapshotPlan'],[shared,'snapshotKeys','shared.snapshotKeys'],[shared,'snapshotCSS','shared.snapshotCSS'],[shared,'copyCanvas','shared.copyCanvas'],[shared,'paint','shared.paint'],[shared,'refreshDynamic','shared.dynamic'],[shared,'refreshBackground','shared.background'],[shared,'settle','shared.settle'],[shared,'clean','shared.clean','cleanup'],[LibraryPageHistory,'save','history.save'],[LibraryPageMotion,'capture','history.capture'],[ui,'fitPlayer','player.fit'],[ui,'drawViz','player.draw'],[Nav,'go','navigation.go']];
+    const targets=[[shared,'create','shared.create','setup'],[shared,'clone','shared.clone'],[shared,'snapshotPlan','shared.snapshotPlan'],[shared,'snapshotKeys','shared.snapshotKeys'],[shared,'snapshotCSS','shared.snapshotCSS'],[shared,'copyCanvas','shared.copyCanvas'],[shared,'consumeAppearance','shared.appearance'],[shared,'paint','shared.paint'],[shared,'refreshDynamic','shared.dynamic'],[shared,'refreshBackground','shared.background'],[shared,'settle','shared.settle'],[shared,'clean','shared.clean','cleanup'],[LibraryPageHistory,'save','history.save'],[LibraryPageMotion,'capture','history.capture'],[ui,'fitPlayer','player.fit'],[ui,'drawViz','player.draw'],[Nav,'go','navigation.go']];
     for(const [object,key,label,stage] of targets){
       if(typeof object?.[key]!=='function')continue;const original=object[key],diagnostics=this;
       const wrapper=function(...args){
@@ -282,7 +283,7 @@ const PreviewDiagnostics={
         if(stage)diagnostics.contexts.push(phase);
         const frame={nested_ms:0};diagnostics.operationFrames.push(frame);
         if(key==='settle')diagnostics.record('motion-settle',{direction:args[0]?.opening?'expand':'collapse',from:args[0]?.p,to:args[1],planned_ms:args[2]});
-        try{const result=original.apply(this,args);if(key==='snapshotPlan')diagnostics.record('snapshot-plan',{active:!!result});return result;}finally{
+        try{const result=original.apply(this,args);if(key==='snapshotPlan')diagnostics.record('snapshot-plan',{active:!!result});if(key==='consumeAppearance')diagnostics.record('appearance-cache',{mode:SharedPlayerMotion.captureMode,...SharedPlayerMotion.appearanceStats});return result;}finally{
           if(stage)diagnostics.contexts.pop();const elapsed=Math.max(0,performance.now()-at),self=Math.max(0,elapsed-frame.nested_ms),id=label+'|'+phase;
           diagnostics.operationFrames.pop();const parent=diagnostics.operationFrames.at(-1);if(parent)parent.nested_ms+=elapsed;
           const value=diagnostics.operations.get(id)||{operation:label,phase,calls:0,total_ms:0,self_ms:0,max_ms:0,max_self_ms:0,over_8ms:0};

@@ -3613,6 +3613,8 @@ const VIZ_PRESETS = [
 const SCREENS={player:'#sc-player',library:'#sc-library',list:'#sc-list',eq:'#sc-eq',search:'#sc-search',settings:'#sc-settings'};
 /* Input belongs to a contact and to the currently active screen. */
 const InputLifecycle={
+  replacementClicks:new Map(),
+  guardReplacement(node,e){this.replacementClicks.set(e.pointerId,{node,at:performance.now()});for(const [id,entry] of this.replacementClicks)if(performance.now()-entry.at>800||this.replacementClicks.size>8)this.replacementClicks.delete(id);},
   resets:new Map(),contacts:new Set(),version:0,gesture:null,rebasing:false,motionSettle:null,
   register(reset,node){this.resets.set(reset,node);return reset;},
   cancel(options={}){
@@ -3646,6 +3648,10 @@ document.addEventListener('pointerdown',e=>{
   if(settling&&!settling.accepts(e))InputLifecycle.cancelMotionSettle();
   InputLifecycle.contacts.add(e.pointerId);if(InputLifecycle.contacts.size>1)InputLifecycle.cancel({keepContacts:true});},true);
 for(const type of ['pointerup','pointercancel'])document.addEventListener(type,e=>InputLifecycle.contacts.delete(e.pointerId),true);
+document.addEventListener('click',e=>{
+  if(e.detail===0)return;const entry=InputLifecycle.replacementClicks.get(e.pointerId);if(!entry)return;InputLifecycle.replacementClicks.delete(e.pointerId);
+  if(entry.node.isConnected===false&&performance.now()-entry.at<=800){e.preventDefault();e.stopImmediatePropagation();}
+},true);
 const Nav={
   cur:'player',
   go:function(name, push){
@@ -3714,6 +3720,7 @@ const Sheets={
     $('#bsheet').classList.remove('on');
     this.returnFocus?.focus?.({preventScroll:true});this.returnFocus=null;
     for(const key of ['sheet','bsheet']){const panel=$('#'+key);panel.inert=true;panel.setAttribute('aria-hidden','true');}
+    if(typeof SharedPlayerMotion!=='undefined')SharedPlayerMotion.scheduleAppearance?.();
   }
 };
 function openSheet(id){ Sheets.show(id||'sheet'); }
@@ -5840,6 +5847,107 @@ const SwipeArt={
 /* A single painted player owns mini/full continuity. Screens retain their input
    lifecycle; only this transient, inert layer paints during the morph. */
 const SharedPlayerMotion={
+  // Exhaustive capture is the measured faster, conservative production path.
+  // The compact planner remains available only to the independent QA probes.
+  captureMode:'exhaustive',appearanceEnabled:true,appearanceJob:null,preparedAppearance:null,
+  appearanceStats:{prepared:0,hits:0,cold:0,invalidated:0},
+  clearAppearance(){
+    const job=this.appearanceJob||this.preparedAppearance;
+    if(job){clearTimeout(job.timer);if(job.idle&&typeof cancelIdleCallback==='function')cancelIdleCallback(job.idle);job.observer?.disconnect();}
+    this.appearanceJob=this.preparedAppearance=null;
+  },
+  appearanceEligible(){
+    return this.appearanceEnabled&&typeof requestIdleCallback==='function'&&typeof MutationObserver==='function'&&
+      ['library','list'].includes(Nav.cur)&&!matchMedia('(hover: hover)').matches&&!document.hidden&&(!document.fonts||document.fonts.status==='loaded')&&
+      !ScreenDrag.state&&!ScreenDrag.settling&&!LibraryPageMotion.state&&!LibraryPageMotion.finish&&!Sheets.open&&
+      !InputLifecycle.contacts.size&&!!Engine.current;
+  },
+  appearanceSheets(){
+    const result=[],seen=new Set();
+    // Compare native serialized rules, including imported sheets. No selectors
+    // or property inventories are parsed on the input path.
+    const visit=sheet=>{if(seen.has(sheet))return;seen.add(sheet);result.push(sheet,sheet.disabled,sheet.media?.mediaText||'');const rules=sheet.cssRules;for(let j=0;j<rules.length;j++){const rule=rules[j];result.push(rule.cssText);if(rule.styleSheet)visit(rule.styleSheet);}};
+    for(const sheets of [document.styleSheets,document.adoptedStyleSheets])if(sheets)for(let i=0;i<sheets.length;i++)visit(sheets[i]);
+    return result;
+  },
+  appearanceFonts(){const fonts=document.fonts,result=[fonts?.status||'unavailable'];if(fonts&&typeof fonts[Symbol.iterator]==='function')for(const face of fonts)result.push(face,face.status);return result;},
+  appearanceSources(){
+    const shared=['#artA','#artB','.art-ov','#p-title','#p-sub','#btn-play','#seek'].map(selector=>$(selector)).filter(Boolean),nodes=new Set();
+    for(const selector of ['#bg','#sc-player','#mini-art','#artA','.art-ov','#mini-title','#p-title','#mini-sub','#p-sub','#mini-play','#btn-play','#mini-seek','#seek']){
+      const root=$(selector);if(!root)continue;
+      for(const node of [root,...root.querySelectorAll('*')])if(selector!=='#sc-player'||!shared.some(part=>part!==node&&part.contains(node)))nodes.add(node);
+    }
+    const dynamic=['#mini-seek','#seek','#t-cur','#t-dur'].map(selector=>$(selector)).filter(Boolean);
+    // Progress/time and every ancestor affected by their layout are captured
+    // live. Only invariant sibling/subtree CSS can be reused.
+    return [...nodes].filter(node=>!dynamic.some(root=>root===node||root.contains(node)||node.contains(root)));
+  },
+  appearanceChanges(records){return records.filter(record=>{
+    const target=record.target?.nodeType===3?record.target.parentElement:record.target,id=target?.id;
+    if(record.type==='attributes'&&record.attributeName==='style'&&['mini-fill','seek-fill','seek-knob'].includes(id)){
+      // Only compositor progress transforms are exempt; another declaration
+      // on the same node still invalidates the invariant sibling cache.
+      const old=document.createElement('span').style;old.cssText=record.oldValue||'';const current=target.style;
+      const rest=style=>{const values=[];for(let i=0;i<style.length;i++){const key=style[i];if(key!=='transform')values.push(key+':'+style.getPropertyValue(key)+'!'+style.getPropertyPriority(key));}return values.sort().join('\0');};return rest(old)!==rest(current);
+    }
+    if(record.type==='attributes'&&['mini-seek','seek'].includes(id)&&['aria-valuenow','aria-valuetext','aria-valuemax'].includes(record.attributeName))return false;
+    if(['characterData','childList'].includes(record.type)&&['t-cur','t-dur'].includes(id))return false;
+    return true;
+  });},
+  appearanceInputs(nodes){return nodes.map(node=>{const style=node.style,values=[];if(typeof style.length==='number'){for(let i=0;i<style.length;i++){const key=style[i];values.push(key+':'+style.getPropertyValue(key)+'!'+style.getPropertyPriority(key));}}else values.push(...style.cssText.split(';'));return [node,node.getAttribute('class'),values.sort().join('\0'),node.textContent];});},
+  appearanceStage(fn){
+    const mini=$('#mini'),full=$('#sc-player'),hidden=[mini.hidden,full.hidden],styles=[this.styleSnapshot(mini,['opacity','transform','transition']),this.styleSnapshot(full,['opacity','transform','transition','z-index'])];
+    try{
+      mini.hidden=full.hidden=false;mini.style.transition=full.style.transition='none';mini.style.transform=full.style.transform='none';mini.style.opacity=full.style.opacity='1';full.style.zIndex='3';
+      UI.fitPlayer();return fn();
+    }finally{for(const snapshot of styles)this.restore(snapshot);mini.hidden=hidden[0];full.hidden=hidden[1];}
+  },
+  scheduleAppearance(){
+    this.clearAppearance();if(!this.appearanceEligible())return;
+    const job={cache:new Map(),nodes:null,index:0,track:Engine.current,trackId:Engine.current.id,screen:Nav.cur,width:innerWidth,height:innerHeight,dpr:devicePixelRatio,focus:document.activeElement};
+    job.cache.snapshotPlan=null;
+    const watch=()=>{
+      for(const selector of ['#bg','#sc-player','#mini']){const node=$(selector);if(node)job.observer.observe(node,{attributes:true,attributeOldValue:true,childList:true,characterData:true,subtree:true});}
+      for(const node of [document.head,document.documentElement,document.body,$('#app')].filter(Boolean))job.observer.observe(node,node===document.head?{attributes:true,childList:true,characterData:true,subtree:true}:{attributes:true,childList:true});
+    };
+    job.observer=new MutationObserver(records=>{if(!this.appearanceChanges(records).length||this.appearanceJob!==job&&this.preparedAppearance!==job)return;this.appearanceStats.invalidated++;this.scheduleAppearance();});
+    const step=deadline=>{
+      job.idle=0;if(this.appearanceJob!==job||!this.appearanceEligible()){this.clearAppearance();return;}
+      if(document.getAnimations?.().some(animation=>animation.playState==='running'||animation.playState==='pending')){job.nodes=null;job.index=0;job.cache.clear();job.timer=setTimeout(()=>{job.timer=0;if(this.appearanceJob===job)job.idle=requestIdleCallback(step);},100);return;}
+      if(deadline.timeRemaining()<6){job.idle=requestIdleCallback(step);return;}
+      if(this.appearanceChanges(job.observer.takeRecords()).length){this.appearanceStats.invalidated++;this.scheduleAppearance();return;}
+      job.observer.disconnect();
+      try{
+        this.appearanceStage(()=>{
+          if(!job.nodes){job.nodes=this.appearanceSources();job.sheets=this.appearanceSheets();job.fonts=this.appearanceFonts();}
+          const start=performance.now();
+          while(job.index<job.nodes.length&&performance.now()-start<6&&deadline.timeRemaining()>2){
+            const node=job.nodes[job.index++],style=getComputedStyle(node),pseudos=[];
+            for(const pseudo of ['::before','::after']){const ps=getComputedStyle(node,pseudo);if(!ps.content||ps.content==='none'||ps.content==='normal')continue;pseudos.push({css:this.snapshotCSS(ps,null),text:ps.content==='""'||ps.content==="''"?'':ps.content.replace(/^['"]|['"]$/g,'')});}
+            job.cache.set(node,{css:this.snapshotCSS(style,null),pseudos});
+          }
+          job.inputs=this.appearanceInputs(job.nodes);
+        });
+        watch();
+        if(job.index===job.nodes.length){this.appearanceJob=null;this.preparedAppearance=job;this.appearanceStats.prepared++;}
+        else job.idle=requestIdleCallback(step);
+      }catch(_){this.clearAppearance();}
+    };
+    this.appearanceJob=job;watch();job.timer=setTimeout(()=>{job.timer=0;if(this.appearanceJob===job)job.idle=requestIdleCallback(step);},180);
+  },
+  claimAppearance(scene){
+    const job=this.preparedAppearance,valid=job&&scene.target==='player'&&job.screen===scene.fromName&&job.track===Engine.current&&job.trackId===Engine.current.id&&
+      job.width===innerWidth&&job.height===innerHeight&&job.dpr===devicePixelRatio&&job.focus===document.activeElement&&
+      !document.hidden&&!this.appearanceChanges(job.observer.takeRecords()).length&&!document.getAnimations?.().some(animation=>animation.playState==='running'||animation.playState==='pending')&&job.nodes.every(node=>node.isConnected);
+    this.clearAppearance();return valid?job:null;
+  },
+  consumeAppearance(job){
+    if(job)try{
+      const nodes=this.appearanceSources(),inputs=this.appearanceInputs(nodes),sheets=this.appearanceSheets(),fonts=this.appearanceFonts();
+      if(nodes.length===job.nodes.length&&inputs.every((values,i)=>values.every((value,j)=>value===job.inputs[i][j]))&&sheets.length===job.sheets.length&&sheets.every((value,i)=>value===job.sheets[i])&&fonts.length===job.fonts.length&&fonts.every((value,i)=>value===job.fonts[i])){this.appearanceStats.hits++;return job.cache;}
+    }catch(_){}
+    this.appearanceStats.cold++;const cache=new Map();cache.snapshotPlan=null;return cache;
+  },
   active(){return typeof ScreenDrag!=='undefined'?(ScreenDrag.state||ScreenDrag.settling)?.morph:null;},
   deferLayout(){const m=this.active();if(!m)return false;m.layoutDeferred=true;return true;},
   deferViz(){const m=this.active();if(!m)return false;m.vizDeferred=true;return true;},
@@ -5979,7 +6087,7 @@ const SharedPlayerMotion={
         let appearance=cache.get(original);
         if(!appearance){
           const style=getComputedStyle(original);
-          if(!Object.prototype.hasOwnProperty.call(cache,'snapshotPlan'))cache.snapshotPlan=this.snapshotPlan(style);
+          if(!Object.prototype.hasOwnProperty.call(cache,'snapshotPlan'))cache.snapshotPlan=this.captureMode==='compact'?this.snapshotPlan(style):null;
           const keys=this.snapshotKeys(original,cache.snapshotPlan),css=this.snapshotCSS(style,keys),pseudos=[];
           for(const pseudo of ['::before','::after']){
             const ps=getComputedStyle(original,pseudo);if(!ps.content||ps.content==='none'||ps.content==='normal')continue;
@@ -6015,6 +6123,7 @@ const SharedPlayerMotion={
     if((scene.fromName!=='player'&&!opening)||other==='settings'||!Engine.current||GestureMotion.reduced()||UI.instantNav||!document.body?.appendChild||!document.createElement)return null;
     const mini=$('#mini'),full=$('#sc-player'),nav=$('#nav'),dim=$('#bg-dim');
     if(!mini?.cloneNode||!full?.cloneNode||!mini.style.getPropertyValue)return null;
+    const prepared=scene.preparedAppearance||null;
     const styles=[this.styleSnapshot(mini,['opacity','transform','transition']),this.styleSnapshot(full,['opacity','transform','transition']),this.styleSnapshot(dim,['opacity','transition']),this.styleSnapshot(nav,['border-top-left-radius','border-top-right-radius','border-bottom-right-radius','border-bottom-left-radius'])];
     const original={miniHidden:mini.hidden,miniInert:mini.inert,miniAria:mini.getAttribute('aria-hidden'),fullHidden:full.hidden,fullInert:full.inert,fullAria:full.getAttribute('aria-hidden')};
     const transforms=[scene.from,scene.to].map(node=>this.styleSnapshot(node,['transform','transition']));
@@ -6030,7 +6139,7 @@ const SharedPlayerMotion={
       for(const [key,a,b] of pairs){const miniNode=$(a),fullNode=$(b);const fullRect=this.rect(fullNode);endpoints[key]={mini:this.rect(miniNode),full:fullRect.width&&fullRect.height?fullRect:this.rect($('.seekrow'))};}
       const miniRadius=this.radius(mini),navMini=this.radius(nav);
       mini.hidden=true;const navFull=this.radius(nav);mini.hidden=false;
-      const appearance=new Map();
+      const appearance=this.consumeAppearance(prepared);
       const layer=document.createElement('div');layer.className='player-scene-layer';layer.setAttribute('aria-hidden','true');layer.inert=true;
       const surface=document.createElement('div');surface.className='player-scene-surface';surface.style.background=getComputedStyle(mini).background;layer.appendChild(surface);
       // The global backdrop may start above the app (e.g. a preview toolbar).
@@ -6245,7 +6354,7 @@ const ScreenDrag={
   clean(s){
     if(s?.morph)SharedPlayerMotion.clean(s.morph);
     if(s)for(const n of [s.from,s.to]){delete n.dataset.gesturePreview;delete n.dataset.scene;n.style.transition='none';n.style.transform='';n.style.zIndex='';n.hidden=n===s.from?Nav.cur!==s.fromName:Nav.cur!==s.target;}
-    this.ownership();this.phase='idle';
+    this.ownership();this.phase='idle';if(typeof SharedPlayerMotion!=='undefined')SharedPlayerMotion.scheduleAppearance?.();
   },
   abort(){
     if(InputLifecycle.rebasing)return;
@@ -6271,9 +6380,10 @@ const ScreenDrag={
   create(target,direction,fromY=0,carryMorph=null){
     if(!SCREENS[target]||target===Nav.cur)return null;
     const fromName=Nav.cur,from=$(SCREENS[fromName]),to=$(SCREENS[target]),height=from.clientHeight||innerHeight;
+    const preparedAppearance=typeof SharedPlayerMotion!=='undefined'?SharedPlayerMotion.claimAppearance?.({target,fromName}):null;
     from.hidden=to.hidden=false;from.style.transition=to.style.transition='none';
     from.dataset.scene=to.dataset.scene='1';to.dataset.gesturePreview='1';to.style.zIndex='3';
-    const s={from,to,fromName,target,direction,height,progress:0,baseProgress:0,fromBaseY:fromY,commit:false};
+    const s={from,to,fromName,target,direction,height,progress:0,baseProgress:0,fromBaseY:fromY,commit:false,preparedAppearance};
     s.morph=carryMorph||(typeof SharedPlayerMotion!=='undefined'?SharedPlayerMotion.create(s):null);
     if(carryMorph){carryMorph.opening=target==='player';s.progress=(carryMorph.opening?carryMorph.p:1-carryMorph.p)*height;s.baseProgress=s.progress;}
     this.state=s;this.phase='drag';this.ownership(s);
@@ -6346,7 +6456,10 @@ const ScreenDrag={
   },
   cancel(){this.complete();}
 };
-InputLifecycle.register(()=>ScreenDrag.abort());
+InputLifecycle.register(()=>{if(typeof SharedPlayerMotion!=='undefined')SharedPlayerMotion.clearAppearance?.();ScreenDrag.abort();});
+window.addEventListener('resize',()=>{if(typeof SharedPlayerMotion!=='undefined')SharedPlayerMotion.clearAppearance?.();});
+window.addEventListener('blur',()=>{if(typeof SharedPlayerMotion!=='undefined')SharedPlayerMotion.clearAppearance?.();});
+document.addEventListener('visibilitychange',()=>{if(document.hidden&&typeof SharedPlayerMotion!=='undefined')SharedPlayerMotion.clearAppearance?.();});
 function libraryDestination(){return ['list','search'].includes(Nav.lastLibrary)?Nav.lastLibrary:'library';}
 function swipeDestination(dy){const v=NativeSettings.values.main_lyrics_swipe;return dy<0&&(v===2||(v===1&&Engine.current?.lyrics))?'lyrics':libraryDestination();}
 function setupArtGestures(){
@@ -6461,7 +6574,7 @@ function bindTapButton(button,action){
   button.addEventListener('pointermove',e=>{if(contact?.id===e.pointerId)contact.travel=Math.max(contact.travel,Math.hypot(e.clientX-contact.x,e.clientY-contact.y));});
   button.addEventListener('pointerup',e=>{
     if(contact?.id!==e.pointerId)return;
-    const done=contact;contact=null;blockClick(e);e.preventDefault();
+    const done=contact;contact=null;blockClick(e);if(button.classList?.contains('library-back'))InputLifecycle.guardReplacement(button,e);e.preventDefault();
     const travel=Math.max(done.travel,Math.hypot(e.clientX-done.x,e.clientY-done.y));
     if(travel<=7&&time(e)-done.started<600&&InputLifecycle.active(button)&&!UI.seekDragging&&!button.disabled)action(e);
   });
