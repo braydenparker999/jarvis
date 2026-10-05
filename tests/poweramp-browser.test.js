@@ -16,7 +16,8 @@ function wav(){
   b.writeUInt32LE(rate,24);b.writeUInt32LE(rate*2,28);b.writeUInt16LE(2,32);b.writeUInt16LE(16,34);b.write('data',36);b.writeUInt32LE(length,40);return b;
 }
 
-test('Poweramp real Chrome touch and large-library regressions',{skip:executablePath?false:'Install Chromium or set JARVIS_CHROME',timeout:120000},async t=>{
+test('Poweramp real Chrome touch and large-library regressions',{timeout:120000},async t=>{
+  assert.ok(executablePath,'Chromium is required: install it or set JARVIS_CHROME');
   const audio=wav();let audioRequests=0;
   const server=createServer(async(req,res)=>{
     try{

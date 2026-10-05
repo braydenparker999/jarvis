@@ -377,6 +377,8 @@ function applyPalette(img){
     });
   }
   if(!light&&SET.accent==='amber')setVars({'--accent':'#f4ddcb','--txt':'#f4ddcb','--accent-dim':'#bdaa99','--txt-dim':'#bbaa9b','--chip':'#201b16','--chip-hi':'#3d2d1e','--surface':'#1d1915','--surface-2':'#231a11'});
+  // An explicit palette producer update must be visible on its next canvas paint.
+  UI.vizAccentAt=0;
   const meta=document.querySelector('meta[name=theme-color]');
   if(meta) meta.setAttribute('content', light ? 'hsl('+h+',12%,94%)' : 'hsl('+h+',18%,6%)');
 }
@@ -2821,6 +2823,7 @@ const Engine = {
     this.saveState();
   },
   next:function(auto){
+    if(!auto)return commitTrackStep(resolveTrackStep(1));
     if(!this.queue.length) return;
     UI.artDir=1;
     if(SET_repeat()==='one' && auto){ this._endedRequest=null;this.el().currentTime=0; this.play(); return; }
@@ -2831,14 +2834,7 @@ const Engine = {
     this.pos++;
     this.playIndex(this.order[this.pos], auto || this.wantsPlayback());
   },
-  prev:function(){
-    if(!this.queue.length) return;
-    UI.artDir=-1;
-    if(SET.previousRestarts && this.el().currentTime > 3){ this.seek(0); return; }
-    if(this.pos<=0) this.pos = this.order.length;
-    this.pos--;
-    this.playIndex(this.order[this.pos], this.wantsPlayback());
-  },
+  prev:function(){return commitTrackStep(resolveTrackStep(-1));},
   seekWhenReady:function(sec){
     if(!Number.isFinite(sec)||sec<0)return;
     const a=this.el();
@@ -3234,6 +3230,8 @@ const UI = {
     document.body.classList.toggle('empty-lib', empty);
   },
   renderNowPlaying:async function(t){
+    UI.cancelSeekGesture?.();
+    const artToken=UI.artRenderToken=(UI.artRenderToken||0)+1;
     const title=$('#p-title'), sub=$('#p-sub');
     UI.refreshEmpty();
     Waveform.load(t);
@@ -3246,26 +3244,30 @@ const UI = {
       $('#mini').hidden=true;
       return;
     }
-    if(UI.artTrackId!==t.id){UI.artTrackId=t.id;UI.setArtEl($('#artA'),null);UI.setArtEl($('#mini-art'),null);UI.setBackground(null);}
+    const cached=SwipeArt.cached(t);
+    if(UI.artTrackId!==t.id){
+      UI.artTrackId=t.id;UI.curArtURL=cached||null;
+      UI.setArtEl($('#artA'),cached||null);UI.setArtEl($('#mini-art'),cached||null);UI.setBackground(cached||null);
+    }
     title.innerHTML='<span>'+esc(t.title)+'</span>';
     sub.innerHTML='<span>'+esc(trackSub(t))+'</span>';
-    $('#mini-title').textContent=t.title;
-    $('#mini-sub').textContent=trackSub(t);
-    $('#mini').hidden = (Nav.cur==='player');
+    SharedPlayerMotion.setMiniLabel($('#mini-title'),t.title);
+    SharedPlayerMotion.setMiniLabel($('#mini-sub'),trackSub(t));
+    $('#mini').hidden = Nav.cur==='player'&&!(SharedPlayerMotion.active?.()||SharedPlayerMotion.transaction);
     document.title = t.title + ' - ' + trackArtist(t);
     UI.renderRating();
     UI.renderMeta();
     UI.renderProgress();
     Views.refreshQueueOrder();
-    const [url,thumb] = await Promise.all([getArtURL(t),getArtURL(t,true)]);
-    if(Engine.current?.id!==t.id)return;
+    const [url,thumb] = await Promise.all([SwipeArt.warm(t),getArtURL(t,true).then(url=>SwipeArt.decode(url))]);
+    if(Engine.current?.id!==t.id||artToken!==UI.artRenderToken)return;
     title.innerHTML='<span>'+esc(t.title)+'</span>';sub.innerHTML='<span>'+esc(trackSub(t))+'</span>';
-    $('#mini-title').textContent=t.title;$('#mini-sub').textContent=trackSub(t);
+    SharedPlayerMotion.setMiniLabel($('#mini-title'),t.title);SharedPlayerMotion.setMiniLabel($('#mini-sub'),trackSub(t));
     UI.renderMeta();
     UI.curArtURL=url;
     const cardA=$('#artA');
     UI.setArtEl(cardA, url);
-    if(UI.artDir && UI.swipeCommitted!==t.id && SET.animations!=='disabled'){
+    if(UI.artDir && UI.swipeCommitted!==t.id && !GestureMotion.reduced()){
       cardA.style.setProperty('--art-from', (UI.artDir>0?36:-36)+'px');
       cardA.classList.remove('anim');
       void cardA.offsetWidth;
@@ -3333,7 +3335,7 @@ const UI = {
     if(document.visibilityState==='hidden')return;
     const cur=Engine.time(), dur=Engine.duration();
     const pct = dur>0 ? clamp(cur/dur*100,0,100) : 0;
-    const onPlayer=Nav.cur==='player',miniVisible=!$('#mini').hidden;
+    const onPlayer=Nav.cur==='player'||!!(typeof SharedPlayerMotion!=='undefined'&&(SharedPlayerMotion.active?.()||SharedPlayerMotion.transaction)),miniVisible=!$('#mini').hidden;
     const text=(selector,value)=>{const node=$(selector);if(node.textContent!==value)node.textContent=value;};
     const attribute=(node,name,value)=>{if(node.getAttribute(name)!==value)node.setAttribute(name,value);};
     if(!UI.seekDragging){
@@ -3365,8 +3367,8 @@ const UI = {
         if(ts-UI.lastProg>(onPlayer?100:240)){UI.lastProg=ts;UI.renderProgress();}
       }
       // Owned gestures paint their own previews. Avoid competing canvas work
-      // while a finger is navigating; audio and the next frame continue normally.
-      if((UI.vizFull||onPlayer)&&!InputLifecycle.contacts.size&&(UI.vizFull||ts-(UI.lastViz||0)>=1000/30)){UI.lastViz=ts;UI.drawViz();}
+      // while a finger or shared-player settle is navigating; audio/progress continue.
+      if((UI.vizFull||onPlayer)&&!InputLifecycle.contacts.size&&!(typeof SharedPlayerMotion!=='undefined'&&SharedPlayerMotion.deferViz())&&(UI.vizFull||ts-(UI.lastViz||0)>=1000/30)){UI.lastViz=ts;UI.drawViz();}
       if(Engine.playing||UI.vizFull||(onPlayer&&UI.settling))UI.loopId=requestAnimationFrame(step);
     };
     UI.loopId=requestAnimationFrame(step);
@@ -3447,25 +3449,30 @@ const UI = {
     const c = UI.vizFull ? $('#vizc') : SET.vizOnPlayer ? $('#player-viz') : $('#viz');
     if(!c) return;
     if(UI.vizFull && SET.force30 && (UI.vizT++%2)) return;
-    const dpr=UI.fitCanvas(c);
-    const g=c.getContext('2d');
-    const W=c.width, H=c.height;
-    g.clearRect(0,0,W,H);
-    if(!n){if(!UI.vizFull&&(SET.seekStyle||'wave')==='wave')UI.drawWaveSeek(g,W,H,null,getComputedStyle(root).getPropertyValue('--accent').trim()||'#f4ddcb',dpr);return;}
-    const an=n.analyser;
-    const bins=an.frequencyBinCount;
-    if(!UI.freq || UI.freq.length!==bins){ UI.freq=new Uint8Array(bins); UI.timeDom=new Uint8Array(an.fftSize); }
-    an.getByteFrequencyData(UI.freq);
-    an.getByteTimeDomainData(UI.timeDom);
-    if(!UI.vizAccentAt||performance.now()-UI.vizAccentAt>250){UI.vizAccent=getComputedStyle(root).getPropertyValue('--accent').trim()||'#f2e0cf';UI.vizAccentAt=performance.now();}
-    const accent=UI.vizAccent;
-    if(!UI.vizFull && (SET.seekStyle||'wave')==='wave' && !SET.vizOnPlayer){
-      UI.drawWaveSeek(g,W,H,UI.freq,accent,dpr);
-      return;
+    try{
+      const dpr=UI.fitCanvas(c);
+      const g=c.getContext('2d');
+      const W=c.width, H=c.height;
+      g.clearRect(0,0,W,H);
+      if(!n){if(!UI.vizFull&&(SET.seekStyle||'wave')==='wave')UI.drawWaveSeek(g,W,H,null,getComputedStyle(root).getPropertyValue('--accent').trim()||'#f4ddcb',dpr);return;}
+      const an=n.analyser;
+      const bins=an.frequencyBinCount;
+      if(!UI.freq || UI.freq.length!==bins){ UI.freq=new Uint8Array(bins); UI.timeDom=new Uint8Array(an.fftSize); }
+      an.getByteFrequencyData(UI.freq);
+      an.getByteTimeDomainData(UI.timeDom);
+      if(!UI.vizAccentAt||performance.now()-UI.vizAccentAt>250){UI.vizAccent=getComputedStyle(root).getPropertyValue('--accent').trim()||'#f2e0cf';UI.vizAccentAt=performance.now();}
+      const accent=UI.vizAccent;
+      if(!UI.vizFull && (SET.seekStyle||'wave')==='wave' && !SET.vizOnPlayer){
+        UI.drawWaveSeek(g,W,H,UI.freq,accent,dpr);
+        return;
+      }
+      if(!UI.vizFull&&SET.vizOnPlayer){const seek=$('#viz');const sd=UI.fitCanvas(seek);const sg=seek.getContext('2d');sg.clearRect(0,0,seek.width,seek.height);if((SET.seekStyle||'wave')==='wave')UI.drawWaveSeek(sg,seek.width,seek.height,UI.freq,accent,sd);}
+      const preset = UI.vizFull ? VIZ_PRESETS[UI.vizPresetIdx % VIZ_PRESETS.length] : (SET.vizOnPlayer ? VIZ_PRESETS[UI.vizPresetIdx % VIZ_PRESETS.length] : VIZ_PRESETS[0]);
+      preset.draw(g,W,H,UI.freq,UI.timeDom,accent,dpr);
+    }finally{
+      UI.vizPaintVersion=(UI.vizPaintVersion||0)+1;
+      if(typeof SharedPlayerMotion!=='undefined')SharedPlayerMotion.canvasPainted();
     }
-    if(!UI.vizFull&&SET.vizOnPlayer){const seek=$('#viz');const sd=UI.fitCanvas(seek);const sg=seek.getContext('2d');sg.clearRect(0,0,seek.width,seek.height);if((SET.seekStyle||'wave')==='wave')UI.drawWaveSeek(sg,seek.width,seek.height,UI.freq,accent,sd);}
-    const preset = UI.vizFull ? VIZ_PRESETS[UI.vizPresetIdx % VIZ_PRESETS.length] : (SET.vizOnPlayer ? VIZ_PRESETS[UI.vizPresetIdx % VIZ_PRESETS.length] : VIZ_PRESETS[0]);
-    preset.draw(g,W,H,UI.freq,UI.timeDom,accent,dpr);
   },
   drawCurve:function(){
     const c=$('#curve');
@@ -3608,9 +3615,20 @@ const VIZ_PRESETS = [
 const SCREENS={player:'#sc-player',library:'#sc-library',list:'#sc-list',eq:'#sc-eq',search:'#sc-search',settings:'#sc-settings'};
 /* Input belongs to a contact and to the currently active screen. */
 const InputLifecycle={
-  resets:new Map(),contacts:new Set(),version:0,
+  replacementClicks:new Map(),
+  guardReplacement(node,e){this.replacementClicks.set(e.pointerId,{node,at:performance.now()});for(const [id,entry] of this.replacementClicks)if(performance.now()-entry.at>800||this.replacementClicks.size>8)this.replacementClicks.delete(id);},
+  resets:new Map(),contacts:new Set(),version:0,gesture:null,rebasing:false,motionSettle:null,
   register(reset,node){this.resets.set(reset,node);return reset;},
-  cancel(){this.version++;this.contacts.clear();for(const [reset,node] of this.resets){reset();if(node?.isConnected===false)this.resets.delete(reset);}},
+  cancel(options={}){
+    this.version++;if(!options.keepContacts)this.contacts.clear();this.gesture=null;this.motionSettle=null;
+    const rebasing=this.rebasing;this.rebasing=rebasing||!!options.preserveScene;
+    try{for(const [reset,node] of this.resets){reset();if(node?.isConnected===false)this.resets.delete(reset);}}finally{this.rebasing=rebasing;}
+  },
+  watchSettle(node,cancel,accepts=e=>node.contains(e.target)){this.motionSettle={node,cancel,accepts};},
+  unwatchSettle(node){if(this.motionSettle?.node===node)this.motionSettle=null;},
+  cancelMotionSettle(){const settling=this.motionSettle;this.motionSettle=null;settling?.cancel();},
+  claim(node,id){if(this.gesture||this.contacts.size>1)return false;this.gesture={node,id,phase:'possible'};return true;},
+  release(node,id){if(this.gesture?.node===node&&this.gesture.id===id)this.gesture=null;},
   active(node){const screen=node.closest?.('.screen');return !screen||(!screen.hidden&&!screen.inert&&SCREENS[Nav.cur]==='#'+screen.id);},
   clickGuard(node){
     let blocked=null;
@@ -3627,37 +3645,26 @@ const InputLifecycle={
 window.addEventListener('blur',()=>InputLifecycle.cancel());
 window.addEventListener('resize',()=>InputLifecycle.cancel());
 document.addEventListener('visibilitychange',()=>{if(document.hidden)InputLifecycle.cancel();});
-document.addEventListener('pointerdown',e=>InputLifecycle.contacts.add(e.pointerId),true);
+document.addEventListener('pointerdown',e=>{
+  const settling=InputLifecycle.motionSettle;
+  if(settling&&!settling.accepts(e))InputLifecycle.cancelMotionSettle();
+  InputLifecycle.contacts.add(e.pointerId);if(InputLifecycle.contacts.size>1)InputLifecycle.cancel({keepContacts:true});},true);
 for(const type of ['pointerup','pointercancel'])document.addEventListener(type,e=>InputLifecycle.contacts.delete(e.pointerId),true);
+document.addEventListener('click',e=>{
+  if(e.detail===0)return;const entry=InputLifecycle.replacementClicks.get(e.pointerId);if(!entry)return;InputLifecycle.replacementClicks.delete(e.pointerId);
+  if(entry.node.isConnected===false&&performance.now()-entry.at<=800){e.preventDefault();e.stopImmediatePropagation();}
+},true);
 const Nav={
   cur:'player',
   go:function(name, push){
     if(!SCREENS[name])return;
-    if(name!==this.cur){InputLifecycle.cancel();ScreenDrag.abort();Sheets.request++;}
+    // Taps and finger drags use the same scene geometry and interruption path.
+    if(!ScreenDrag.activating){ScreenDrag.navigate(name,push);return;}
+    if(name!==this.cur){InputLifecycle.cancel({preserveScene:true});Sheets.request++;}
     if(name!==this.cur&&Selection.mode)Selection.exit();
     if(name===this.cur){
       $('#mini').hidden = (name==='player' || !Engine.current);
       return;
-    }
-    const from=$(SCREENS[this.cur]), to=$(SCREENS[name]);
-    from.__navAnimation?.cancel();to.__navAnimation?.cancel();
-    from.inert=true;from.setAttribute('aria-hidden','true');
-    to.inert=false;to.setAttribute('aria-hidden','false');
-    const up = name!=='player';
-    to.hidden=false;
-    const duration=SET.animations==='disabled'||matchMedia('(prefers-reduced-motion: reduce)').matches?0:SET.animations==='fast'?130:180;
-    if(UI.instantNav||!duration){from.hidden=true;}else{
-    const oldName=this.cur;
-    if(to.animate){
-      const options={duration,easing:'cubic-bezier(.2,.8,.2,1)'};
-      to.__navAnimation=to.animate([{transform:up?'translateY(100%)':'translateY(-16%)'},{transform:'none'}],options);
-      from.__navAnimation=from.animate([{transform:'none'},{transform:up?'translateY(-16%)':'translateY(100%)'}],options);
-    }else{
-      to.classList.add(up?'enter-up':'leave-down');void to.offsetWidth;to.classList.remove('enter-up','leave-down');from.classList.add(up?'leave-down':'enter-up');
-    }
-    setTimeout(function(){
-      if(Nav.cur!==oldName&&!from.dataset.gesturePreview){ from.hidden=true; from.classList.remove('leave-down','enter-up'); }
-    }, duration);
     }
     this.cur=name;
     const dim=$('#bg-dim');
@@ -3668,8 +3675,8 @@ const Nav={
     UI.renderProgress();
     UI.syncNav();
     $$('#nav button').forEach(function(b){ b.classList.toggle('on', b.dataset.nav===name || (name==='settings'&&b.dataset.nav==='menu')); });
-    if(name==='eq') { setTimeout(function(){ UI.drawCurve(); EQ.render(); },30); }
-    if(name==='player') requestAnimationFrame(function(){ UI.fitPlayer(); });
+    if(name==='eq') { setTimeout(function(){if(Nav.cur===name){UI.drawCurve();EQ.render();}},30); }
+    if(name==='player'&&!(typeof SharedPlayerMotion!=='undefined'&&SharedPlayerMotion.deferLayout()))requestAnimationFrame(function(){if(Nav.cur===name&&!(typeof SharedPlayerMotion!=='undefined'&&SharedPlayerMotion.deferLayout()))UI.fitPlayer();});
     if(push!==false){
       try{ history.pushState({screen:name},''); }catch(e){}
     }
@@ -3698,6 +3705,8 @@ const Sheets={
     const panel=$('#'+id),main=!!panel.querySelector('.main-menu-content');
     panel.classList.toggle('main-menu-sheet',main);
     panel.classList.toggle('track-menu-sheet',!!panel.querySelector('.track-menu-content'));
+    panel.classList.toggle('list-options-sheet',!!panel.querySelector('.list-options-content'));
+    panel.classList.toggle('list-menu-sheet',!!panel.querySelector('.list-menu-content'));
     document.body.classList.toggle('main-menu-open',main);
     $('#scrim').classList.add('on');
     panel.classList.add('on');panel.setAttribute('role','dialog');panel.setAttribute('aria-modal','true');panel.setAttribute('aria-label',panel.querySelector('h3')?.textContent||'Player options');panel.tabIndex=-1;
@@ -3713,6 +3722,7 @@ const Sheets={
     $('#bsheet').classList.remove('on');
     this.returnFocus?.focus?.({preventScroll:true});this.returnFocus=null;
     for(const key of ['sheet','bsheet']){const panel=$('#'+key);panel.inert=true;panel.setAttribute('aria-hidden','true');}
+    if(typeof SharedPlayerMotion!=='undefined')SharedPlayerMotion.scheduleAppearance?.();
   }
 };
 function openSheet(id){ Sheets.show(id||'sheet'); }
@@ -3874,14 +3884,7 @@ const Views={
     }
     return {type:'tracks', items:T};
   },
-  trackSorter:function(){
-    const s=SET.sortTracks;
-    if(s==='artist') return function(a,b){ return sortNat(trackArtist(a),trackArtist(b))||sortNat(a.title,b.title); };
-    if(s==='album') return function(a,b){ return sortNat(trackAlbum(a),trackAlbum(b))||(a.track-b.track); };
-    if(s==='added') return function(a,b){ return (b.added||0)-(a.added||0); };
-    if(s==='path') return function(a,b){ return sortNat(a.path,b.path); };
-    return function(a,b){ return sortNat(a.title,b.title); };
-  },
+  trackSorter:function(){return ListOptions.comparator(SET.sortTracks||'title');},
   treeItems:function(path){
     const T=allTracks();
     const dirs=new Set(), files=[];
@@ -3919,7 +3922,7 @@ const Views={
         if(spec.queueView==='upcoming'&&(PlaybackQueue.active||PlaybackQueue.pending.length))body.appendChild(el('p','note',PlaybackQueue.active?'When the added queue ends, playback follows your Queue settings.':'Added queue songs can interrupt this order according to Queue settings.'));
       }
       if(!data.items.length) body.appendChild(Views.emptyEl(spec));
-      else {const list=Views.trackList(data.items, spec);list.__playbackIndices=data.indices;body.appendChild(list);}
+      else {const list=Views.trackList(data.items, spec);list.__playbackIndices=data.indices;list.__mappedPlayback=!!data.mappedPlayback;body.appendChild(list);}
     } else if(data.type==='groups'){
       body.appendChild(Views.groupList(data));
     } else if(data.type==='playlists'){
@@ -4027,11 +4030,17 @@ const Views={
     const showIt = (data.type==='tracks'&&data.items.length>28) || (data.type==='groups'&&data.items.length>28);
     a.style.display = showIt ? 'flex' : 'none';
     if(!showIt) return;
-    const letters='#ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
-    const initials=data.items.map(item=>alphaInitial(data.type==='tracks'?(SET.listUiFilenameAsTitle?baseName(item.path||item.title):item.title):(data.open==='folder'?baseName(item.key)||item.key:item.key)));
+    const letters='0ABCDEFGHIJKLMNOPQRSTUVWXYZ#'.split('');
+    const values=data.items.map(item=>data.type==='tracks'?(data.alphaField==='filename'?baseName(item.path||''):data.alphaField==='path'?item.path:data.alphaField==='artist'?trackArtist(item):data.alphaField==='album'?trackAlbum(item):(SET.listUiFilenameAsTitle?baseName(item.path||item.title):item.title)):(data.open==='folder'?baseName(item.key)||item.key:item.key));
+    const initials=values.map(alphaInitial),available=[...new Set(initials.filter(first=>/^[A-Z]$/.test(first)))].sort();
     a.__anchors.set(String.fromCharCode(94),0);
-    for(const letter of letters){const index=initials.findIndex(first=>letter==='#'?!/^[A-Z]$/.test(first):/^[A-Z]$/.test(first)&&first>=letter);if(index>=0)a.__anchors.set(letter,index);}
-    a.innerHTML='<span>'+String.fromCharCode(94)+'</span>'+letters.map(function(l){ return '<span>'+l+'</span>'; }).join('');
+    for(const letter of letters){
+      let index=initials.findIndex(first=>letter==='0'?/^[0-9]$/.test(first):letter==='#'?!/^[A-Z0-9]$/.test(first):first===letter);
+      if(index<0&&/^[A-Z]$/.test(letter)){const next=available.find(first=>first>=letter);if(next)index=initials.indexOf(next);}
+      if(index>=0)a.__anchors.set(letter,index);
+    }
+    a.setAttribute('aria-label','Alphabet scrollbar');a.setAttribute('role','slider');a.setAttribute('aria-valuemin','0');a.setAttribute('aria-valuemax',String(letters.length));a.setAttribute('aria-valuenow','0');a.tabIndex=0;
+    a.innerHTML='<span>'+String.fromCharCode(94)+'</span>'+letters.map(function(l){return '<span'+(a.__anchors.has(l)?'':' class="unavailable"')+'>'+l+'</span>';}).join('');
   },
   buildFabs:function(data, spec){
     const f=$('#list-fabs');
@@ -4039,7 +4048,7 @@ const Views={
     f.innerHTML='';
     if(data.type==='groups'||data.type==='playlists') { f.innerHTML=''; return; }
     const mk=function(icon,label,fn,cls){
-      const b=el('button','fab '+(cls||''), icoHTML(icon)+(label?'<span>'+label+'</span>':''));
+      const b=el('button','fab '+(label?'fab-labeled ':'')+(cls||''), icoHTML(icon)+(label?'<span>'+label+'</span>':''));
       b.setAttribute('aria-label',label||({shuffle:'Shuffle songs',play:'Play songs',search:'Search library',more:'List actions'})[icon]||icon);
       b.onclick=fn;
       f.appendChild(b);
@@ -4047,11 +4056,11 @@ const Views={
     };
     mk('shuffle','',function(){
       if(!tracks||!tracks.length) return;
-      SET.shuffleOn=true; saveSet(); UI.renderToggles();
+      Engine.categoryKind=spec.kind;SET.shuffleOn=true;SET.shuffleMode=1;saveSet();UI.renderToggles();
       Engine.setQueue(tracks, Math.floor(Math.random()*tracks.length), true);
       toast('Shuffling ' + tracks.length + ' tracks');
     });
-    mk('play','',function(){ if(tracks&&tracks.length) Engine.setQueue(tracks,0,true); });
+    mk('play','',function(){if(!tracks?.length)return;Engine.categoryKind=spec.kind;const index=data.mappedPlayback&&data.indices?.[0];if(index!==false&&index!=null&&Engine.queue[index]?.id===tracks[0].id&&Engine.order.includes(index))Engine.playIndex(index,true);else Engine.setQueue(tracks,0,true);});
     mk('search','',function(){ Nav.go('search'); setTimeout(function(){ $('#q').focus(); },200); });
     mk('select','Select',function(){ Selection.toggleMode(); });
     mk('more','',function(){ ctxMenuList(data, spec); });
@@ -4116,7 +4125,7 @@ const TrackWindow={
       }
       if(!box.getBoundingClientRect().width||container.closest('.screen')?.hidden)return;
       const style=getComputedStyle(box),first=rows.values().next().value;
-      const key=[box.dataset.zoom,box.clientWidth,style.fontSize,document.body.classList.contains('list-no-art'),SET.showMetaLine].join('|');
+      const key=[box.dataset.zoom,box.dataset.titlesOnly,box.clientWidth,style.fontSize,document.body.classList.contains('list-no-art'),SET.showMetaLine].join('|');
       const layoutChanged=signature!==key;
       if(signature!==key){
         signature=key;cols=Number(style.getPropertyValue('--list-cols'))||1;gap=parseFloat(style.rowGap)||0;padding=parseFloat(style.paddingTop)||0;
@@ -4234,7 +4243,10 @@ function installListDelegation(root){
         else PlaybackQueue.play(i);
         Nav.go('player');return;
       }
-      Engine.categoryKind=box.__spec?.kind;Engine.setQueue(box.__items, i, true);
+      Engine.categoryKind=box.__spec?.kind;
+      const mapped=box.__mappedPlayback&&box.__playbackIndices?.[i];
+      if(mapped!==false&&mapped!=null&&Engine.queue[mapped]?.id===t.id&&Engine.order.includes(mapped))Engine.playIndex(mapped,true);
+      else Engine.setQueue(box.__items, i, true);
       if((NativeSettings.values.list_item_action??1)===1) Nav.go('player');
       return;
     }
@@ -4640,65 +4652,164 @@ const Bookmarks={
    SEARCH
    ===================================================================== */
 const Search={
-  filter:'All',
-  init:function(){
-    const chips=['All','Albums','Artists','Album Artists','Folders','Genres','Titles'];
-    $('#q-chips').innerHTML=chips.map(function(c,i){
-      return '<button class="chip'+(i===0?' on':'')+'" data-c="'+c+'">'+c+'</button>';
-    }).join('');
-    $$('#q-chips .chip').forEach(function(c){
-      c.onclick=function(){
-        $$('#q-chips .chip').forEach(function(x){ x.classList.remove('on'); });
-        c.classList.add('on');
-        Search.filter=c.dataset.c;
-        Search.run();
-      };
+  filter:'All',sections:[],pageSize:60,
+  // These categories use the same library metadata and routes as Library.
+  categories:[
+    {label:'Albums',kind:'albums',open:'album',icon:'album'},
+    {label:'Artists',kind:'artists',open:'artist',icon:'mic'},
+    {label:'Album Artists',kind:'aartists',open:'aartist',icon:'mic2'},
+    {label:'Folders',kind:'folders',open:'folder',icon:'folder'},
+    {label:'Genres',kind:'genres',open:'genre',icon:'guitar'},
+    {label:'Years',kind:'years',open:'year',icon:'year'},
+    {label:'Composers',kind:'composers',open:'composer',icon:'person'},
+    {label:'Playlists',kind:'playlists',icon:'playlist'},
+    {label:'All Songs',kind:'all',icon:'note'},
+    {label:'Streams',kind:'streams',icon:'cast',unavailable:true}
+  ],
+  enabled:function(category){return SET.searchCategories?.[category.kind]!==false;},
+  renderChips:function(){
+    const strip=$('#q-chips'),scroll=strip.scrollLeft;
+    if(this.filter==='Titles')this.filter='All Songs';
+    if(this.filter!=='All'&&!this.categories.some(c=>c.label===this.filter&&this.enabled(c)))this.filter='All';
+    const labels=['All',...this.categories.filter(c=>this.enabled(c)).map(c=>c.label)];
+    strip.innerHTML=labels.map(c=>'<button class="chip'+(c===this.filter?' on':'')+'" data-c="'+c+'" aria-pressed="'+(c===this.filter)+'">'+c+'</button>').join('');
+    strip.querySelectorAll('.chip').forEach(c=>c.onclick=()=>{
+      this.filter=c.dataset.c;
+      strip.querySelectorAll('.chip').forEach(b=>{const selected=b===c;b.classList.toggle('on',selected);b.setAttribute('aria-pressed',String(selected));});
+      this.run();$('#q-body').scrollTop=0;
     });
-    $('#q').addEventListener('input', debounce(function(){ Search.run(); },160));
-    $('#q-clear').onclick=function(){ $('#q').value=''; Search.run(); $('#q').focus(); };
+    strip.scrollLeft=scroll;
+  },
+  init:function(){
+    this.renderChips();
+    $('#q').addEventListener('input',debounce(()=>this.run(),160));
+    $('#q-clear').onclick=()=>{$('#q').value='';this.run();$('#q').focus();};
+    $('#q-shuffle').onclick=()=>this.play(true);
+    $('#q-play').onclick=()=>this.play(false);
+    $('#q-select').onclick=()=>this.select();
+    $('#q-more').onclick=()=>this.listOptions();
+    this.refreshActions();
+  },
+  collect:function(query){
+    const q=String(query||'').trim().toLowerCase();if(!q)return [];
+    const tracks=allTracks(),match=s=>String(s||'').toLowerCase().includes(q),sections=[];
+    for(const category of this.categories){
+      if(!this.enabled(category)||this.filter!=='All'&&this.filter!==category.label)continue;
+      if(category.unavailable)continue;
+      let data;
+      if(category.kind==='all'){
+        const items=tracks.filter(t=>nativeValues().search_track_titles_only?match(t.title):[t.title,t.artist,t.album,t.albumArtist,t.genre,t.path,t.composer,t.year].some(match));
+        data={type:'tracks',items};
+      }else if(category.kind==='playlists'){
+        data={type:'playlists',items:Playlists.all().filter(p=>match(p.name))};
+      }else{
+        const fields={albums:trackAlbum,artists:trackArtist,aartists:t=>t.albumArtist||trackArtist(t),folders:t=>t.folder||'/',genres:t=>t.genre||'Unknown genre',years:t=>t.year?String(t.year):'Unknown year',composers:t=>t.composer||'Unknown composer'};
+        const groups=Views.groupBy(tracks,fields[category.kind]).filter(g=>match(g.key));
+        const items=groups.filter(g=>!(category.kind==='albums'&&nativeValues().hide_unknown_album&&g.key==='Unknown album')&&!(category.kind==='artists'&&nativeValues().hide_unknown_artist&&g.key==='Unknown artist'));
+        data={type:'groups',items,icon:category.icon,open:category.open,art:true};
+      }
+      if(data.items.length)sections.push({category,data});
+    }
+    return sections;
+  },
+  groupList:function(data){
+    const box=el('div','list search-group-list');box.__groups=data.items;box.__gdata=data;box.__spec={kind:'search'};
+    const titlesOnly=!!Views.listOptions?.({kind:'search'}).titlesOnly;
+    const rowHTML=(g,i)=>{
+      const first=g.tracks[0],label=data.open==='folder'?(baseName(g.key)||g.key):g.key;
+      const known=g.tracks.length&&g.tracks.every(t=>Number(t.dur)>0&&Number.isFinite(Number(t.dur)));
+      const years=[...new Set(g.tracks.map(t=>t.year).filter(Boolean))];
+      const sub=data.open==='album'&&first?(first.albumArtist||trackArtist(first)):g.tracks.length+' track'+(g.tracks.length===1?'':'s');
+      const meta=[String(g.tracks.length),known?fmtTime(g.tracks.reduce((sum,t)=>sum+Number(t.dur),0)):'Duration unavailable',years.length===1?years[0]:null].filter(v=>v!=null);
+      return '<div class="trow" role="button" tabindex="0" aria-label="'+esc(label)+'" data-g="'+i+'"><div class="art" data-art="'+esc(first?.id||'')+'"><div class="ph">'+icoHTML(data.icon)+'</div></div><div class="tmeta"><div class="t1">'+esc(label)+'</div>'+(titlesOnly?'':'<div class="t2">'+esc(sub)+'</div><div class="t3">'+icoHTML('note')+'<span>'+esc(meta.join(' | '))+'</span></div>')+'</div></div>';
+    };
+    this.paginate(box,data.items,rowHTML);return ListZoom.attach(box,'search');
+  },
+  playlistList:function(items){
+    const box=el('div','list search-playlist-list');box.__pls=items;box.__spec={kind:'search'};
+    const titlesOnly=!!Views.listOptions?.({kind:'search'}).titlesOnly;
+    this.paginate(box,items,(p,i)=>{
+      const first=p.ids.map(id=>LIB.map.get(id)).find(sourceTrackEnabled);
+      return '<div class="trow" role="button" tabindex="0" aria-label="'+esc(p.name)+'" data-pl="'+i+'"><div class="art" data-art="'+esc(first?.id||'')+'"><div class="ph">'+icoHTML('playlist')+'</div></div><div class="tmeta"><div class="t1">'+esc(p.name)+'</div>'+(titlesOnly?'':'<div class="t2">'+p.ids.length+' tracks</div>')+'</div></div>';
+    });return ListZoom.attach(box,'search');
+  },
+  paginate:function(box,items,rowHTML){
+    let start=0;
+    const render=()=>{
+      box.querySelectorAll('[data-art]').forEach(node=>artObserver?.unobserve(node));
+      const end=Math.min(items.length,start+this.pageSize);
+      box.innerHTML=items.slice(start,end).map((item,i)=>rowHTML(item,start+i)).join('');
+      observeArt(Array.from(box.children));
+      if(items.length<=this.pageSize)return;
+      const page=el('div','search-result-page');page.setAttribute('role','group');page.setAttribute('aria-label','Search result pages');
+      page.innerHTML='<button class="btn" data-search-prev '+(start?'':'disabled')+'>Previous</button><span role="status">'+(start+1)+'–'+end+' of '+items.length+'</span><button class="btn" data-search-next '+(end<items.length?'':'disabled')+'>Next</button>';
+      const change=(delta,control)=>{if(!box.isConnected||Nav.cur!=='search')return;const last=Math.floor((items.length-1)/this.pageSize)*this.pageSize;start=Math.max(0,Math.min(last,start+delta*this.pageSize));render();box.querySelector(control)?.focus({preventScroll:true});box.scrollIntoView?.({block:'start',behavior:'auto'});};
+      page.querySelector('[data-search-prev]').onclick=()=>change(-1,'[data-search-prev]');page.querySelector('[data-search-next]').onclick=()=>change(1,'[data-search-next]');box.appendChild(page);
+    };render();
   },
   run:function(){
-    const q=($('#q').value||'').trim().toLowerCase();
-    const body=$('#q-body');
+    const q=($('#q').value||'').trim(),body=$('#q-body'),scroll=body.scrollTop;
     TrackWindow.clean(body);
+    body.querySelectorAll('[data-art]').forEach(node=>artObserver?.unobserve(node));
     if(Selection.mode&&body.contains(Selection.box))Selection.exit();
-    body.innerHTML='';
-    if(!q){
-      body.innerHTML='<div class="empty">'+icoHTML('search')+'<div>Search your library by title, artist, album, folder or genre.</div></div>';
-      return;
+    body.innerHTML='';this.sections=this.collect(q);
+    for(const section of this.sections){
+      const heading=el('h2','search-section-label',esc(section.category.label));body.appendChild(heading);
+      const data=section.data,box=data.type==='tracks'?Views.trackList(data.items,{kind:'search'}):data.type==='groups'?this.groupList(data):this.playlistList(data.items);
+      box.classList.add('search-result-list');box.setAttribute('aria-label',section.category.label+' search results');section.box=box;body.appendChild(box);
     }
-    const T=allTracks();
-    const match=function(s){ return String(s||'').toLowerCase().indexOf(q)>=0; };
-    const f=Search.filter;
-    if(f==='All'||f==='Titles'){
-      const hits=T.filter(function(t){
-        return f==='Titles'||nativeValues().search_track_titles_only ? match(t.title)
-          : (match(t.title)||match(t.artist)||match(t.album)||match(t.albumArtist)||match(t.genre)||match(t.path));
-      });
-      if(hits.length){
-        body.appendChild(el('div','seghead','Tracks ('+hits.length+')'));
-        body.appendChild(Views.trackList(hits.slice(0,400), {kind:'search'}));
-      }
+    if(!this.sections.length){
+      const streams=this.filter==='Streams',message=streams?'Streams are unavailable. No stream library is connected.':q?'No results for “'+q+'”':'Search your library by title, artist, album, folder or genre.';
+      body.appendChild(el('div','empty search-empty',icoHTML('search')+'<div>'+esc(message)+'</div>'));
     }
-    const groupFns={
-      'Albums':[function(t){ return trackAlbum(t); },'album','album'],
-      'Artists':[function(t){ return trackArtist(t); },'mic','artist'],
-      'Album Artists':[function(t){ return t.albumArtist||trackArtist(t); },'mic2','aartist'],
-      'Folders':[function(t){ return t.folder||'/'; },'folder','folder'],
-      'Genres':[function(t){ return t.genre||'Unknown genre'; },'guitar','genre']
-    };
-    const keys = f==='All' ? Object.keys(groupFns) : (groupFns[f]?[f]:[]);
-    keys.forEach(function(k){
-      const spec=groupFns[k];
-      const groups=Views.groupBy(T,spec[0]).filter(function(g){ return match(g.key); });
-      if(!groups.length) return;
-      body.appendChild(el('div','seghead',k+' ('+groups.length+')'));
-      body.appendChild(Views.groupList({items:groups.slice(0,120), icon:spec[1], open:spec[2], art:k==='Albums'}));
-    });
-    if(!body.children.length) body.innerHTML='<div class="empty">'+icoHTML('search')+'<div>No results for "'+esc(q)+'"</div></div>';
+    body.scrollTop=scroll;
+  },
+  playbackItems:function(){
+    const songSections=this.sections.filter(s=>s.data.type==='tracks'),songItems=songSections.flatMap(s=>s.data.items);
+    const found=nativeValues().search_play_tracks!==false&&songItems.length?songItems:this.sections.flatMap(s=>s.data.type==='tracks'?s.data.items:s.data.type==='groups'?s.data.items.flatMap(g=>g.tracks):s.data.items.flatMap(p=>p.ids.map(id=>LIB.map.get(id)).filter(sourceTrackEnabled)));
+    const seen=new Set();return found.filter(t=>{if(seen.has(t.id))return false;seen.add(t.id);return true;});
+  },
+  refreshActions:function(){
+    if(!$('#q').value.trim())this.sections=[];
+    const items=this.playbackItems(),box=this.sections.find(s=>s.data.type==='tracks')?.box;
+    for(const id of ['#q-play','#q-shuffle']){$(id).disabled=!items.length;$(id).title=items.length?'':'No playable search results';}
+    const select=$('#q-select');select.disabled=!box?.__items?.length;select.title=select.disabled?'Choose All Songs results to select tracks':'';select.setAttribute('aria-pressed',String(Selection.mode&&Selection.box===box));
+    $('#q-clear').disabled=!$('#q').value;$('#q-clear').setAttribute('aria-label','Clear search');
+  },
+  play:function(shuffle){
+    const items=this.playbackItems();if(!items.length)return;
+    if(shuffle){SET.shuffleOn=true;SET.shuffleMode=1;UI.renderToggles();saveSet();}
+    this.remember?.();Engine.categoryKind='search';Engine.setQueue(items,0,true);Nav.go('player');
+  },
+  select:function(){
+    const box=this.sections.find(s=>s.data.type==='tracks')?.box;if(!box?.__items?.length)return;
+    if(Selection.mode&&Selection.box===box)Selection.exit();else Selection.enter(null,box);
+    this.refreshActions();
+  },
+  listOptions:function(){
+    const s=$('#sheet'),options=Views.listOptions?.({kind:'search'})||{},zoom=ListZoom.get('search');
+    s.innerHTML='<div class="list-options-content search-list-options-content"><header class="list-options-head"><h3>List Options: Search</h3><button class="iconbtn" data-search-settings aria-label="Open search settings">'+icoHTML('settings')+'</button></header><div class="list-options-body"><div class="search-category-options"></div><h4>Layout</h4><label class="list-choice"><input type="checkbox" data-search-titles '+(options.titlesOnly?'checked':'')+'><span>Show titles only</span></label><h4>View As</h4><p class="list-pinch-hint">'+icoHTML('info')+' Pinch-to-zoom for zooming</p><div class="list-view-options"></div></div><footer class="list-options-footer"><button class="btn" data-search-close>Close</button></footer></div>';
+    const change=()=>{this.renderChips();this.run();};
+    for(const category of this.categories){
+      const row=el('label','list-choice');row.innerHTML='<input type="checkbox" data-search-category="'+category.kind+'" '+(this.enabled(category)?'checked':'')+'><span>'+category.label+'</span>';
+      row.querySelector('input').onchange=e=>{SET.searchCategories=Object.assign({},SET.searchCategories,{[category.kind]:e.target.checked});saveSet();change();};
+      s.querySelector('.search-category-options').appendChild(row);
+    }
+    const labels={[-4]:'Grid - 1 line small',[-3]:'1 line extra small',[-2]:'1 line',[-1]:'List - no images',0:'List - compact',3:'List - small',4:'List',1:'Grid - extra small',2:'Grid - small',5:'Grid'};
+    for(const id of [-3,-2,-1,0,3,4,1,2,5,-4]){
+      const row=el('label','list-choice');row.innerHTML='<input type="radio" name="search-view" value="'+id+'" '+(zoom===id?'checked':'')+'><span>'+labels[id]+'</span>';
+      row.querySelector('input').onchange=()=>{
+        if(Nav.cur!=='search')return;
+        const boxes=Array.from($('#q-body').querySelectorAll('.zoom-list'));
+        if(boxes.length){ListZoom.set(boxes[0],id,boxes[0].querySelector('.trow'));for(const box of boxes.slice(1)){ListZoom.apply(box,'search',id);box.__window?.refresh();}}
+        else{SET.listZoom=Object.assign({},SET.listZoom,{search:id});saveSet();}
+      };s.querySelector('.list-view-options').appendChild(row);
+    }
+    s.querySelector('[data-search-titles]').onchange=e=>{ListOptions.save({kind:'search'},{titlesOnly:e.target.checked});change();};
+    s.querySelector('[data-search-settings]').onclick=()=>{closeSheet();Settings.open('library_search');};
+    s.querySelector('[data-search-close]').onclick=closeSheet;openSheet('sheet');
   }
 };
-
 /* =====================================================================
    SETTINGS SCREENS
    ===================================================================== */
@@ -5579,19 +5690,72 @@ function toggleVizFull(on){
 /* =====================================================================
    GESTURES
    ===================================================================== */
-function peekTrack(delta){
-  if(!Engine.queue.length) return null;
-  if(delta<0&&SET.previousRestarts&&Engine.time()>3)return Engine.current;
-  if(delta>0&&PlaybackQueue.shouldStart())return PlaybackQueue.tracks()[0]||null;
-  if(delta>0&&PlaybackQueue.active&&Engine.pos+1>=Engine.order.length){
-    if(nativeValues().queue_end===0)return Engine.queue[Engine.order[0]];
-    const resume=PlaybackQueue.resume;return resume?LIB.map.get(resume.ids[resume.order[resume.pos]])||null:null;
-  }
-  let p=Engine.pos+delta;
-  if(p<0) p=Engine.order.length-1;
-  if(p>=Engine.order.length) p=0;
-  return Engine.queue[Engine.order[p]];
+/* Resolve manual navigation once. The preview and release use the same action,
+   including a restart of a restored/unloaded track and explicit queue edges. */
+function restoreTrackStepOrigin(){
+  const origin=Engine._manualStepOrigin;Engine._manualStepOrigin=null;
+  if(origin&&origin.currentId===Engine.current?.id&&origin.queue===Engine.queue&&origin.order===Engine.order&&Engine.queue[Engine.order[origin.pos]]?.id===origin.currentId)Engine.pos=origin.pos;
 }
+function resolveTrackStep(delta){
+  const origin=Engine._manualStepOrigin;
+  const sameOrigin=origin&&origin.currentId===Engine.current?.id&&origin.queue===Engine.queue&&origin.order===Engine.order;
+  if(origin&&!sameOrigin)Engine._manualStepOrigin=null;
+  if(sameOrigin&&!(typeof PlaybackTransitions!=='undefined'&&PlaybackTransitions.pending))restoreTrackStepOrigin();
+  if(!Engine.queue.length||!Engine.order.length)return null;
+  const direction=delta<0?-1:1;
+  const step={direction,currentId:Engine.current?.id,request:Engine._playRequest,
+    queue:Engine.queue,order:Engine.order,queueLength:Engine.queue.length,orderLength:Engine.order.length,
+    fromPos:Engine.pos,originPos:Engine._manualStepOrigin?.pos??Engine.pos,pending:PlaybackQueue.pending.slice(),active:PlaybackQueue.active,resume:PlaybackQueue.resume};
+  if(direction<0&&SET.previousRestarts&&Engine.time()>3)return {...step,kind:'restart',track:Engine.current};
+  if(direction>0&&PlaybackQueue.shouldStart())return {...step,kind:'queue-start',track:PlaybackQueue.tracks()[0]||null};
+  if(direction>0&&PlaybackQueue.active&&Engine.pos+1>=Engine.order.length){
+    if(nativeValues().queue_end===0)return {...step,kind:'queue-finish',queueEnd:0,track:Engine.queue[Engine.order[0]]};
+    const resume=PlaybackQueue.resume;
+    const next=resume?.order.slice(resume.pos).map(i=>LIB.map.get(resume.ids[i])).find(sourceTrackEnabled)||null;
+    return {...step,kind:'queue-finish',queueEnd:nativeValues().queue_end,track:next};
+  }
+  const pos=direction<0?(Engine.pos<=0?Engine.order.length-1:Engine.pos-1):(Engine.pos+1)%Engine.order.length;
+  return {...step,kind:'track',pos,index:Engine.order[pos],track:Engine.queue[Engine.order[pos]]||null};
+}
+function trackStepCurrent(step){
+  return !!step&&step.currentId===Engine.current?.id&&step.request===Engine._playRequest&&
+    step.queue===Engine.queue&&step.order===Engine.order&&step.fromPos===Engine.pos&&
+    step.queueLength===Engine.queue.length&&step.orderLength===Engine.order.length&&
+    step.active===PlaybackQueue.active&&step.resume===PlaybackQueue.resume&&
+    step.pending.length===PlaybackQueue.pending.length&&step.pending.every((id,i)=>id===PlaybackQueue.pending[i])&&
+    (step.kind!=='track'||Engine.queue[Engine.order[step.pos]]?.id===step.track?.id)&&
+    (step.kind!=='queue-start'||PlaybackQueue.shouldStart()&&PlaybackQueue.tracks()[0]?.id===step.track?.id)&&
+    (step.kind!=='queue-finish'||step.queueEnd===nativeValues().queue_end&&resolveTrackStep(1)?.track?.id===step.track?.id);
+}
+function commitTrackStep(step){
+  if(!trackStepCurrent(step)||(step.track&&!sourceTrackEnabled(step.track)))return false;
+  const autoplay=Engine.wantsPlayback();UI.artDir=step.direction;
+  if(step.kind==='restart'){UI.artDir=0;Engine.seek(0);}
+  else if(step.kind==='queue-start')PlaybackQueue.begin(false,0,autoplay);
+  else if(step.kind==='queue-finish')PlaybackQueue.finish(autoplay);
+  else if(step.track){
+    // Local manual fades select asynchronously. Advance the occurrence now so
+    // another deliberate Next continues from this requested target, not from
+    // the still-audible outgoing song.
+    const request=Engine._playRequest;Engine.pos=step.pos;
+    const result=Engine.playIndex(step.index,autoplay),acceptedRequest=Engine._playRequest;
+    if(acceptedRequest===request&&Engine.current?.id!==step.track.id){Engine.pos=step.originPos;UI.artDir=0;return false;}
+    if(Engine.current?.id!==step.track.id)Engine._manualStepOrigin={currentId:step.currentId,queue:step.queue,order:step.order,pos:step.originPos};
+    else Engine._manualStepOrigin=null;
+    if(result&&typeof result.then==='function'){
+      const recover=()=>{
+        if(acceptedRequest!==Engine._playRequest)return;
+        if(Engine.current?.id===step.track.id){Engine._manualStepOrigin=null;return;}
+        restoreTrackStepOrigin();
+        UI.swipeCommitted=null;UI.artDir=0;UI.renderNowPlaying(Engine.current);
+      };
+      Promise.resolve(result).then(recover,recover);
+    }
+  }
+  else return false;
+  return true;
+}
+function peekTrack(delta){return resolveTrackStep(delta)?.track||null;}
 /* Shared finger tracking: one paint per display frame and velocity near release. */
 const GestureMotion={
   time(e){return Number.isFinite(e.timeStamp)&&e.timeStamp>0?e.timeStamp:performance.now();},
@@ -5608,15 +5772,16 @@ const GestureMotion={
     let state=null,frame=0,longTimer=0,blocked=false;const pointers=new Set();
     const blockClick=InputLifecycle.clickGuard(node);
     const paint=()=>{frame=0;if(state)handlers.move?.(state);};
-    const cancel=()=>{clearTimeout(longTimer);cancelAnimationFrame(frame);frame=0;if(state){handlers.cancel?.(state);state=null;}};
+    const release=done=>{InputLifecycle.release(node,done.id);try{if(node.hasPointerCapture?.(done.id))node.releasePointerCapture(done.id);}catch(_){};};
+    const cancel=()=>{clearTimeout(longTimer);cancelAnimationFrame(frame);frame=0;if(state){const done=state;state=null;done.phase='cancel';blockClick({pointerId:done.id});release(done);handlers.cancel?.(done);}};
     node.addEventListener('pointerdown',e=>{
       pointers.add(e.pointerId);
       if(pointers.size>1||e.isPrimary===false){blocked=true;if(state)blockClick({pointerId:state.id});cancel();return;}
-      if(blocked||e.button>0||!InputLifecycle.active(node)||handlers.ignore?.(e))return;
+      if(state||blocked||e.button>0||!InputLifecycle.active(node)||handlers.ignore?.(e)||!InputLifecycle.claim(node,e.pointerId))return;
       const now=this.time(e);
-      state={id:e.pointerId,x:e.clientX,y:e.clientY,dx:0,dy:0,travel:0,vx:0,vy:0,axis:'',started:performance.now(),elapsed:0,inputStarted:now,samples:[{x:e.clientX,y:e.clientY,t:now}]};
+      state={id:e.pointerId,x:e.clientX,y:e.clientY,dx:0,dy:0,travel:0,vx:0,vy:0,axis:'',started:performance.now(),elapsed:0,inputStarted:now,samples:[{x:e.clientX,y:e.clientY,t:now}],phase:'possible'};
       handlers.start?.(state,e);node.setPointerCapture?.(e.pointerId);
-      if(handlers.long&&SET.longPressMenu)longTimer=setTimeout(()=>{if(state&&state.travel<=7){blockClick(e);const done=state;state=null;handlers.long(done);}},SET.longPressMs||480);
+      if(handlers.long&&SET.longPressMenu)longTimer=setTimeout(()=>{if(state&&state.travel<=7){blockClick(e);const done=state;state=null;release(done);handlers.long(done);}},SET.longPressMs||480);
     });
     node.addEventListener('pointermove',e=>{
       if(!state||state.id!==e.pointerId)return;
@@ -5624,11 +5789,16 @@ const GestureMotion={
       state.travel=Math.max(state.travel,Math.hypot(state.dx,state.dy));
       if(Math.hypot(state.dx,state.dy)>7)clearTimeout(longTimer);
       if(!state.axis&&Math.max(Math.abs(state.dx),Math.abs(state.dy))>9){if(Math.abs(state.dx)>Math.abs(state.dy)*1.15)state.axis='x';else if(Math.abs(state.dy)>Math.abs(state.dx)*1.15)state.axis='y';}
+      if(state.axis){state.phase='drag';if(InputLifecycle.gesture?.node===node)InputLifecycle.gesture.phase='drag';}
       state.samples.push({x:e.clientX,y:e.clientY,t:now});while(state.samples.length>2&&state.samples[0].t<now-90)state.samples.shift();
       const first=state.samples[0],dt=Math.max(1,now-first.t);state.vx=(e.clientX-first.x)/dt;state.vy=(e.clientY-first.y)/dt;
       if(!frame)frame=requestAnimationFrame(paint);
     });
     const end=e=>{
+      // Touch implicitly captures the hit-tested child before this surface
+      // takes explicit capture. Its bubbling loss is a transfer notification,
+      // not a loss of our still-owned pointer stream.
+      if(e.type==='lostpointercapture'&&e.target!==node&&node.hasPointerCapture?.(e.pointerId))return;
       pointers.delete(e.pointerId);if(!pointers.size)blocked=false;
       if(!state||state.id!==e.pointerId)return;
       clearTimeout(longTimer);cancelAnimationFrame(frame);frame=0;
@@ -5638,7 +5808,7 @@ const GestureMotion={
       done.travel=Math.max(done.travel,Math.hypot(done.dx,done.dy));
       if(done.travel>7)blockClick(e);
       if(this.time(e)-done.samples.at(-1).t>100){done.vx=0;done.vy=0;}
-      handlers.move?.(done);state=null;handlers.end?.(done,e);
+      handlers.move?.(done);state=null;done.phase='settle';release(done);handlers.end?.(done,e);
     };
     ['pointerup','pointercancel','lostpointercapture'].forEach(type=>node.addEventListener(type,end));
     const reset=()=>{cancel();pointers.clear();blocked=false;};
@@ -5647,6 +5817,7 @@ const GestureMotion={
     return reset;
   },
   settle(nodes,targets,ms,done){
+    if(this.reduced())ms=0;
     let ended=false,timer=0;const finish=()=>{if(ended)return;ended=true;finish.pending=false;clearTimeout(timer);nodes[0]?.removeEventListener('transitionend',onEnd);nodes.forEach(n=>n.style.transition='none');done?.();};
     const onEnd=e=>{if(e.target===nodes[0]&&e.propertyName==='transform')finish();};
     nodes[0]?.addEventListener('transitionend',onEnd);
@@ -5657,84 +5828,864 @@ const GestureMotion={
   }
 };
 const SwipeArt={
-  ready:new Map(),pending:new Map(),
+  ready:new Map(),pending:new Map(),keys:new Map(),requests:new Map(),
+  key(t){return t?[t.id,t.coverURL||'',t.artKey||'',t.customArt||''].join('|'):'';},
+  cached(t){return t&&this.keys.get(t.id)===this.key(t)?this.ready.get(t.id):undefined;},
+  async decode(url){if(!url)return null;const img=new Image();img.src=url;try{await img.decode();return url;}catch(e){return null;}},
+  remember(t,url){
+    this.keys.set(t.id,this.key(t));this.ready.set(t.id,url);
+    if(this.ready.size>8){const id=this.ready.keys().next().value;this.ready.delete(id);this.keys.delete(id);this.requests.delete(id);}
+    return url;
+  },
   warm(t){
-    if(!t)return Promise.resolve(null);if(this.ready.has(t.id))return Promise.resolve(this.ready.get(t.id));if(this.pending.has(t.id))return this.pending.get(t.id);
-    const promise=getArtURL(t).then(async url=>{if(url){const img=new Image();img.src=url;try{await img.decode();}catch(e){}}this.ready.set(t.id,url);if(this.ready.size>8)this.ready.delete(this.ready.keys().next().value);return url;}).finally(()=>this.pending.delete(t.id));
-    this.pending.set(t.id,promise);return promise;
+    if(!t)return Promise.resolve(null);
+    const cached=this.cached(t);if(cached!==undefined)return Promise.resolve(cached);
+    const key=this.key(t);if(this.pending.has(key))return this.pending.get(key);this.requests.set(t.id,key);
+    const promise=getArtURL(t).then(url=>this.decode(url)).then(url=>this.requests.get(t.id)===key?this.remember(t,url):this.cached(t)||null).catch(()=>null).finally(()=>this.pending.delete(key));
+    this.pending.set(key,promise);return promise;
   },
   neighbors(){this.warm(peekTrack(-1));this.warm(peekTrack(1));}
 };
-const ScreenDrag={
-  state:null,finish:null,settling:null,
-  clean(s){if(!s)return;delete s.to.dataset.gesturePreview;for(const n of [s.from,s.to]){n.style.transition='';n.style.transform='';n.style.zIndex='';}s.to.hidden=s.target!==Nav.cur;s.to.inert=s.target!==Nav.cur;},
-  abort(){this.finish?.cancel?.();this.finish=null;const s=this.state||this.settling;this.state=null;this.settling=null;this.clean(s);},
-  pause(){
-    const s=this.settling;if(!s)return;
-    const y=GestureMotion.offset(s.to,'y');this.finish?.cancel?.();this.finish=null;
-    s.progress=clamp(s.height+s.direction*y,0,s.height);s.baseProgress=s.progress;
-    s.from.style.transition=s.to.style.transition='none';
-    s.from.style.transform=`translateY(${s.direction*s.progress*.18}px)`;s.to.style.transform=`translateY(${y}px)`;
+/* A single painted player owns mini/full continuity. Screens retain their input
+   lifecycle; only this transient, inert layer paints during the morph. */
+const SharedPlayerMotion={
+  // Exhaustive capture is the measured faster, conservative production path.
+  // The compact planner remains available only to the independent QA probes.
+  captureMode:'exhaustive',appearanceEnabled:true,appearanceJob:null,preparedAppearance:null,
+  appearanceStats:{prepared:0,hits:0,cold:0,invalidated:0,lastMiss:null},
+  clearAppearance(){
+    const job=this.appearanceJob||this.preparedAppearance;
+    if(job){clearTimeout(job.timer);if(job.idle&&typeof cancelIdleCallback==='function')cancelIdleCallback(job.idle);job.observer?.disconnect();}
+    this.appearanceJob=this.preparedAppearance=null;
   },
-  returnInterrupted(){if(this.settling){this.begin(this.settling.target,this.settling.direction);this.end(false);return true;}return false;},
-  begin(target,direction){
-    if(this.state)return;
-    if(this.settling){this.pause();this.state=this.settling;this.settling=null;return;}
-    this.abort();
-    if(!SCREENS[target]||target===Nav.cur)return;
-    const from=$(SCREENS[Nav.cur]),to=$(SCREENS[target]),height=from.clientHeight||innerHeight;
-    from.__navAnimation?.cancel();to.__navAnimation?.cancel();
-    to.hidden=false;to.inert=true;to.dataset.gesturePreview='1';from.style.transition='none';to.style.transition='none';to.style.zIndex='3';
-    this.state={from,to,target,direction,height,baseProgress:0};this.move(0);
+  appearanceEligible(){
+    return this.appearanceEnabled&&typeof requestIdleCallback==='function'&&typeof MutationObserver==='function'&&
+      ['library','list'].includes(Nav.cur)&&!matchMedia('(hover: hover)').matches&&!document.hidden&&(!document.fonts||document.fonts.status==='loaded')&&
+      !ScreenDrag.state&&!ScreenDrag.settling&&!LibraryPageMotion.state&&!LibraryPageMotion.finish&&!Sheets.open&&
+      !InputLifecycle.contacts.size&&!!Engine.current;
   },
-  move(dy){const s=this.state;if(!s)return;s.progress=Math.max(0,Math.min(s.height,(s.baseProgress||0)+s.direction*dy));const distance=s.direction*s.progress;s.from.style.transform=`translateY(${distance*.18}px)`;s.to.style.transform=`translateY(${distance-s.direction*s.height}px)`;},
-  end(commit,velocity=0){
-    const s=this.state;if(!s)return;this.state=null;this.settling=s;commit=commit&&s.progress>0;
-    const y=s.to.getBoundingClientRect().top,ms=GestureMotion.duration(commit?y:s.height-Math.abs(y),velocity);
-    this.finish=GestureMotion.settle([s.to,s.from],[commit?'translateY(0)':`translateY(${-s.direction*s.height}px)`,commit?`translateY(${s.direction*s.height*.18}px)`:'translateY(0)'],ms,()=>{
-      this.finish=null;
-      this.settling=null;
-      delete s.to.dataset.gesturePreview;
-      for(const n of [s.from,s.to]){n.style.transition='';n.style.transform='';n.style.zIndex='';}
-      if(commit){UI.instantNav=true;try{Nav.go(s.target);}finally{UI.instantNav=false;}}
-      else s.to.hidden=true;
+  appearanceSheets(){
+    const result=[],seen=new Set();
+    // Compare native serialized rules, including imported sheets. No selectors
+    // or property inventories are parsed on the input path.
+    const visit=sheet=>{if(seen.has(sheet))return;seen.add(sheet);result.push(sheet,sheet.disabled,sheet.media?.mediaText||'');const rules=sheet.cssRules;for(let j=0;j<rules.length;j++){const rule=rules[j];result.push(rule.cssText);if(rule.styleSheet)visit(rule.styleSheet);}};
+    for(const sheets of [document.styleSheets,document.adoptedStyleSheets])if(sheets)for(let i=0;i<sheets.length;i++)visit(sheets[i]);
+    return result;
+  },
+  appearanceFonts(){const fonts=document.fonts,result=[fonts?.status||'unavailable'];if(fonts&&typeof fonts[Symbol.iterator]==='function')for(const face of fonts)result.push(face,face.status);return result;},
+  appearanceSources(){
+    const shared=['#artA','#artB','.art-ov','#p-title','#p-sub','#btn-play','#seek'].map(selector=>$(selector)).filter(Boolean),nodes=new Set();
+    for(const selector of ['#bg','#sc-player','#mini-art','#artA','.art-ov','#mini-title','#p-title','#mini-sub','#p-sub','#mini-play','#btn-play','#mini-seek','#seek']){
+      const root=$(selector);if(!root)continue;
+      for(const node of [root,...root.querySelectorAll('*')])if(selector!=='#sc-player'||!shared.some(part=>part!==node&&part.contains(node)))nodes.add(node);
+    }
+    const dynamic=['#mini-seek','#seek','#t-cur','#t-dur'].map(selector=>$(selector)).filter(Boolean);
+    // Progress/time and every ancestor affected by their layout are captured
+    // live. Only invariant sibling/subtree CSS can be reused.
+    const mini=$('#mini');return [...nodes].filter(node=>!mini?.contains(node)&&!dynamic.some(root=>root===node||root.contains(node)||node.contains(root)));
+  },
+  appearanceChanges(records){return records.filter(record=>{
+    const target=record.target?.nodeType===3?record.target.parentElement:record.target,id=target?.id,parentMotion=!!target?.classList?.contains('mini-swipe-content');
+    if(record.type==='attributes'&&record.oldValue!==undefined&&target?.getAttribute(record.attributeName)===record.oldValue)return false;
+    if(record.type==='attributes'&&record.attributeName==='style'&&(['mini-fill','seek-fill','seek-knob'].includes(id)||parentMotion)){
+      // Only compositor progress transforms are exempt; another declaration
+      // on the same node still invalidates the invariant sibling cache.
+      const old=document.createElement('span').style;old.cssText=record.oldValue||'';const current=target.style;
+      const rest=style=>{const values=[];for(let i=0;i<style.length;i++){const key=style[i];if(key!=='transform'&&!(parentMotion&&(key==='transition'||key.startsWith('transition-'))))values.push(key+':'+style.getPropertyValue(key)+'!'+style.getPropertyPriority(key));}return values.sort().join('\0');};return rest(old)!==rest(current);
+    }
+    if(record.type==='attributes'&&['mini-seek','seek'].includes(id)&&['aria-valuenow','aria-valuetext','aria-valuemax'].includes(record.attributeName))return false;
+    if(['characterData','childList'].includes(record.type)&&['t-cur','t-dur'].includes(id))return false;
+    return true;
+  });},
+  appearanceFocus(nodes){const active=document.activeElement;if(!active||active===document.body||active===document.documentElement)return null;return nodes.some(node=>node===active||node.contains(active)||active.contains?.(node))?active:null;},
+  appearanceInputs(nodes){return nodes.map(node=>{const style=node.style,values=[];if(typeof style.length==='number'){for(let i=0;i<style.length;i++){const key=style[i];values.push(key+':'+style.getPropertyValue(key)+'!'+style.getPropertyPriority(key));}}else values.push(...style.cssText.split(';'));return [node,node.getAttribute('class'),values.sort().join('\0'),node.textContent];});},
+  appearanceStage(fn){
+    const mini=$('#mini'),full=$('#sc-player'),hidden=[mini.hidden,full.hidden],styles=[this.styleSnapshot(mini,['opacity','transform','transition']),this.styleSnapshot(full,['opacity','transform','transition','z-index'])];
+    try{
+      mini.hidden=full.hidden=false;mini.style.transition=full.style.transition='none';mini.style.transform=full.style.transform='none';mini.style.opacity=full.style.opacity='1';full.style.zIndex='3';
+      UI.fitPlayer();return fn();
+    }finally{for(const snapshot of styles)this.restore(snapshot);mini.hidden=hidden[0];full.hidden=hidden[1];}
+  },
+  scheduleAppearance(){
+    this.clearAppearance();if(!this.appearanceEligible())return;
+    const job={cache:new Map(),nodes:null,index:0,track:Engine.current,trackId:Engine.current.id,screen:Nav.cur,width:innerWidth,height:innerHeight,dpr:devicePixelRatio,focus:this.appearanceFocus(this.appearanceSources())};
+    job.cache.snapshotPlan=null;
+    const watch=()=>{
+      for(const selector of ['#bg','#sc-player','#mini']){const node=$(selector);if(node)job.observer.observe(node,{attributes:true,attributeOldValue:true,childList:true,characterData:true,subtree:true});}
+      for(const node of [document.head,document.documentElement,document.body,$('#app')].filter(Boolean))job.observer.observe(node,node===document.head?{attributes:true,childList:true,characterData:true,subtree:true}:{attributes:true,childList:true});
+    };
+    job.observer=new MutationObserver(records=>{const changed=this.appearanceChanges(records);if(!changed.length||this.appearanceJob!==job&&this.preparedAppearance!==job)return;this.appearanceStats.lastMiss={reason:'mutation',node:changed[0].target?.id||changed[0].target?.parentElement?.id||null,targetClass:changed[0].target?.className||null,attribute:changed[0].attributeName||changed[0].type};this.appearanceStats.invalidated++;this.scheduleAppearance();});
+    const step=deadline=>{
+      job.idle=0;if(this.appearanceJob!==job||!this.appearanceEligible()){this.clearAppearance();return;}
+      if(document.getAnimations?.().some(animation=>animation.playState==='running'||animation.playState==='pending')){job.nodes=null;job.index=0;job.cache.clear();job.timer=setTimeout(()=>{job.timer=0;if(this.appearanceJob===job)job.idle=requestIdleCallback(step);},100);return;}
+      if(deadline.timeRemaining()<6){job.idle=requestIdleCallback(step);return;}
+      if(this.appearanceChanges(job.observer.takeRecords()).length){this.appearanceStats.invalidated++;this.scheduleAppearance();return;}
+      job.observer.disconnect();
+      try{
+        this.appearanceStage(()=>{
+          if(!job.nodes){job.nodes=this.appearanceSources();job.sheets=this.appearanceSheets();job.fonts=this.appearanceFonts();}
+          const start=performance.now();
+          while(job.index<job.nodes.length&&performance.now()-start<6&&deadline.timeRemaining()>2){
+            const node=job.nodes[job.index++],style=getComputedStyle(node),pseudos=[];
+            for(const pseudo of ['::before','::after']){const ps=getComputedStyle(node,pseudo);if(!ps.content||ps.content==='none'||ps.content==='normal')continue;pseudos.push({css:this.snapshotCSS(ps,null),text:ps.content==='""'||ps.content==="''"?'':ps.content.replace(/^['"]|['"]$/g,'')});}
+            job.cache.set(node,{css:this.snapshotCSS(style,null),pseudos});
+          }
+          job.inputs=this.appearanceInputs(job.nodes);
+        });
+        watch();
+        if(job.index===job.nodes.length){this.appearanceJob=null;this.preparedAppearance=job;this.appearanceStats.prepared++;}
+        else job.idle=requestIdleCallback(step);
+      }catch(_){this.clearAppearance();}
+    };
+    this.appearanceJob=job;watch();job.timer=setTimeout(()=>{job.timer=0;if(this.appearanceJob===job)job.idle=requestIdleCallback(step);},180);
+  },
+  claimAppearance(scene){
+    const job=this.preparedAppearance,valid=job&&scene.target==='player'&&job.screen===scene.fromName&&job.track===Engine.current&&job.trackId===Engine.current.id&&
+      job.width===innerWidth&&job.height===innerHeight&&job.dpr===devicePixelRatio&&job.focus===this.appearanceFocus(job.nodes)&&
+      !document.hidden&&!this.appearanceChanges(job.observer.takeRecords()).length&&!document.getAnimations?.().some(animation=>animation.playState==='running'||animation.playState==='pending')&&job.nodes.every(node=>node.isConnected);
+    if(job&&!valid)this.appearanceStats.lastMiss={reason:'claim',focusChanged:job.focus!==this.appearanceFocus(job.nodes),screenChanged:job.screen!==scene.fromName,trackChanged:job.track!==Engine.current||job.trackId!==Engine.current.id,viewportChanged:job.width!==innerWidth||job.height!==innerHeight||job.dpr!==devicePixelRatio,animations:!!document.getAnimations?.().some(animation=>animation.playState==='running'||animation.playState==='pending')};
+    this.clearAppearance();return valid?job:null;
+  },
+  consumeAppearance(job){
+    if(job)try{
+      const nodes=this.appearanceSources(),inputs=this.appearanceInputs(nodes),sheets=this.appearanceSheets(),fonts=this.appearanceFonts();
+      if(nodes.length===job.nodes.length&&inputs.every((values,i)=>values.every((value,j)=>value===job.inputs[i][j]))&&sheets.length===job.sheets.length&&sheets.every((value,i)=>value===job.sheets[i])&&fonts.length===job.fonts.length&&fonts.every((value,i)=>value===job.fonts[i])){this.appearanceStats.hits++;this.appearanceStats.lastMiss=null;return job.cache;}
+      const at=inputs.findIndex((values,i)=>!job.inputs[i]||values.some((value,j)=>value!==job.inputs[i][j]));this.appearanceStats.lastMiss={reason:'validation',node:at<0?null:nodes[at]?.id||nodes[at]?.tagName,field:at<0?null:inputs[at].findIndex((value,j)=>value!==job.inputs[at]?.[j]),sheetsChanged:sheets.length!==job.sheets.length||sheets.some((value,i)=>value!==job.sheets[i]),fontsChanged:fonts.length!==job.fonts.length||fonts.some((value,i)=>value!==job.fonts[i])};
+    }catch(_){}
+    this.appearanceStats.cold++;const cache=new Map();cache.snapshotPlan=null;return cache;
+  },
+  active(){return typeof ScreenDrag!=='undefined'?(ScreenDrag.state||ScreenDrag.settling)?.morph:null;},
+  deferLayout(){const m=this.active();if(!m)return false;m.layoutDeferred=true;return true;},
+  deferViz(){const m=this.active();if(!m)return false;m.vizDeferred=true;return true;},
+  rect(node){const r=node.getBoundingClientRect();return {left:r.left,top:r.top,width:r.width,height:r.height};},
+  mixRect(mini,full,p){p=clamp(p,0,1);const r={};for(const key of ['left','top','width','height'])r[key]=mini[key]+(full[key]-mini[key])*p;return r;},
+  sceneGeometry(endpoints,p){const geometry={};for(const [key,pair] of Object.entries(endpoints))geometry[key]=this.mixRect(pair.mini,pair.full,p);return geometry;},
+  styleSnapshot(node,keys){return {node,values:keys.map(key=>[key,node.style.getPropertyValue(key),node.style.getPropertyPriority(key)])};},
+  restore(snapshot){for(const [key,value,priority] of snapshot.values)if(value)snapshot.node.style.setProperty(key,value,priority);else snapshot.node.style.removeProperty(key);},
+  radius(node){const s=getComputedStyle(node);return ['border-top-left-radius','border-top-right-radius','border-bottom-right-radius','border-bottom-left-radius'].map(key=>parseFloat(s.getPropertyValue(key))||0);},
+  copyCanvas(source,copy){
+    try{
+      // A snapshot replaces transparent pixels too. Bitmap dimensions can
+      // change after a direct layout paint, independently of frozen CSS boxes.
+      if(copy.width!==source.width)copy.width=source.width;if(copy.height!==source.height)copy.height=source.height;
+      const context=copy.getContext('2d');context.clearRect(0,0,copy.width,copy.height);context.drawImage(source,0,0);
+    }catch(_){}
+  },
+  snapshotPlan(style,diagnostics=null){
+    // Freeze the properties the page actually authors, not hundreds of unused
+    // browser defaults. Rules are re-read for every scene: theme classes,
+    // stylesheet edits, inline artwork/seek values and CSSOM changes cannot
+    // reuse a stale picture. Inaccessible sheets keep the exhaustive fallback.
+    const fail=(reason,error)=>{if(diagnostics)diagnostics.fallback={reason,name:error?.name||null,message:error?.message||null};return null;};
+    if(!document.styleSheets?.length&&!document.adoptedStyleSheets?.length)return fail('stylesheets-unavailable');
+    const rules=[],computed=new Set();
+    const listInfo=list=>{if(diagnostics){const name=list?.constructor?.name||'array-like',iterable=typeof list?.[Symbol.iterator]==='function';diagnostics.lists ||= [];if(!diagnostics.lists.some(item=>item.name===name&&item.iterable===iterable))diagnostics.lists.push({name,iterable});}};
+    const each=(list,visit)=>{if(!list)return;listInfo(list);for(let i=0;i<list.length;i++)visit(list[i]??list.item?.(i));};
+    for(let i=0;i<style.length;i++)if(!style[i].startsWith('--'))computed.add(style[i]);
+    const declaration=(style,pseudo)=>{
+      const keys=[],variables=new Set();let liveVariables=!!pseudo;
+      for(let i=0;i<style.length;i++){
+        const key=style[i];if(!key.startsWith('--'))keys.push(key);
+        // Classes survive ID removal. A live class pseudo or !important rule
+        // can outrank the frozen longhands and still consume a local variable.
+        // Keep only its referenced variables, not the whole inherited schema.
+        if(style.getPropertyPriority(key)==='important')liveVariables=true;
+      }
+      // CSSOM enumerates pending-substitution shorthand longhands with empty
+      // values. The authored shorthand still exists in cssText (mask/background
+      // with var(), for example), so discover references from that serialization.
+      if(liveVariables)for(const match of style.cssText.matchAll(/\bvar\(\s*(--[^\s,)]+)/g))variables.add(match[1]);
+      return {keys,variables:[...variables]};
+    };
+    let stage='stylesheet-rules';
+    const visit=list=>each(list,rule=>{
+      if(!rule)return;stage='rule-declarations';
+      if(rule.style){
+        // A pseudo's declarations also belong to its originating element's
+        // vocabulary. Unknown pseudo types are conservative global entries.
+        const selector=rule.selectorText?.replace(/::?(before|after)\b/g,'');
+        rules.push({selector:selector&&!selector.includes('::')?selector:null,...declaration(rule.style,/::?(before|after)\b|::/.test(rule.selectorText||''))});
+      }
+      stage='nested-rules';if(rule.styleSheet)visit(rule.styleSheet.cssRules);
+      if(rule.cssRules)visit(rule.cssRules);
+    });
+    try{for(const list of [document.styleSheets,document.adoptedStyleSheets])each(list,sheet=>{stage='stylesheet-rules';visit(sheet.cssRules);});}catch(error){return fail(stage,error);}
+    const probe=document.createElement('span').style,expanded=new Map(),inventory=[...computed],dependents=new Map();
+    // CSSOM enumerates canonical declaration slots, even for aliases and
+    // pending-substitution shorthands. Map each slot to every aggregate/alias
+    // in the computed inventory that uses it, without repeatedly scanning all
+    // computed getters for each authored name.
+    const slots=key=>{probe.cssText='';probe.setProperty(key,'initial');const result=[];for(let i=0;i<probe.length;i++)result.push(probe[i]);return result;};
+    for(const key of inventory)for(const slot of slots(key)){if(!dependents.has(slot))dependents.set(slot,new Set());dependents.get(slot).add(key);}
+    const expand=key=>{
+      if(expanded.has(key))return expanded.get(key);
+      const values=new Set();
+      if(key==='all')for(const property of inventory)values.add(property);
+      else for(const slot of slots(key))for(const property of dependents.get(slot)||[])values.add(property);
+      if(computed.has(key))values.add(key);
+      const keys=[...values].filter(key=>!key.startsWith('animation-')&&!key.startsWith('transition-')&&key!=='pointer-events');
+      expanded.set(key,keys);return keys;
+    };
+    // Repeated selector strings often occur in the page's later overrides.
+    // Only their property vocabulary matters here; the browser still computes
+    // the cascade. Merge exactly equal selectors and expand matched rules lazily.
+    const grouped=new Map();
+    for(const rule of rules){
+      let group=grouped.get(rule.selector);
+      if(!group){group={selector:rule.selector,authored:new Set(),variables:new Set(),keys:null};grouped.set(rule.selector,group);}
+      for(const key of rule.keys)group.authored.add(key);
+      for(const variable of rule.variables)group.variables.add(variable);
+    }
+    if(diagnostics){diagnostics.rules=rules.length;diagnostics.selectorGroups=grouped.size;}
+    // These values change when a clone is reparented into a hidden/inert scene,
+    // or resolve against its rounded frozen box. The exhaustive snapshot also
+    // resolves currentColor consumers before real class pseudos inherit them.
+    // Keep that freeze contract in addition to all CSSOM-authored properties.
+    const context=inventory.filter(key=>key==='visibility'||key==='interactivity'||key==='app-region'||key.endsWith('-origin')||key.endsWith('-color'));
+    return {rules:[...grouped.values()],expand,context,order:new Map(inventory.map((key,index)=>[key,index])),nodes:new Map(),diagnostics};
+  },
+  snapshotKeys(node,plan){
+    if(!plan)return null;
+    if(typeof node.matches!=='function'){if(plan.diagnostics)(plan.diagnostics.nodeFallbacks ||= []).push('matches-unavailable');return null;}
+    if(plan.nodes.has(node))return plan.nodes.get(node);
+    // Carry every ancestor's authored/inline property name conservatively.
+    // This freezes inherited fonts/colors and variables' resolved longhands
+    // without guessing an inheritance or paint whitelist. Non-inherited names
+    // simply resolve to the child's own used value.
+    const inherited=node.parentElement?this.snapshotKeys(node.parentElement,plan):[];if(inherited===null)return null;
+    const keys=new Set([...plan.context,...inherited]);
+    for(const rule of plan.rules){let matches=!rule.selector;
+      if(!matches)try{matches=node.matches(rule.selector);}catch(error){
+        // Some readable CSSOM selectors cannot be used by Element.matches.
+        // Include that rule conservatively instead of expanding every source
+        // to every browser default. Cache the decision for this scene only.
+        if(plan.diagnostics&&!(plan.diagnostics.selectorFallbacks?.length>=12))(plan.diagnostics.selectorFallbacks ||= []).push({selector:rule.selector,name:error.name,message:error.message});
+        rule.selector=null;matches=true;
+      }
+      if(matches){rule.keys ||= [...new Set([...rule.authored].flatMap(plan.expand).concat([...rule.variables]))];for(const key of rule.keys)keys.add(key);}
+    }
+    for(let i=0;i<node.style.length;i++){const key=node.style[i];if(!key.startsWith('--'))for(const property of plan.expand(key))keys.add(property);}
+    const result=[...keys].sort((a,b)=>(plan.order.get(a)??Infinity)-(plan.order.get(b)??Infinity));plan.nodes.set(node,result);return result;
+  },
+  snapshotCSS(style,keys){
+    if(!keys){keys=[];for(let i=0;i<style.length;i++)keys.push(style[i]);}
+    // Resolved longhands need no duplicate custom-variable payload. Only live
+    // pseudo/important references retain variables. An absent variable must
+    // stay absent so var(--missing, fallback) does not become a defined empty.
+    const css=[];
+    for(const key of keys){const value=style.getPropertyValue(key);
+      if(key.startsWith('--')&&!value){let present=false;for(let i=0;i<style.length;i++)if(style[i]===key){present=true;break;}if(!present)continue;}
+      css.push(key+':'+value+';');
+    }
+    return css.join('');
+  },
+  clone(node,cache=new Map(),suppressed=[]){
+    // Cache each source's frozen CSS once per scene. Shared parts are painted
+    // separately, so invisible duplicate descendants need no CSS/canvas
+    // snapshot. Their roots retain flow dimensions; every ID still disappears.
+    const copy=node.cloneNode(true),originals=[node,...node.querySelectorAll('*')],copies=[copy,...copy.querySelectorAll('*')],excluded=new Set();
+    originals.forEach((original,index)=>{
+      const cloned=copies[index],hidden=suppressed.some(root=>root===original||root.contains?.(original));
+      if(hidden)excluded.add(original);
+      // Preserve each suppressed root's flow dimensions; its descendants are
+      // invisible and need no frozen CSS until their separate shared clone.
+      if(!hidden||suppressed.includes(original)){
+        let appearance=cache.get(original);
+        if(!appearance){
+          const style=getComputedStyle(original);
+          if(!Object.prototype.hasOwnProperty.call(cache,'snapshotPlan'))cache.snapshotPlan=this.captureMode==='compact'?this.snapshotPlan(style):null;
+          const keys=this.snapshotKeys(original,cache.snapshotPlan),css=this.snapshotCSS(style,keys),pseudos=[];
+          for(const pseudo of ['::before','::after']){
+            const ps=getComputedStyle(original,pseudo);if(!ps.content||ps.content==='none'||ps.content==='normal')continue;
+            pseudos.push({css:this.snapshotCSS(ps,keys),text:ps.content==='""'||ps.content==="''"?'':ps.content.replace(/^['"]|['"]$/g,'')});
+          }
+          appearance={css,pseudos};cache.set(original,appearance);
+        }
+        cloned.style.cssText=appearance.css;
+        if(!hidden&&original.tagName==='CANVAS'&&cloned.style.display!=='none')this.copyCanvas(original,cloned);
+        for(const pseudo of appearance.pseudos){const part=document.createElement('span');part.className='player-scene-pseudo';part.style.cssText=pseudo.css;part.style.pointerEvents='none';part.textContent=pseudo.text;cloned.appendChild(part);}
+      }
+      cloned.removeAttribute('id');cloned.removeAttribute('autofocus');cloned.removeAttribute('tabindex');
+      cloned.style.setProperty('transition','none');cloned.style.setProperty('animation','none');cloned.style.setProperty('pointer-events','none');
+    });
+    copy._sceneNodes=new Map(originals.map((original,index)=>[original,copies[index]]));copy._sceneSuppressed=excluded;copy.setAttribute('aria-hidden','true');copy.inert=true;return copy;
+  },
+  promote(node){
+    // Frozen computed CSS includes will-change:auto inline. It outranks the
+    // scene class, so set the transient compositor hint explicitly after clone.
+    node.style.willChange='transform,opacity';
+  },
+  reveal(node,bounds,layer){
+    // A rounded overflow mask and inverse-transformed content replace an
+    // animated viewport-sized clip-path. Content stays at its canonical
+    // viewport origin/scale while the much smaller mask owns the expansion.
+    const mask=document.createElement('div');mask.className='player-scene-reveal';
+    node.style.position='absolute';node.style.clipPath='none';this.promote(node);
+    mask.appendChild(node);layer.appendChild(mask);return {mask,node,bounds};
+  },
+  box(node,r){Object.assign(node.style,{position:'fixed',inset:'auto',left:r.left+'px',top:r.top+'px',width:r.width+'px',height:r.height+'px',margin:'0',minWidth:'0',minHeight:'0',maxWidth:'none',maxHeight:'none',transformOrigin:'0 0',transform:'none'});},
+  create(scene){
+    const opening=scene.target==='player',other=opening?scene.fromName:scene.target;
+    if((scene.fromName!=='player'&&!opening)||other==='settings'||!Engine.current||GestureMotion.reduced()||UI.instantNav||!document.body?.appendChild||!document.createElement)return null;
+    const mini=$('#mini'),full=$('#sc-player'),nav=$('#nav'),dim=$('#bg-dim');
+    if(!mini?.cloneNode||!full?.cloneNode||!mini.style.getPropertyValue)return null;
+    const prepared=scene.preparedAppearance||null;
+    const styles=[this.styleSnapshot(mini,['opacity','transform','transition']),this.styleSnapshot(full,['opacity','transform','transition']),this.styleSnapshot(dim,['opacity','transition']),this.styleSnapshot(nav,['border-top-left-radius','border-top-right-radius','border-bottom-right-radius','border-bottom-left-radius'])];
+    const original={miniHidden:mini.hidden,miniInert:mini.inert,miniAria:mini.getAttribute('aria-hidden'),fullHidden:full.hidden,fullInert:full.inert,fullAria:full.getAttribute('aria-hidden')};
+    const transforms=[scene.from,scene.to].map(node=>this.styleSnapshot(node,['transform','transition']));
+    let morph=null;
+    try{
+      // Both endpoints must participate in layout, with canonical transforms.
+      for(const node of [scene.from,scene.to]){node.hidden=false;node.style.transition='none';node.style.transform='none';}
+      mini.hidden=false;mini.style.transition='none';mini.style.transform='none';mini.style.opacity='1';full.style.opacity='1';
+      UI.fitPlayer();
+      if(getComputedStyle(mini).display==='none'||!mini.getBoundingClientRect().width)return null;
+      const endpoints={surface:{mini:this.rect(mini),full:this.rect(full)}};
+      const pairs=[['art','#mini-art','#artstage'],['title','#mini-title','#p-title'],['sub','#mini-sub','#p-sub'],['play','#mini-play','#btn-play'],['seek','#mini-seek','#seek']];
+      for(const [key,a,b] of pairs){const miniNode=$(a),fullNode=$(b);const fullRect=this.rect(fullNode);endpoints[key]={mini:this.rect(miniNode),full:fullRect.width&&fullRect.height?fullRect:this.rect($('.seekrow'))};}
+      const miniRadius=this.radius(mini),navMini=this.radius(nav);
+      mini.hidden=true;const navFull=this.radius(nav);mini.hidden=false;
+      const appearance=this.consumeAppearance(prepared);
+      const layer=document.createElement('div');layer.className='player-scene-layer';layer.setAttribute('aria-hidden','true');layer.inert=true;
+      const surface=document.createElement('div');surface.className='player-scene-surface';surface.style.background=getComputedStyle(mini).background;layer.appendChild(surface);
+      // The global backdrop may start above the app (e.g. a preview toolbar).
+      // Keep its own viewport-space origin and size; only its reveal is morphed.
+      const backgroundBounds=this.rect($('#bg')),background=this.clone($('#bg'),appearance);background.classList.add('player-scene-background');this.box(background,backgroundBounds);
+      const clonedDim=background._sceneNodes.get(dim);if(clonedDim)clonedDim.style.opacity='0';const backgroundReveal=this.reveal(background,backgroundBounds,layer);
+      const sharedParts=['#artA','#artB','.art-ov','#p-title','#p-sub','#btn-play','#seek'].map(selector=>$(selector)).filter(Boolean);
+      const fullClone=this.clone(full,appearance,sharedParts);fullClone.classList.add('player-scene-full');this.box(fullClone,endpoints.surface.full);
+      // Full-only controls reveal inside the expanding surface. The shared parts
+      // have exactly one painted owner, not an unrelated stationary duplicate.
+      for(const original of sharedParts){const copy=fullClone._sceneNodes.get(original);if(copy){copy.style.visibility='hidden';copy.style.opacity='0';}}
+      const fullReveal=this.reveal(fullClone,endpoints.surface.full,layer);
+      const art=document.createElement('div');art.className='player-scene-art';
+      const artNodes={mini:this.clone($('#mini-art'),appearance),full:this.clone($('#artA'),appearance)};
+      for(const [end,node] of Object.entries(artNodes)){
+        const base=endpoints.art[end];this.box(node,base);Object.assign(node.style,{position:'absolute',left:'0',top:'0',borderRadius:'0',transform:`scale(${endpoints.art.mini.width/base.width},${endpoints.art.mini.height/base.height})`});node.classList.add('player-scene-art-appearance');this.promote(node);art.appendChild(node);
+      }
+      const artOverlay=$('.art-ov')?this.clone($('.art-ov'),appearance):null;
+      if(artOverlay){this.box(artOverlay,endpoints.art.full);Object.assign(artOverlay.style,{position:'absolute',left:'0',top:'0',transform:`scale(${endpoints.art.mini.width/endpoints.art.full.width},${endpoints.art.mini.height/endpoints.art.full.height})`});this.promote(artOverlay);art.appendChild(artOverlay);}
+      layer.appendChild(art);
+      const pairNodes={};
+      for(const [key,a,b] of pairs.slice(1)){
+        const from=this.clone($(a),appearance),to=this.clone($(b),appearance);from.classList.add('player-scene-part');to.classList.add('player-scene-part');this.promote(from);this.promote(to);layer.appendChild(from);layer.appendChild(to);
+        pairNodes[key]={mini:from,full:to};
+      }
+      const input=document.createElement('div');input.className='player-scene-input';input.setAttribute('aria-hidden','true');
+      morph={opening,p:opening?0:1,endpoints,layer,surface,background,backgroundBounds,backgroundReveal,fullClone,fullReveal,art,artNodes,artOverlay,pairs:pairNodes,input,mini,full,dim,nav,styles,original,miniRadius,artRadius:{mini:this.radius($('#mini-art')),full:this.radius($('#artstage'))},navRadius:{mini:navMini,full:navFull},trackId:Engine.current.id,playMarkup:{mini:$('#mini-play').innerHTML,full:$('#btn-play').innerHTML},focus:[mini,...full.querySelectorAll('button,input,select,textarea,a[href],[tabindex]')].filter(n=>n===mini||n.tabIndex>=0||['BUTTON','INPUT','SELECT','TEXTAREA','A'].includes(n.tagName)).map(node=>({node,tabindex:node.getAttribute('tabindex')}))};
+      document.body.appendChild(input);document.body.appendChild(layer);
+      this.bindInput(morph);
+      if(typeof MutationObserver==='function'){
+        morph.observer=new MutationObserver(records=>{if(Engine.current?.id!==morph.trackId){ScreenDrag.abort();return;}
+          if(records?.length&&records.every(record=>record.target===dim))return;
+          const progressOnly=records?.length&&records.every(record=>(record.target.closest?.('#mini-seek,#seek,#t-cur,#t-dur,#mini-play,#btn-play')||record.target.parentElement?.closest?.('#mini-seek,#seek,#t-cur,#t-dur,#mini-play,#btn-play')));
+          this.refreshDynamic(morph,!progressOnly);
+          if(progressOnly)return;
+          this.refreshBackground(morph);
+          for(const [end,selector] of [['mini','#mini-art'],['full','#artA']]){const source=$(selector),style=getComputedStyle(source),clone=morph.artNodes[end];clone.style.backgroundImage=style.backgroundImage;clone.style.backgroundSize=style.backgroundSize;
+            for(const original of source.querySelectorAll('.ph')){const copy=clone._sceneNodes.get(original);if(copy){const appearance=getComputedStyle(original);copy.style.display=appearance.display;copy.style.visibility=appearance.visibility;copy.style.opacity=appearance.opacity;}}
+          }
+        });
+        for(const selector of ['#mini-art','#artA','#mini-title','#bg','#mini-seek','#seek','#t-cur','#t-dur','#mini-play','#btn-play'])morph.observer.observe($(selector),{attributes:true,attributeFilter:['class','style'],childList:true,characterData:true,subtree:true});
+        if(document.documentElement)morph.observer.observe(document.documentElement,{attributes:true,attributeFilter:['class','style']});
+      }
+      mini.dataset.sharedPlayer=full.dataset.sharedPlayer='1';
+      this.prepare(morph);this.refreshBackground(morph);
+      this.paint(morph,morph.p);return morph;
+    }finally{
+      for(const snapshot of transforms)this.restore(snapshot);
+      if(!morph){for(const snapshot of styles)this.restore(snapshot);mini.hidden=original.miniHidden;full.hidden=original.fullHidden;}
+    }
+  },
+  bindInput(m){
+    const node=m.input;let contact=null,frame=0;
+    const paint=()=>{frame=0;if(!contact||contact.axis!=='y')return;const owner=ScreenDrag.state||ScreenDrag.settling;if(owner){ScreenDrag.begin(owner.target,owner.direction);ScreenDrag.move(contact.dy);}};
+    const release=()=>{if(!contact)return;const done=contact;contact=null;cancelAnimationFrame(frame);frame=0;InputLifecycle.release(node,done.id);try{if(node.hasPointerCapture?.(done.id))node.releasePointerCapture(done.id);}catch(_){};};
+    const down=e=>{
+      if(contact||e.isPrimary===false||e.button>0||!InputLifecycle.claim(node,e.pointerId))return;
+      ScreenDrag.pause();const time=GestureMotion.time(e);
+      contact={id:e.pointerId,x:e.clientX,y:e.clientY,dx:0,dy:0,axis:'',vy:0,last:time,samples:[{y:e.clientY,t:time}],commit:ScreenDrag.settling?.commit??ScreenDrag.state?.commit};node.setPointerCapture?.(e.pointerId);
+    };
+    const sample=e=>{const s=contact,time=GestureMotion.time(e);s.dx=e.clientX-s.x;s.dy=e.clientY-s.y;if(!s.axis&&Math.max(Math.abs(s.dx),Math.abs(s.dy))>9){if(Math.abs(s.dy)>Math.abs(s.dx)*1.15)s.axis='y';else if(Math.abs(s.dx)>Math.abs(s.dy)*1.15)s.axis='x';}
+      s.samples.push({y:e.clientY,t:time});while(s.samples.length>2&&s.samples[0].t<time-90)s.samples.shift();const first=s.samples[0];s.vy=(e.clientY-first.y)/Math.max(1,time-first.t);s.last=time;
+    };
+    const move=e=>{if(!contact||e.pointerId!==contact.id)return;sample(e);if(contact.axis==='y'&&InputLifecycle.gesture?.node===node)InputLifecycle.gesture.phase='drag';if(!frame)frame=requestAnimationFrame(paint);};
+    const end=e=>{
+      if(!contact||e.pointerId!==contact.id)return;
+      if(e.type==='pointercancel'||e.type==='lostpointercapture'){release();ScreenDrag.cancel();return;}
+      const quiet=GestureMotion.time(e)-contact.last>100;sample(e);if(quiet)contact.vy=0;cancelAnimationFrame(frame);frame=0;paint();const s=contact;release();
+      const owner=ScreenDrag.state;if(owner){const deliberate=s.axis==='y'&&GestureMotion.commits(s.dy,s.vy,Math.min(owner.height,300));ScreenDrag.end(deliberate?owner.direction*s.dy>0:!!s.commit,s.vy,false);}else ScreenDrag.returnInterrupted();
+    };
+    const events={pointerdown:down,pointermove:move,pointerup:end,pointercancel:end,lostpointercapture:end};
+    for(const [type,handler] of Object.entries(events))node.addEventListener(type,handler);
+    m.releaseInput=release;m.resetInput=()=>{release();ScreenDrag.cancel();};InputLifecycle.register(m.resetInput,node);
+    m.disposeInput=()=>{release();for(const [type,handler] of Object.entries(events))node.removeEventListener(type,handler);InputLifecycle.resets.delete(m.resetInput);};
+  },
+  setStyle(node,key,value){if(node.style[key]!==value)node.style[key]=value;},
+  prepare(m){
+    if(m.boxesReady)return;
+    m.canvases=[];m.seekParts=[];m.textParts=[];
+    // Read visibility once, before any animation writes. The production canvas
+    // renderer stamps UI.vizPaintVersion, including direct waveform/theme paints.
+    for(const [source,copy] of m.fullClone._sceneNodes||[])if(source.tagName==='CANVAS'&&!m.fullClone._sceneSuppressed?.has(source))m.canvases.push({source,copy,visible:getComputedStyle(source).display!=='none'});
+    for(const copy of [m.pairs.seek?.mini,m.pairs.seek?.full])for(const [source,part] of copy?._sceneNodes||[]){
+      if(part===copy)continue;const inline=new Map(['transform','left','width'].map(key=>[key,this.dynamicValue(source,key)]));
+      for(const [key,value] of inline)if(value)part.style.setProperty(key,value);
+      // Computed CSS strings round subpixel widths and transform arguments.
+      // Retain the real mini fill width and the writer's unrounded transform.
+      if(source.id==='mini-fill'&&!inline.get('width')){const width=this.rect(source).width;if(width>0)part.style.width=width+'px';}
+      m.seekParts.push({source,part,inline});
+    }
+    if(m.playMarkup)m.playSources={mini:$('#mini-play'),full:$('#btn-play')};
+    if(m.fullClone._sceneNodes)for(const selector of ['#t-cur','#t-dur']){const source=$(selector),copy=m.fullClone._sceneNodes.get(source);if(copy)m.textParts.push({source,copy});}
+    this.box(m.surface,m.endpoints.surface.mini);this.box(m.art,m.endpoints.art.mini);
+    for(const reveal of [m.backgroundReveal,m.fullReveal]){this.box(reveal.mask,m.endpoints.surface.mini);reveal.mask.style.zIndex=reveal===m.backgroundReveal?'0':'2';}
+    for(const [key,nodes] of Object.entries(m.pairs))for(const end of ['mini','full'])this.box(nodes[end],m.endpoints[key][end]);
+    m.canvasStamp=typeof UI!=='undefined'?UI.vizPaintVersion:undefined;m.boxesReady=true;
+  },
+  canvasPainted(){
+    // Called after actual drawing, including direct waveform/layout refreshes.
+    // Held geometry needs fresh pixels without a permanent polling RAF.
+    const scene=typeof ScreenDrag!=='undefined'&&(ScreenDrag.state||ScreenDrag.settling);if(scene?.morph)this.refreshCanvases(scene.morph);
+  },
+  refreshCanvases(m,force=false){
+    const stamp=typeof UI!=='undefined'?UI.vizPaintVersion:undefined;if(!force&&stamp===m.canvasStamp)return;m.canvasStamp=stamp;
+    for(const {source,copy,visible} of m.canvases||[])if(visible)this.copyCanvas(source,copy);
+  },
+  dynamicValue(source,key){const value=source.style.getPropertyValue(key);return key==='transform'&&source._sceneSerializedTransform===value&&typeof source._sceneRawTransform==='string'?source._sceneRawTransform:value;},
+  refreshDynamic(m,appearance=false){
+    this.prepare(m);const updates=[];
+    // Normal playback writes inline progress transforms. Copy only changed
+    // values, without computed-style/layout reads. Theme/class changes and a
+    // cleared inline value take the slower appearance refresh path once.
+    for(const entry of m.seekParts){const {source,part,inline}=entry;let style;
+      for(const key of ['transform','left','width']){const value=this.dynamicValue(source,key),previous=inline.get(key);inline.set(key,value);
+        if(appearance||(value!==previous&&!value)){if(key==='transform'&&value)updates.push([part,key,value]);else if(key==='width'&&source.id==='mini-fill'&&!value)updates.push([part,key,this.rect(source).width+'px']);else{style ||= getComputedStyle(source);updates.push([part,key,style.getPropertyValue(key)]);}}
+        else if(value!==previous)updates.push([part,key,value]);
+      }
+    }
+    if(appearance)for(const entry of m.canvases)entry.visible=getComputedStyle(entry.source).display!=='none';
+    for(const [part,key,value] of updates)if(part.style.getPropertyValue(key)!==value)part.style.setProperty(key,value);
+    this.refreshCanvases(m,appearance);
+    if(m.playMarkup)for(const end of ['mini','full']){const source=m.playSources[end];if(m.playMarkup[end]!==source.innerHTML){m.playMarkup[end]=source.innerHTML;const copy=this.clone(source);copy.classList.add('player-scene-part');this.promote(copy);m.pairs.play[end].remove();m.layer.appendChild(copy);m.pairs.play[end]=copy;const base=m.endpoints.play[end],g=m.geometry?.play;this.box(copy,base);if(g){copy.style.transform=`translate(${g.left-base.left}px,${g.top-base.top}px) scale(${g.width/base.width},${g.height/base.height})`;copy.style.opacity=String(end==='mini'?1-m.p:m.p);}}}
+    for(const {source,copy} of m.textParts)if(copy.textContent!==source.textContent)copy.textContent=source.textContent;
+  },
+  refreshBackground(m){
+    // Palette/art changes invalidate the snapshot. Batch all reads before
+    // writes; stable blurred layers never receive per-frame filter rewrites.
+    const updates=[],animated=[];
+    for(const [source,copy] of m.background._sceneNodes||[]){if(source===m.dim)continue;const style=getComputedStyle(source);
+      for(const key of ['background','background-image','background-size','background-position','filter','display','visibility'])updates.push([copy,key,style.getPropertyValue(key)]);
+      if(copy!==m.background)updates.push([copy,'opacity',style.opacity]);
+      const animations=source.getAnimations?.().filter(animation=>animation.playState!=='finished'&&animation.playState!=='idle')||[];
+      if(animations.length)animated.push({source,copy,animations});
+    }
+    for(const [copy,key,value] of updates)if(copy.style.getPropertyValue(key)!==value)copy.style.setProperty(key,value);
+    m.backgroundAnimations=animated;if(animated.length&&!m.appearanceFrame)this.watchBackground(m);
+  },
+  watchBackground(m){
+    // Only a live art/palette crossfade needs sampling while a finger holds
+    // still. This short-lived RAF never repaints the scene geometry.
+    m.appearanceFrame=requestAnimationFrame(()=>{
+      m.appearanceFrame=0;const updates=[],remaining=[];
+      for(const entry of m.backgroundAnimations||[]){const style=getComputedStyle(entry.source);
+        for(const key of ['background','background-image','filter'])updates.push([entry.copy,key,style.getPropertyValue(key)]);
+        if(entry.copy!==m.background)updates.push([entry.copy,'opacity',style.opacity]);
+        if(entry.animations.some(animation=>animation.playState!=='finished'&&animation.playState!=='idle'))remaining.push(entry);
+      }
+      for(const [copy,key,value] of updates)if(copy.style.getPropertyValue(key)!==value)copy.style.setProperty(key,value);
+      m.backgroundAnimations=remaining;if(remaining.length)this.watchBackground(m);
     });
   },
-  cancel(){this.abort();}
+  lockOriginals(m){
+    const gesture=typeof InputLifecycle!=='undefined'?InputLifecycle.gesture:null,owner=gesture?.node;
+    // Do not invalidate the original pointer capture while its stream is live.
+    // Once it releases, only the separate contact plane can accept new input.
+    for(const node of [m.mini,m.full]){const held=owner&&(owner===node||node.contains?.(owner))&&owner.hasPointerCapture?.(gesture.id);const inert=!held;if(node.inert!==inert)node.inert=inert;if(node.getAttribute('aria-hidden')!=='true')node.setAttribute('aria-hidden','true');}
+    for(const item of m.focus||[])if(item.node.getAttribute('tabindex')!=='-1')item.node.setAttribute('tabindex','-1');
+  },
+  paint(m,p){
+    this.prepare(m);this.refreshCanvases(m);this.lockOriginals(m);
+    // Nav.go/renderNowPlaying may update originals during the transaction.
+    for(const node of [m.mini,m.full]){if(node.hidden)node.hidden=false;for(const [key,value] of [['transition','none'],['transform','none'],['opacity','0']])this.setStyle(node,key,value);}
+    p=clamp(p,0,1);if(m.geometry&&m.p===p)return;m.p=p;const g=this.sceneGeometry(m.endpoints,p);m.geometry=g;
+    const r=g.surface,radii=m.miniRadius.map(radius=>radius*(1-p)),base=m.endpoints.surface.mini,sx=r.width/base.width,sy=r.height/base.height;
+    // Fixed endpoint boxes are installed once. Transforms move/scale the solid
+    // shell and shared parts; inverse-scaled elliptical radii keep exact pixels.
+    const shellTransform=`translate(${r.left-base.left}px,${r.top-base.top}px) scale(${sx},${sy})`,shellRadius=radii.map(radius=>radius/sx+'px').join(' ')+' / '+radii.map(radius=>radius/sy+'px').join(' ');
+    m.surface.style.transform=shellTransform;m.surface.style.borderRadius=shellRadius;this.setStyle(m.surface,'opacity','1');
+    for(const {mask,node,bounds} of [m.backgroundReveal,m.fullReveal]){
+      mask.style.transform=shellTransform;mask.style.borderRadius=shellRadius;
+      // Absolute endpoint boxes retain their original CSS origin. Compensate
+      // for that origin too; toolbar/safe-area offsets cannot move the image.
+      node.style.transform=`translate(${(bounds.left-r.left)/sx-bounds.left}px,${(bounds.top-r.top)/sy-bounds.top}px) scale(${1/sx},${1/sy})`;node.style.opacity=String(p);
+    }
+    const art=m.endpoints.art.mini;m.art.style.transform=`translate(${g.art.left-art.left}px,${g.art.top-art.top}px) scale(${g.art.width/art.width},${g.art.height/art.height})`;
+    if(m.artOverlay)m.artOverlay.style.opacity=String(p);
+    m.artNodes.mini.style.opacity=String(1-p);m.artNodes.full.style.opacity=String(p);
+    m.art.style.borderRadius=m.artRadius.mini.map((radius,i)=>(radius+(m.artRadius.full[i]-radius)*p)/(g.art.width/art.width)+'px').join(' ');
+    for(const [key,nodes] of Object.entries(m.pairs))for(const end of ['mini','full']){
+      const base=m.endpoints[key][end],n=nodes[end];if(!base.width||!base.height){this.setStyle(n,'opacity','0');continue;}
+      n.style.transform=`translate(${g[key].left-base.left}px,${g[key].top-base.top}px) scale(${g[key].width/base.width},${g[key].height/base.height})`;n.style.opacity=String(end==='mini'?1-p:p);
+    }
+    this.setStyle(m.dim,'transition','none');m.dim.style.opacity=String((SET.listBg===false ? .94 : .66)*(1-p));
+    ['border-top-left-radius','border-top-right-radius','border-bottom-right-radius','border-bottom-left-radius'].forEach((key,i)=>{const value=(m.navRadius.mini[i]+(m.navRadius.full[i]-m.navRadius.mini[i])*p)+'px';if(m.nav.style.getPropertyValue(key)!==value)m.nav.style.setProperty(key,value);});
+  },
+  settle(m,target,ms,done){
+    // A RAF owner stores the last actually painted progress. Pausing never
+    // reconstructs an intermediate cover from wall-clock time or panel offset.
+    let frame=0,timer=0,ended=false;const start=m.p,at=performance.now();
+    const finish=()=>{if(ended)return;ended=true;finish.pending=false;cancelAnimationFrame(frame);clearTimeout(timer);this.paint(m,target);done?.();};
+    const tick=now=>{if(ended)return;const t=clamp((now-at)/ms,0,1),e=1-Math.pow(1-t,3);this.paint(m,start+(target-start)*e);if(t>=1)finish();else frame=requestAnimationFrame(tick);};
+    finish.pending=!!ms;finish.cancel=()=>{if(ended)return;ended=true;finish.pending=false;cancelAnimationFrame(frame);clearTimeout(timer);};
+    if(ms){frame=requestAnimationFrame(tick);timer=setTimeout(finish,ms+40);}else finish();return finish;
+  },
+  clean(m){
+    if(!m)return;m.observer?.disconnect();if(m.appearanceFrame)cancelAnimationFrame(m.appearanceFrame);m.appearanceFrame=0;m.backgroundAnimations=[];m.disposeInput?.();m.layer.remove();m.input.remove();
+    for(const snapshot of m.styles)this.restore(snapshot);
+    delete m.mini.dataset.sharedPlayer;delete m.full.dataset.sharedPlayer;
+    for(const item of m.focus||[])if(item.tabindex==null)item.node.removeAttribute('tabindex');else item.node.setAttribute('tabindex',item.tabindex);
+    m.full.inert=m.original.fullInert??false;if(m.original.fullAria==null)m.full.removeAttribute('aria-hidden');else m.full.setAttribute('aria-hidden',m.original.fullAria);
+    m.mini.hidden=Nav.cur==='player'||Nav.cur==='settings'||!Engine.current;m.mini.inert=m.original.miniInert;
+    if(m.original.miniAria==null)m.mini.removeAttribute('aria-hidden');else m.mini.setAttribute('aria-hidden',m.original.miniAria);
+    // The canonical endpoint was fitted before capture. Resize/dock observers
+    // and tap navigation coalesce their follow-up work until the scene retires.
+    if((m.layoutDeferred||m.vizDeferred)&&typeof DockLayout!=='undefined')DockLayout.schedule();
+  }
 };
-InputLifecycle.register(()=>ScreenDrag.abort());
+const SnapshotReferenceMotion={...SharedPlayerMotion};
+/* The presentation owns persistent live nodes, not frozen copies. Installation
+   happens at boot. Input work is bounded geometry plus compositor properties. */
+Object.assign(SharedPlayerMotion,{
+  captureMode:'persistent',appearanceEnabled:false,appearanceJob:null,preparedAppearance:null,
+  appearanceStats:{prepared:0,hits:0,cold:0,invalidated:0,lastMiss:null},presenter:null,geometryFrame:0,geometryDirty:true,
+  active(){return typeof ScreenDrag!=='undefined'?(ScreenDrag.state||ScreenDrag.settling)?.morph:null;},
+  deferLayout(){const m=this.active();if(!m)return false;m.layoutDeferred=true;return true;},
+  deferViz(){const m=this.active();if(!m)return false;m.vizDeferred=true;return true;},
+  rect:SnapshotReferenceMotion.rect,mixRect:SnapshotReferenceMotion.mixRect,sceneGeometry:SnapshotReferenceMotion.sceneGeometry,
+  styleSnapshot:SnapshotReferenceMotion.styleSnapshot,restore:SnapshotReferenceMotion.restore,radius:SnapshotReferenceMotion.radius,
+  setStyle:SnapshotReferenceMotion.setStyle,settle:SnapshotReferenceMotion.settle,
+  // These explicit reference utilities remain accessible to pixel-baseline QA.
+  // Production create/paint/update never invoke them.
+  clone:SnapshotReferenceMotion.clone,snapshotCSS:SnapshotReferenceMotion.snapshotCSS,snapshotPlan:SnapshotReferenceMotion.snapshotPlan,snapshotKeys:SnapshotReferenceMotion.snapshotKeys,copyCanvas:SnapshotReferenceMotion.copyCanvas,
+  clearAppearance(){if(this.geometryFrame)cancelAnimationFrame(this.geometryFrame);this.geometryFrame=0;},
+  claimAppearance(){return null;},
+  modelKey(){return [innerWidth,innerHeight,devicePixelRatio,document.body.className,SET.playerLayout,SET.playerFont,SET.fontScale,SET.nativeSeekbar,UI.lastFitArt].join('|');},
+  readModels(pairs,A){
+    const appearances={};for(const key of ['title','sub','play'])appearances[key]={mini:this.appearance(pairs[key].mini),full:this.appearance(pairs[key].full)};
+    for(const end of ['mini','full']){const glyph=pairs.play[end].firstElementChild,style=getComputedStyle(glyph),r=this.rect(glyph);appearances.play[end+'Glyph']={width:r.width||parseFloat(style.width)||1,height:r.height||parseFloat(style.height)||1,opacity:parseFloat(style.opacity)||1};}
+    return {key:this.modelKey(),appearances,artMiniSize:getComputedStyle(pairs.art.mini).backgroundSize,artFullSize:getComputedStyle(A).backgroundSize,nativeSeekVisible:getComputedStyle(pairs.seek.full).display!=='none'};
+  },
+  scheduleAppearance(){
+    this.geometryDirty=true;if(!this.presenter||this.active()||this.geometryFrame)return;
+    this.geometryFrame=requestAnimationFrame(()=>{this.geometryFrame=0;if(this.active()||InputLifecycle.contacts.size||document.hidden)return;
+      const {full,mini}=this.presenter,hidden=[full.hidden,mini.hidden],opacity=[full.style.opacity,mini.style.opacity];
+      // Renderer typography/colour primitives are prepared outside contact.
+      // This is bounded known-widget state, never a style inventory or clone.
+      try{this.settingUp=true;full.hidden=mini.hidden=false;full.style.opacity=mini.style.opacity='0';UI.fitPlayer();const pairs={art:{mini:$('#mini-art'),full:$('#artstage')},title:{mini:$('#mini-title'),full:$('#p-title')},sub:{mini:$('#mini-sub'),full:$('#p-sub')},play:{mini:$('#mini-play'),full:$('#btn-play')},seek:{mini:$('#mini-seek'),full:$('#seek')}};this.models=this.readModels(pairs,$('#artA'));this.geometryDirty=false;}
+      finally{full.hidden=hidden[0];mini.hidden=hidden[1];full.style.opacity=opacity[0];mini.style.opacity=opacity[1];this.settingUp=false;}
+    });
+  },
+  install(){
+    if(this.presenter)return;
+    const full=$('#sc-player'),mini=$('#mini'),mask=document.createElement('div'),content=document.createElement('div'),backgroundMask=document.createElement('div'),backgroundContent=document.createElement('div'),background=document.createElement('div'),input=document.createElement('div');
+    mask.id='player-live-mask';content.id='player-live-content';backgroundMask.id='player-live-backdrop-mask';backgroundContent.id='player-live-backdrop-content';background.id='player-live-background';input.id='player-live-input';input.hidden=backgroundMask.hidden=true;input.setAttribute('aria-hidden','true');
+    root.style.setProperty('--player-live-top',this.rect($('#app')).top+'px');
+    mini.before(backgroundMask);mini.before(mask);mask.appendChild(content);content.appendChild(full);backgroundMask.appendChild(backgroundContent);backgroundContent.appendChild(background);document.body.appendChild(input);
+    const backgroundParts={};for(const name of ['art','art-next','grad','vig']){const node=document.createElement('div');node.className='player-live-bg-'+name;background.appendChild(node);backgroundParts[name]=node;}
+    this.presenter={full,mini,mask,content,backgroundMask,backgroundContent,background,input,backgroundParts};
+    for(const selector of ['#mini-title','#mini-sub']){const node=$(selector);this.setMiniLabel(node,node.textContent);}
+    const artWriter=UI.setArtEl;UI.setArtEl=function(node,url){const m=SharedPlayerMotion.active()||SharedPlayerMotion.transaction;if(m&&m.trackId!==Engine.current?.id){ScreenDrag.abort();return artWriter.call(UI,node,url);}if(m&&node===m.pairs.art.mini)m.producerMiniArt=url?'url("'+url+'")':'';const result=artWriter.call(UI,node,url);if(m&&(node.id==='mini-art'||node.id==='artA'))SharedPlayerMotion.paintArtwork(m);return result;};
+    const playWriter=UI.renderPlayState;UI.renderPlayState=function(...args){const result=playWriter.apply(UI,args),m=SharedPlayerMotion.active()||SharedPlayerMotion.transaction;if(m&&!m.retired)SharedPlayerMotion.ownGlyph(m);return result;};
+    SnapshotReferenceMotion.bindInput.call(this,this.presenter);
+    // Input listeners/contact plane are installed once and reused. Retirement
+    // releases capture but does not remove/recreate the presentation.
+    this.presenter.disposeInput=null;
+    const sync=()=>this.updateBackground();
+    const observer=new MutationObserver(sync);for(const selector of ['#bg-art','#bg-art-next'])observer.observe($(selector),{attributes:true,attributeFilter:['style']});
+    const geometryObserver=new MutationObserver(()=>{if(this.active()&&this.active().trackId!==Engine.current?.id)ScreenDrag.abort();this.scheduleAppearance();});
+    for(const selector of ['#p-title','#p-sub','.outinfo'])geometryObserver.observe($(selector),{childList:true,characterData:true,subtree:true});
+    geometryObserver.observe(document.body,{attributes:true,attributeFilter:['class']});
+    const paletteObserver=new MutationObserver(()=>{const m=this.active();if(!m){this.models=null;this.scheduleAppearance();return;}const color=getComputedStyle(m.mini).color;for(const key of ['title','sub','play']){const style=getComputedStyle(m.pairs[key].full);m.appearances[key].mini.color=color;m.appearances[key].full.color=style.color;m.appearances[key].full.background=style.backgroundColor;m.appearances[key].full.borderColor=style.borderTopColor;}m.geometry=null;this.paint(m,m.p);});paletteObserver.observe(root,{attributes:true,attributeFilter:['style']});
+    window.addEventListener('resize',()=>{root.style.setProperty('--player-live-top',this.rect($('#app')).top+'px');this.scheduleAppearance();});document.fonts?.ready.then(()=>this.scheduleAppearance());
+    this.updateBackground();this.scheduleAppearance();
+  },
+  setMiniLabel(node,text){
+    let span=node.firstElementChild;
+    if(!span?.classList.contains('player-live-label-text')){span=document.createElement('span');span.className='player-live-label-text';node.replaceChildren(span);}
+    span.textContent=text;
+  },
+  appearance(node){
+    const style=getComputedStyle(node),number=key=>parseFloat(style.getPropertyValue(key))||0;
+    return {fontFamily:style.fontFamily,fontSize:number('font-size'),fontWeight:parseFloat(style.fontWeight)||700,lineHeight:number('line-height')||number('font-size')*1.2,color:style.color,background:style.backgroundColor,borderColor:style.borderTopColor,borderWidth:number('border-top-width'),padding:{left:number('padding-left'),top:number('padding-top'),right:number('padding-right'),bottom:number('padding-bottom')},radius:this.radius(node)};
+  },
+  blend(a,b,p){return `color-mix(in srgb,${a} ${(1-p)*100}%,${b} ${p*100}%)`;},
+  ownGlyph(m){
+    const node=m.pairs.play.mini.firstElementChild;if(!node||node===m.glyph)return;
+    m.glyph=node;m.styles.push(this.styleSnapshot(node,['transform','transform-origin','opacity']));node.style.transformOrigin='50% 50%';
+    this.paintGlyph(m);
+  },
+  paintGlyph(m){
+    if(!m.glyph||!m.geometry)return;
+    const model=m.appearances.play,p=m.p,box=m.endpoints.play.mini,g=m.geometry.play,scaleX=g.width/box.width,scaleY=g.height/box.height;
+    const width=model.miniGlyph.width+(model.fullGlyph.width-model.miniGlyph.width)*p,height=model.miniGlyph.height+(model.fullGlyph.height-model.miniGlyph.height)*p;
+    m.glyph.style.transform=`scale(${width/model.miniGlyph.width/scaleX},${height/model.miniGlyph.height/scaleY})`;m.glyph.style.opacity=String(model.miniGlyph.opacity+(model.fullGlyph.opacity-model.miniGlyph.opacity)*p);
+  },
+  paintArtwork(m){
+    if(!m||m.retired)return;
+    const node=m.pairs.art.mini,full=$('#artA'),image=full.style.backgroundImage||m.producerMiniArt||'';
+    node.style.backgroundImage=image;node.style.backgroundSize=m.p>.001?m.artFullSize:m.artMiniSize;
+    const ph=node.querySelector('.ph');if(ph)ph.style.display=image?'none':'grid';
+  },
+  updateBackground(){
+    const presenter=this.presenter;if(!presenter)return;
+    for(const name of ['art','art-next']){const source=$('#bg-'+name),copy=presenter.backgroundParts[name];
+      // Same known artwork writer and CSS variables as the real background.
+      // No computed-style enumeration, raster copy, parser or subtree clone.
+      for(const key of ['background-image','opacity']){const value=source.style.getPropertyValue(key);if(copy.style.getPropertyValue(key)!==value){if(value)copy.style.setProperty(key,value);else copy.style.removeProperty(key);}}
+    }
+  },
+  create(scene){
+    const opening=scene.target==='player',other=opening?scene.fromName:scene.target;
+    if((scene.fromName!=='player'&&!opening)||other==='settings'||!Engine.current||GestureMotion.reduced()||UI.instantNav)return null;
+    const presenter=this.presenter;if(!presenter)return null;
+    const {mini,full,mask,content,backgroundMask,backgroundContent,input,background}=presenter,nav=$('#nav'),dim=$('#bg-dim');
+    const original={miniHidden:mini.hidden,miniInert:mini.inert,miniAria:mini.getAttribute('aria-hidden'),fullHidden:full.hidden,fullInert:full.inert,fullAria:full.getAttribute('aria-hidden')};
+    const pairs={art:{mini:$('#mini-art'),full:$('#artstage')},title:{mini:$('#mini-title'),full:$('#p-title')},sub:{mini:$('#mini-sub'),full:$('#p-sub')},play:{mini:$('#mini-play'),full:$('#btn-play')},seek:{mini:$('#mini-seek'),full:$('#seek')}};
+    const motionKeys=['position','inset','left','top','width','height','margin','overflow','max-width','max-height','min-width','min-height','padding','border-width','border-color','border-style','color','transform','transform-origin','transition','opacity','will-change','z-index','border-radius','border-top-left-radius','border-top-right-radius','border-bottom-right-radius','border-bottom-left-radius','background','background-image','background-size','box-shadow'];
+    const slide=mini.querySelector('.mini-swipe-content'),overlay=$('.art-ov'),A=$('#artA'),B=$('#artB');
+    const focus=[mini,...mini.querySelectorAll('button,input,select,textarea,a[href],[tabindex]'),...full.querySelectorAll('button,input,select,textarea,a[href],[tabindex]')].filter(node=>node===mini||node.tabIndex>=0||['BUTTON','INPUT','SELECT','TEXTAREA','A'].includes(node.tagName)).map(node=>({node,tabindex:node.getAttribute('tabindex')}));
+    const styles=[mini,full,dim,nav,slide,overlay,A,B,...Object.values(pairs).flatMap(pair=>[pair.mini,pair.full])].filter(Boolean).map(node=>this.styleSnapshot(node,motionKeys));
+    let m=null;this.settingUp=true;
+    try{
+      mini.hidden=full.hidden=false;mini.style.transition=full.style.transition='none';mini.style.transform=full.style.transform='none';mini.style.opacity=full.style.opacity='1';
+      const endpoints={surface:{mini:this.rect(mini),full:this.rect(full)}};
+      for(const [key,nodes] of Object.entries(pairs)){const fullRect=this.rect(nodes.full);endpoints[key]={mini:this.rect(nodes.mini),full:fullRect.width&&fullRect.height?fullRect:this.rect($('.seekrow'))};}
+      if(!endpoints.surface.mini.width||!endpoints.surface.mini.height||!endpoints.surface.full.width)return null;
+      const miniRadius=this.radius(mini),navMini=this.radius(nav),artRadius={mini:this.radius(pairs.art.mini),full:this.radius(pairs.art.full)};
+      // The authored joined dock has square top corners only while mini shows.
+      const navFull=[navMini[2],navMini[3],navMini[2],navMini[3]];
+      const model=this.models?.key===this.modelKey()?this.models:this.readModels(pairs,A),{appearances,artMiniSize,artFullSize,nativeSeekVisible}=model;
+      m={...presenter,opening,p:opening?0:1,endpoints,pairs,appearances,slide,overlay,A,B,artMiniSize,artFullSize,nativeSeekVisible,producerMiniArt:pairs.art.mini.style.backgroundImage,miniRadius,navRadius:{mini:navMini,full:navFull},artRadius,nav,dim,styles,focus,original,trackId:Engine.current.id,geometry:null,retired:false};
+      this.transaction=m;
+      const base=endpoints.surface.mini,fullBox=endpoints.surface.full;
+      for(const node of [mask,backgroundMask])Object.assign(node.style,{inset:'auto',left:base.left+'px',top:base.top+'px',width:base.width+'px',height:base.height+'px'});
+      for(const node of [content,backgroundContent])Object.assign(node.style,{inset:'auto',left:'0',top:'0',width:fullBox.width+'px',height:fullBox.height+'px'});
+      Object.assign(background.style,{left:-fullBox.left+'px',top:-fullBox.top+'px',width:innerWidth+'px',height:innerHeight+'px'});
+      mini.dataset.sharedPlayer=full.dataset.sharedPlayer='1';mask.dataset.active=backgroundMask.dataset.active='1';input.hidden=backgroundMask.hidden=false;input.className='player-scene-input';mini.style.background='transparent';
+      for(const [key,nodes] of Object.entries(pairs)){const node=nodes.mini,box=endpoints[key].mini;Object.assign(node.style,{position:'absolute',inset:'auto',left:(box.left-base.left)+'px',top:(box.top-base.top)+'px',width:box.width+'px',height:box.height+'px',margin:'0',minWidth:'0',minHeight:'0',maxWidth:'none',maxHeight:'none',transformOrigin:'0 0',transition:'none',willChange:'transform,opacity',zIndex:key==='art'?'20':'23'});if(key!=='art')nodes.full.style.opacity='0';}
+      Object.assign(mini.style,{position:'absolute',inset:'auto',left:base.left+'px',top:base.top+'px',width:base.width+'px',height:base.height+'px',margin:'0',transform:'none',willChange:'auto',zIndex:'auto',overflow:'visible',boxShadow:'none'});
+      if(slide){slide.style.transform='none';slide.style.willChange='auto';}A.style.opacity=B.style.opacity='0';pairs.art.full.style.overflow='visible';
+      for(const key of ['title','sub']){const node=pairs[key].mini,span=node.firstElementChild;m.styles.push(this.styleSnapshot(span,['position','left','top','display','transform','transform-origin','font-family','font-size','font-weight','line-height','letter-spacing','white-space','max-width']));Object.assign(span.style,{position:'absolute',left:'0',top:'0',display:'block',transformOrigin:'0 0',fontSize:appearances[key].mini.fontSize+'px',whiteSpace:'nowrap',maxWidth:'none'});node.style.padding='0';node.style.overflow='hidden';}
+      if(overlay){overlay.style.transformOrigin='0 0';overlay.style.transition='none';}full.style.zIndex='2';this.paint(m,m.p);this.ownGlyph(m);this.paintArtwork(m);return m;
+    }catch(error){this.clean(m||{...presenter,styles,focus,original,retired:false});throw error;}
+    finally{this.settingUp=false;if(!m){for(const snapshot of styles)this.restore(snapshot);mini.hidden=original.miniHidden;full.hidden=original.fullHidden;}}
+  },
+  lockOriginals(m){
+    const gesture=typeof InputLifecycle!=='undefined'?InputLifecycle.gesture:null,owner=gesture?.node;
+    for(const node of [m.mini,m.full]){const held=owner&&(owner===node||node.contains?.(owner))&&owner.hasPointerCapture?.(gesture.id);node.inert=!held;node.setAttribute('aria-hidden','true');}
+    for(const item of m.focus||[])if(item.node.getAttribute('tabindex')!=='-1')item.node.setAttribute('tabindex','-1');
+  },
+  paint(m,p){
+    if(m.retired)return;this.lockOriginals(m);m.mini.hidden=m.full.hidden=false;m.A.style.opacity=m.B.style.opacity='0';for(const [key,nodes] of Object.entries(m.pairs))if(key!=='art')nodes.full.style.opacity='0';
+    p=clamp(p,0,1);if(m.geometry&&m.p===p)return;m.p=p;const g=this.sceneGeometry(m.endpoints,p);m.geometry=g;
+    const base=m.endpoints.surface.mini,r=g.surface,full=m.endpoints.surface.full,sx=r.width/base.width,sy=r.height/base.height;
+    const transform=`translate(${r.left-base.left}px,${r.top-base.top}px) scale(${sx},${sy})`,radius=m.miniRadius.map(value=>value*(1-p)/sx+'px').join(' ')+' / '+m.miniRadius.map(value=>value*(1-p)/sy+'px').join(' ');
+    for(const node of [m.mask,m.backgroundMask]){node.style.transform=transform;node.style.borderRadius=radius;}
+    for(const node of [m.content,m.backgroundContent])node.style.transform=`translate(${(full.left-r.left)/sx}px,${(full.top-r.top)/sy}px) scale(${1/sx},${1/sy})`;
+    m.background.style.opacity=String(p);m.full.style.opacity=String(clamp((p-.8)/.2,0,1));m.mini.style.opacity='1';
+    for(const [key,nodes] of Object.entries(m.pairs)){
+      const node=nodes.mini,box=m.endpoints[key].mini,target=g[key];if(!box.width||!box.height){node.style.opacity='0';continue;}
+      const scaleX=target.width/box.width,scaleY=target.height/box.height;node.style.transform=`translate(${target.left-box.left}px,${target.top-box.top}px) scale(${scaleX},${scaleY})`;node.style.opacity=String(key==='seek'&&!m.nativeSeekVisible?1-p:1);
+      if(key==='art'){const radii=m.artRadius.mini.map((value,i)=>value+(m.artRadius.full[i]-value)*p);node.style.borderRadius=radii.map(value=>value/scaleX+'px').join(' ')+' / '+radii.map(value=>value/scaleY+'px').join(' ');}
+      if(key==='title'||key==='sub'){const model=m.appearances[key],span=node.firstElementChild,font=model.mini.fontSize+(model.full.fontSize-model.mini.fontSize)*p,fontScale=font/model.mini.fontSize,padding={};for(const side of ['left','top'])padding[side]=model.mini.padding[side]+(model.full.padding[side]-model.mini.padding[side])*p;span.style.transform=`translate(${padding.left/scaleX}px,${padding.top/scaleY}px) scale(${fontScale/scaleX},${fontScale/scaleY})`;span.style.fontFamily=p<.5?model.mini.fontFamily:model.full.fontFamily;span.style.fontWeight=String(model.mini.fontWeight+(model.full.fontWeight-model.mini.fontWeight)*p);span.style.lineHeight=(model.mini.lineHeight+(model.full.lineHeight-model.mini.lineHeight)*p)/fontScale+'px';node.style.color=this.blend(model.mini.color,model.full.color,p);node.style.backgroundColor=this.blend(model.mini.background,model.full.background,p);const radii=model.mini.radius.map((value,i)=>value+(model.full.radius[i]-value)*p);node.style.borderRadius=radii.map(value=>value/scaleX+'px').join(' ')+' / '+radii.map(value=>value/scaleY+'px').join(' ');}
+      if(key==='play'){const model=m.appearances.play;node.style.backgroundColor=this.blend(model.mini.background,model.full.background,p);node.style.borderStyle='solid';node.style.borderColor=model.full.borderColor;node.style.borderWidth=(model.mini.borderWidth+(model.full.borderWidth-model.mini.borderWidth)*p)/scaleX+'px';}
+    }
+    if(m.overlay){const art=m.endpoints.art.full;m.overlay.style.transform=`translate(${g.art.left-art.left}px,${g.art.top-art.top}px) scale(${g.art.width/art.width},${g.art.height/art.height})`;}this.paintGlyph(m);this.paintArtwork(m);
+    m.dim.style.transition='none';m.dim.style.opacity=String((SET.listBg===false?.94:.66)*(1-p));
+    ['border-top-left-radius','border-top-right-radius','border-bottom-right-radius','border-bottom-left-radius'].forEach((key,i)=>m.nav.style.setProperty(key,(m.navRadius.mini[i]+(m.navRadius.full[i]-m.navRadius.mini[i])*p)+'px'));
+  },
+  canvasPainted(){},refreshDynamic(){},refreshCanvases(){},refreshBackground(){this.updateBackground();},
+  clean(m){
+    if(!m||m.retired)return;m.retired=true;
+    // Reset every property we own even when construction/retarget/cancel throws.
+    // The live library was never hidden, moved, cloned or detached by this owner.
+    m.releaseInput?.();m.input.hidden=m.backgroundMask.hidden=true;m.input.className='';delete m.mask.dataset.active;delete m.backgroundMask.dataset.active;for(const node of [m.mask,m.content,m.backgroundMask,m.backgroundContent,m.background])node.removeAttribute('style');
+    for(const snapshot of m.styles||[])this.restore(snapshot);
+    for(const item of m.focus||[])if(item.tabindex==null)item.node.removeAttribute('tabindex');else item.node.setAttribute('tabindex',item.tabindex);
+    if(m.pairs?.art?.mini){const node=m.pairs.art.mini;node.style.backgroundImage=m.producerMiniArt||'';const ph=node.querySelector('.ph');if(ph)ph.style.display=m.producerMiniArt?'none':'grid';}
+    delete m.mini.dataset.sharedPlayer;delete m.full.dataset.sharedPlayer;
+    m.mini.style.removeProperty('opacity');m.full.style.removeProperty('opacity');m.mini.style.removeProperty('transform');m.full.style.removeProperty('transform');
+    m.mini.hidden=Nav.cur==='player'||Nav.cur==='settings'||!Engine.current;m.mini.inert=false;m.mini.setAttribute('aria-hidden',m.mini.hidden?'true':'false');
+    m.full.hidden=Nav.cur!=='player';m.full.inert=m.full.hidden;m.full.setAttribute('aria-hidden',m.full.hidden?'true':'false');
+    this.transaction=null;if(m.layoutDeferred||m.vizDeferred)DockLayout.schedule();
+  }
+});
+const ScreenDrag={
+  state:null,finish:null,settling:null,phase:'idle',activating:false,
+  activate(name,push){this.activating=true;try{Nav.go(name,push);}finally{this.activating=false;}},
+  ownership(s){
+    // A scene may be visible without owning input. Inert also protects native list taps.
+    for(const [name,selector] of Object.entries(SCREENS)){
+      const n=$(selector),active=name===Nav.cur;
+      n.inert=!active;n.setAttribute('aria-hidden',active?'false':'true');
+      if(n!==s?.from&&n!==s?.to)n.hidden=!active;
+    }
+    if(s?.morph)SharedPlayerMotion.lockOriginals(s.morph);
+  },
+  clean(s){
+    if(s?.morph)SharedPlayerMotion.clean(s.morph);
+    if(s)for(const n of [s.from,s.to]){delete n.dataset.gesturePreview;delete n.dataset.scene;n.style.transition='none';n.style.transform='';n.style.zIndex='';n.hidden=n===s.from?Nav.cur!==s.fromName:Nav.cur!==s.target;}
+    this.ownership();this.phase='idle';if(typeof SharedPlayerMotion!=='undefined')SharedPlayerMotion.scheduleAppearance?.();
+  },
+  abort(){
+    if(InputLifecycle.rebasing)return;
+    this.phase='cancel';this.finish?.cancel?.();this.finish=null;
+    const s=this.state||this.settling;this.state=null;this.settling=null;this.clean(s);
+  },
+  pause(){
+    const s=this.settling;if(!s||!this.finish?.pending)return;
+    // Read both painted positions before canceling. Reconstructing parallax from
+    // the target alone jumps when a new navigation rebases an unfinished scene.
+    if(s.morph){this.finish.cancel();this.finish=null;s.progress=(s.morph.opening?s.morph.p:1-s.morph.p)*s.height;s.baseProgress=s.progress;this.phase='possible';return;}
+    const fromY=GestureMotion.offset(s.from,'y'),toY=GestureMotion.offset(s.to,'y');
+    this.finish.cancel();this.finish=null;
+    s.progress=clamp(s.height+s.direction*toY,0,s.height);s.baseProgress=s.progress;s.fromBaseY=fromY;
+    s.from.style.transition=s.to.style.transition='none';
+    s.from.style.transform=`translateY(${fromY}px)`;s.to.style.transform=`translateY(${toY}px)`;
+    this.phase='possible';
+  },
+  returnInterrupted(){
+    if(!this.settling)return false;
+    const s=this.settling,commit=s.commit;this.begin(s.target,s.direction);this.end(commit,0,false);return true;
+  },
+  create(target,direction,fromY=0,carryMorph=null){
+    if(!SCREENS[target]||target===Nav.cur)return null;
+    const fromName=Nav.cur,from=$(SCREENS[fromName]),to=$(SCREENS[target]),height=from.clientHeight||innerHeight;
+    const preparedAppearance=typeof SharedPlayerMotion!=='undefined'?SharedPlayerMotion.claimAppearance?.({target,fromName}):null;
+    const s={from,to,fromName,target,direction,height,progress:0,baseProgress:0,fromBaseY:fromY,commit:false,preparedAppearance};
+    // Measure the bounded player pose before revealing an incoming library
+    // subtree. Its mounted rows must not force layout inside player setup.
+    try{s.morph=carryMorph||(typeof SharedPlayerMotion!=='undefined'?SharedPlayerMotion.create(s):null);}
+    catch(error){this.clean(s);throw error;}
+    from.hidden=to.hidden=false;from.style.transition=to.style.transition='none';
+    from.dataset.scene=to.dataset.scene='1';to.dataset.gesturePreview='1';to.style.zIndex='3';
+    if(carryMorph){carryMorph.opening=target==='player';s.progress=(carryMorph.opening?carryMorph.p:1-carryMorph.p)*height;s.baseProgress=s.progress;}
+    this.state=s;this.phase='drag';this.ownership(s);
+    // The original captured gesture remains live, but no new background contact
+    // can activate a row through the incoming preview.
+    from.inert=true;from.setAttribute('aria-hidden','true');to.inert=true;to.setAttribute('aria-hidden','true');
+    if(s.morph)SharedPlayerMotion.lockOriginals(s.morph);
+    this.move(0);return s;
+  },
+  navigate(target,push){
+    const old=this.state||this.settling;
+    if(old){
+      this.pause();this.finish?.cancel?.();this.finish=null;
+      if(target===old.target||target===old.fromName){
+        this.state=old;this.settling=null;this.end(target===old.target,0,push);return;
+      }
+      const current=$(SCREENS[Nav.cur]),y=GestureMotion.offset(current,'y');
+      const carryMorph=old.morph&&Nav.cur==='player'&&target!=='settings'?old.morph:null;
+      if(old.morph&&!carryMorph)SharedPlayerMotion.clean(old.morph);
+      this.state=this.settling=null;
+      // Retire the other scene, retaining the actual current-screen offset.
+      for(const n of [old.from,old.to])if(n!==current){delete n.dataset.gesturePreview;delete n.dataset.scene;n.style.transition='none';n.style.transform='';n.style.zIndex='';n.hidden=true;n.inert=true;}
+      delete current.dataset.gesturePreview;delete current.dataset.scene;current.style.zIndex='';
+      if(this.create(target,target==='player'?-1:1,y,carryMorph))this.end(true,0,push);return;
+    }
+    if(target===Nav.cur){this.activate(target,push);this.ownership();return;}
+    if(this.create(target,target==='player'?-1:1))this.end(true,0,push);
+  },
+  begin(target,direction){
+    if(this.state)return;
+    if(this.settling){this.pause();this.state=this.settling;this.settling=null;this.phase='drag';return;}
+    this.create(target,direction);
+  },
+  move(dy){
+    const s=this.state;if(!s)return;
+    s.progress=clamp(s.baseProgress+s.direction*dy,0,s.height);
+    if(s.morph){SharedPlayerMotion.paint(s.morph,s.morph.opening?s.progress/s.height:1-s.progress/s.height);return;}
+    const delta=s.direction*(s.progress-s.baseProgress);
+    s.from.style.transform=`translateY(${s.fromBaseY+delta*.18}px)`;s.to.style.transform=`translateY(${s.direction*(s.progress-s.height)}px)`;
+  },
+  end(commit,velocity=0,push){
+    const s=this.state;if(!s)return;this.state=null;this.settling=s;this.phase='settle';
+    // Tap navigation may commit at zero progress; drag thresholds belong to its handler.
+    s.commit=!!commit;
+    const destination=commit?s.target:s.fromName;
+    if(destination!==Nav.cur)this.activate(destination,push);
+    this.ownership(s);
+    if(s.morph){
+      SharedPlayerMotion.paint(s.morph,s.morph.p);
+      const distance=commit?s.height-s.progress:s.progress,ms=UI.instantNav?0:GestureMotion.duration(distance,velocity);
+      const target=commit?(s.morph.opening?1:0):(s.morph.opening?0:1);
+      const finish=SharedPlayerMotion.settle(s.morph,target,ms,()=>{if(this.settling!==s)return;this.finish=null;this.settling=null;this.clean(s);});
+      this.finish=finish.pending?finish:null;return;
+    }
+    const toY=GestureMotion.offset(s.to,'y'),fromY=GestureMotion.offset(s.from,'y');
+    const distance=commit?Math.abs(toY):Math.max(Math.abs(s.direction*s.height+toY),Math.abs(fromY));
+    const ms=UI.instantNav?0:GestureMotion.duration(distance,velocity);
+    const finish=GestureMotion.settle([s.to,s.from],[commit?'translateY(0)':`translateY(${-s.direction*s.height}px)`,commit?`translateY(${fromY+s.direction*(s.height-s.progress)*.18}px)`:'translateY(0)'],ms,()=>{
+      if(this.settling!==s)return;
+      this.finish=null;this.settling=null;this.clean(s);
+    });
+    // Zero-duration settles complete synchronously; never retain a dead handle.
+    this.finish=finish.pending?finish:null;
+  },
+  complete(){
+    if(InputLifecycle.rebasing)return;
+    if(this.state){const s=this.state;this.end(Nav.cur===s.target,0,false);return;}
+    if(this.settling){this.returnInterrupted();return;}
+    this.abort();
+  },
+  cancel(){this.complete();}
+};
+InputLifecycle.register(()=>{if(typeof SharedPlayerMotion!=='undefined')SharedPlayerMotion.clearAppearance?.();ScreenDrag.abort();});
+window.addEventListener('resize',()=>{if(typeof SharedPlayerMotion!=='undefined')SharedPlayerMotion.clearAppearance?.();});
+window.addEventListener('blur',()=>{if(typeof SharedPlayerMotion!=='undefined')SharedPlayerMotion.clearAppearance?.();});
+document.addEventListener('visibilitychange',()=>{if(document.hidden&&typeof SharedPlayerMotion!=='undefined')SharedPlayerMotion.clearAppearance?.();});
 function libraryDestination(){return ['list','search'].includes(Nav.lastLibrary)?Nav.lastLibrary:'library';}
 function swipeDestination(dy){const v=NativeSettings.values.main_lyrics_swipe;return dy<0&&(v===2||(v===1&&Engine.current?.lyrics))?'lyrics':libraryDestination();}
 function setupArtGestures(){
-  const stage=$('#artstage'),A=$('#artA'),B=$('#artB');let width=1,neighbor=null,serial=0,finish=null,lastTap=-Infinity,fromId=null,offset=0;
-  const clear=()=>{A.style.transition='none';B.style.transition='none';A.style.transform='';B.style.transform='';A.style.opacity='1';B.style.opacity='0';};
+  const stage=$('#artstage'),A=$('#artA'),B=$('#artB');let width=1,neighbor=null,step=null,serial=0,finish=null,lastTap=-Infinity,fromId=null,offset=0;
+  const clear=()=>{InputLifecycle.unwatchSettle(stage);A.style.transition='none';B.style.transition='none';A.style.transform='';B.style.transform='';A.style.opacity='1';B.style.opacity='0';};
   const preview=direction=>{
-    const track=peekTrack(direction);if(track?.id===neighbor?.id)return;neighbor=track;const token=++serial;
-    UI.setArtEl(B,track?SwipeArt.ready.get(track.id):null);
+    if(step?.direction===direction)return;step=resolveTrackStep(direction);
+    const track=step?.track;neighbor=track;const token=++serial;
+    UI.setArtEl(B,SwipeArt.cached(track)||null);
     SwipeArt.warm(track).then(url=>{if(token===serial&&neighbor?.id===track?.id)UI.setArtEl(B,url);});
   };
   GestureMotion.bind(stage,{
     ignore:e=>!!e.target.closest('button'),
-    start(){const resume=finish?.pending&&fromId===Engine.current?.id;offset=resume?GestureMotion.offset(A):0;finish?.cancel?.();finish=null;ScreenDrag.pause();if(!resume){clear();neighbor=null;}width=stage.clientWidth||1;fromId=Engine.current?.id;A.style.transition=B.style.transition='none';if(resume){A.style.transform=`translateX(${offset}px)`;B.style.transform=`translateX(${offset+(offset<0?width:-width)}px)`;}SwipeArt.neighbors();},
+    start(){const resume=finish?.pending&&fromId===Engine.current?.id;offset=resume?GestureMotion.offset(A):0;finish?.cancel?.();finish=null;InputLifecycle.unwatchSettle(stage);ScreenDrag.pause();if(!resume){clear();neighbor=null;step=null;}width=stage.clientWidth||1;fromId=Engine.current?.id;A.style.transition=B.style.transition='none';if(resume){A.style.transform=`translateX(${offset}px)`;B.style.transform=`translateX(${offset+(offset<0?width:-width)}px)`;}SwipeArt.neighbors();},
     move(s){
-      if(s.axis==='x'&&SET.swipeToChange){ScreenDrag.abort();const position=s.dx+offset;preview(position<0?1:-1);const dx=neighbor?position:position*.25;A.style.transform=`translateX(${dx}px)`;B.style.opacity=neighbor?'1':'0';B.style.transform=`translateX(${dx+(position<0?width:-width)}px)`;}
+      if(s.axis==='x'&&SET.swipeToChange){if(!s.sceneCompleted){ScreenDrag.complete();s.sceneCompleted=true;}const position=s.dx+offset;preview(position<0?1:-1);const dx=neighbor?position:position*.25;A.style.transform=`translateX(${dx}px)`;B.style.opacity=neighbor?'1':'0';B.style.transform=`translateX(${dx+(position<0?width:-width)}px)`;}
       else if(s.axis==='y'&&swipeDestination(s.dy)!=='lyrics'){ScreenDrag.begin(swipeDestination(s.dy),s.dy<0?-1:1);ScreenDrag.move(s.dy);}
     },
     end(s){
       if((s.axis==='x'||(!s.axis&&offset))&&SET.swipeToChange){
-        const position=s.dx+offset,commit=s.axis==='x'&&!!neighbor&&GestureMotion.commits(position,s.vx,width),direction=position<0?1:-1,target=neighbor;
+        lastTap=-Infinity;
+        const position=s.dx+offset,commit=s.axis==='x'&&!!neighbor&&GestureMotion.commits(position,s.vx,width),direction=position<0?1:-1,target=neighbor,action=step;
         finish=GestureMotion.settle([A,B],[`translateX(${commit?-direction*width:0}px)`,`translateX(${commit?0:direction*width}px)`],GestureMotion.duration(commit?width-Math.abs(position):position,s.vx),()=>{
           finish=null;serial++;
-          if(commit&&Engine.current?.id===fromId){UI.setArtEl(A,SwipeArt.ready.get(target.id)||null);UI.swipeCommitted=target.id;clear();direction>0?Engine.next():Engine.prev();vibrate(10);}
+          if(commit&&Engine.current?.id===fromId){
+            UI.swipeCommitted=target.id;
+            if(commitTrackStep(action)){UI.setArtEl(A,SwipeArt.cached(target)||null);clear();vibrate(10);}
+            else{UI.swipeCommitted=null;clear();}
+          }
           else clear();
-        });return;
+        });
+        if(finish?.pending)InputLifecycle.watchSettle(stage,()=>{finish?.cancel?.();finish=null;serial++;lastTap=-Infinity;clear();},e=>stage.contains(e.target)&&!e.target.closest('button'));
+        return;
       }
       if(s.axis==='y'){
+        lastTap=-Infinity;
         const commit=GestureMotion.commits(s.dy,s.vy,Math.min(innerHeight,400));
         if(ScreenDrag.state)ScreenDrag.end(commit&&ScreenDrag.state.direction*s.dy>=0,s.vy);else if(commit&&s.dy<0)playerSwipeUp();clear();return;
       }
       if(ScreenDrag.returnInterrupted()){clear();return;}
-      if(s.travel<=7&&s.elapsed<280){const now=performance.now();if(SET.doubleTapPause&&now-lastTap<300){Engine.toggle();lastTap=0;}else{lastTap=now;if(SET.vizOnPlayer)document.body.classList.toggle('fadedctrls');}}else lastTap=-Infinity;
+      if(s.travel<=7&&s.elapsed<(SET.longPressMenu?(SET.longPressMs||480):600)){const now=performance.now();if(SET.doubleTapPause&&s.elapsed<280&&now-lastTap<300){Engine.toggle();lastTap=0;}else{lastTap=now;if(SET.vizOnPlayer)document.body.classList.toggle('fadedctrls');}}else lastTap=-Infinity;
       clear();
     },
     cancel(){serial++;clear();ScreenDrag.cancel();},
@@ -5745,17 +6696,18 @@ function setupArtGestures(){
 function setupMiniGestures(){
   const mini=$('#mini'),slide=el('div','mini-swipe-content');
   while(mini.firstChild)slide.appendChild(mini.firstChild);mini.appendChild(slide);
-  let ghost=null,finish=null,width=1,fromId=null,target=null,serial=0,offset=0;
-  const clear=()=>{slide.style.transition='';slide.style.transform='';ghost?.remove();ghost=null;serial++;};
+  let ghost=null,finish=null,width=1,fromId=null,target=null,step=null,serial=0,offset=0;
+  const clear=()=>{InputLifecycle.unwatchSettle(mini);slide.style.transition='';slide.style.transform='';ghost?.remove();ghost=null;serial++;};
   GestureMotion.bind(mini,{
     ignore:e=>!!e.target.closest('#mini-play,.mini-seek'),
-    start(){const resume=finish?.pending&&fromId===Engine.current?.id;offset=resume?GestureMotion.offset(slide):0;finish?.cancel?.();finish=null;ScreenDrag.pause();if(!resume){clear();target=null;}width=mini.clientWidth||1;fromId=Engine.current?.id;slide.style.transition='none';if(resume){slide.style.transform=`translateX(${offset}px)`;if(ghost){ghost.style.transition='none';ghost.style.transform=`translateX(${offset+(offset<0?width:-width)}px)`;}}},
+    start(){const resume=finish?.pending&&fromId===Engine.current?.id;offset=resume?GestureMotion.offset(slide):0;finish?.cancel?.();finish=null;InputLifecycle.unwatchSettle(mini);ScreenDrag.pause();if(!resume){clear();target=null;step=null;}width=mini.clientWidth||1;fromId=Engine.current?.id;slide.style.transition='none';if(resume){slide.style.transform=`translateX(${offset}px)`;if(ghost){ghost.style.transition='none';ghost.style.transform=`translateX(${offset+(offset<0?width:-width)}px)`;}}},
     move(s){
       if(s.axis==='y'&&s.dy<0){ScreenDrag.begin('player',-1);ScreenDrag.move(s.dy);return;}
       if(s.axis!=='x')return;
-      ScreenDrag.abort();const position=s.dx+offset,next=peekTrack(position<0?1:-1);
+      if(!s.sceneCompleted){ScreenDrag.complete();s.sceneCompleted=true;}const position=s.dx+offset,direction=position<0?1:-1;
+      if(step?.direction!==direction)step=resolveTrackStep(direction);const next=step?.track;
       if(next?.id!==target?.id){target=next;ghost?.remove();ghost=null;const token=++serial;
-        if(target){ghost=slide.cloneNode(true);ghost.classList.add('mini-swipe-ghost');ghost.removeAttribute('id');ghost.querySelectorAll('[id]').forEach(n=>n.removeAttribute('id'));ghost.setAttribute('aria-hidden','true');ghost.inert=true;ghost.querySelector('.t1').textContent=target.title;ghost.querySelector('.t2').textContent=trackSub(target);UI.setArtEl(ghost.querySelector('.art'),SwipeArt.ready.get(target.id));mini.appendChild(ghost);SwipeArt.warm(target).then(url=>{if(ghost&&token===serial)UI.setArtEl(ghost.querySelector('.art'),url);});}
+        if(target){ghost=slide.cloneNode(true);ghost.classList.add('mini-swipe-ghost');ghost.removeAttribute('id');ghost.querySelectorAll('[id]').forEach(n=>n.removeAttribute('id'));ghost.setAttribute('aria-hidden','true');ghost.inert=true;ghost.querySelector('.t1').textContent=target.title;ghost.querySelector('.t2').textContent=trackSub(target);UI.setArtEl(ghost.querySelector('.art'),SwipeArt.cached(target)||null);mini.appendChild(ghost);SwipeArt.warm(target).then(url=>{if(ghost&&token===serial)UI.setArtEl(ghost.querySelector('.art'),url);});}
       }
       slide.style.transition='none';slide.style.transform=`translateX(${target?position:position*.25}px)`;if(ghost){ghost.style.transition='none';ghost.style.transform=`translateX(${position+(position<0?width:-width)}px)`;}
     },
@@ -5763,13 +6715,15 @@ function setupMiniGestures(){
       if(ScreenDrag.state){ScreenDrag.end(ScreenDrag.state.direction*s.dy>=0&&GestureMotion.commits(s.dy,s.vy,300),s.vy);return;}
       if(ScreenDrag.returnInterrupted())return;
       if(s.axis==='x'||(!s.axis&&offset)){
-        const position=s.dx+offset,commit=s.axis==='x'&&!!target&&GestureMotion.commits(position,s.vx,width),direction=position<0?1:-1;
+        const position=s.dx+offset,commit=s.axis==='x'&&!!target&&GestureMotion.commits(position,s.vx,width),direction=position<0?1:-1,action=step,previewed=target;
         const nodes=ghost?[slide,ghost]:[slide],transforms=[`translateX(${commit?-direction*width:0}px)`,`translateX(${commit?0:direction*width}px)`];
         finish=GestureMotion.settle(nodes,transforms,GestureMotion.duration(commit?width-Math.abs(position):position,s.vx),()=>{finish=null;
-          if(commit&&Engine.current?.id===fromId){UI.setArtEl($('#mini-art'),SwipeArt.ready.get(target.id)||null);direction>0?Engine.next():Engine.prev();vibrate(10);}clear();
-        });return;
+          if(commit&&Engine.current?.id===fromId){UI.swipeCommitted=previewed.id;if(commitTrackStep(action)){UI.setArtEl($('#mini-art'),SwipeArt.cached(previewed)||null);vibrate(10);}else UI.swipeCommitted=null;}clear();
+        });
+        if(finish?.pending)InputLifecycle.watchSettle(mini,()=>{finish?.cancel?.();finish=null;clear();},e=>mini.contains(e.target)&&!e.target.closest('#mini-play,.mini-seek'));
+        return;
       }
-      if(!s.axis&&s.travel<=7&&s.elapsed<280)Nav.go('player');clear();
+      if(!s.axis&&s.travel<=7)Nav.go('player');clear();
     },
     cancel(){clear();ScreenDrag.cancel();}
   });
@@ -5788,169 +6742,198 @@ function setupPlayerSwipeDown(){
 }
 
 function bindTapButton(button,action){
-  let contact=null;const blockClick=InputLifecycle.clickGuard(button);
+  let contact=null,canceledContact=null;const blockClick=InputLifecycle.clickGuard(button);
   const time=e=>Number.isFinite(e.timeStamp)&&e.timeStamp>0?e.timeStamp:performance.now();
-  const reset=()=>{if(contact)blockClick({pointerId:contact.id});contact=null;};
-  button.onclick=e=>{if(button.disabled||!InputLifecycle.active(button)){e.preventDefault();return;}e.stopPropagation();action();};
+  const reset=()=>{if(contact){canceledContact=contact.id;blockClick({pointerId:contact.id});}contact=null;};
+  button.onclick=e=>{if(button.disabled||UI.seekDragging||!InputLifecycle.active(button)){e.preventDefault();return;}e.stopPropagation();InputLifecycle.cancelMotionSettle();action(e);};
   button.addEventListener('pointerdown',e=>{
     if(!['touch','pen'].includes(e.pointerType))return;
-    if(contact||e.isPrimary===false){reset();return;}
-    if(e.button>0||button.disabled||!InputLifecycle.active(button))return;
+    // The second contact's capture-phase guard clears before this listener.
+    // Rearm the canceled first contact so its trailing click stays rejected.
+    if(contact||e.isPrimary===false||InputLifecycle.contacts.size>1){reset();if(canceledContact!==null)blockClick({pointerId:canceledContact});return;}
+    if(e.button>0||button.disabled||UI.seekDragging||!InputLifecycle.active(button))return;
+    canceledContact=null;
     contact={id:e.pointerId,x:e.clientX,y:e.clientY,started:time(e),travel:0};
     try{button.setPointerCapture(e.pointerId);}catch(_){}
   });
   button.addEventListener('pointermove',e=>{if(contact?.id===e.pointerId)contact.travel=Math.max(contact.travel,Math.hypot(e.clientX-contact.x,e.clientY-contact.y));});
   button.addEventListener('pointerup',e=>{
     if(contact?.id!==e.pointerId)return;
-    const done=contact;contact=null;blockClick(e);e.preventDefault();
+    const done=contact;contact=null;blockClick(e);if(button.classList?.contains('library-back'))InputLifecycle.guardReplacement(button,e);e.preventDefault();
     const travel=Math.max(done.travel,Math.hypot(e.clientX-done.x,e.clientY-done.y));
-    if(travel<=7&&time(e)-done.started<600&&InputLifecycle.active(button)&&!button.disabled)action();
+    if(travel<=7&&time(e)-done.started<600&&InputLifecycle.active(button)&&!UI.seekDragging&&!button.disabled)action(e);
   });
   button.addEventListener('pointercancel',reset);button.addEventListener('lostpointercapture',reset);
-  document.addEventListener('pointerdown',()=>{if(InputLifecycle.contacts.size>1)reset();},true);
+  // The shared lifecycle already resets all registered owners on multi-touch.
+  // Do not retain each replaced header through another document listener.
   InputLifecycle.register(reset,button);
 }
 function bindTransportButton(button){
   const action=button.dataset.act;let pointer=null,timer=0,repeat=0,suppressUntil=0;
   const stop=()=>{clearTimeout(timer);clearInterval(repeat);timer=0;repeat=0;pointer=null;};
-  button.onclick=e=>{
-    if(e.detail!==0&&performance.now()<suppressUntil){e.preventDefault();return;}
+  const suppress=()=>{suppressUntil=performance.now()+700;};
+  bindTapButton(button,e=>{
+    if(!(e.type==='click'&&e.detail===0)&&performance.now()<suppressUntil){e.preventDefault();return;}
     vibrate(8);
     if(action==='next')Engine.next();else if(action==='prev')Engine.prev();else proSkip(action==='ff'?1:-1);
-  };
+  });
   if(action!=='ff'&&action!=='rew')return;
   const seek=()=>Engine.seekBy(action==='ff'?SET.seekStep:-SET.seekStep);
+  const reset=()=>{if(pointer)suppress();stop();};
   button.addEventListener('pointerdown',e=>{
-    if(e.isPrimary===false||e.button>0||pointer)return;
+    if(e.isPrimary===false||e.button>0||pointer||UI.seekDragging||!InputLifecycle.active(button))return;
     suppressUntil=0;pointer={id:e.pointerId,x:e.clientX,y:e.clientY,request:Engine._playRequest};
     timer=setTimeout(()=>{
-      if(!pointer||pointer.request!==Engine._playRequest||UI.seekDragging){stop();return;}
-      suppressUntil=performance.now()+700;seek();
-      repeat=setInterval(()=>{if(!pointer||pointer.request!==Engine._playRequest||UI.seekDragging){stop();return;}suppressUntil=performance.now()+700;seek();},250);
+      if(!pointer||pointer.request!==Engine._playRequest||UI.seekDragging||!InputLifecycle.active(button)){reset();return;}
+      suppress();seek();
+      repeat=setInterval(()=>{if(!pointer||pointer.request!==Engine._playRequest||UI.seekDragging||!InputLifecycle.active(button)){reset();return;}suppress();seek();},250);
     },450);
   });
-  button.addEventListener('pointermove',e=>{if(pointer&&e.pointerId===pointer.id&&Math.hypot(e.clientX-pointer.x,e.clientY-pointer.y)>9){suppressUntil=performance.now()+700;stop();}});
-  ['pointerup','pointercancel','pointerleave','lostpointercapture'].forEach(type=>button.addEventListener(type,e=>{if(pointer&&e.pointerId===pointer.id){if(repeat)suppressUntil=performance.now()+700;stop();}}));
-  window.addEventListener('blur',stop);
-  document.addEventListener('visibilitychange',()=>{if(document.hidden)stop();});
+  button.addEventListener('pointermove',e=>{if(pointer&&e.pointerId===pointer.id&&Math.hypot(e.clientX-pointer.x,e.clientY-pointer.y)>7)reset();});
+  ['pointerup','pointercancel','pointerleave','lostpointercapture'].forEach(type=>button.addEventListener(type,e=>{if(pointer&&e.pointerId===pointer.id){if(repeat||type!=='pointerup')suppress();stop();}}));
+  document.addEventListener('pointerdown',()=>{if(InputLifecycle.contacts.size>1)reset();},true);
+  InputLifecycle.register(reset,button);
 }
 
-function paintSeekFraction(fraction){
-  const fill=$('#seek-fill'),knob=$('#seek-knob');
-  if(!UI.seekWidth)UI.seekWidth=$('#seek').clientWidth||1;
+function paintSeekFraction(fraction,width){
+  const seek=$('#seek'),fill=$('#seek-fill'),knob=$('#seek-knob');
+  fraction=Number.isFinite(fraction)?clamp(fraction,0,1):0;
+  if(!(width>0))width=UI.seekWidth||(UI.seekWidth=seek.clientWidth||1);
   if(fill.style.width!=='100%')fill.style.width='100%';
   if(knob.style.left!=='0%')knob.style.left='0%';
-  fill.style.transform='scaleX('+fraction+')';knob.style.transform='translateX('+(fraction*UI.seekWidth)+'px) translateX(-50%) scale('+($('#seek').classList.contains('drag')?1.5:1)+')';
+  const fillTransform='scaleX('+fraction+')',knobTransform='translateX('+(fraction*width)+'px) translateX(-50%) scale('+(seek.classList.contains('drag')?1.5:1)+')';
+  if(fill.style.transform!==fillTransform)fill.style.transform=fillTransform;
+  if(knob.style.transform!==knobTransform)knob.style.transform=knobTransform;
+  fill._sceneRawTransform=fillTransform;fill._sceneSerializedTransform=fill.style.transform;knob._sceneRawTransform=knobTransform;knob._sceneSerializedTransform=knob.style.transform;
 }
 function paintMiniProgress(fraction){
   const fill=$('#mini-fill');
+  fraction=Number.isFinite(fraction)?clamp(fraction,0,1):0;
   const transform='translateX('+(fraction*100)+'%)';
   if(fill.style.transform!==transform)fill.style.transform=transform;
+  fill._sceneRawTransform=transform;fill._sceneSerializedTransform=fill.style.transform;
 }
 function setupSeekGestures(){
-  const seek=$('#seek');
-  let W=1;
-  const pos=function(clientX){
-    const r=seek.getBoundingClientRect();
-    W=r.width||1;
-    return clamp((clientX-r.left)/W,0,1);
+  const seek=$('#seek'),tr=$('#transport'),miniSeek=$('#mini-seek'),mini=$('#mini');
+  const guards=new Map([seek,tr,miniSeek].map(node=>[node,InputLifecycle.clickGuard(node)]));
+  let owner=null,frame=0,blockedContext=null;
+  const time=e=>Number.isFinite(e?.timeStamp)&&e.timeStamp>0?e.timeStamp:performance.now();
+  const valid=state=>state.id===Engine.current?.id&&state.request===Engine._playRequest&&InputLifecycle.active(state.node);
+  const block=state=>{
+    guards.get(state.node)({pointerId:state.pointer});
+    blockedContext={node:state.node,at:performance.now()};
   };
-  let drag=null;
-  const apply=function(frac){
-    paintSeekFraction(frac);
-    $('#t-cur').textContent=fmtTime(frac*Engine.duration());
-  };
-  const finish=(e,cancel=false)=>{
-    if(!drag||e.pointerId!==drag.pointer)return;
-    const state=drag;drag=null;UI.seekDragging=false;
+  const clear=state=>{
+    owner=null;cancelAnimationFrame(frame);frame=0;
+    UI.seekPreview=null;UI.seekDragging=false;
     seek.classList.remove('drag');document.body.classList.remove('scrubbing');
-    if(!cancel&&state.request===Engine._playRequest&&state.id===Engine.current?.id){Engine.seek(pos(e.clientX)*Engine.duration());vibrate(8);}
-    try{if(seek.hasPointerCapture(e.pointerId))seek.releasePointerCapture(e.pointerId);}catch(_){}
-    UI.renderProgress();
+    try{if(state.node.hasPointerCapture?.(state.pointer))state.node.releasePointerCapture(state.pointer);}catch(_){}
   };
-  seek.addEventListener('pointerdown',e=>{
-    if(e.isPrimary===false||e.button>0||drag||!Engine.current)return;
-    drag={pointer:e.pointerId,id:Engine.current.id,request:Engine._playRequest};UI.seekDragging=true;
-    document.body.classList.add('scrubbing');seek.classList.add('drag');
-    try{seek.setPointerCapture(e.pointerId);}catch(_){}apply(pos(e.clientX));
-  });
-  seek.addEventListener('pointermove',e=>{if(drag&&e.pointerId===drag.pointer)apply(pos(e.clientX));});
-  seek.addEventListener('pointerup',e=>finish(e));
-  seek.addEventListener('pointercancel',e=>finish(e,true));
-  seek.addEventListener('lostpointercapture',e=>finish(e,true));
-  InputLifecycle.register(()=>{if(drag)finish({pointerId:drag.pointer},true);});
-
-  /* Moving timeline: the time at the center follows relative finger travel. */
-  const tr=$('#transport'),blockTimelineClick=InputLifecycle.clickGuard(tr);let ts=null,frame=0;
+  const refresh=state=>{
+    if(!state.active)return;
+    UI.renderProgress();if(state.node!==miniSeek)UI.drawViz();
+  };
+  const cancel=()=>{
+    if(!owner)return;
+    const state=owner;block(state);clear(state);refresh(state);
+  };
+  // Metadata/artwork refreshes for the same selection must not steal a contact.
+  // renderNowPlaying calls this hook after Engine changes the selected song.
+  UI.cancelSeekGesture=()=>{if(owner&&!valid(owner))cancel();};
   const paint=()=>{
-    frame=0;if(!ts||!ts.active)return;
-    const fraction=ts.d?ts.preview/ts.d:0;UI.seekPreview=fraction;
-    $('#t-cur').textContent=fmtTime(ts.preview);
-    paintSeekFraction(fraction);UI.drawViz();
-  };
-  const begin=e=>{
-    ts.active=true;UI.seekDragging=true;document.body.classList.add('scrubbing');
-    try{tr.setPointerCapture(e.pointerId);}catch(_){}paint();
-  };
-  tr.addEventListener('pointerdown',e=>{
-    if(e.isPrimary===false||e.button>0||ts)return;
-    const wave=(SET.seekStyle||'wave')==='wave',button=e.target.closest('button');
-    if(button&&!wave)return;
-    const duration=Engine.duration();if(!(duration>0))return;
-    ts={pointer:e.pointerId,id:Engine.current?.id,request:Engine._playRequest,x:e.clientX,y:e.clientY,t:Engine.time(),d:duration,width:tr.getBoundingClientRect().width||1,wave,staticBar:SET.nativeSeekbar===1,active:false,moved:false,preview:Engine.time(),button:!!button};
-    if(wave&&!button)begin(e);
-  });
-  tr.addEventListener('pointermove',e=>{
-    if(!ts||e.pointerId!==ts.pointer)return;
-    const dx=e.clientX-ts.x,dy=e.clientY-ts.y;if(!ts.active&&(Math.abs(dx)<10||Math.abs(dx)<Math.abs(dy)*1.2))return;
-    if(!ts.active)begin(e);if(Math.abs(dx)>=6)ts.moved=true;
-    if(ts.wave&&!ts.staticBar)ts.preview=clamp(ts.t-dx/ts.width*Waveform.span(ts.d),0,ts.d);
-    else if(ts.wave){const r=tr.getBoundingClientRect();ts.preview=clamp((e.clientX-r.left)/ts.width*ts.d,0,ts.d);}
-    else ts.preview=clamp(ts.t+dx/ts.width*Math.min(ts.d,300),0,ts.d);
-    if(!frame)frame=requestAnimationFrame(paint);
-  });
-  const finishTimeline=(e,cancel=false)=>{
-    if(!ts||e.pointerId!==ts.pointer)return;
-    if(frame){cancelAnimationFrame(frame);frame=0;}
-    const state=ts;ts=null;
-    if(state.active){
-      if(state.moved)blockTimelineClick(e);
-      if(!cancel&&state.moved&&state.id===Engine.current?.id&&state.request===Engine._playRequest){Engine.seek(state.preview);vibrate(8);}
-      UI.seekPreview=null;UI.seekDragging=false;document.body.classList.remove('scrubbing');
-      UI.renderProgress();UI.drawViz();
+    frame=0;if(!owner||!owner.active)return;
+    if(!valid(owner)){cancel();return;}
+    const fraction=owner.preview/owner.duration;UI.seekPreview=fraction;
+    if(owner.node===miniSeek){
+      paintMiniProgress(fraction);
+      miniSeek.setAttribute('aria-valuenow',String(Math.round(owner.preview)));
+      miniSeek.setAttribute('aria-valuetext',fmtTime(owner.preview)+' of '+fmtTime(owner.duration));
+    }else{
+      paintSeekFraction(fraction,owner.seekWidth);$('#t-cur').textContent=fmtTime(owner.preview);UI.drawViz();
     }
-    try{if(tr.hasPointerCapture(e.pointerId))tr.releasePointerCapture(e.pointerId);}catch(_){}
   };
-  tr.addEventListener('pointerup',e=>finishTimeline(e));
-  tr.addEventListener('pointercancel',e=>finishTimeline(e,true));
-  tr.addEventListener('lostpointercapture',e=>finishTimeline(e,true));
-  InputLifecycle.register(()=>{if(ts)finishTimeline({pointerId:ts.pointer},true);});
-
-  const miniSeek=$('#mini-seek'),mini=$('#mini');let miniDrag=null,miniFrame=0;
-  const blockMiniClick=InputLifecycle.clickGuard(miniSeek);
-  const miniFraction=(x,r=miniDrag?.rect||miniSeek.getBoundingClientRect())=>clamp((x-r.left)/(r.width||1),0,1);
-  const paintMini=x=>{const fraction=miniFraction(x);paintMiniProgress(fraction);miniSeek.setAttribute('aria-valuenow',String(Math.round(fraction*Engine.duration())));miniSeek.setAttribute('aria-valuetext',fmtTime(fraction*Engine.duration())+' of '+fmtTime(Engine.duration()));return fraction;};
-  const endMini=(e,cancel=false)=>{
-    if(!miniDrag||miniDrag.pointer!==e.pointerId)return;
-    cancelAnimationFrame(miniFrame);miniFrame=0;
-    const state=miniDrag;miniDrag=null;UI.seekDragging=false;document.body.classList.remove('scrubbing');
-    blockMiniClick(e);
-    if(!cancel&&state.id===Engine.current?.id&&state.request===Engine._playRequest)Engine.seek(miniFraction(e.clientX,state.rect)*Engine.duration());
-    try{if(miniSeek.hasPointerCapture?.(e.pointerId))miniSeek.releasePointerCapture(e.pointerId);}catch(_){}
-    UI.renderProgress();
+  const activate=state=>{
+    state.active=true;UI.seekDragging=true;document.body.classList.add('scrubbing');
+    if(state.node===seek)seek.classList.add('drag');
+    try{state.node.setPointerCapture(state.pointer);}catch(_){}
   };
+  const update=(e,schedule=true)=>{
+    if(!owner||owner.pointer!==e.pointerId)return;
+    if(!valid(owner)){cancel();return;}
+    const state=owner,x=Number.isFinite(e.clientX)?e.clientX:state.lastX,y=Number.isFinite(e.clientY)?e.clientY:state.lastY;
+    state.lastX=x;state.lastY=y;
+    const dx=x-state.x,dy=y-state.y;
+    state.travel=Math.max(state.travel,Math.hypot(dx,dy));
+    if(state.node===tr){
+      // A stationary button remains a button. Horizontal travel transfers
+      // ownership to the timeline, including travel first delivered on release.
+      if(!state.active&&(Math.abs(dx)<10||Math.abs(dx)<Math.abs(dy)*1.2))return;
+      if(!state.active)activate(state);
+      if(Math.abs(dx)>=6)state.moved=true;
+      if(state.wave&&!state.staticBar)state.preview=clamp(state.start-dx/state.rect.width*state.span,0,state.duration);
+      else if(state.wave)state.preview=clamp((x-state.rect.left)/state.rect.width*state.duration,0,state.duration);
+      else state.preview=clamp(state.start+dx/state.rect.width*Math.min(state.duration,300),0,state.duration);
+    }else state.preview=clamp((x-state.rect.left)/state.rect.width,0,1)*state.duration;
+    if(schedule&&!frame)frame=requestAnimationFrame(paint);
+  };
+  const begin=(node,e)=>{
+    if(owner){if(owner.pointer!==e.pointerId)cancel();return;}
+    if(e.isPrimary===false||e.button>0||InputLifecycle.contacts.size>1||!InputLifecycle.active(node)||!Engine.current)return;
+    if(node===miniSeek&&mini.hidden)return;
+    const wave=(SET.seekStyle||'wave')==='wave',button=node===tr&&!!e.target.closest?.('button');
+    if(button&&!wave)return;
+    const duration=Engine.duration();if(!(Number.isFinite(duration)&&duration>0))return;
+    const rect=node.getBoundingClientRect(),start=clamp(Engine.time(),0,duration);
+    owner={node,pointer:e.pointerId,id:Engine.current.id,request:Engine._playRequest,rect:{left:rect.left,width:rect.width||1},
+      x:e.clientX,y:e.clientY,lastX:e.clientX,lastY:e.clientY,started:time(e),duration,start,preview:start,
+      wave,staticBar:SET.nativeSeekbar===1,span:Waveform.span(duration),active:false,moved:false,travel:0,button};
+    // The knob shares the cached rail width; movement paints never measure DOM.
+    owner.seekWidth=node===seek?owner.rect.width:seek.clientWidth||1;UI.seekWidth=owner.seekWidth;
+    blockedContext=null;
+    if(node!==tr){
+      e.preventDefault();e.stopPropagation?.();activate(owner);update(e,false);paint();
+    }else if(wave&&!button){activate(owner);paint();}
+  };
+  const finish=(e,canceled=false)=>{
+    if(!owner||owner.pointer!==e.pointerId)return;
+    const state=owner;
+    // A button-origin scrub transfers capture to the transport. The old
+    // button's bubbling loss must not discard the timeline's active preview.
+    if(e.type==='lostpointercapture'&&e.target!==state.node&&state.node.hasPointerCapture?.(state.pointer))return;
+    if(!canceled)update(e,false);
+    if(owner!==state)return;
+    const commits=!canceled&&valid(state)&&state.active&&(state.node!==tr||state.moved);
+    const consumes=state.node!==tr||canceled||state.moved||state.travel>7||time(e)-state.started>=450;
+    if(consumes)block(state);
+    // Capture-phase release wins before a scrub's original button can fire.
+    // Pending button holds still receive release so their repeat timer can stop.
+    if(state.active&&(state.node!==tr||state.moved)){e.preventDefault?.();e.stopPropagation?.();}
+    clear(state);
+    if(commits){Engine.seek(state.preview);if(state.node!==miniSeek)vibrate(8);}
+    refresh(state);
+  };
+  for(const node of [seek,tr,miniSeek]){
+    node.addEventListener('pointerdown',e=>begin(node,e));
+    node.addEventListener('pointermove',update);
+    node.addEventListener('pointerup',e=>finish(e),true);
+    node.addEventListener('pointercancel',e=>finish(e,true));
+    node.addEventListener('lostpointercapture',e=>finish(e,true));
+    node.addEventListener('contextmenu',e=>{
+      if((owner?.node===node&&(node!==tr||owner.active||time(e)-owner.started>=450))||
+        (blockedContext?.node===node&&performance.now()-blockedContext.at<=800)){
+        e.preventDefault();e.stopImmediatePropagation();
+      }
+    },true);
+  }
+  document.addEventListener('pointerdown',e=>{if(owner&&e.pointerId!==owner.pointer)cancel();},true);
   miniSeek.tabIndex=0;miniSeek.setAttribute('role','slider');miniSeek.setAttribute('aria-label','Seek current track');miniSeek.setAttribute('aria-valuemin','0');
-  miniSeek.addEventListener('pointerdown',e=>{
-    if(miniDrag||e.isPrimary===false||e.button>0||!(Engine.duration()>0)||mini.hidden)return;
-    e.preventDefault();e.stopPropagation();miniDrag={pointer:e.pointerId,id:Engine.current?.id,request:Engine._playRequest,rect:miniSeek.getBoundingClientRect(),x:e.clientX};UI.seekDragging=true;document.body.classList.add('scrubbing');
-    try{miniSeek.setPointerCapture(e.pointerId);}catch(_){}paintMini(e.clientX);
+  miniSeek.addEventListener('keydown',e=>{
+    if(!['ArrowLeft','ArrowRight','Home','End'].includes(e.key)||!Engine.current||!InputLifecycle.active(miniSeek))return;
+    const duration=Engine.duration();if(!(duration>0))return;
+    e.preventDefault();e.stopPropagation();InputLifecycle.cancelMotionSettle();cancel();
+    const current=Engine.time();Engine.seek(e.key==='Home'?0:e.key==='End'?duration:clamp(current+(e.key==='ArrowRight'?5:-5),0,duration));UI.renderProgress();
   });
-  miniSeek.addEventListener('pointermove',e=>{if(miniDrag?.pointer!==e.pointerId)return;miniDrag.x=e.clientX;if(!miniFrame)miniFrame=requestAnimationFrame(()=>{miniFrame=0;if(miniDrag)paintMini(miniDrag.x);});});
-  miniSeek.addEventListener('pointerup',e=>endMini(e));
-  miniSeek.addEventListener('pointercancel',e=>endMini(e,true));miniSeek.addEventListener('lostpointercapture',e=>endMini(e,true));
-  miniSeek.addEventListener('keydown',e=>{if(!['ArrowLeft','ArrowRight','Home','End'].includes(e.key))return;e.preventDefault();e.stopPropagation();const t=Engine.time(),d=Engine.duration();Engine.seek(e.key==='Home'?0:e.key==='End'?d:clamp(t+(e.key==='ArrowRight'?5:-5),0,d));UI.renderProgress();});
-  InputLifecycle.register(()=>{if(miniDrag)endMini({pointerId:miniDrag.pointer},true);});
-
+  InputLifecycle.register(()=>{cancel();UI.seekWidth=0;});
 }
 function setupVizGestures(){
   const v=$('#vizfull');
@@ -5980,7 +6963,10 @@ function setupAlphaScrub(){
     const hit=letters.findIndex(letter=>y<=letter.bottom),i=hit<0?letters.length-1:hit;
     const ch=letters[i].text;
     bubble.textContent=ch;
-    bubble.style.top=clamp(y-r.top-33,0,r.height-66)+'px';
+    const height=bubble.offsetHeight||102,screenTop=body.closest?.('.screen')?.getBoundingClientRect().top||0;
+    bubble.style.top=(clamp(y-height/2,r.top,(r.bottom??r.top+r.height)-height)-screenTop)+'px';
+    $$('span',a).forEach(span=>span.classList?.toggle('current',span.textContent===ch));a.setAttribute('aria-valuetext',ch);a.setAttribute('aria-valuenow',String(letters.findIndex(letter=>letter.text===ch)));
+    if(ch===String.fromCharCode(94)){lastLetter=ch;++jumpVersion;body.scrollTop=0;return;}
     if(ch===lastLetter)return;lastLetter=ch;
     const index=a.__anchors?.get(ch),box=body.querySelector('.zoom-list');
     if(index!=null&&box){
@@ -5994,7 +6980,8 @@ function setupAlphaScrub(){
       const t1=rows[k].querySelector('.t1');
       if(!t1) continue;
       const first=alphaInitial(t1.textContent.replace(/^\d+\.\s*/,''));
-      if(ch==='#'){ if(!/^[A-Z]$/.test(first)){ target=rows[k]; break; } }
+      if(ch==='0'){if(/^[0-9]$/.test(first)){target=rows[k];break;}}
+      else if(ch==='#'){ if(!/^[A-Z0-9]$/.test(first)){ target=rows[k]; break; } }
       else if(ch===String.fromCharCode(94)){ target=rows[0]; break; }
       else if(/^[A-Z]$/.test(first)&&first>=ch){ target=rows[k]; break; }
     }
@@ -6007,11 +6994,17 @@ function setupAlphaScrub(){
     a.setPointerCapture(e.pointerId); pick(e.clientY); vibrate(6);
   });
   a.addEventListener('pointermove',function(e){ if(pointer===e.pointerId) pick(e.clientY); });
-  const reset=()=>{const id=pointer;pointer=null;lastLetter=null;letters=[];a.classList.remove('active');bubble.classList.remove('on');try{if(a.hasPointerCapture?.(id))a.releasePointerCapture(id);}catch(_){};};
+  const reset=()=>{const id=pointer;pointer=null;lastLetter=null;letters=[];a.classList.remove('active');bubble.classList.remove('on');$$('span',a).forEach(span=>span.classList?.remove('current'));try{if(a.hasPointerCapture?.(id))a.releasePointerCapture(id);}catch(_){};};
   const up=function(e){if(pointer===e.pointerId)reset();};
   a.addEventListener('pointerup',up);
   a.addEventListener('pointercancel',up);
   a.addEventListener('lostpointercapture',up);InputLifecycle.register(reset);
+  a.addEventListener('keydown',e=>{
+    if(!InputLifecycle.active(a)||!['ArrowUp','ArrowDown','Home','End'].includes(e.key))return;
+    e.preventDefault();const spans=$$('span',a);if(!spans.length)return;
+    const current=Number(a.getAttribute('aria-valuenow'))||0,next=e.key==='Home'?0:e.key==='End'?spans.length-1:clamp(current+(e.key==='ArrowDown'?1:-1),0,spans.length-1);
+    letters=spans.map(span=>({text:span.textContent,bottom:span.getBoundingClientRect().bottom}));lastLetter=null;const r=spans[next].getBoundingClientRect();pick((r.top+r.bottom)/2);bubble.classList.remove('on');
+  });
 }
 /* =====================================================================
    INIT
@@ -6158,7 +7151,8 @@ function bindStatic(){
   /* keyboard (desktop testing / bluetooth keyboards) */
   window.addEventListener('keydown',function(e){
     if(e.key==='Escape'&&Sheets.open){e.preventDefault();closeSheet();return;}
-    if(e.defaultPrevented||e.repeat||Sheets.open||e.target.closest?.('input,textarea,select,button,[contenteditable="true"],[role="slider"]'))return;
+    if(e.defaultPrevented||e.repeat||Sheets.open||e.target.closest?.('input,textarea,select,button,[contenteditable]:not([contenteditable="false"]),[role="slider"]'))return;
+    if(['Space','ArrowRight','ArrowLeft'].includes(e.code)||e.key==='n'||e.key==='p')InputLifecycle.cancelMotionSettle();
     if(e.code==='Space'){ e.preventDefault(); Engine.toggle(); }
     else if(e.code==='ArrowRight') Engine.seekBy(SET.seekStep);
     else if(e.code==='ArrowLeft') Engine.seekBy(-SET.seekStep);
@@ -6559,57 +7553,100 @@ EQ.presetMenu=function(){
   $('#preset-flat').onclick=()=>{EQ.applyPreset(EQ.allPresets().find(p=>p.name==='Flat'));closeSheet();};
   render();openSheet('sheet');
 };
+/* Reference EQ presentation: the preamp stays still while the band bank scrolls.
+   Channel-specific EQ and palette controls have no browser engine binding. */
 EQ.tab='eq';
+function eqFreqLabel(f){return f>=1000?String(Number((f/1000).toFixed(f>=10000?0:1)))+'K':String(f);}
+function eqDialArc(){return '<svg class="eq-dial-arc" viewBox="0 0 100 100" aria-hidden="true"><path d="M20.8 84.8 A45.5 45.5 0 1 1 79.2 84.8" pathLength="100"/></svg>';}
+function eqCaptureFocus(box){
+  const active=document.activeElement;if(!active||!box.contains(active))return null;
+  if(active.id)return '#'+active.id;
+  for(const key of ['data-type','data-band','data-preamp','data-freq','data-q']){const value=active.getAttribute(key);if(value!==null)return '['+key+'="'+value+'"]';}
+  return null;
+}
+function eqRestoreFocus(box,selector){if(selector)$(selector,box)?.focus({preventScroll:true});}
+function eqGainSlider(i){
+  return '<div class="vslide" '+(i<0?'data-preamp="1"':'data-band="'+i+'"')+' role="slider" tabindex="0" aria-label="'+(i<0?'Preamp':eqFreqLabel(SET.eqFreqs[i])+' Hz gain')+'" aria-valuemin="-15" aria-valuemax="15"><div class="track"></div><div class="glow"></div><span class="eq-ticks" aria-hidden="true"></span><div class="thumb"></div></div>';
+}
 EQ.render=function(){
-  normalizeEq();const box=$('#bands'),graphic=SET.eqMode==='graphic';
-  box.classList.toggle('graphic-bands',graphic);box.style.display=EQ.tab==='eq'?'flex':'none';
-  $('#curve').style.display=EQ.tab==='eq'?'block':'none';
+  normalizeEq();const box=$('#bands'),graphic=SET.eqMode==='graphic',scroll=box.scrollLeft;
+  const body=$('#sc-eq .eqbody'),focus=eqCaptureFocus(body);body.hidden=EQ.tab!=='eq';body.classList.toggle('eq-graphic',graphic);body.classList.toggle('eq-parametric',!graphic);
+  box.classList.toggle('graphic-bands',graphic);box.classList.toggle('parametric-bands',!graphic);
+  $('#curve').hidden=EQ.tab!=='eq';$('#curve').style.display=EQ.tab==='eq'?'block':'none';
   $('.eqstat').hidden=EQ.tab!=='eq';$('.eqfoot').hidden=EQ.tab!=='eq';
+  $('#eq-capabilities').hidden=EQ.tab!=='eq'||graphic;
   $('#fx-panel').hidden=EQ.tab!=='tone';$('#volume-panel').hidden=EQ.tab!=='vol';
   $$('[data-eqtab]').forEach(b=>{b.classList.toggle('on',b.dataset.eqtab===EQ.tab);b.setAttribute('aria-selected',String(b.dataset.eqtab===EQ.tab));});
-  const slider=(i)=>'<div class="vslide" '+(i<0?'data-preamp="1"':'data-band="'+i+'"')+' role="slider" tabindex="0" aria-label="'+(i<0?'Preamp':fmtFreq(SET.eqFreqs[i])+' Hz gain')+'" aria-valuemin="-15" aria-valuemax="15"><div class="track"></div><div class="glow"></div><div class="thumb"></div></div>';
-  box.innerHTML='<div class="band preamp">'+slider(-1)+'<div class="pill">Preamp<b id="pv">'+SET.preamp.toFixed(1)+'</b></div></div>'+SET.eqFreqs.map((f,i)=>{
-    if(graphic)return '<div class="band" data-b="'+i+'">'+slider(i)+'<div class="pill">'+fmtFreq(f)+'<b data-gain-label="'+i+'">'+SET.eqGains[i].toFixed(1)+'</b></div></div>';
-    return '<div class="band" data-b="'+i+'" style="background:'+BAND_COLORS[i%BAND_COLORS.length]+'"><select class="band-type" aria-label="Band '+(i+1)+' filter type" data-type="'+i+'">'+[['peaking','Peak'],['lowshelf','Low shelf'],['highshelf','High shelf']].map(v=>'<option value="'+v[0]+'"'+(SET.eqTypes[i]===v[0]?' selected':'')+'>'+v[1]+'</option>').join('')+'</select><div style="display:flex;align-items:center">'+slider(i)+'<div><div class="knob sm" data-freq="'+i+'" role="slider" tabindex="0" aria-label="Band '+(i+1)+' frequency"><i></i></div><div class="pill">Freq<b data-freq-label="'+i+'">'+fmtFreq(f)+'</b></div><div class="knob sm" data-q="'+i+'" role="slider" tabindex="0" aria-label="Band '+(i+1)+' Q"><i></i></div><div class="pill">Q<b data-q-label="'+i+'">'+SET.eqQ[i].toFixed(2)+'</b></div></div></div><div class="pill">Gain<b data-gain-label="'+i+'">'+SET.eqGains[i].toFixed(1)+'</b></div></div>';
+  $('#eq-preamp').innerHTML=eqGainSlider(-1)+'<div class="pill">Preamp<b id="pv">'+SET.preamp.toFixed(1)+'</b></div>';
+  box.innerHTML=SET.eqFreqs.map((f,i)=>{
+    if(graphic)return '<div class="band" data-b="'+i+'">'+eqGainSlider(i)+'<div class="pill">'+eqFreqLabel(f)+'<b data-gain-label="'+i+'">'+SET.eqGains[i].toFixed(1)+'</b></div></div>';
+    const shelf=SET.eqTypes[i]!=='peaking';
+    return '<div class="band parametric-band" data-b="'+i+'" style="--band-color:'+BAND_COLORS[i%BAND_COLORS.length]+'">'+
+      '<div class="parametric-gain">'+eqGainSlider(i)+'<div class="pill">Gain<b data-gain-label="'+i+'">'+SET.eqGains[i].toFixed(1)+'</b></div></div>'+
+      '<div class="parametric-parameters"><button class="band-channel" disabled aria-label="L+R only; separate channel EQ unavailable" title="All filters apply to both channels. Separate channel EQ is unavailable.">L+R</button>'+
+      '<select class="band-type" aria-label="Band '+(i+1)+' filter type" data-type="'+i+'">'+[['peaking','Peak'],['lowshelf','Low shelf'],['highshelf','High shelf']].map(v=>'<option value="'+v[0]+'"'+(SET.eqTypes[i]===v[0]?' selected':'')+'>'+v[1]+'</option>').join('')+'</select>'+
+      '<div class="knob sm eq-q-dial" data-q="'+i+'" role="slider" tabindex="'+(shelf?'-1':'0')+'" aria-label="Band '+(i+1)+' Q'+(shelf?'; fixed shelf slope':'')+'" aria-valuemin="0.1" aria-valuemax="12" aria-disabled="'+shelf+'">'+eqDialArc()+'<i></i></div><div class="pill">Q<b data-q-label="'+i+'">'+(shelf?'Fixed':SET.eqQ[i].toFixed(2))+'</b></div>'+
+      '<div class="knob sm eq-frequency-dial" data-freq="'+i+'" role="slider" tabindex="0" aria-label="Band '+(i+1)+' frequency" aria-valuemin="20" aria-valuemax="20000">'+eqDialArc()+'<i></i></div><div class="pill">Freq<b data-freq-label="'+i+'">'+eqFreqLabel(f)+'</b></div></div></div>';
   }).join('');
-  if(!graphic)box.insertAdjacentHTML('beforeend','<div class="band" style="background:none;justify-content:center"><button class="btn" id="band-add">+ Add band</button><button class="btn" id="band-remove">Remove last</button></div>');
-  if($('#band-add'))$('#band-add').onclick=()=>{if(SET.eqFreqs.length>=32){toast('Maximum 32 bands');return;}SET.eqFreqs.push(1000);SET.eqGains.push(0);SET.eqQ.push(1);SET.eqTypes.push('peaking');EQ.changed();EQ.render();};
-  if($('#band-remove'))$('#band-remove').onclick=()=>{if(SET.eqFreqs.length<=1)return;['eqFreqs','eqGains','eqQ','eqTypes'].forEach(k=>SET[k].pop());EQ.changed();EQ.render();};
+  if(!graphic)box.insertAdjacentHTML('beforeend','<div class="band band-tools"><button class="btn" id="band-add">+ Add band</button><button class="btn" id="band-remove">Remove last</button></div>');
+  if($('#band-add'))$('#band-add').onclick=()=>{if(SET.eqFreqs.length>=32){toast('Maximum 32 bands');return;}SET.eqFreqs.push(1000);SET.eqGains.push(0);SET.eqQ.push(1);SET.eqTypes.push('peaking');EQ.changed(true);};
+  if($('#band-remove')){$('#band-remove').disabled=SET.eqFreqs.length<=1;$('#band-remove').onclick=()=>{if(SET.eqFreqs.length<=1)return;['eqFreqs','eqGains','eqQ','eqTypes'].forEach(k=>SET[k].pop());EQ.changed(true);};}
   $('#preset-sel').textContent=SET.preset||'Manual';$('#bass-v').textContent=Math.round(SET.bass*100)+'%';$('#treble-v').textContent=Math.round(SET.treble*100)+'%';
   $('#vol-v').textContent=Math.round(SET.volume*100)+'%';$('#vol-range').value=Math.round(SET.volume*100);
-  $('#m-equ').classList.toggle('on',!!SET.eqEnabled);$('#m-tone').classList.toggle('on',!!SET.toneEnabled);$('#m-lim').classList.toggle('on',!!SET.limiterEnabled);
-  $('#eqstat').textContent=(SET.eqEnabled?'EQ ':'EQ OFF ')+(graphic?'':'PARAM ')+SET.eqFreqs.length+(SET.toneEnabled?' TON':'')+(SET.limiterEnabled?' LMT':'');
-  EQ.knob($('#k-bass'),SET.bass,-1,1);EQ.knob($('#k-treble'),SET.treble,-1,1);
-  EQ.bind();EQ.sync();UI.drawCurve();
+  [['m-equ','eqEnabled'],['m-tone','toneEnabled'],['m-lim','limiterEnabled']].forEach(([id,key])=>{const n=$('#'+id);n.classList.toggle('on',!!SET[key]);n.setAttribute('aria-pressed',String(!!SET[key]));});
+  const bypass=SET.audioMode==='transparent';
+  $('#eq-playback-state').textContent=bypass?'Transparent · effects bypassed':'Custom playback · browser DSP';
+  $('#eqstat').textContent=(bypass?'SAVED ':'')+(SET.eqEnabled?'EQ ':'EQ OFF ')+(graphic?'':'PARAM ')+SET.eqFreqs.length+(SET.toneEnabled?' TON':'')+(SET.limiterEnabled?' LMT':'');
+  [['k-bass','bass'],['k-treble','treble']].forEach(([id,key])=>{const k=$('#'+id);k.setAttribute('role','slider');k.setAttribute('tabindex','0');k.setAttribute('aria-label',key==='bass'?'Bass':'Treble');k.setAttribute('aria-valuemin','-100');k.setAttribute('aria-valuemax','100');k.setAttribute('aria-valuenow',Math.round(SET[key]*100));k.onkeydown=e=>{if(['ArrowUp','ArrowDown','Home'].includes(e.key)){e.preventDefault();setVal(key,e.key==='Home'?0:clamp(SET[key]+(e.key==='ArrowUp'?.01:-.01),-1,1));EQ.render();}};EQ.knob(k,SET[key],-1,1);});
+  EQ.bind();EQ.sync();box.scrollLeft=scroll;if(EQ.tab==='eq')eqRestoreFocus(body,focus);UI.drawCurve();
 };
-EQ.changed=function(){SET.preset='Manual';saveSet();Engine.applyEQ();$('#preset-sel').textContent='Manual';EQ.sync();UI.drawCurve();};
+EQ.changed=function(render=false){SET.preset='Manual';saveSet();Engine.applyEQ();$('#preset-sel').textContent='Manual';if(render)EQ.render();else{EQ.sync();UI.drawCurve();}};
 EQ.sync=function(){
-  $$('#bands .vslide').forEach(s=>{
-    const v=s.dataset.preamp?SET.preamp:SET.eqGains[+s.dataset.band],h=s.getBoundingClientRect().height||200;
-    const th=$('.thumb',s).getBoundingClientRect().height||(SET.eqMode==='graphic'?64:66),range=h-th-16,y=8+((15-v)/30)*range,mid=h/2,center=y+th/2;
-    $('.thumb',s).style.top=y+'px';$('.glow',s).style.top=(SET.eqMode==='graphic'?center:Math.min(center,mid))+'px';$('.glow',s).style.height=(SET.eqMode==='graphic'?Math.max(0,h-8-center):Math.abs(mid-center))+'px';s.setAttribute('aria-valuenow',v.toFixed(1));
+  $$('#sc-eq .eqbody .vslide').forEach(s=>{
+    const preamp=!!s.dataset.preamp,v=preamp?SET.preamp:SET.eqGains[+s.dataset.band],h=s.getBoundingClientRect().height||280;
+    const th=$('.thumb',s).getBoundingClientRect().height||64,range=Math.max(0,h-th-16),y=8+((15-v)/30)*range,center=y+th/2;
+    $('.thumb',s).style.top=y+'px';$('.glow',s).style.top=center+'px';$('.glow',s).style.height=preamp?'0px':Math.max(0,h-8-center)+'px';s.setAttribute('aria-valuenow',v.toFixed(1));s.setAttribute('aria-valuetext',v.toFixed(1)+' dB');
   });
   $$('#bands [data-gain-label]').forEach(b=>b.textContent=SET.eqGains[+b.dataset.gainLabel].toFixed(1));
   if($('#pv'))$('#pv').textContent=SET.preamp.toFixed(1);
-  $$('#bands [data-freq]').forEach(k=>{const i=+k.dataset.freq;EQ.knob(k,Math.log(SET.eqFreqs[i]/20)/Math.log(1000),0,1);k.setAttribute('aria-valuenow',SET.eqFreqs[i]);});
-  $$('#bands [data-q]').forEach(k=>{const i=+k.dataset.q;EQ.knob(k,SET.eqQ[i],.1,12);k.setAttribute('aria-valuenow',SET.eqQ[i]);});
-  $$('#bands [data-freq-label]').forEach(b=>b.textContent=fmtFreq(SET.eqFreqs[+b.dataset.freqLabel]));
-  $$('#bands [data-q-label]').forEach(b=>b.textContent=SET.eqQ[+b.dataset.qLabel].toFixed(2));
+  $$('#bands [data-freq]').forEach(k=>{const i=+k.dataset.freq;EQ.knob(k,Math.log(SET.eqFreqs[i]/20)/Math.log(1000),0,1);k.setAttribute('aria-valuenow',SET.eqFreqs[i]);k.setAttribute('aria-valuetext',eqFreqLabel(SET.eqFreqs[i])+' Hz');});
+  $$('#bands [data-q]').forEach(k=>{const i=+k.dataset.q;EQ.knob(k,SET.eqQ[i],.1,12);k.setAttribute('aria-valuenow',SET.eqQ[i]);k.setAttribute('aria-valuetext',SET.eqTypes[i]==='peaking'?SET.eqQ[i].toFixed(2):'Fixed shelf slope');});
+  $$('#bands [data-freq-label]').forEach(b=>b.textContent=eqFreqLabel(SET.eqFreqs[+b.dataset.freqLabel]));
+  $$('#bands [data-q-label]').forEach(b=>b.textContent=SET.eqTypes[+b.dataset.qLabel]==='peaking'?SET.eqQ[+b.dataset.qLabel].toFixed(2):'Fixed');
 };
+const eqKnobOriginal=EQ.knob;
+EQ.knob=function(node,val,min,max){eqKnobOriginal.call(EQ,node,val,min,max);if(node){node.style.setProperty('--dial-progress',clamp((val-min)/(max-min),0,1));if(['k-bass','k-treble'].includes(node.id)){node.setAttribute('aria-valuenow',Math.round(val*100));node.setAttribute('aria-valuetext',Math.round(val*100)+'%');}}};
 EQ.bind=function(){
-  $$('#bands .vslide').forEach(s=>{
+  $$('#sc-eq .eqbody .vslide').forEach(s=>{
     const get=()=>s.dataset.preamp?SET.preamp:SET.eqGains[+s.dataset.band];
     const put=v=>{v=clamp(v,-15,15);if(s.dataset.preamp)SET.preamp=v;else SET.eqGains[+s.dataset.band]=v;EQ.changed();};
     dragCtl(s,(dx,dy,st)=>{let v=st.v-dy/Math.max(60,s.getBoundingClientRect().height-$('.thumb',s).getBoundingClientRect().height-16)*30;if(Math.abs(v)<.25)v=0;put(v);},()=>({v:get()}));
     s.ondblclick=()=>put(0);s.onkeydown=e=>{if(['ArrowUp','ArrowDown','Home'].includes(e.key)){e.preventDefault();put(e.key==='Home'?0:get()+(e.key==='ArrowUp'?.1:-.1));}};
   });
   $$('#bands .knob').forEach(k=>{
+    if(k.getAttribute('aria-disabled')==='true')return;
     const isF=k.dataset.freq!=null,i=+(isF?k.dataset.freq:k.dataset.q);
     const put=v=>{if(isF)SET.eqFreqs[i]=Math.round(clamp(v,20,20000));else SET.eqQ[i]=clamp(v,.1,12);EQ.changed();};
     dragCtl(k,(dx,dy,st)=>put(isF?st.v*Math.pow(2,-dy/40):st.v-dy/60),()=>({v:isF?SET.eqFreqs[i]:SET.eqQ[i]}));
     k.onkeydown=e=>{if(['ArrowUp','ArrowDown'].includes(e.key)){e.preventDefault();const d=e.key==='ArrowUp'?1:-1;put(isF?SET.eqFreqs[i]*Math.pow(2,d/12):SET.eqQ[i]+d*.05);}};
   });
-  $$('#bands [data-type]').forEach(s=>s.onchange=()=>{SET.eqTypes[+s.dataset.type]=s.value;EQ.changed();});
+  $$('#bands [data-type]').forEach(s=>s.onchange=()=>{SET.eqTypes[+s.dataset.type]=s.value;EQ.changed();EQ.render();});
+};
+EQ.restoreDefaults=function(){SET.eqGains=SET.eqFreqs.map(()=>0);SET.preamp=0;SET.bass=0;SET.treble=0;EQ.changed();EQ.render();toast('Equalizer and tone gains reset');};
+function eqMenuIcon(key){
+  const paths={auto:'<path d="M5 3h12l3 3v15H4V3zM7 3v6h10V3"/><circle cx="12" cy="15" r="2.2"/>',save:'<path d="M5 3h12l3 3v10M7 3v6h10V3M4 3v18h7"/><path d="M13 20v-3a4 4 0 0 1 8 0v3M13 18v3M21 18v3"/>',rename:'<path d="M4 4h6M7 4v16M4 20h6"/><text x="13" y="19" fill="currentColor" stroke="none" font-size="14">A</text>',export:'<path d="M12 21H4V3h10l4 4v4M14 3v4h4M12 15h9M17 11l4 4-4 4"/>',import:'<path d="M12 21h8V3H10L6 7v4M10 3v4H6M3 15h12M11 11l4 4-4 4"/>'};
+  return paths[key]?S(paths[key]):icoHTML(({lock:'lock',share:'share',restore:'refresh'})[key]);
+}
+EQ.moreMenu=function(){
+  const s=$('#sheet');
+  const actions=[['auto','Auto Save','Unavailable in this browser',null],['lock','Lock','Unavailable in this browser',null],['save','Save preset','Device assignment unavailable',EQ.savePreset],['rename','Rename','Unavailable in this browser',null],['share','Share','Unavailable in this browser',null],['export','Export','Preset export unavailable',null],['import','Import','Preset import unavailable',null],['restore','Restore Defaults','Flatten EQ and tone gains',EQ.restoreDefaults]];
+  s.innerHTML='<div class="eq-menu-heading"><h3>Equalizer</h3><button class="iconbtn" id="eq-menu-close" aria-label="Close equalizer menu">'+icoHTML('close')+'</button></div><div class="eq-menu-modes"><button data-eq-mode="graphic" aria-pressed="'+(SET.eqMode==='graphic')+'">Graphic</button><button data-eq-mode="parametric" aria-pressed="'+(SET.eqMode==='parametric')+'">Parametric</button><button id="eq-playback-mode" aria-pressed="'+(SET.audioMode==='custom')+'">'+(SET.audioMode==='transparent'?'Enable Custom DSP':'Use Transparent')+'</button></div><div class="eq-menu-rows">'+actions.map(([key,label,note,fn])=>'<button class="eq-menu-row" data-eq-action="'+key+'" '+(!fn?'disabled':'')+'><span class="eq-menu-symbol" aria-hidden="true">'+eqMenuIcon(key)+'</span><span>'+label+'<small>'+note+'</small></span></button>').join('')+'</div>';
+  const close=()=>closeSheet();
+  $('#eq-menu-close').onclick=close;
+  $$('[data-eq-mode]',s).forEach(b=>b.onclick=()=>{SET.eqMode=b.dataset.eqMode;saveSet();close();EQ.render();});
+  $('#eq-playback-mode').onclick=()=>{setVal('audioMode',SET.audioMode==='transparent'?'custom':'transparent');close();EQ.render();};
+  $$('[data-eq-action]',s).forEach(b=>{const action=actions.find(a=>a[0]===b.dataset.eqAction);if(action?.[3])b.onclick=()=>{close();action[3]();};});
+  openSheet('sheet');
 };
 const rebuildEq=EQ.rebuild;
 EQ.rebuild=function(){rebuildEq.call(EQ);SET.eqTypes=SET.eqFreqs.map(()=> 'peaking');SET.eqQ=SET.eqFreqs.map(()=>1.4142);saveSet();Engine.applyEQ();EQ.render();};
@@ -6648,15 +7685,45 @@ applySettings=function(k){
   if(k==='trackView'||k==='gridColumns'||k==='albumView'){if(Nav.cur==='list')Views.render(Views.currentSpec,true);if(Nav.cur==='search')Search.run();}
   if(k==='artAspect')$$('.artcard').forEach(c=>c.style.backgroundSize=SET.artAspect==='crop'?'cover':'contain');
 };
+/* Native dial geometry, using only the controls already in the browser graph. */
+const EQ_DIALS={
+  volume:{min:0,max:1,step:.01,format:v=>Math.round(v*100)+'%'},
+  balance:{min:-1,max:1,step:.01,format:v=>v.toFixed(2)},
+  speed:{min:.5,max:2,step:.05,format:v=>v.toFixed(2)+'×'},
+  reverbDamp:{min:0,max:1,step:.01,format:v=>Math.round(v*100)+'%'},
+  reverbDelay:{min:0,max:200,step:1,format:v=>Math.round(v)+' ms'},
+  reverbSize:{min:.2,max:4,step:.05,format:v=>v.toFixed(2)+' s'},
+  reverbMix:{min:0,max:.7,step:.01,format:v=>Math.round(v*100)+'%'}
+};
+function eqEffectDial(key,label,extra=''){
+  const d=EQ_DIALS[key],unavailable=!d;
+  return '<div class="eq-effect-cell '+extra+(unavailable?' eq-unavailable':'')+'"><div class="knob eq-effect-dial" '+(unavailable?'aria-disabled="true"':'data-effect-dial="'+key+'" role="slider" tabindex="0" aria-valuemin="'+d.min+'" aria-valuemax="'+d.max+'"')+' aria-label="'+label+(unavailable?'; unavailable':'')+'">'+eqDialArc()+'<i></i></div><div class="eq-effect-label">'+label+'<b '+(unavailable?'':'data-effect-value="'+key+'"')+'>'+(unavailable?'Unavailable':d.format(Number(SET[key])||0))+'</b></div></div>';
+}
+function bindEqEffectDials(box){
+  $$('[data-effect-dial]',box).forEach(k=>{
+    const key=k.dataset.effectDial,d=EQ_DIALS[key];
+    const sync=()=>{const v=Number(SET[key])||0;if(key==='speed')EQ.knob(k,v<1?v-.5:.5+(v-1)*.5,0,1);else EQ.knob(k,v,d.min,d.max);k.setAttribute('aria-valuenow',v);k.setAttribute('aria-valuetext',d.format(v));$('[data-effect-value="'+key+'"]',box).textContent=d.format(v);};
+    const put=v=>{setVal(key,clamp(Math.round(v/d.step)*d.step,d.min,d.max));sync();};
+    dragCtl(k,(dx,dy,st)=>put(st.v-dy/200*(d.max-d.min)),()=>({v:Number(SET[key])||0}));
+    k.onkeydown=e=>{if(['ArrowUp','ArrowDown','Home'].includes(e.key)){e.preventDefault();put(e.key==='Home'?DEFAULTS[key]:Number(SET[key])+(e.key==='ArrowUp'?d.step:-d.step));}};
+    k.ondblclick=()=>put(DEFAULTS[key]);sync();
+  });
+}
 function renderFxPanel(){
-  const box=$('#fx-panel');box.innerHTML='<h3>Reverb</h3>';
-  [S_sw('reverbEnabled','Reverb'),S_sl('reverbDamp','Damping',0,100,1,v=>v+'%',['Bright','Soft'],100),S_sl('reverbSize','Room decay',20,400,5,v=>(v/100).toFixed(2)+' s',['0.2 s','4 s'],100),S_sl('reverbDelay','Pre-delay',0,200,1,v=>v+' ms',['0','200 ms']),S_sl('reverbMix','Mix',0,70,1,v=>v+'%',['Dry','Wet'],100)].forEach(i=>box.appendChild(Settings.item(i)));
-  box.appendChild(el('div','note','Convolution reverb for browser playback.'));
-  const reset=el('button','btn','Reset');reset.onclick=()=>{['reverbDamp','reverbSize','reverbDelay','reverbMix'].forEach(k=>SET[k]=DEFAULTS[k]);saveSet();Engine.applyReverb();renderFxPanel();};box.appendChild(reset);
+  const box=$('#fx-panel'),focus=eqCaptureFocus(box);box.classList.toggle('eq-reverb-off',!SET.reverbEnabled);
+  box.innerHTML='<div class="eq-reverb-grid">'+eqEffectDial('reverbDamp','Damp')+eqEffectDial('filter','Filter')+eqEffectDial('fade','Fade')+eqEffectDial('reverbDelay','Pre-Delay')+eqEffectDial('preDelayMix','Pre-Delay Mix')+eqEffectDial('reverbSize','Size')+'</div><div class="eq-reverb-actions"><button class="eq-outline" id="eq-reverb-toggle" aria-pressed="'+!!SET.reverbEnabled+'">Reverb</button><button class="eq-outline" disabled title="Reverb presets are unavailable">Preset</button><button class="eq-outline" disabled title="Reverb preset saving is unavailable">Save</button><button class="eq-outline" id="eq-reverb-reset">Reset</button></div>'+eqEffectDial('reverbMix','Mix','eq-reverb-mix')+'<div class="eq-engine-note">Browser convolution reverb · native reverb presets unavailable</div>';
+  $('#eq-reverb-toggle').onclick=()=>{setVal('reverbEnabled',!SET.reverbEnabled);renderFxPanel();};
+  $('#eq-reverb-reset').onclick=()=>{['reverbDamp','reverbSize','reverbDelay','reverbMix'].forEach(k=>SET[k]=DEFAULTS[k]);saveSet();Engine.applyReverb();renderFxPanel();};
+  bindEqEffectDials(box);eqRestoreFocus(box,focus);
 }
 function renderVolumePanel(){
-  const box=$('#volume-panel');box.innerHTML='<h3>Volume / Stereo</h3>';
-  [S_sl('volume','Volume',0,100,1,v=>v+'%',['0','100%'],100),S_sl('balance','Balance',-100,100,1,v=>v===0?'Center':(v<0?'L ':'R ')+Math.abs(v)+'%',['L','R'],100),S_sw('mono','Mono'),S_sl('speed','Tempo',50,200,5,v=>(v/100).toFixed(2)+'×',['0.5×','2×'],100),S_sw('pitchPreserve','Preserve pitch')].forEach(i=>box.appendChild(Settings.item(i)));
+  const box=$('#volume-panel'),focus=eqCaptureFocus(box);
+  box.innerHTML='<div class="eq-volume-upper">'+eqEffectDial('balance','Balance')+eqEffectDial('stereoExpand','Stereo Expand')+'</div><div class="eq-tempo-row"><span class="eq-outline eq-tempo-label">Tempo</span>'+eqEffectDial('speed','Tempo','eq-tempo-dial')+'<div class="eq-tempo-steps"><button id="eq-tempo-up" aria-label="Increase tempo">+</button><button id="eq-tempo-down" aria-label="Decrease tempo">−</button></div></div><div class="eq-volume-actions"><button class="eq-outline" id="eq-mono" aria-pressed="'+!!SET.mono+'">Mono</button><button class="eq-outline" id="eq-volume-reset">Reset</button></div>'+eqEffectDial('volume','Volume','eq-master-volume')+'<button class="eq-pitch" id="eq-pitch-preserve" aria-pressed="'+!!SET.pitchPreserve+'">Preserve pitch '+(SET.pitchPreserve?'✓':'')+'</button>';
+  $('#eq-mono').onclick=()=>{setVal('mono',!SET.mono);renderVolumePanel();};
+  $('#eq-pitch-preserve').onclick=()=>{setVal('pitchPreserve',!SET.pitchPreserve);renderVolumePanel();};
+  $('#eq-volume-reset').onclick=()=>{['volume','balance','mono','speed','pitchPreserve'].forEach(k=>SET[k]=DEFAULTS[k]);saveSet();Engine.applyVolume();Engine.applySpeed();renderVolumePanel();};
+  for(const [id,delta] of [['eq-tempo-up',.05],['eq-tempo-down',-.05]])$('#'+id).onclick=()=>{setVal('speed',clamp(SET.speed+delta,.5,2));renderVolumePanel();};
+  bindEqEffectDials(box);eqRestoreFocus(box,focus);
 }
 
 /* Keep the existing delegated lists and indexed library. Add a grid at the
@@ -6673,7 +7740,8 @@ Nav.go=function(name,push){
   if(name==='player'&&['library','list','search'].includes(Nav.cur))Nav.lastLibrary=Nav.cur;
   navGoOriginal.call(Nav,name,push);
   document.body.classList.toggle('in-settings',name==='settings');
-  $('#mini').hidden=name==='player'||name==='settings'||!Engine.current;
+  // A live morph owns the real mini even after outer navigation wrappers return.
+  $('#mini').hidden=!(SharedPlayerMotion.active?.()||SharedPlayerMotion.transaction)&&(name==='player'||name==='settings'||!Engine.current);
 };
 Nav.returnToLibrary=function(){Nav.go(['list','search'].includes(Nav.lastLibrary)?Nav.lastLibrary:'library');};
 const viewsPushOriginal=Views.push;
@@ -6701,17 +7769,20 @@ const oldCounts=Views.counts,oldItems=Views.buildItems;
 CATS.splice(CATS.findIndex(c=>c.k==='bookmarks')+1,0,{k:'history',n:'Recently Played',ic:'clock',c:'#b27855'},{k:'disliked',n:'Low Rated',ic:'thumbdown',c:'#9d657a'});
 Views.counts=function(){const c=oldCounts.call(Views);c.history=allTracks().filter(t=>t.lastPlayed).length;c.disliked=allTracks().filter(t=>t.rating<0).length;return c;};
 Views.buildItems=function(spec){
-  if(spec.kind==='history')return {type:'tracks',items:allTracks().filter(t=>t.lastPlayed).sort((a,b)=>b.lastPlayed-a.lastPlayed).slice(0,200)};
-  if(spec.kind==='disliked')return {type:'tracks',items:allTracks().filter(t=>t.rating<0)};
-  return oldItems.call(Views,spec);
+  let data;
+  if(spec.kind==='history')data={type:'tracks',items:allTracks().filter(t=>t.lastPlayed).sort((a,b)=>b.lastPlayed-a.lastPlayed).slice(0,200)};
+  else if(spec.kind==='disliked')data={type:'tracks',items:allTracks().filter(t=>t.rating<0)};
+  else data=oldItems.call(Views,spec);
+  return ListOptions.prepare(data,spec);
 };
 Search.history=[];
 try{const h=JSON.parse(localStorage.getItem('dc.search.history')||'[]');if(Array.isArray(h))Search.history=h.filter(s=>typeof s==='string').slice(0,20);}catch(e){}
 Search.remember=function(){const q=$('#q').value.trim();if(!q)return;Search.history=[q,...Search.history.filter(x=>x.toLowerCase()!==q.toLowerCase())].slice(0,20);try{localStorage.setItem('dc.search.history',JSON.stringify(Search.history));}catch(e){}};
 const searchOriginal=Search.run;
 Search.run=function(){
-  if($('#q').value.trim()){searchOriginal.call(Search);return;}
-  TrackWindow.clean($('#q-body'));
+  // The history view replaces results too. Always use the production teardown
+  // first, including selection ownership, windows and pending artwork.
+  searchOriginal.call(Search);if($('#q').value.trim())return;
   $('#q-body').innerHTML=Search.history.map((q,i)=>'<div class="history-row"><button class="history-term" data-history="'+i+'">'+esc(q)+'</button><button class="iconbtn" data-remove-history="'+i+'" aria-label="Remove '+esc(q)+'">'+icoHTML('close')+'</button></div>').join('')+(Search.history.length?'<button class="btn" id="history-clear" style="display:block;margin:16px auto">Clear search history</button>':'<div class="note">Search titles, artists, albums, folders and genres.</div>');
   $$('#q-body [data-history]').forEach(b=>b.onclick=()=>{$('#q').value=Search.history[+b.dataset.history];Search.run();});
   function save(){try{localStorage.setItem('dc.search.history',JSON.stringify(Search.history));}catch(e){}Search.run();}
@@ -6747,9 +7818,7 @@ function setupParity(){
   const top=$('#sc-settings .topbar'),search=el('button','iconbtn',icoHTML('search'));search.id='set-search';search.setAttribute('aria-label','Search settings');top.insertBefore(search,$('#set-close'));search.onclick=Settings.search;$('#set-close').onclick=Settings.close;
   const eq=$('#sc-eq .scroll');eq.insertBefore(el('div','eq-panel'),$('.eqbody'));eq.querySelector('.eq-panel').id='fx-panel';eq.insertBefore(el('div','eq-panel'),$('.eqbody'));eq.querySelector('.eq-panel:not([id])').id='volume-panel';renderFxPanel();renderVolumePanel();
   $$('[data-eqtab]').forEach(b=>{b.onclick=()=>{EQ.tab=b.dataset.eqtab;renderFxPanel();renderVolumePanel();EQ.render();};b.setAttribute('aria-label',b.dataset.eqtab==='eq'?'Equalizer':b.dataset.eqtab==='tone'?'Reverb':'Volume / Stereo');});
-  $('#preset-more').onclick=()=>{
-    dialog('Equalizer','',[{label:'Graphic',fn:()=>{SET.eqMode='graphic';EQ.render();saveSet();}},{label:'Parametric',fn:()=>{SET.eqMode='parametric';EQ.render();saveSet();}},{label:'Save preset',fn:EQ.savePreset},{label:'Presets',fn:EQ.presetMenu}]);
-  };
+  $('#preset-more').onclick=EQ.moreMenu;
   PAGES.look.items.unshift(S_act('Use recording appearance','Your exported Poweramp layout, font and background settings',applyRecordingProfile));
   PAGES.look.items.splice(1,0,S_seg('settingsTheme','Settings Theme',[['default','Default'],['light','Light'],['dark','Dark']]));
   PAGES.listui.items.splice(0,0,S_seg('trackView','Songs View',[['grid','Grid'],['list','List']]),S_seg('gridColumns','Grid Columns',[[2,'2'],[3,'3'],[4,'4'],[5,'5']],'Pinch a song grid to change its size'));
@@ -6770,8 +7839,110 @@ function setupParity(){
 /* 0.4.1: reference-driven settings and the ten native list scenes.
    Native numeric zoom IDs and page/control order come from the supplied APK.
    Browser behavior is implemented here independently. */
-const NativeSchema={"art":{"title":"Album Art","items":[{"t":"head","text":"Download"},{"t":"native","key":"download_album_art","title":"Download Album Art","desc":"Automatically search and download missing album art","kind":"switch","format":"%d","default":false},{"t":"native","key":"download_artist_art","title":"Download Artist Images","desc":"Includes Album Artists and Composers. If disabled, track album art is used","kind":"switch","format":"%d","default":false},{"t":"native","key":"aa_download_hd","title":"High Resolution","desc":"Higher downloaded album art resolution, increases storage/connection bandwidth usage","kind":"switch","format":"%d","default":false},{"t":"native","key":"download_aa_wifi_only","title":"Download Only On Wi-Fi","desc":"Album art will be downloaded only when wi-fi is connected","kind":"switch","format":"%d","default":true},{"t":"native","key":"reset_negative_aa_status","title":"Reset Negative Status","desc":"Clear stored \"not-found\" status for album/artist images","kind":"action","format":"%d","default":0},{"t":"native","key":"clear_aa_cache","title":"Delete Cache","desc":"Poweramp images cache will be deleted","kind":"action","format":"%d","default":0},{"t":"head","text":"Advanced Tweaks"},{"t":"native","key":"aa_force_default","title":"Force Default Image","desc":"Always show default image instead of any album art","kind":"switch","format":"%d","default":false},{"t":"native","key":"aa_8888","title":"Use 24-bit RGB","desc":"Higher color resolution for album art. Requires 2x more memory per image","kind":"switch","format":"%d","default":false},{"t":"native","key":"aa_hi_res_for_apis","title":"Send High Resolution Album Art","desc":"High resolution album art is sent to Android lock screen, app widgets, and other media API consumers. Lock Screen / Blur has priority over this option","kind":"switch","format":"%d","default":false},{"t":"native","key":"aa_always","title":"Always Send Album Art","desc":"For smartwatches/other devices which should always receive album art, even when screen is off","kind":"switch","format":"%d","default":false},{"t":"native","key":"aa_no_ashmem","title":"API Compatibility","desc":"Change if album art is not visible in Android Auto/3rd party apps","kind":"switch","format":"%d","default":false},{"t":"native","key":"download_if_no_tags","title":"Also Search By Title/Filename","desc":"Search for album art even if no tags are found in the track","kind":"switch","format":"%d","default":true},{"t":"native","key":"prefer_downloaded_aa","title":"Prefer Downloaded Album Art","desc":"Prefer downloaded album art over in-folder Cover.jpg/AlbumArt.jpg, etc","kind":"switch","format":"%d","default":false},{"t":"native","key":"aa_aspect","title":"Aspect Ratio","desc":"","kind":"chips","options":[[0,"Default"],[1,"Keep Aspect Ratio"],[2,"Square"]],"format":"%d","default":0},{"t":"native","key":"aa_higher_res","title":"Increase Resolution","desc":"Increase image quality for high resolution embedded/in-folder images","kind":"switch","format":"%d","default":false},{"t":"native","key":"aa_per_stream_track","title":"Prefer Track Cover for Streams","desc":"Show album art based on stream track title/artist instead of the stream name","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"aa"},"background":{"title":"Background","items":[{"t":"native","key":"aa_blur_enabled","title":"Enable Blurred Backgrounds","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"list_aa_blur_enabled","title":"List Background","desc":"","kind":"switch","dependency":"aa_blur_enabled","format":"%d","default":false},{"t":"native","key":"lyrics_aa_blur_enabled","title":"Lyrics Background","desc":"","kind":"switch","dependency":"aa_blur_enabled","format":"%d","default":false},{"t":"note","text":"Skins may override, change, or completely disable background\n\nLyrics and list background is specifically dimmed to make text readable","quote":true},{"t":"native","key":"aa_bg_gradient","title":"Background Gradient","desc":"","kind":"slider","min":0,"max":10,"format":"%d","ends":["None","Max"],"default":0},{"t":"native","key":"aa_bg_gradient_color","title":"Background Gradient Color","desc":"","kind":"color","format":"%s","default":"#000000"},{"t":"native","key":"aa_bg_gradient_for_list","title":"Background Gradient For Lists","desc":"Also apply background gradient for list background","kind":"switch","format":"%d","default":false},{"t":"note","text":"Skin may override and disable this option","quote":false},{"t":"native","key":"aa_blur","title":"Background Blur","desc":"","kind":"slider","dependency":"aa_blur_enabled","min":0,"max":15,"format":"%d","ends":["Less","More"],"default":5},{"t":"native","key":"aa_blur_scale","title":"Background Details","desc":"","kind":"slider","dependency":"aa_blur_enabled","min":0,"max":10,"format":"%d","ends":["Solid Color","Detailed"],"default":5},{"t":"native","key":"aa_blur_intensity","title":"Background Intensity","desc":"","kind":"slider","dependency":"aa_blur_enabled","min":0,"max":250,"format":"%d%%","default":100},{"t":"note","text":"Some skins may adjust this option to make text readable","quote":false},{"t":"native","key":"aa_blur_saturation","title":"Background Saturation","desc":"","kind":"slider","dependency":"aa_blur_enabled","min":0,"max":300,"step":10,"format":"%d%%","default":150},{"t":"note","text":"Some skins may adjust this option to make text readable","quote":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"aa_bg"},"audio":{"title":"Audio","items":[{"t":"native","key":"audio_info","title":"Audio Info","desc":"Detailed info about the audio processing. Also available by long press on small meta info on the Main and Equalizer screens","kind":"action","format":"%d","default":0},{"t":"native","key":"fade","title":"Crossfade, Fade, and Gapless","desc":"Crossfade options, fade type and length, gapless","kind":"nav","page":"crossfade","format":"%d","default":0},{"t":"native","key":"rg","title":"Replay Gain (RG)","desc":"Enable RG, set source, preamp values","kind":"nav","page":"rg","format":"%d","default":0},{"t":"native","key":"audio_focus","title":"Audio Focus","desc":"Pause/Resume/Duck volume on calls/notifications/start","kind":"nav","page":"focus","format":"%d","default":0},{"t":"native","key":"","title":"Equalizer","desc":"Equalizer settings, number of bands, frequencies","kind":"nav","page":"equalizer","format":"%d","default":0},{"t":"native","key":"audio_resampler","title":"Resampler","desc":"Resampling/dither settings","kind":"nav","page":"resampler","format":"%d","default":0},{"t":"native","key":"audio_dvc","title":"Direct Volume Control (DVC)","desc":"DVC options, DVC for Bluetooth","kind":"nav","page":"dvc","format":"%d","default":0},{"t":"native","key":"audio_outputs","title":"Output","desc":"Audio output options","kind":"nav","page":"output","format":"%d","default":0},{"t":"native","key":"audio_tweaks","title":"Advanced Tweaks","desc":"Volume levels, MusicFX, equalizer/reverb presets reset","kind":"nav","page":"tweaks","format":"%d","default":0}],"source":"audio"},"dvc":{"title":"Direct Volume Control (DVC)","items":[{"t":"note","text":"Direct Volume Control (DVC) improves volume and equalizer/tone dynamic range\n\nDVC for Bluetooth only works with Absolute Volume disabled in Android developer options. Otherwise it results in too low volume\n\nAbsolute Volume means Bluetooth device volume is synced to the phone","quote":true},{"t":"native","key":"dvc_enabled","title":"Enable Direct Volume Control","desc":"","kind":"switch","format":"%d","default":true},{"t":"note","text":"DVC is enabled if:\n\n• per output option allows it\n\n• No DVC for Bluetooth Absolute Volume option allows it","quote":false},{"t":"head","text":"Bluetooth"},{"t":"native","key":"no_dvc_bt_absvol","title":"No DVC for Bluetooth Absolute Volume","desc":"Automatically disable DVC for Bluetooth when Absolute Volume is detected or it's not possible to detect it","kind":"switch","dependency":"dvc_enabled","format":"%d","default":true},{"t":"note","text":"• this option may temporarily change volume for a few seconds on Bluetooth connection\n\n• volume may be constantly changed and probed on this page","quote":false},{"t":"note","text":"• it's not possible to detect Absolute Volume on your device\n\n• on you device this option just disables DVC for Bluetooth by default\n\n• uncheck if you know that Absolute Volume is disabled for your device","quote":true},{"t":"native","key":"dvc_bt_msg","title":"Disable Bluetooth Absolute Volume","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"no_dvc_gain_mb","title":"No DVC - Preamp Reduction","desc":"Allows equalization/basses without distortion","kind":"knob","min":-1000,"max":0,"step":50,"scale":100.0,"format":"%.1fdB","default":-600},{"t":"native","key":"compensate_dvc_vol","title":"Compensate DVC Volume","desc":"Specifically compensate low volume in DVC mode on buggy Android 15+ firmwares. Applied only when the issue is detected","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"audio_dvc"},"equalizer":{"title":"Equalizer","items":[{"t":"note","text":"Depending on the loaded preset, the equalizer can be in Graphic or Parametric mode\n\nPreset list has the Graphic and Parametric filters (both can be activated)\n\nGraphic mode is easy to use 5-32 preconfigured bands","quote":true},{"t":"native","key":"peq_equ_bands","title":"Graphic Equalizer Bands","desc":"Set number of bands, configure frequencies","kind":"nav","page":"peq_equ_bands","format":"%d","default":0},{"t":"native","key":"peq_equ_tone","title":"Tone","desc":"Set Bass/Treble frequencies and Q factors","kind":"nav","page":"peq_equ_tone","format":"%d","default":0},{"t":"native","key":"eq_labels","title":"Equalizer Values","desc":"","kind":"chips","options":[[0,"Hidden"],[1,"dB"],[2,"%"]],"format":"%d","default":1},{"t":"native","key":"tone_labels","title":"Tone Values","desc":"","kind":"chips","options":[[0,"Hidden"],[1,"dB"],[2,"%"]],"format":"%d","default":2},{"t":"native","key":"_autosave","title":"Auto Save","desc":"Auto save current preset","kind":"switch","format":"%d","default":false},{"t":"native","key":"dsp_border_gain","title":"Smooth Equalizer/Tone Gains","desc":"Automatically reduce Equalizer/Tone band gains near maximum volume to avoid overloading","kind":"switch","format":"%d","default":true},{"t":"native","key":"suggest_autoeq","title":"Suggest AutoEq Presets","desc":"Show suggestion to assign AutoEq preset for the connected Bluetooth/USB device","kind":"switch","format":"%d","default":false},{"t":"native","key":"_clear_autoeq_known_devices","title":"Reset the Disabled AutoEq Suggestions","desc":"","kind":"action","dependency":"suggest_autoeq","format":"%d","default":0},{"t":"native","key":"_presets_to_peq","title":"Export Presets to the Poweramp Equalizer app","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"_import_autoeq","title":"Import AutoEq Presets","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"reset_eq_presets","title":"Restore Equalizer Presets","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"audio_equ"},"focus":{"title":"Audio Focus","items":[{"t":"native","key":"resume_after_call","title":"Resume After Call","desc":"Resume playing on hang up (if paused by call)","kind":"switch","format":"%d","default":true},{"t":"native","key":"resume_on_start","title":"Resume On Start","desc":"Resume playing when Poweramp is started","kind":"switch","format":"%d","default":false},{"t":"native","key":"resume_on_resume","title":"Resume On Reopen","desc":"Also resume when Poweramp is already running and reopened from the launcher","kind":"switch","dependency":"resume_on_start","format":"%d","default":true},{"t":"native","key":"resume_on_mount","title":"Wait For Storage","desc":"Wait for a storage (up to 30s.) to mount before resuming on start","kind":"switch","dependency":"resume_on_start","format":"%d","default":false},{"t":"native","key":"cc_af_warning","title":"Chromecast output may ignore calls and short Audio Focus completely. Press here to configure","desc":"","kind":"link","page":"audio_output_device_opts","anchor":"no_af","format":"%d","default":0},{"t":"head","text":"Audio Focus"},{"t":"native","key":"","title":"On Android 8 and up Poweramp can be unloaded by the system while paused. Press here to avoid that via Keep Notification option","desc":"","kind":"link","page":"notifications","anchor":"keep_notification_always","format":"%d","default":0},{"t":"native","key":"af_short","title":"Short Audio Focus Change / Calls","desc":"Temporarily pause on short audio focus change (calls/notifications/navigation/etc.)","kind":"switch","format":"%d","default":true},{"t":"native","key":"pause_in_call","title":"Pause In Call","desc":"Pause when phone call happens. Poweramp always pauses for call via Bluetooth","kind":"switch","format":"%d","default":true},{"t":"native","key":"resume_on_focus","title":"Resume On Focus Gain","desc":"Resume after getting back the focus. If disabled, player stays paused","kind":"switch","dependency":"af_short","format":"%d","default":true},{"t":"native","key":"af_short_duck","title":"Duck Volume","desc":"When possible, allow lowering the volume on short audio focus. This option can be overridden by Audio output settings","kind":"switch","dependency":"af_short","format":"%d","default":true},{"t":"native","key":"af_permanent","title":"Permanent Audio Focus Change","desc":"Pause on permanent audio focus change (other player/game/etc.)","kind":"switch","format":"%d","default":true},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"audio_focus"},"audio_output":{"title":"Audio Output","items":[{"t":"head","text":"Use For Output Devices:"},{"t":"native","key":"output_headset","title":"Wired Headset/AUX","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_speaker","title":"Speaker","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_bt","title":"Bluetooth","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_usb","title":"USB DAC","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_chromecast","title":"Chromecast","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_other","title":"Other Output Devices","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"audio_output"},"audio_output_device_opts":{"title":"Audio Output Device Opts","items":[{"t":"note","text":"Enable","quote":false},{"t":"native","key":"sample_rate","title":"Sample Rate","desc":"","kind":"select","format":"%d","default":0},{"t":"native","key":"sample_fmt","title":"Sample Format","desc":"","kind":"select","format":"%d","default":0},{"t":"note","text":"Sample rate/format may be detected only when playback is active","quote":false},{"t":"note","text":"Global sound effects, like Dolby, may force standard definition audio (48 kHz/16 bit)","quote":false},{"t":"native","key":"float","title":"Float32 Sample Format","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"no_dvc","title":"No DVC","desc":"Disable Direct Volume Control for this output/device","kind":"switch","format":"%d","default":false},{"t":"native","key":"no_headroom","title":"No Headroom Gain","desc":"Don't reduce output gain when DVC is disabled. May cause distortion for high equ/tone gains","kind":"switch","format":"%d","default":false},{"t":"native","key":"buffer_size","title":"Buffer Size","desc":"Tweak if audio skips","kind":"action","format":"%d","default":0},{"t":"native","key":"vis_latency_ms","title":"Visualization/Lyrics Delay","desc":"","kind":"slider","min":0,"max":2500,"format":"Extra delay to apply to visualization/lyrics for a better sync: %d ms","default":0},{"t":"native","key":"oem_variant","title":"Use OEM Variant","desc":"Use OEM API Variant for this output/device","kind":"switch","format":"%d","default":false},{"t":"native","key":"cc_force_aa","title":"Force Send Album Art","desc":"Send album art to Chromecast device even if it reports it has no display","kind":"switch","format":"%d","default":false},{"t":"native","key":"cc_show_meta","title":"Show Meta Information","desc":"Show additional meta information (track format, category, next track) on the Chromecast devices with a screen","kind":"switch","format":"%d","default":false},{"t":"native","key":"no_equ","title":"No Equ/Tone","desc":"Disable equalizer/tone DSP for this output/device","kind":"switch","format":"%d","default":false},{"t":"native","key":"no_duck","title":"No Duck","desc":"Disable volume ducking for this output, e.g. when notifications cause issues with this output. Temporarily pause player instead","kind":"switch","format":"%d","default":false},{"t":"native","key":"no_af","title":"Ignore Audio Focus","desc":"Ignore calls/short Audio Focus requests, including notification sounds and ringtones","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"audio_output_device_opts"},"output":{"title":"Output","items":[{"t":"head","text":"Output Plugins"},{"t":"native","kind":"nav","page":"output_at","title":"AudioTrack Output","desc":"Java based output"},{"t":"native","kind":"nav","page":"output_osl","title":"OpenSL ES Output","desc":"Native optimized output"},{"t":"native","kind":"nav","page":"output_aa","title":"AAudio Output","desc":"Hi-Res (Android 14+) native output"},{"t":"native","kind":"nav","page":"output_oslhd","title":"OpenSL ES Hi-Res Output","desc":"Experimental native 24+ bit 96/192+ kHz"},{"t":"native","kind":"nav","page":"output_athd","title":"Hi-Res Output","desc":"Experimental direct hardware 24+ bit 96/192+ kHz"},{"t":"native","kind":"nav","page":"output_cc","title":"Chromecast Output","desc":""},{"t":"native","kind":"nav","page":"output_bench","title":"Built-in Benchmark (silent) Output","desc":""}],"source":"audio_outputs"},"audio_platform_log":{"title":"Audio Outputs Detection Log","items":[],"source":"audio_platform_log"},"resampler":{"title":"Resampler","items":[{"t":"native","key":"resampler_type","title":"Resampler Type","desc":"","kind":"chips","options":[[0,"SW - high quality"],[1,"SoX - very high quality, higher power consumption"]],"format":"%d","default":0},{"t":"native","key":"resampler_cutoff","title":"Resampler Cutoff Frequency Ratio","desc":"","kind":"knob","min":800,"max":990,"scale":10.0,"format":"%.1f%%","default":970},{"t":"native","key":"dither","title":"Dither","desc":"","kind":"select","options":[[0,"None (fastest)"],[1,"Rectangular (fast)"],[2,"Triangular (fast)"],[3,"Triangular with high pass (fast)"],[4,"F-weighted noise shaping (slow)"],[5,"Modified-e-weighted noise shaping (slow)"],[6,"Improved-e-weighted noise shaping (slow)"],[7,"Shibata noise shaping (slow)"],[8,"Low shibata noise shaping (slow)"]],"format":"%s. Output plugin can override this setting","default":0},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"audio_resampler"},"tweaks":{"title":"Advanced Tweaks","items":[{"t":"head","text":"Volume"},{"t":"native","key":"volume_levels","title":"Volume Levels","desc":"","kind":"select","options":[[0,"System Default"],[30,"30"],[51,"50"],[76,"75"],[101,"100"]],"format":"Number of volume levels: %s","default":0},{"t":"note","text":"Starting from Android 12 this option is limited by Google and may work only inside Poweramp or may not work at all\n\nSamsung Sound Assistant changed volume step is supported automatically (up to 150 levels)\n\nThe option may cause issues with Android Auto","quote":false},{"t":"native","key":"volume_popup","title":"Volume Panel","desc":"Custom volume panel. Shown when volume is adjusted in Poweramp UI","kind":"switch","format":"%d","default":false},{"t":"native","key":"pause_on_volume","title":"Pause/Resume on Volume","desc":"Pause when volume is set to 0, resume when volume increased from 0","kind":"switch","format":"%d","default":false},{"t":"native","key":"","title":"Change Tracks By Long Volume Keys Press","desc":"Press here for Volume keys long press option","kind":"nav","page":"misc","anchor":"volume_keys_long_press_hint","format":"%d","default":0},{"t":"head","text":"Other"},{"t":"native","key":"allow_platform_fx","title":"MusicFX","desc":"Enable MusicFX Button (Android system audio effects) in Volume tab","kind":"switch","format":"%d","default":false},{"t":"native","key":"force_no_speaker","title":"Force Speaker Off (for Hi-Res Output)","desc":"Enable this if speaker doesn't switch off after calls, some notifications, etc.","kind":"switch","format":"%d","default":false},{"t":"native","key":"force_audio_on_focus","title":"Force Audio On Audio Focus Change","desc":"Enable this if audio stops after notifications","kind":"switch","format":"%d","default":false},{"t":"native","key":"use_stream3_player","title":"Emulate Media Stream (for Hi-Res output)","desc":"Enable this if volume or other media actions don't work for the lock screen or when screen is off","kind":"switch","format":"%d","default":false},{"t":"native","key":"mod_gain_mb","title":"Tracker Decoder Extra Gain","desc":"Extra gain applied to tracker formats, such as .mod, *.s3c, *.xm, *.it","kind":"knob","min":-1000,"max":1000,"step":100,"scale":100.0,"format":"%.1fdB","default":0},{"t":"native","key":"mod_separation","title":"Tracker Decoder Stereo Separation","desc":"","kind":"knob","min":0,"max":200,"step":10,"scale":1.0,"format":"%.0f%%","default":0},{"t":"native","key":"reset_eq_presets","title":"Restore Equalizer Presets","desc":"Built-in and AutoEq equalizer presets will be restored to defaults","kind":"action","format":"%d","default":0},{"t":"native","key":"reset_reverb_presets","title":"Restore Reverb Presets","desc":"Built-in reverb presets will be restored/set to defaults","kind":"action","format":"%d","default":0},{"t":"native","key":"audio_platform_log","title":"Audio Outputs Detection Log","desc":"","kind":"nav","page":"audio_platform_log","format":"%d","default":0},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"audio_tweaks"},"commands_history":{"title":"Last Processed Commands","items":[],"source":"commands_history"},"crossfade":{"title":"Crossfade, Fade, and Gapless","items":[{"t":"native","key":"crossfade_auto_advance","title":"Auto-advance Fading","desc":"","kind":"chips","options":[[0,"No fading"],[1,"Non-gapless/cue"],[2,"All songs"],[3,"Shuffled songs"]],"format":"When song is changed automatically, apply crossfade: %s","default":0},{"t":"native","key":"fade_manual_advance","title":"Manual Track Change Fading","desc":"","kind":"chips","options":[[0,"No fading"],[1,"Short crossfade"],[2,"Crossfade"]],"format":"Output plugin can override this setting. When song is changed manually, apply: %s","default":1},{"t":"native","key":"fade_play_pause","title":"Fade Play/Pause/Stop","desc":"","kind":"switch","format":"%d","default":true},{"t":"native","key":"fade_seek","title":"Fade on Seek","desc":"","kind":"switch","format":"%d","default":true},{"t":"native","key":"gapless_preload_ms","title":"Preload Gapless Tracks","desc":"Increase (to Normal or more) for slow storages to improve gapless","kind":"slider","min":0,"max":5000,"step":100,"format":"%dms","ends":["None","More"],"default":0},{"t":"native","key":"track_end_silence_ms","title":"Silence Between Tracks","desc":"Applied to all tracks excluding CUE tracks. Elapsed time may go beyond track duration","kind":"slider","min":0,"max":5000,"step":100,"format":"%dms","default":0},{"t":"native","key":"crossfade_length_ms","title":"Crossfade Length","desc":"","kind":"slider","min":100,"max":15000,"step":50,"format":"%dms","default":5000},{"t":"native","key":"fade_short_xfade_ms","title":"Short Manual Crossfade Length","desc":"","kind":"slider","min":10,"max":1000,"step":10,"format":"%dms","default":400},{"t":"native","key":"fade_short_ms","title":"Play/Pause/Stop Fade Length","desc":"","kind":"slider","min":10,"max":1000,"format":"%dms","default":400},{"t":"native","key":"fade_seek_ms","title":"Seek Fade Length","desc":"","kind":"slider","min":10,"max":500,"format":"%dms","default":100},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"fade"},"feature_packages":{"title":"Feature Packages","items":[{"t":"note","text":"a number of upgrades, new cool features, and options in a single package","quote":false},{"t":"note","text":"list of the included features","quote":false},{"t":"note","text":"request and vote for the next package features on the Poweramp forum","quote":false},{"t":"note","text":"the same package gets even more features in the subsequent updates","quote":false},{"t":"note","text":"packages allow us to continue Poweramp development","quote":false},{"t":"note","text":"one time package purchase, instead of a 🤢 subscription","quote":false},{"t":"note","text":"a discounted, minimal price, if you recently purchased Full Version","quote":false},{"t":"note","text":"Hide Feature Packages from the Settings top","quote":false},{"t":"head","text":"Other"},{"t":"native","key":"buy_uber_badges","title":"Buy Uberpatron Badges","desc":"","kind":"action","format":"%d","default":0},{"t":"note","text":"● support Poweramp development\n\n● get Uberpatron Edition Badges\n\n● currently these are purely cosmetic items","quote":false},{"t":"native","key":"restore_purchase","title":"Restore Purchases","desc":"","kind":"action","format":"%d","default":0}],"source":"feature_packages"},"about":{"title":"About","items":[{"t":"note","text":"DrawerCast Player 0.5.0\nPoweramp reference implementation"},{"t":"native","kind":"action","key":"drawercast_details","title":"Implementation Status"},{"t":"native","kind":"nav","page":"storage","title":"Storage"},{"t":"native","kind":"action","key":"drawercast_server","title":"A15 Music Server"}]},"headset":{"title":"Headset/Bluetooth","items":[{"t":"head","text":"Connection"},{"t":"native","key":"pause_on_headset","title":"Pause On Headset Disconnect","desc":"Pause when wired/Bluetooth headset/USB DAC disconnected","kind":"switch","format":"%d","default":false},{"t":"native","key":"resume_on_headset","title":"Resume On Wired Headset","desc":"Resume playing when wired headset is connected","kind":"switch","format":"%d","default":false},{"t":"native","key":"resume_on_bt","title":"Resume On Bluetooth","desc":"Resume playing when Bluetooth device is connected","kind":"switch","format":"%d","default":false},{"t":"native","key":"","title":"Audio Focus","desc":"Few other play/resume options are available in Audio Focus settings","kind":"nav","page":"focus","format":"%d","default":0},{"t":"head","text":"Buttons"},{"t":"native","key":"enable_headset_controls","title":"Respond To Buttons","desc":"Enable Headset/Bluetooth controls","kind":"switch","format":"%d","default":false},{"t":"native","key":"headset_controls","title":"Wired Headset","desc":"","kind":"chips","options":[[0,"Single press"],[1,"Double/triple press for next/prev. track"],[2,"Long press for next track (when playing)"]],"format":"%d","default":0},{"t":"native","key":"avrcp_controls","title":"Bluetooth","desc":"","kind":"chips","options":[[0,"Single press"],[1,"Double/triple press for next/prev. track"],[2,"Long press for next track (when playing)"]],"format":"%d","default":0},{"t":"native","key":"long_volume_press","title":"Press here for Volume keys long press option","desc":"","kind":"link","page":"misc","anchor":"long_volume_controls","format":"%d","default":0},{"t":"native","key":"follow_pl_exact","title":"Strict Resume/Pause/Stop","desc":"Use for headunits/devices generating stray play/pause/stop key press commands, which are interpreted as undesired playback toggle or double press","kind":"switch","dependency":"enable_headset_controls","format":"%d","default":false},{"t":"native","key":"ignore_bt_sec","title":"Ignore Bluetooth Commands","desc":"Ignore all Bluetooth commands for a period of time after a connection","kind":"slider","min":0,"max":20,"format":"%d","ends":["0","20"],"default":0},{"t":"native","key":"bt_ignore_repeat_shuffle","title":"Ignore Repeat/Shuffle","desc":"Ignore Bluetooth Repeat and Shuffle commands completely","kind":"switch","format":"%d","default":false},{"t":"native","key":"headset_beep","title":"Beep","desc":"","kind":"switch","dependency":"enable_headset_controls","format":"%d","default":false},{"t":"native","key":"beep_more","title":"Beep More","desc":"Beep on all commands, such as from notifications or other controls","kind":"switch","dependency":"headset_beep","format":"%d","default":false},{"t":"native","key":"headset_vibrate","title":"Vibrate","desc":"","kind":"switch","dependency":"enable_headset_controls","format":"%d","default":false},{"t":"native","key":"no_android_long_press","title":"Disable Default Long Press","desc":"Disable long press activated voice search while Poweramp is playing","kind":"switch","format":"%d","default":false},{"t":"native","key":"commands_history","title":"Last Processed Commands","desc":"","kind":"nav","page":"commands_history","format":"%d","default":0},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"headset"},"library":{"title":"Library","items":[{"t":"native","key":"rescan_folders","title":"Rescan","desc":"","kind":"action","format":"%d","default":0},{"t":"note","text":"Poweramp retains track info (e.g., ratings, playlists) from removed storage even after a Rescan. Use Full Rescan to clear it\n\nPoweramp scans files only during active use or playback, not in the background, to save battery\n\nFor very large libraries, Poweramp scans in chunks during playback as resources allow","quote":true},{"t":"native","key":"erase_and_rescan","title":"Full Rescan","desc":"Clear tag info database and rescan Library/Folders. Use when storage/SD card changed, on major ROM updates, or when folders are moved on storage","kind":"action","format":"%d","default":0},{"t":"native","key":"music_folders_button","title":"Music Folders","desc":"","kind":"action","format":"%d","default":0},{"t":"note","text":"Android may not allow certain folders to be added, such as Download or a storage root. In this case please add their subfolders instead. This restriction is imposed by Google","quote":true},{"t":"native","key":"file_access_legacy","title":"File Access Legacy Mode","desc":"Direct file access mode. Requires extra permission","kind":"switch","format":"%d","default":false},{"t":"native","key":"scan_min_track_duration","title":"Ignore Short Tracks (Notifications, etc.)","desc":"","kind":"select","options":[[0,"Don't ignore - include all"],[2,"2"],[6,"6"],[10,"10"],[15,"15"],[30,"30"],[45,"45"],[60,"60"]],"format":"Less than (seconds): %s","default":6},{"t":"native","key":"skip_video","title":"Ignore Video Tracks","desc":"Tracks with video stream will be ignored","kind":"switch","format":"%d","default":false},{"t":"native","key":"auto_find_button","title":"Auto-Find Music Folders","desc":"Use this option to find music folders automatically","kind":"action","format":"%d","default":0},{"t":"head","text":"Advanced"},{"t":"native","key":"restore_pos","title":"Store/Restore Per Track Progress","desc":"Useful for podcasts, long sets","kind":"switch","format":"%d","default":true},{"t":"native","key":"long_skip_rewind","title":"-10/+10s Rewind Pro Buttons","desc":"Change >> (category change) pro buttons to -10/+10s rewinding buttons for long tracks. Also applies to Long category","kind":"switch","format":"%d","default":true},{"t":"native","key":"restore_pos_min_dur","title":"Track Duration For Per Track Progress and -10/+10s Buttons","desc":"","kind":"slider","min":0,"max":60,"format":"At least: %d min.","default":45},{"t":"native","key":"played_dur","title":"Count As Played","desc":"","kind":"slider","min":0,"max":100,"format":"Count track as played after playing at least: %d%%","default":50},{"t":"note","text":"Individual playlists and folders can be set to keep each track progress via their header menu / List Options","quote":true},{"t":"native","key":"library_lists","title":"Lists","desc":"List click action, lists/categories options","kind":"nav","page":"listui","format":"%d","default":0},{"t":"native","key":"library_search","title":"Search","desc":"Search results playback options","kind":"nav","page":"library_search","format":"%d","default":0},{"t":"native","key":"library_queue","title":"Queue","desc":"Queue options","kind":"nav","page":"library_queue","format":"%d","default":0},{"t":"native","key":"library_playlists","title":"Playlists","desc":"User created playlists import/export and options","kind":"nav","page":"library_playlists","format":"%d","default":0},{"t":"native","key":"library_shuffle","title":"Shuffle","desc":"Shuffle options","kind":"nav","page":"library_shuffle","format":"%d","default":0},{"t":"native","key":"library_scanner","title":"Scanner","desc":"Poweramp folders and library scanner options","kind":"nav","page":"library_scanner","format":"%d","default":0},{"t":"native","key":"reset_stats","title":"Reset stats","desc":"Reset tracks played times, last played, and related stats","kind":"action","format":"%d","default":0},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"library"},"listui":{"title":"Lists","items":[{"t":"head","text":"Look and Feel"},{"t":"native","key":"library_list_opts","title":"Library List Options","desc":"Select top visible Library categories. Also available from Library header menu","kind":"action","format":"%d","default":0},{"t":"native","key":"static_navbar","title":"Static Navbar","desc":"Don't move Navbar away in lists","kind":"switch","format":"%d","default":false},{"t":"native","key":"navbar_seekbar","title":"Seekbar in Navbar","desc":"Show track seekbar in Navbar. Increases Navbar size","kind":"switch","format":"%d","default":false},{"t":"native","key":"headers_meta","title":"Headers With Meta","desc":"Show number of songs and some other meta information in headers","kind":"switch","format":"%d","default":true},{"t":"native","key":"az_scroll","title":"A-Z Scroll","desc":"Use alphabetical A-Z scroll in lists","kind":"switch","format":"%d","default":true},{"t":"native","key":"localized_az","title":"Localized A-Z Scroll","desc":"A-Z scroll includes alphabet for the selected UI language","kind":"switch","dependency":"az_scroll","format":"%d","default":false},{"t":"native","key":"list_header_buttons","title":"Header Buttons","desc":"Action buttons shown in the list header","kind":"chips","options":[[0,"Disabled"],[1,"Enabled"]],"format":"%d","default":0},{"t":"native","key":"list_bottom_toolbar","title":"Bottom Buttons","desc":"Action buttons are displayed on the bottom of lists when header is scrolled away or header buttons are disabled","kind":"chips","options":[[0,"Disabled"],[1,"Semi-transparent"],[2,"Enabled"]],"format":"%d","default":0},{"t":"native","key":"track_num_type","title":"Show Track Number","desc":"","kind":"chips","options":[[0,"Disabled"],[1,"Separate number - relevant categories"],[2,"In the meta - relevant categories"],[3,"In the title - everywhere"]],"format":"%d","default":0},{"t":"native","key":"track_disc_meta","title":"Show Disc","desc":"Disc tag is shown in the track meta","kind":"switch","dependency":"track_num_type","format":"%d","default":false},{"t":"native","key":"title_filename","title":"Filename As Title","desc":"Always use track filename instead of tag. Applies to all categories as well","kind":"switch","format":"%d","default":false},{"t":"native","key":"list_action_resets","title":"Click Restarts Track","desc":"If disabled, continue playing the same track, but still change category and re-shuffle if needed","kind":"switch","format":"%d","default":false},{"t":"native","key":"list_item_action","title":"List Item Action","desc":"","kind":"chips","options":[[1,"Play and go to Main UI"],[2,"Play and stay in the list"],[3,"Enqueue and stay in the list"]],"format":"%d","default":1},{"t":"native","key":"enable_deletion","title":"Delete Action","desc":"Enable the Delete menu action that deletes song files (after confirmation)","kind":"switch","format":"%d","default":true},{"t":"head","text":"Albums"},{"t":"native","key":"join_albums","title":"Join Albums","desc":"If disabled, separate albums are shown for tracks without album artist tag","kind":"switch","format":"%d","default":true},{"t":"native","key":"use_albumartist","title":"Album Artist Label for Tracks","desc":"Show Album Artist tag (if exists) instead of just Artist tag for tracks","kind":"switch","format":"%d","default":false},{"t":"native","key":"use_albumartist_albums","title":"Album Artist Label for Albums","desc":"Show Album Artist tag (if exists) instead of just Artist tag for Albums. Also changes sorting by Artist","kind":"switch","format":"%d","default":false},{"t":"native","key":"use_albumartist_albumartists","title":"Album Artist Label for Album Artist Tracks","desc":"Show Album Artist tag (if exists) instead of just Artist tag for Album Artists tracks. Also changes sorting by Artist","kind":"switch","format":"%d","default":true},{"t":"native","key":"hide_unknown_album","title":"Hide Unknown Album","desc":"No Unknown Album shown in track labels","kind":"switch","format":"%d","default":true},{"t":"native","key":"hide_unknown_artist","title":"Hide Unknown Artist","desc":"No Unknown Artist shown in track labels when possible. This may hide the 2nd track label completely","kind":"switch","dependency":"hide_unknown_album","feature":"1","format":"%d","default":false},{"t":"head","text":"Advanced"},{"t":"native","key":"show_unsplit_cats","title":"Show Unsplit Combined Categories","desc":"Unsplit combined Artists, Album Artists, Composers are visible in the appropriate categories","kind":"switch","format":"%d","default":false},{"t":"native","key":"hier_no_advance","title":"No \"Play All Categories\" For Hier Folders","desc":"Don't apply Play All Categories mode when Folders Hierarchy playback started with the list header play button","kind":"switch","format":"%d","default":false},{"t":"native","key":"root_hier_immediate","title":"Folders Hierarchy Immediate Root","desc":"If only one root music folder exists, show its contents immediately in top Folders Hierarchy category. This option will go deeper until folder with tracks or multiple subfolders","kind":"switch","format":"%d","default":false},{"t":"native","key":"hier_files_zoom","title":"Hierarchy Files Zoom Level","desc":"Apply Folder Files zoom level for Folders Hierarchy category when a folder contains files only","kind":"switch","format":"%d","default":false},{"t":"native","key":"no_sort_field","title":"Don't Ignore Articles For Sort","desc":"Don't ignore articles (\"the\", \"a\", \"an\") in the beginning of albums, artists, and composers","kind":"switch","format":"%d","default":false},{"t":"native","key":"show_cue_source","title":"Show CUE Disc Image Files","desc":"Big undivided CUE disc image files will be visible in lists","kind":"switch","format":"%d","default":false},{"t":"native","key":"stream_name_in_title","title":"Stream Name In Title","desc":"Use \"Stream - Track Title\" pattern for stream titles, instead of just \"Track Title\". Applied to the next played stream","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"library_lists"},"library_playlists":{"title":"Playlists","items":[{"t":"note","text":"Poweramp automatically recognizes file based playlists (.m3u, .m3u8, .pls, .wpl) from the selected Music Folders\n\nPoweramp also imports playlist if opened via file manager","quote":true},{"t":"native","key":"playlists_import","title":"Import System Library Playlists","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"playlists_export","title":"Export Poweramp Playlists","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"pl_import_ratings","title":"Import Ratings","desc":"Update track ratings from imported playlists (when new playlist is imported) or from playlists opened in file managers","kind":"switch","format":"%d","default":true},{"t":"note","text":"Poweramp always saves track ratings to the exported m3u8 playlists","quote":true},{"t":"native","key":"playlist_insert_pos","title":"Playlist Insert Position","desc":"","kind":"chips","options":[[1,"Insert at start"],[0,"Add to end"],[2,"Shuffled"]],"format":"%d","default":0},{"t":"note","text":"Insert position can also be changed by long pressing the button in the selection menu","quote":true},{"t":"native","key":"pl_del_entry_w_track","title":"Remove Playlist Entries On Track Deletion","desc":"Playlist entries are automatically removed for the deleted tracks. If disabled, non-playable items stay in the playlist and can be resolved to matching tracks later","kind":"switch","format":"%d","default":true},{"t":"native","key":"pl_auto_resolve","title":"Resolve Playlist Entries","desc":"Automatically match unresolved playlist entries on Folders/Library auto scan. If disabled, non-playable items may appear in playlists after a storage change, folders renaming/moving, etc. \n\nPlaylist entries always can be corrected manually by the Rescan menu action from Playlists category","kind":"switch","format":"%d","default":true},{"t":"native","key":"pl_no_dups","title":"Don't Add Duplicates","desc":"Duplicates won't be added to playlist","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"library_playlists"},"library_queue":{"title":"Queue","items":[{"t":"note","text":"Poweramp Queue is a separate dynamic playlist","quote":true},{"t":"native","key":"queue_start","title":"Start Playing Queue","desc":"","kind":"chips","options":[[1,"Immediately"],[2,"After the current song"],[3,"After the current category/folder/album/..."]],"format":"%d","default":2},{"t":"native","key":"queue_end","title":"On Queue End","desc":"","kind":"chips","options":[[0,"Stay in Queue / repeat Queue"],[1,"Return to previous category"]],"format":"%d","default":1},{"t":"native","key":"queue_insert_pos","title":"Queue Insert Position","desc":"","kind":"chips","options":[[0,"Normal"],[2,"Shuffled"]],"format":"%d","default":0},{"t":"native","key":"play_next_insert_pos","title":"Play Next Insert Position","desc":"","kind":"chips","options":[[0,"Normal"],[2,"Shuffled"]],"format":"%d","default":0},{"t":"note","text":"Insert position can also be changed by long pressing the button in the selection menu","quote":true},{"t":"native","key":"q_next_forces_after_song","title":"Play Next: Start Queue","desc":"Play Next forces option: After the current Song","kind":"switch","format":"%d","default":true},{"t":"native","key":"queue_clear_on_add","title":"Always Clear On Add","desc":"If enabled, Queue is always cleared on track(s) addition. If disabled, Queue is cleared only after all songs have been played","kind":"switch","format":"%d","default":false},{"t":"native","key":"queue_never_clear_on_add","title":"Never Clear On Add","desc":"If enabled, Queue is never cleared on track(s) addition. Search results playback still clears Queue","kind":"switch","format":"%d","default":false},{"t":"native","key":"queue_no_shuffle","title":"Ignore Shuffle","desc":"Queue is always played in-order. Also affects Search results Shuffle","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"library_queue"},"library_scanner":{"title":"Scanner","items":[{"t":"head","text":"Scanner"},{"t":"native","key":"auto_scan","title":"Auto-scan","desc":"Enable automatic SD card/storages scan. If disabled, only manual Rescan is available","kind":"switch","format":"%d","default":true},{"t":"native","key":"scan_no_wait","title":"Rescan Immediately","desc":"Rescan immediately when something changed on the storage. Tracks appear faster, but this may introduce more rescans when you upload multiple files to the device","kind":"switch","dependency":"auto_scan","format":"%d","default":false},{"t":"native","key":"initial_scan","title":"Initial Scan","desc":"Quick scan when Poweramp is started for first time","kind":"switch","dependency":"auto_scan","format":"%d","default":true},{"t":"native","key":"scan_providers","title":"Scan Providers","desc":"Automatically scan 3rd party track provider plugins on startup","kind":"switch","dependency":"auto_scan","format":"%d","default":false},{"t":"native","key":"scan_post_usb_mount","title":"USB Disconnection/SD Card Mount","desc":"Scan on USB disconnection and/or SD card mount","kind":"switch","dependency":"auto_scan","format":"%d","default":true},{"t":"native","key":"scan_post_system","title":"System Media Scanner/MTP","desc":"Scan once Android System/MTP Media Scanner finishes","kind":"switch","dependency":"auto_scan","format":"%d","default":true},{"t":"head","text":"Other"},{"t":"native","key":"","title":"Press here to show/hide unsplit combined categories","desc":"","kind":"link","page":"listui","anchor":"show_unsplit_cats","format":"%d","default":0},{"t":"native","key":"artists_split_chars","title":"Symbols to Split Multiple Artists","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"artists_split_ignore","title":"Unsplit Artists","desc":"","kind":"action","format":"%d","default":"AC/DC | +/-"},{"t":"native","key":"composers_split_chars","title":"Symbols to Split Multiple Composers","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"genres_split_chars","title":"Symbols to Split Multiple Genres","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"tag_encoding","title":"Tag Encoding","desc":"Encoding for non-Unicode tags and playlists","kind":"select","options":[["_default_","Default"],["Big5","Chinese Traditional (Big5)"],["GB2312","Chinese Simplified (GB2312)"],["GBK","Chinese Simplified (GBK)"],["ISO-8859-2","Eastern European (ISO-8859-2)"],["Windows-1250","Eastern European (Win-1250)"],["ISO-8859-7","Greek (ISO-8859-7)"],["Windows-1253","Greek (Windows-1253)"],["ISO-8859-8","Hebrew (ISO-8859-8)"],["Windows-1255","Hebrew (Win-1255)"],["SJIS","Japanese (Shift_JIS)"],["ISO-2022-JP","Japanese (ISO-2022-JP)"],["EUC-JP","Japanese (EUC-JP)"],["EUC-KR","Korean (EUC-KR)"],["Windows-1251","Russian (Win-1251)"],["TIS-620","Thai (Win-874)"],["Windows-1252","Western (Win-1252)"],["ISO-8859-1","Western (ISO-8859-1)"]],"format":"%d","default":"_default_"},{"t":"native","key":"m3u_utf8","title":"Always Use UTF-8 for .m3u","desc":"If disabled, Tag Encoding setting is used for .m3u playlists. UTF-8 is always used for .m3u8 playlists","kind":"switch","format":"%d","default":true},{"t":"native","key":"process_cues","title":"Parse CUE Files","desc":"Virtual folders are created for CUE files with multiple tracks","kind":"switch","format":"%d","default":true},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"library_scanner"},"library_search":{"title":"Search","items":[{"t":"native","key":"list_opts","title":"Search Categories","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"search_play_tracks","title":"Play Tracks Only","desc":"If some tracks are found, play only the tracks and ignore other found categories. If there are no tracks, found categories will be played","kind":"switch","format":"%d","default":false},{"t":"native","key":"search_track_titles_only","title":"Search Track Titles Only","desc":"If disabled, track album and artist are also used for the search","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"library_search"},"library_shuffle":{"title":"Shuffle","items":[{"t":"native","key":"shuffle_random_factor","title":"Shuffle Randomization","desc":"","kind":"slider","min":0,"max":12,"step":2,"format":"%d","ends":["Less Random","Full Random"],"default":0},{"t":"note","text":"Less Random prefers least played tracks or other shuffled items\n\nFull Random does complete randomization\n\nThe option applies to the next shuffle session","quote":true},{"t":"native","key":"no_reshuffle","title":"No Reshuffle","desc":"Don't apply a new shuffle when any track is selected from the current playing list","kind":"switch","format":"%d","default":false},{"t":"native","key":"no_reshuffle_for_large_lists","title":"No Reshuffle For Large Lists","desc":"Don't reset shuffle order when a new track is manually selected from a very large list","kind":"switch","format":"%d","default":false},{"t":"native","key":"category_shuffle","title":"Category Items Shuffle","desc":"","kind":"chips","options":[[4,"Shuffle Songs/Categories"],[3,"Shuffle Categories"],[2,"Shuffle Songs"]],"format":"%d","default":4},{"t":"native","key":"hier_flat_shf","title":"Shuffle All Songs In Folder Hierarchy","desc":"Shuffle Songs mode shuffles all songs from the whole folder hierarchy. If enabled, header Shuffle button uses this mode as well","kind":"switch","format":"%d","default":true},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"library_shuffle"},"lock":{"title":"Lock Screen","items":[{"t":"head","text":"Android Lock Screen"},{"t":"note","text":"Android Lock Screen support is always enabled, as it's required for Bluetooth track info, smart watch support, other apps, etc.","quote":true},{"t":"native","key":"ics_ls_aa","title":"Album Art","desc":"Show album art on Android lock screen. This option may also affect Android Auto covers. Not supported by some devices/ROMs","kind":"switch","format":"%d","default":true},{"t":"native","key":"ls_aa_blur","title":"Blur","desc":"Lock screen album art is blurred. The album art background isn't shown by some devices. This option is not recommended for smart watches or apps that use Poweramp album art","kind":"switch","dependency":"ics_ls_aa","format":"%d","default":false},{"t":"native","key":"ls_default_aa","title":"Show Default Image","desc":"Send default placeholder image when no album art exists for the track. Also affects smart watches, other apps utilizing media APIs. Default image is defined by skin","kind":"switch","format":"%d","default":false},{"t":"head","text":"Poweramp Lock Screen"},{"t":"native","key":"ls_enable","title":"Show On Lock Screen","desc":"Poweramp shows itself on top of system lock screen if music is playing. Settings, deletion, edit tag, etc. actions trigger device lock screen","kind":"switch","format":"%d","default":false},{"t":"native","key":"ls_force_timeout","title":"Shorter Timeout","desc":"Apply shorter screen timeout when Poweramp is on lock screen","kind":"switch","dependency":"ls_enable","format":"%d","default":true},{"t":"native","key":"ls_app_settings","title":"Open App Settings","desc":"","kind":"action","dependency":"ls_enable","format":"%d","default":0},{"t":"native","key":"ls_enable_land","title":"Landscape Layout","desc":"Enable rotation to landscape layout","kind":"switch","dependency":"ls_enable","format":"%d","default":false},{"t":"native","key":"direct_unlock","title":"Direct Unlock","desc":"Unlock directly to home screen (if possible) instead of Android lockscreen","kind":"switch","dependency":"ls_enable","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"lockscreen"},"misc":{"title":"Misc","items":[{"t":"head","text":"Scrobbling"},{"t":"native","key":"scrobble_to_last_fm","title":"Scrobble via Official Last.fm app","desc":"Scrobble via Last.fm app","kind":"switch","format":"%d","default":false},{"t":"native","key":"scrobble_to_simple_last_fm","title":"Scrobble via Simple Scrobbler","desc":"Scrobble to Last.fm/Libre.fm via Simple Scrobbler (previously Simple Last.fm)","kind":"switch","format":"%d","default":false},{"t":"note","text":"Most scrobbler apps should work without extra configuration","quote":true},{"t":"head","text":"Android Auto"},{"t":"native","key":"buttons","title":"Buttons","desc":"Media action buttons","kind":"nav","page":"ui_mediaactions","format":"%d","default":0},{"t":"native","key":"mb_a_grid","title":"Grid View for Categories","desc":"If enabled, Albums, Artists, Folders, etc. categories are shown as grid. May require category re-opening for view to apply","kind":"switch","format":"%d","default":false},{"t":"native","key":"mb_a_aa_cats","title":"Images for Categories","desc":"If enabled, album art and other relevant images are shown for categories","kind":"switch","format":"%d","default":true},{"t":"native","key":"mb_a_aa_tracks","title":"Album Art for Tracks","desc":"If enabled, album art is shown for track entries","kind":"switch","format":"%d","default":true},{"t":"native","key":"send_mediasession_q","title":"Now Playing List For Connected Devices/Apps","desc":"Enable Now Playing List/Queue for the connected devices (e.g. Wear) and apps (Android Auto). Poweramp activates this option if some device/app requests Now Playing list","kind":"switch","format":"%d","default":false},{"t":"head","text":"Tweaks"},{"t":"native","key":"send_metachanged","title":"Metachanged Intent","desc":"For external apps","kind":"switch","format":"%d","default":true},{"t":"native","key":"use_wakelock","title":"Use Wakelock","desc":"Check this if audio stops when screen is off","kind":"switch","format":"%d","default":false},{"t":"native","key":"send_old_api_aa","title":"Send Album Art for old API","desc":"Send Album Art for old Poweramp v2 API. Updated Poweramp API allows much higher res images, but this may be needed for old API apps","kind":"switch","format":"%d","default":false},{"t":"native","key":"check_for_skin_reload","title":"Always Reload Skin","desc":"For skin developers. Always check skin for a change when app activity goes background","kind":"switch","format":"%d","default":false},{"t":"native","key":"shutdown_intent","title":"Shutdown Intent","desc":"Listen to this shutdown intent and pauses itself/stores state when the intent is received","kind":"text","format":"%d","default":""},{"t":"native","key":"pause_on_screen_off","title":"Pause on Screen Off","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"op_framerate","title":"Apply OP High Framerate","desc":"Force higher display framerate via non-standard APIs. May be required for some devices/firmwares","kind":"switch","format":"%d","default":false},{"t":"native","key":"migrate_data_29","title":"Migrate Data to Android 10","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"stream_timeout_ms","title":"Network Stream Timeout","desc":"","kind":"slider","options":[[1000,"1"],[5000,"5"],[10000,"10"],[15000,"15"],[30000,"30"],[60000,"60"],[120000,"120"],[300000,"300"],[2147483647,"Never"]],"scale":1000.0,"format":"%s","ends":["Small","Never"],"default":30000},{"t":"native","key":"stream_buffer_bytes","title":"Network Stream Buffer","desc":"%1$.1fMB","kind":"slider","min":524288,"max":4194304,"step":10240,"scale":1048576.0,"format":"%d","ends":["Small","More"],"default":1048576},{"t":"note","text":"Increasing buffer size also increases stream start time","quote":false},{"t":"native","key":"user_agent","title":"User Agent","desc":"User Agent header value to use for the streaming","kind":"text","format":"%d","default":0},{"t":"native","key":"load_user_so","title":"Load custom .so library","desc":"Try to load custom ffmpeg_neon.so from the path:","kind":"switch","format":"%d","default":false},{"t":"native","key":"override_region","title":"Override Region","desc":"","kind":"switch","format":"%d","default":false},{"t":"head","text":"Volume Keys Long Press"},{"t":"native","key":"long_volume_controls","title":"Change Tracks By Long Volume Keys Press","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"misc"},"peq_equ_bands":{"title":"Graphic Equalizer Bands","items":[{"t":"native","key":"equ_bands_num","title":"Number of Bands","desc":"Predefined number of bands, including ISO recommended bands distribution","kind":"chips","options":[[5,"5"],[10,"10 (ISO)"],[12,"12"],[15,"15 (ISO)"],[16,"16"],[24,"24"],[31,"31 (ISO)"],[32,"32"]],"format":"%d","default":10},{"t":"note","text":"High number of bands may require manual Block Size adjustment for the increased frequency resolution","quote":false},{"t":"head","text":"Advanced"},{"t":"native","key":"equ_custom_bands","title":"Enable Custom Bands","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"equ_custom_bands_num","title":"Custom Number of Bands","desc":"","kind":"slider","dependency":"equ_custom_bands","min":5,"max":32,"format":"%d","ends":["5","32"],"default":10},{"t":"native","key":"equ_custom_bands_first_fr","title":"First Frequency","desc":"%.0fHz","kind":"slider","dependency":"equ_custom_bands","min":5,"max":200,"scale":1.0,"format":"%.0fHz","ends":["5","200"],"default":20},{"t":"native","key":"equ_custom_bands_last_fr","title":"Last Frequency","desc":"%.1fkHz","kind":"slider","dependency":"equ_custom_bands","min":14000,"max":20000,"step":500,"scale":1000.0,"format":"%.1fkHz","ends":["14K","20K"],"default":16000},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"peq_equ_bands"},"peq_equ_tone":{"title":"Tone","items":[{"t":"note","text":"Long press value to edit","quote":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"peq_equ_tone"},"rg":{"title":"Replay Gain (RG)","items":[{"t":"native","key":"rg_type","title":"Replay Gain","desc":"","kind":"chips","options":[[0,"Don't apply"],[1,"Apply Gain"],[2,"Apply Gain/prevent clipping according to Peak"]],"format":"%d","default":0},{"t":"native","key":"rg_source","title":"Source","desc":"","kind":"chips","options":[[0,"Album"],[1,"Track"]],"format":"%d","default":0},{"t":"native","key":"rg_preamp_mb","title":"RG preamp","desc":"","kind":"knob","min":-1600,"max":1600,"step":10,"scale":100.0,"format":"%.1fdB","default":0},{"t":"native","key":"rg_default_mb","title":"Preamp for songs without RG info","desc":"","kind":"knob","min":-1600,"max":1600,"step":10,"scale":100.0,"format":"%.1fdB","default":0},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"rg"},"root":{"title":"Settings","items":[{"t":"head","text":"Settings"},{"t":"native","key":"ui","title":"Look and Feel","desc":"Skin, player interface, language, notifications","kind":"nav","page":"look","format":"%d","default":0,"icon":"palette","color":"#8170ab"},{"t":"native","key":"audio","title":"Audio","desc":"Crossfade, replay gain, volume, output","kind":"nav","page":"audio","format":"%d","default":0,"icon":"speakerwave","color":"#aa5075"},{"t":"native","key":"vis","title":"Visualization","desc":"Faded controls opacity, preset duration","kind":"nav","page":"viz","format":"%d","default":0,"icon":"viz","color":"#a355c1"},{"t":"native","key":"aa_bg","title":"Background","desc":"Blur, details, intensity, saturation","kind":"nav","page":"background","format":"%d","default":0,"icon":"image","color":"#67a294"},{"t":"native","key":"aa","title":"Album Art","desc":"Download, quality, cache cleanup","kind":"nav","page":"art","format":"%d","default":0,"icon":"image","color":"#72975f"},{"t":"native","key":"folders_library","title":"Library","desc":"Rescan, music folders, list, queue options","kind":"nav","page":"library","format":"%d","default":0,"icon":"folder","color":"#668dc0"},{"t":"native","key":"headset","title":"Headset/Bluetooth","desc":"Pause/resume on connection, headset buttons","kind":"nav","page":"headset","format":"%d","default":0,"icon":"headphones","color":"#aaa2ad"},{"t":"native","key":"lockscreen","title":"Lock Screen","desc":"Poweramp lock screen options","kind":"nav","page":"lock","format":"%d","default":0,"icon":"lock","color":"#c07d50"},{"t":"native","key":"misc","title":"Misc","desc":"Scrobbling, Android Auto, other tweaks","kind":"nav","page":"misc","format":"%d","default":0,"icon":"more","color":"#519896"},{"t":"native","key":"general","title":"About","desc":"Version/changelog, translations info","kind":"nav","page":"about","format":"%d","default":0,"icon":"wave","color":"#a69bbc"},{"t":"head","text":"Other"},{"t":"native","key":"equalizer_for_spot_ytm_etc","title":"Equalizer for Spotify and YouTube Music","desc":"Free Poweramp Equalizer app with the signature Poweramp sound for the streaming players such as Spotify and YouTube Music","kind":"nav","url":"https://play.google.com/store/apps/details?id=com.maxmpz.equalizer&referrer=utm_source%3Dapp%26utm_medium%3Dapp%26utm_campaign%3Dpa1","format":"%d","default":0},{"t":"native","key":"get_support","title":"Get Support","desc":"","kind":"nav","page":"support","format":"%d","default":0},{"t":"native","key":"settings_export","title":"Export Settings/Data","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"settings_import","title":"Import Settings/Data","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"send_errors","title":"Send Errors To Developer","desc":"Suggest sending a crash log via email","kind":"switch","format":"%d","default":true}],"source":"singlepane"},"support":{"title":"Get Support","items":[{"t":"native","key":"faq","title":"FAQ","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"purchase_faq","title":"Purchase FAQ","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"poweramp_forum","title":"Forum","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"send_log","title":"Send Log","desc":"","kind":"action","format":"%d","default":0}],"source":"support"},"translations":{"title":"Translations","items":[{"t":"native","key":"visit_crowdin","title":"Poweramp Crowdin Project","desc":"Visit/join Poweramp translation project at Crowdin.net","kind":"action","format":"%d","default":0},{"t":"head","text":"Translators"},{"t":"native","key":"","title":"Arabic","desc":"BLueBLaze, mohjif, Abdullah S Almalki, tictac, Sajed ALAJATI, khansaab, zaid.m.alani, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Bengali","desc":"abualam002, MD: Ashikur Rahman, Emilia Mihai, Dok Dok, fuadhasanmaruf, Mahdi Jaman, MD: Ashikrrahman, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Chinese Simplified","desc":"Cye3s, sincostandx, Ihon Liu, 天外来客bin, 琳 曹, Miao Zhang, Jane Zhang, Budi Pang, 吴天豪, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Chinese Traditional","desc":"Francis Yeh, 人工知能, Jane Zhang, KaiChing Chang, Fu Chun Hsu, 明城, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Czech","desc":"MySQL, andrewz, Ondřej Zástěra, Ghull, karanco, Jan Havlík, Michal, Dominik Matus, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Danish","desc":"NCAA, chreddy, John Hansen","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Dutch","desc":"Erik Paelman, wsnel57, Naxiz, KevinHofstede, charliehpoels, JayJay1989, YolandaCarati","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"French","desc":"AlbatorV, クリスDownix, AsTro, Fauque Benoit, Sceap, tictac, Rose, Francesco Masini, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"German","desc":"Andreas Laufer, Fusionplayz, Vincent T., Saintscar, Stefan Druwe, 明城liebst20","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Greek","desc":"koliglia, tkredmond, Nikos, BillKan, DainBramaged, DimitrisSalonika, horion70, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Hebrew","desc":"Rami Heled, Lidor Elmaliach, benjo24, elyashiv_sabach, עמרי עטייה, Yoel IL, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Hindi","desc":"Ankush Jain, jznsamuel, santosh_sahu, Shivaji Kute, Vatsal_Vala, Vogendra Sahu (Raj. C.G), and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Hungarian","desc":"Z737, Tomi_Ohl, nvi9, Gyula Király, Szilard Kovacs, Gyula Juhász, Bence Ujj, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Indonesian","desc":"M Akmal, Muhammad Bintang, Ali Muhammad Reyhan, Amirul Huda, M Arif Majidi, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Italian","desc":"Federico Di Lorenzo, Tiwi90, Carlo369, DarkRevenger, Fabrizio Cacicia, Francesco Masini, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Japanese","desc":"Kanako Inazu, \"sunatomo\", kik0220","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Korean","desc":"신윤호, David Cho, WhiteClover, ENVY, PBJUN","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Persian","desc":"Ismail Barinkar, AhmadH, alpha1657, Barinkar, esshx8, mahmoodbaghelani, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Polish","desc":"0kti, Maciej Minklejn, TiGerPL v19, Kszemek, Piotr Patalong, oskar, Błażej Jeżewski, Povilas Grebliunas","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Portuguese, Brazilian","desc":"Skellingtor, Lucas Vinícius, Loui's, André Gama, Henry F., Vinicius Camargo, Leandro Sales, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Romanian","desc":"adi petcu, Andrei Sângeorzan, Cornel_Pavel, flor90, Dee Norbert","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Russian","desc":"Ka3u6y6a, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Serbian","desc":"Ivan Pesic, emv441, Nebojsa Nikolic, Nikola Vukovic, Nikola Đurić, Stefan Marinkovic, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Spanish","desc":"Mihai Pantazi, Lesther Tabares, Bruno Herrera, Brandon Zuriel Alonso Alvarado, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Slovak","desc":"Maťo, RandomTypek, marttin, wupuchim, profile.trololol","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Thai","desc":"BugviewTH, Nana Jipataa, อรรถพล เติมสายทอง","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Turkish","desc":"Fatih Fırıncı, Semih Yeşilyurt, sonysinger, elmasevmem, rserdar, Oğuzcan, KBD, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Ukrainian","desc":"taras-ko, Bohdan Antokhov, rapkonig, Ka3u6y6a, Oleksandr, taras0012, rapkonig, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Vietnamese","desc":"alienyd, Nguyễn Trung Hậu, robot_boy_tn, Thế, thanhtai2009, Quoc Thanh, tandat nguyen, Hoàng Hải Long","kind":"action","format":"%d","default":0}],"source":"translations"},"look":{"title":"Look and Feel","items":[{"t":"native","key":"ui_theme","title":"Skin","desc":"Change Poweramp visual theme. Set per-skin options like extra Pro Buttons, Static Seekbar","kind":"nav","page":"skin","format":"%d","default":0},{"t":"native","key":"follow_night_mode","title":"Follow Day/Night Mode","desc":"Follow system Day/Night Mode if selected skin supports light/dark themes","kind":"switch","format":"%d","default":false},{"t":"native","key":"settings_theme","title":"Settings Theme","desc":"","kind":"chips","options":[[0,"Default"],[1,"Light"],[2,"Dark"],[3,"Follow Day/Night Mode"]],"format":"%d","default":0},{"t":"native","key":"settings_font","title":"Settings Font","desc":"","kind":"chips","options":[[0,"Default"],[1,"Alternative font"],[2,"Bold"],[3,"Bold+"]],"format":"%d","default":2},{"t":"head","text":"General"},{"t":"native","key":"ui_player","title":"Player Screen","desc":"","kind":"nav","page":"player","format":"%d","default":0},{"t":"native","key":"ui_lyrics","title":"Lyrics","desc":"","kind":"nav","page":"lyrics","format":"%d","default":0},{"t":"native","key":"ui_notify","title":"Notifications","desc":"","kind":"nav","page":"notifications","format":"%d","default":0},{"t":"native","key":"","title":"Press here for the additional List UI options like Filename As Title, Show Track Number, etc.","desc":"","kind":"link","page":"listui","format":"%d","default":0},{"t":"head","text":"Misc"},{"t":"native","key":"lang","title":"Language","desc":"","kind":"select","options":[["","Auto"],["ar","العربية"],["bn","বাংলা"],["in","Bahasa Indonesia"],["cs","Čeština"],["zh_CN","中文(简体)"],["zh_TW","中文(繁體)"],["da","Dansk"],["de","Deutsch"],["en_US","English"],["es","Español"],["fa","فارسی"],["fr","Français"],["el","ελληνικά"],["iw","עברית"],["hi","हिन्दी"],["it","Italiano"],["ro","Limba română"],["hu","Magyar"],["nl","Nederlands"],["ja","日本語"],["ko","한국어"],["pl","Polski"],["pt_BR","Português brasileiro"],["ru","Русский"],["sk","Slovenčina"],["sr","Cрпски"],["th","ไทย"],["vi","Tiếng Việt"],["tr","Türkçe"],["uk","Українська мова"]],"format":"%s","default":""},{"t":"native","key":"ui_icon","title":"Icon","desc":"Set launcher icon","kind":"nav","page":"ui_icon","format":"%d","default":0},{"t":"native","key":"orientation","title":"Screen Orientation","desc":"","kind":"chips","options":[[0,"Default"],[1,"Portrait (Vertical)"],[2,"Landscape (Horizontal)"]],"format":"%d","default":0},{"t":"native","key":"anim_speed","title":"Animations","desc":"Disable/enable or change UI animation speed where possible","kind":"chips","feature":"1","options":[[0,"Disabled"],[2,"Fast"],[1,"Default"]],"format":"%d","default":0},{"t":"native","key":"start_at_lib","title":"Start at Library","desc":"Changes startup screen. Back action returns from the Player Screen to the current list","kind":"switch","format":"%d","default":false},{"t":"native","key":"hide_status_bar","title":"Hide Status Bar","desc":"","kind":"switch","format":"%d","default":false},{"t":"note","text":"Some firmwares are unable to change status bar/nav bar dynamically. You may need to exit/enter the app once for these options to apply","quote":true},{"t":"native","key":"keep_screen_on","title":"Keep Screen On","desc":"Always keep screen on in the app","kind":"switch","format":"%d","default":false},{"t":"native","key":"num_settings_tags","title":"Settings Shortcuts in Main Menu","desc":"","kind":"slider","options":[[0,"Disabled"]],"min":0,"max":10,"format":"%s","ends":["Disabled","Max"],"default":0},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"ui"},"ui_icon":{"title":"Icon","items":[{"t":"note","text":"Actual icon look may vary depending on Android version, launcher, and system settings\n\nIt may take a few seconds for the launcher to update the icon","quote":false},{"t":"head","text":"Icons"}],"source":"ui_icon"},"lyrics":{"title":"Lyrics","items":[{"t":"note","text":"When lyrics swipe is enabled, swipe album art up to show lyrics.\n\nReturn from lyrics by swipe to side or scrolling up.\n\nPinch-to-zoom  for zooming","quote":true},{"t":"native","key":"main_lyrics_swipe","title":"Lyrics Swipe Up","desc":"Swipe action on the Player Screen/cover","kind":"chips","options":[[0,"Disabled"],[1,"When local lyrics available"],[2,"Always"]],"format":"%d","default":0},{"t":"note","text":"Local lyrics: lyrics tag, LRC file, or lyrics previously downloaded by a lyrics plugin\n\nFull Rescan is required","quote":true},{"t":"native","key":"main_lyrics_button","title":"Lyrics Button","desc":"Button on the Player Screen/cover","kind":"chips","options":[[0,"Disabled"],[1,"When local lyrics available"],[2,"Always"]],"format":"%d","default":0},{"t":"note","text":"Long press on lyrics button always opens 3rd party app","quote":false},{"t":"native","key":"lyrics_in_menu","title":"Lyrics Item In The Track Menu","desc":"","kind":"chips","options":[[0,"Open lyrics UI"],[1,"Open 3rd party app"]],"format":"%d","default":0},{"t":"note","text":"Long press on lyrics item in track menu always opens 3rd party app","quote":false},{"t":"native","key":"lyrics_keep_screen","title":"Keep Screen On","desc":"Keep screen on for the lyrics","kind":"switch","format":"%d","default":false},{"t":"native","key":"lyrics_offset","title":"Lyrics Time Offset","desc":"Applied to synced lyrics in addition to the offset tag","kind":"slider","min":-5000,"max":5000,"step":50,"format":"%d","ends":["-5000","5000"],"default":0},{"t":"note","text":"Positive value makes lyrics text appear earlier\n\nNegative value delays lyrics text\n\nPer-output Visualization/Lyrics latency is also applied","quote":false},{"t":"native","key":"list_zoom_lyrics","title":"Lyrics Size","desc":"Pinch-to-zoom  for zooming","kind":"chips","options":[[-1,"Small Font"],[0,"Default"],[1,"Large Font"]],"format":"%d","default":0},{"t":"note","text":"Poweramp loads lyrics from track tags or from the LRC file\n\nIf lyrics plugin is installed, Poweramp also queries the plugin for the lyrics\n\nIf no lyrics found, lyrics text can be searched in the preferred lyrics app or in browser","quote":true},{"t":"native","key":"lyrics_plugin","title":"Preferred Lyrics App","desc":"","kind":"select","options":[[-1,"None"],[6,"Browser via custom URL"],[2,"Google"],[3,"Google (Web)"],[0,"MusiXmatch"],[1,"Genius"],[4,"QuickLyric"],[5,"Walkman Lyrics Extension"]],"format":"3rd party app to search lyrics when no lyrics found (if installed): %s","default":0},{"t":"native","key":"lyrics_custom_url","title":"Custom URL","desc":"For the Browser via custom URL","kind":"text","format":"%d","default":0},{"t":"head","text":"Scanner"},{"t":"native","key":"rescan_lyrics_tags","title":"Rescan Lyrics Tags","desc":"Force rescan tracks which may contain lyrics tags, including SYLT","kind":"action","format":"%d","default":0},{"t":"native","key":"lrc_scan","title":"Scan LRC Files","desc":"If enabled, Poweramp searches for LRC files in the Music Folders, matching LRC files by their tags, file names, and folders","kind":"switch","format":"%d","default":false},{"t":"native","key":"lrc_utf8","title":"Always Use UTF-8","desc":"If disabled, Tag Encoding setting is used for non-Unicode files","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"ui_lyrics"},"ui_mediaactions":{"title":"Buttons","items":[{"t":"note","text":"The media buttons are unified for all media controllers, such as Android 13+ media notification, Android Auto, watches, etc.\n\nThe playback control buttons (play/pause/prev./next) are fixed and can't be changed\n\nFirst two buttons are available in the media notification, other actions are usually visible only in other media controllers (Android Auto)","quote":false},{"t":"head","text":"Notification/Android Auto"},{"t":"native","key":"notify_action1","title":"Button 1","desc":"","kind":"chips","options":[[0,"None"],[1,"Repeat"],[2,"Shuffle"],[3,"Close"],[4,"Like"],[5,"Unlike"],[6,"Rating"],[8,"-10"],[7,"+10"],[10,"Prev. category"],[9,"Next category"]],"format":"%d","default":0},{"t":"native","key":"notify_action2","title":"Button 2","desc":"","kind":"chips","options":[[0,"None"],[1,"Repeat"],[2,"Shuffle"],[3,"Close"],[4,"Like"],[5,"Unlike"],[6,"Rating"],[8,"-10"],[7,"+10"],[10,"Prev. category"],[9,"Next category"]],"format":"%d","default":0},{"t":"head","text":"Android Auto/Other"},{"t":"native","key":"notify_action3","title":"Button 3","desc":"","kind":"chips","options":[[0,"None"],[1,"Repeat"],[2,"Shuffle"],[3,"Close"],[4,"Like"],[5,"Unlike"],[6,"Rating"],[8,"-10"],[7,"+10"],[10,"Prev. category"],[9,"Next category"]],"format":"%d","default":0},{"t":"native","key":"notify_action4","title":"Button 4","desc":"","kind":"chips","options":[[0,"None"],[1,"Repeat"],[2,"Shuffle"],[3,"Close"],[4,"Like"],[5,"Unlike"],[6,"Rating"],[8,"-10"],[7,"+10"],[10,"Prev. category"],[9,"Next category"]],"format":"%d","default":0},{"t":"native","key":"notify_action5","title":"Button 5","desc":"","kind":"chips","options":[[0,"None"],[1,"Repeat"],[2,"Shuffle"],[3,"Close"],[4,"Like"],[5,"Unlike"],[6,"Rating"],[8,"-10"],[7,"+10"],[10,"Prev. category"],[9,"Next category"]],"format":"%d","default":0},{"t":"native","key":"notify_action6","title":"Button 6","desc":"","kind":"chips","options":[[0,"None"],[1,"Repeat"],[2,"Shuffle"],[3,"Close"],[4,"Like"],[5,"Unlike"],[6,"Rating"],[8,"-10"],[7,"+10"],[10,"Prev. category"],[9,"Next category"]],"format":"%d","default":0},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"ui_mediaactions"},"notifications":{"title":"Notifications","items":[{"t":"native","key":"notification_colors","title":"Notification Colors","desc":"Adjust if notification text/icons are not visible due to the non-standard colors","kind":"chips","options":[[0,"Auto"],[1,"Black"],[2,"White"]],"format":"%d","default":0},{"t":"native","key":"notify_colorize","title":"Colorize Notification","desc":"Match notification colors and background to the track album art image","kind":"switch","format":"%d","default":true},{"t":"native","key":"buttons","title":"Buttons","desc":"Media action buttons","kind":"nav","page":"ui_mediaactions","format":"%d","default":0},{"t":"native","key":"status_lib","title":"Navigate to the List","desc":"Notification navigates to the current list on touch","kind":"switch","format":"%d","default":false},{"t":"head","text":"Notification Keeping"},{"t":"native","key":"keep_notification","title":"Keep Notification","desc":"Notification stays even if Poweramp paused in its UI, when playback auto-ends, etc.","kind":"switch","format":"%d","default":false},{"t":"note","text":"If disabled, notification still stays when player is paused via notification\n\nNotification can be removed by swiping away, X button, using Stop action in Poweramp, etc.","quote":true},{"t":"native","key":"notify_resume","title":"Keep Inactive Media Notification","desc":"Player can be resumed via Media Notification suggestion when inactive or unloaded (depending on firmware)","kind":"switch","format":"%d","default":false},{"t":"native","key":"keep_service","title":"Keep Service","desc":"Poweramp player service won't be unloaded when in idle","kind":"switch","format":"%d","default":false},{"t":"native","key":"no_keep_notif_on_dscn","title":"Remove Notification on Disconnection","desc":"Notification is removed on Headset/BT disconnection if player is paused","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"ui_notify"},"player":{"title":"Player Screen","items":[{"t":"native","key":"","title":"Press here for the additional Skin options like Static Seekbar, Pro Buttons. 3rd party skins may support even more options","desc":"","kind":"link","page":"skin","format":"%d","default":0},{"t":"native","key":"aa_anim","title":"Album Art Animation","desc":"Animate on track advance. Also applies to bottom bar","kind":"switch","format":"%d","default":true},{"t":"native","key":"anim_long_labels","title":"Animate Long Labels","desc":"Animate long track title and album/artist labels","kind":"switch","format":"%d","default":true},{"t":"native","key":"anim_long_labels_in_lists","title":"Animate Long Labels Everywhere","desc":"Animate long track labels also in lists and the miniplayer","kind":"switch","dependency":"anim_long_labels","format":"%d","default":true},{"t":"head","text":"Player Screen Buttons"},{"t":"note","text":"Player screen buttons appear as an optionally scrollable row below the track cover\n\nThe button customizations are separate for portrait and landscape orientations\n\nTo customize, long-press the empty space between buttons or use the item below","quote":true},{"t":"native","key":"edit_player_screen_buttons","title":"Edit Player Screen Buttons","desc":"","kind":"action","feature":"1","format":"%d","default":0},{"t":"native","key":"sub_aa_buttons_no_gap","title":"Prefer No Gap","desc":"Minimize gaps between buttons for the centered layout","kind":"switch","feature":"1","format":"%d","default":false},{"t":"native","key":"sub_aa_buttons_no_lp_edit","title":"Do Not Edit On Long Press","desc":"Prevents accidental long press started button editing","kind":"switch","feature":"1","format":"%d","default":false},{"t":"native","key":"","title":"Restore Player Screen Buttons","desc":"","kind":"action","feature":"1","format":"%d","default":0},{"t":"head","text":"Other Buttons"},{"t":"native","key":"cc_button","title":"Chromecast Button","desc":"","kind":"chips","options":[[0,"Disabled"],[1,"Player Screen"],[4,"Player Screen Button"],[2,"Main Menu"],[3,"Player Screen and Main Menu"]],"format":"%d","default":1},{"t":"native","key":"rating_type","title":"Rating Type","desc":"","kind":"chips","options":[[0,"Disabled"],[1,"Like/unlike thumbs"],[2,"5 stars"],[3,"5 stars (menu/lists only)"]],"format":"%d","default":1},{"t":"note","text":"Swipe over stars to select rating. Touch an empty space where star should be placed for immediate rating. Long press to toggle between 5 or 0 stars","quote":false},{"t":"native","key":"hide_menu","title":"Menu Button","desc":"Menu can be opened by long pressing the cover","kind":"chips","options":[[1,"Disabled"],[0,"Enabled"]],"format":"%d","default":0},{"t":"native","key":"menu_button_long_press","title":"Menu Button Long Press","desc":"Long press action for the track menu button","kind":"chips","dependency":"hide_menu","feature":"1","options":[[0,"Disabled"],[1,"Delete"],[2,"Add to Playlist"],[3,"Info/Tags"],[4,"Album Art"],[5,"Artist"],[6,"Album"],[7,"Folder"],[8,"Genre"],[9,"Share"],[10,"Like"],[11,"Unlike"]],"format":"%d","default":0},{"t":"native","key":"main_lyrics_button","title":"Lyrics Button","desc":"Button on the Player Screen/cover","kind":"chips","options":[[0,"Disabled"],[1,"When local lyrics available"],[2,"Always"]],"format":"%d","default":0},{"t":"native","key":"line2_click","title":"Line2 Press","desc":"Handle press on the 2nd track text line","kind":"chips","feature":"1","options":[[0,"Disabled"],[1,"Artist"],[2,"Album"],[3,"Folder"],[4,"Genre"]],"format":"%d","default":0},{"t":"native","key":"line2_long_click","title":"Line2 Long Press","desc":"Handle long press on the 2nd track text line","kind":"chips","feature":"1","options":[[0,"Disabled"],[1,"Artist"],[2,"Album"],[3,"Folder"],[4,"Genre"]],"format":"%d","default":0},{"t":"native","key":"show_counter","title":"Track Counter","desc":"Show track number/total tracks counter (if supported by skin)","kind":"switch","format":"%d","default":false},{"t":"note","text":"Track Counter is available via Player Screen Buttons customization","quote":true},{"t":"native","key":"previous_resets","title":"<< Button Resets Current Track","desc":"First press rewinds track, second press changes track. Includes headset/bluetooth button presses, notification button","kind":"switch","format":"%d","default":false},{"t":"note","text":"To reset a track to 0:00 on the Player Screen use a long press on Elapsed time (left to Play button)","quote":false},{"t":"native","key":"long_skip_rewind","title":"-10/+10s Rewind Pro Buttons","desc":"Change >> (category change) pro buttons to -10/+10s rewinding buttons for long tracks. Also applies to Long category","kind":"switch","format":"%d","default":true},{"t":"native","key":"","title":"Press here to set long track duration","desc":"","kind":"link","page":"library","anchor":"restore_pos_min_dur","format":"%d","default":0},{"t":"native","key":"menu_nav_to_folders","title":"Navigate to the Folders","desc":"Track menu / Folders button navigates to the Folders category instead of the Folders Hierarchy","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"ui_player"},"skin":{"title":"Skin","items":[{"t":"head","text":"Built-in Skins"},{"t":"native","kind":"skinselect","key":"skin_theme","title":"","default":"dark","options":[["light","Light"],["dark","Dark"]]},{"t":"native","key":"skin_alt_layout","kind":"radio","title":"Layout","desc":"","options":[[0,"Default","Track labels and buttons on cover. Best for small or wide screens"],[1,"Alternative layout","Moves track labels below cover, makes on-cover buttons smaller and faded"],[2,"Full cover","Moves all track labels and buttons below cover. Works best on long screen phones"]],"default":1},{"t":"note","quote":true,"text":"Use Player Screen and Lyrics options to hide/show menu/lyrics/Chromecast buttons and rating"},{"t":"native","key":"skin_track_labels_align","kind":"chips","title":"Track Labels","desc":"","options":[[0,"Default",""],[1,"Centered",""]],"default":0},{"t":"native","key":"skin_labels_bg","kind":"chips","title":"Labels Background","desc":"","options":[[0,"Enabled",""],[1,"Hidden",""]],"default":0},{"t":"native","key":"skin_player_buttons_bg","kind":"chips","title":"Player Buttons Background","desc":"","options":[[0,"Enabled",""],[1,"Hidden",""]],"default":0},{"t":"native","key":"skin_mu_colors","kind":"chips","title":"Material You colors","desc":"","options":[[0,"Disabled",""],[1,"More pronounced",""],[2,"Less pronounced",""]],"default":1},{"t":"native","key":"skin_font_variant","kind":"chips","title":"Font","desc":"","options":[[0,"Default",""],[1,"Alternative font",""],[2,"Bold",""]],"default":2},{"t":"native","key":"skin_rounding","kind":"chips","title":"Rounded Corners","desc":"","options":[[0,"More rounded",""],[1,"Less rounded",""]],"default":0},{"t":"native","key":"skin_seekbar","kind":"chips","title":"Seekbar Style","desc":"","options":[[0,"Default",""],[1,"Static Seekbar",""],[2,"Simple Seekbar (with Pro Buttons)",""]],"default":0},{"t":"native","key":"skin_more_buttons","kind":"switch","title":"Pro Buttons","desc":"Track and category change buttons. Always enabled for Simple Seekbar","default":true},{"t":"native","key":"skin_knob_hilite","kind":"chips","title":"Knob Highlight","desc":"","options":[[0,"None",""],[1,"Monochromatic",""],[2,"Colorful",""]],"default":2},{"t":"native","key":"skin_graphic_frs_color","kind":"chips","title":"Eq. Graphic Mode Curve","desc":"","options":[[0,"Monochromatic",""],[1,"Colorful",""]],"default":1},{"t":"native","key":"skin_statusbar_bg","kind":"chips","title":"Transparent Status Bar","desc":"","options":[[0,"Default",""],[1,"No Background",""]],"default":0},{"t":"note","quote":true,"text":"Some covers may make status bar icons not readable. In this case you can adjust Background options"},{"t":"native","key":"skin_navbar_bg","kind":"chips","title":"Transparent Navbar","desc":"Applied on the Player Screen","options":[[0,"Default",""],[1,"Semi-transparent",""],[2,"No Background",""]],"default":1},{"t":"note","quote":true,"text":"Some firmwares are unable to change status bar/nav bar dynamically. You may need to exit/enter the app once for these options to apply"},{"t":"native","key":"skin_navbar_offset","kind":"switch","title":"Offset Navbar","desc":"Move Navbar slightly away from the corners (for display with large corner radius)","default":true},{"t":"native","key":"skin_android_navbar_bg","kind":"chips","title":"Android Navigation Bar","desc":"","options":[[0,"Default",""],[1,"No Background",""]],"default":1},{"t":"native","key":"restore_defaults","kind":"action","title":"Restore Defaults"},{"t":"head","text":"3rd Party Skins"},{"t":"note","text":"No 3rd Party Skins Found"}],"source":"poweramp_builtin_skins"},"viz":{"title":"Visualization","items":[{"t":"native","key":"enable_vis","title":"Visualization On Player Screen","desc":"Visualization can be switched on with Player Screen  button","kind":"switch","format":"%d","default":false},{"t":"native","key":"vis_frs_type","title":"Equalizer Screen Spectrum","desc":"","kind":"chips","options":[[0,"Disabled"],[1,"Classic"],[2,"Rounded"]],"format":"%d","default":2},{"t":"native","key":"vis_in_lib","title":"Visualization in Library","desc":"Visible when visualization on Player Screen is enabled. Depending on visualization preset used, some UI elements may become poorly visible","kind":"switch","format":"%d","default":false},{"t":"native","key":"vis_preset_change_sec","title":"Preset Duration","desc":"For By Duration and Shuffle modes","kind":"slider","min":3,"max":120,"format":"%d","default":15},{"t":"native","key":"vis_panel_faded_alpha","title":"Top Visualization Panel Opacity","desc":"","kind":"slider","min":0,"max":100,"format":"%d%%","default":60},{"t":"native","key":"vis_controls_faded_alpha","title":"Faded Controls Opacity","desc":"","kind":"slider","min":0,"max":100,"format":"%d%%","default":50},{"t":"native","key":"vis_temp_ui_ms","title":"UI Timeout","desc":"Time to show UI during active visualization","kind":"slider","min":500,"max":15000,"step":100,"format":"%d","default":1500},{"t":"native","key":"vis_aa_visible","title":"Visible Album Art","desc":"Keep album art visible during visualization","kind":"switch","format":"%d","default":true},{"t":"native","key":"vis_ignore_touch_faded","title":"Ignore Touch","desc":"Ignore first touch in Fade Controls mode","kind":"switch","format":"%d","default":false},{"t":"native","key":"vis_list_faded_alpha","title":"Track Opacity","desc":"Track labels, rating, menu, and album art (if visible) opacity","kind":"slider","min":0,"max":100,"format":"%d","default":25},{"t":"native","key":"vis_fs_hide_bars","title":"Hide System Bars For Full Screen","desc":"Hide status bar and navigation completely when in Full Screen mode","kind":"switch","feature":"1","format":"%d","default":false},{"t":"native","key":"vis_use_compact_bars","title":"Scaled Bars For Faded Controls","desc":"Scale bars visualization to album art area in Fade Controls mode. If disabled, bar visualization is always full-screen","kind":"switch","format":"%d","default":true},{"t":"native","key":"milk_hd","title":"HD","desc":"Increased visualization resolution, reduces performance","kind":"switch","format":"%d","default":false},{"t":"native","key":"milk_crop_aspect","title":"Crop Aspect","desc":"Crop visualization instead of scaling it, reduces performance for a better visual match","kind":"switch","format":"%d","default":false},{"t":"native","key":"milk_30_fps","title":"Force 30 FPS","desc":"Reduce frame rate to 30 frames per second","kind":"switch","format":"%d","default":false},{"t":"native","key":"milk_strict","title":"Strict","desc":"Slower .milk presets rendering for a bit better visual match","kind":"switch","format":"%d","default":false},{"t":"native","key":"vis_extra_delay_info","title":"Visualization Delay","desc":"Extra delay for better audio/visualization/lyrics match is set per each Output/Device type","kind":"nav","page":"","format":"%d","default":0},{"t":"head","text":"Presets"},{"t":"native","key":"vis_rescan","title":"Rescan Presets","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"vis_full_rescan","title":"Full Presets Rescan","desc":"Clear scanned presets info and do the full presets rescan","kind":"action","format":"%d","default":0},{"t":"native","key":"milk_hide_unliked","title":"Hide Unliked Presets","desc":"Unliked presets are completely hidden. Preset list is reloaded when closed","kind":"switch","format":"%d","default":false},{"t":"note","text":"Presets disabling removes their ratings","quote":false},{"t":"head","text":"3rd Party Presets"},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"vis"},"output_at":{"title":"AudioTrack Output","source":"audio_output","items":[{"t":"note","text":"Default Android audio API. Stable and supported by all Android devices"},{"t":"head","text":"Use For Output Devices:"},{"t":"native","key":"output_headset","title":"Wired Headset/AUX","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_speaker","title":"Speaker","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_bt","title":"Bluetooth","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_usb","title":"USB DAC","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_chromecast","title":"Chromecast","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_other","title":"Other Output Devices","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}]},"output_osl":{"title":"OpenSL ES Output","source":"audio_output","items":[{"t":"note","text":"Native Android audio API"},{"t":"head","text":"Use For Output Devices:"},{"t":"native","key":"output_headset","title":"Wired Headset/AUX","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_speaker","title":"Speaker","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_bt","title":"Bluetooth","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_usb","title":"USB DAC","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_chromecast","title":"Chromecast","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_other","title":"Other Output Devices","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}]},"output_aa":{"title":"AAudio Output","source":"audio_output","items":[{"t":"note","text":"Hi-Res capable optimized audio output. Hi-Res is supported by a subset of Android devices"},{"t":"head","text":"Use For Output Devices:"},{"t":"native","key":"output_headset","title":"Wired Headset/AUX","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_speaker","title":"Speaker","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_bt","title":"Bluetooth","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_usb","title":"USB DAC","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_chromecast","title":"Chromecast","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_other","title":"Other Output Devices","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}]},"output_oslhd":{"title":"OpenSL ES Hi-Res Output","source":"audio_output","items":[{"t":"note","text":"Experimental Hi-Res audio API. Supported by subset of Android devices"},{"t":"head","text":"Use For Output Devices:"},{"t":"native","key":"output_headset","title":"Wired Headset/AUX","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_speaker","title":"Speaker","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_bt","title":"Bluetooth","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_usb","title":"USB DAC","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_chromecast","title":"Chromecast","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_other","title":"Other Output Devices","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}]},"output_athd":{"title":"Hi-Res Output","source":"audio_output","items":[{"t":"note","text":"Experimental Hi-Res audio API. Supported by a subset of Android devices"},{"t":"head","text":"Use For Output Devices:"},{"t":"native","key":"output_headset","title":"Wired Headset/AUX","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_speaker","title":"Speaker","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_bt","title":"Bluetooth","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_usb","title":"USB DAC","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_chromecast","title":"Chromecast","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_other","title":"Other Output Devices","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}]},"output_cc":{"title":"Chromecast Output","source":"audio_output","items":[{"t":"note","text":""},{"t":"head","text":"Use For Output Devices:"},{"t":"native","key":"output_headset","title":"Wired Headset/AUX","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_speaker","title":"Speaker","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_bt","title":"Bluetooth","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_usb","title":"USB DAC","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_chromecast","title":"Chromecast","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_other","title":"Other Output Devices","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}]},"output_bench":{"title":"Built-in Benchmark (silent) Output","source":"audio_output","items":[{"t":"note","text":""},{"t":"head","text":"Use For Output Devices:"},{"t":"native","key":"output_headset","title":"Wired Headset/AUX","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_speaker","title":"Speaker","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_bt","title":"Bluetooth","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_usb","title":"USB DAC","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_chromecast","title":"Chromecast","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_other","title":"Other Output Devices","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}]}};
-const ZoomProfile={"library":3,"files":3,"folders":3,"folder_files":3,"folders_hier":3,"albums":3,"album_files":3,"albums_by_artist":3,"albums_by_artist_files":3,"album_artists":3,"album_artists_files":3,"album_artists_albums":3,"album_artists_albums_files":3,"artists":3,"artist_files":3,"artists_albums":3,"artists_albums_files":3,"genres":3,"genres_files":3,"genres_albums":3,"genres_albums_files":3,"composers":3,"composers_files":3,"composers_albums":3,"composers_albums_files":3,"playlists":3,"playlists_files":3,"queue":3,"most_played_files":3,"top_rated_files":3,"low_rated_files":3,"recently_added_files":3,"recently_played_files":3,"long_files":3,"years":3,"years_files":3,"years_albums":3,"years_albums_files":3,"streams":3,"bookmarks":3,"search":3,"lyrics":0};
+const NativeSchema={"art":{"title":"Album Art","items":[{"t":"head","text":"Download"},{"t":"native","key":"download_album_art","title":"Download Album Art","desc":"Automatically search and download missing album art","kind":"switch","format":"%d","default":false},{"t":"native","key":"download_artist_art","title":"Download Artist Images","desc":"Includes Album Artists and Composers. If disabled, track album art is used","kind":"switch","format":"%d","default":false},{"t":"native","key":"aa_download_hd","title":"High Resolution","desc":"Higher downloaded album art resolution, increases storage/connection bandwidth usage","kind":"switch","format":"%d","default":false},{"t":"native","key":"download_aa_wifi_only","title":"Download Only On Wi-Fi","desc":"Album art will be downloaded only when wi-fi is connected","kind":"switch","format":"%d","default":true},{"t":"native","key":"reset_negative_aa_status","title":"Reset Negative Status","desc":"Clear stored \"not-found\" status for album/artist images","kind":"action","format":"%d","default":0},{"t":"native","key":"clear_aa_cache","title":"Delete Cache","desc":"Poweramp images cache will be deleted","kind":"action","format":"%d","default":0},{"t":"head","text":"Advanced Tweaks"},{"t":"native","key":"aa_force_default","title":"Force Default Image","desc":"Always show default image instead of any album art","kind":"switch","format":"%d","default":false},{"t":"native","key":"aa_8888","title":"Use 24-bit RGB","desc":"Higher color resolution for album art. Requires 2x more memory per image","kind":"switch","format":"%d","default":false},{"t":"native","key":"aa_hi_res_for_apis","title":"Send High Resolution Album Art","desc":"High resolution album art is sent to Android lock screen, app widgets, and other media API consumers. Lock Screen / Blur has priority over this option","kind":"switch","format":"%d","default":false},{"t":"native","key":"aa_always","title":"Always Send Album Art","desc":"For smartwatches/other devices which should always receive album art, even when screen is off","kind":"switch","format":"%d","default":false},{"t":"native","key":"aa_no_ashmem","title":"API Compatibility","desc":"Change if album art is not visible in Android Auto/3rd party apps","kind":"switch","format":"%d","default":false},{"t":"native","key":"download_if_no_tags","title":"Also Search By Title/Filename","desc":"Search for album art even if no tags are found in the track","kind":"switch","format":"%d","default":true},{"t":"native","key":"prefer_downloaded_aa","title":"Prefer Downloaded Album Art","desc":"Prefer downloaded album art over in-folder Cover.jpg/AlbumArt.jpg, etc","kind":"switch","format":"%d","default":false},{"t":"native","key":"aa_aspect","title":"Aspect Ratio","desc":"","kind":"chips","options":[[0,"Default"],[1,"Keep Aspect Ratio"],[2,"Square"]],"format":"%d","default":0},{"t":"native","key":"aa_higher_res","title":"Increase Resolution","desc":"Increase image quality for high resolution embedded/in-folder images","kind":"switch","format":"%d","default":false},{"t":"native","key":"aa_per_stream_track","title":"Prefer Track Cover for Streams","desc":"Show album art based on stream track title/artist instead of the stream name","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"aa"},"background":{"title":"Background","items":[{"t":"native","key":"aa_blur_enabled","title":"Enable Blurred Backgrounds","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"list_aa_blur_enabled","title":"List Background","desc":"","kind":"switch","dependency":"aa_blur_enabled","format":"%d","default":false},{"t":"native","key":"lyrics_aa_blur_enabled","title":"Lyrics Background","desc":"","kind":"switch","dependency":"aa_blur_enabled","format":"%d","default":false},{"t":"note","text":"Skins may override, change, or completely disable background\n\nLyrics and list background is specifically dimmed to make text readable","quote":true},{"t":"native","key":"aa_bg_gradient","title":"Background Gradient","desc":"","kind":"slider","min":0,"max":10,"format":"%d","ends":["None","Max"],"default":0},{"t":"native","key":"aa_bg_gradient_color","title":"Background Gradient Color","desc":"","kind":"color","format":"%s","default":"#000000"},{"t":"native","key":"aa_bg_gradient_for_list","title":"Background Gradient For Lists","desc":"Also apply background gradient for list background","kind":"switch","format":"%d","default":false},{"t":"note","text":"Skin may override and disable this option","quote":false},{"t":"native","key":"aa_blur","title":"Background Blur","desc":"","kind":"slider","dependency":"aa_blur_enabled","min":0,"max":15,"format":"%d","ends":["Less","More"],"default":5},{"t":"native","key":"aa_blur_scale","title":"Background Details","desc":"","kind":"slider","dependency":"aa_blur_enabled","min":0,"max":10,"format":"%d","ends":["Solid Color","Detailed"],"default":5},{"t":"native","key":"aa_blur_intensity","title":"Background Intensity","desc":"","kind":"slider","dependency":"aa_blur_enabled","min":0,"max":250,"format":"%d%%","default":100},{"t":"note","text":"Some skins may adjust this option to make text readable","quote":false},{"t":"native","key":"aa_blur_saturation","title":"Background Saturation","desc":"","kind":"slider","dependency":"aa_blur_enabled","min":0,"max":300,"step":10,"format":"%d%%","default":150},{"t":"note","text":"Some skins may adjust this option to make text readable","quote":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"aa_bg"},"audio":{"title":"Audio","items":[{"t":"native","key":"audio_info","title":"Audio Info","desc":"Detailed info about the audio processing. Also available by long press on small meta info on the Main and Equalizer screens","kind":"action","format":"%d","default":0},{"t":"native","key":"fade","title":"Crossfade, Fade, and Gapless","desc":"Crossfade options, fade type and length, gapless","kind":"nav","page":"crossfade","format":"%d","default":0},{"t":"native","key":"rg","title":"Replay Gain (RG)","desc":"Enable RG, set source, preamp values","kind":"nav","page":"rg","format":"%d","default":0},{"t":"native","key":"audio_focus","title":"Audio Focus","desc":"Pause/Resume/Duck volume on calls/notifications/start","kind":"nav","page":"focus","format":"%d","default":0},{"t":"native","key":"","title":"Equalizer","desc":"Equalizer settings, number of bands, frequencies","kind":"nav","page":"equalizer","format":"%d","default":0},{"t":"native","key":"audio_resampler","title":"Resampler","desc":"Resampling/dither settings","kind":"nav","page":"resampler","format":"%d","default":0},{"t":"native","key":"audio_dvc","title":"Direct Volume Control (DVC)","desc":"DVC options, DVC for Bluetooth","kind":"nav","page":"dvc","format":"%d","default":0},{"t":"native","key":"audio_outputs","title":"Output","desc":"Audio output options","kind":"nav","page":"output","format":"%d","default":0},{"t":"native","key":"audio_tweaks","title":"Advanced Tweaks","desc":"Volume levels, MusicFX, equalizer/reverb presets reset","kind":"nav","page":"tweaks","format":"%d","default":0}],"source":"audio"},"dvc":{"title":"Direct Volume Control (DVC)","items":[{"t":"note","text":"Direct Volume Control (DVC) improves volume and equalizer/tone dynamic range\n\nDVC for Bluetooth only works with Absolute Volume disabled in Android developer options. Otherwise it results in too low volume\n\nAbsolute Volume means Bluetooth device volume is synced to the phone","quote":true},{"t":"native","key":"dvc_enabled","title":"Enable Direct Volume Control","desc":"","kind":"switch","format":"%d","default":true},{"t":"note","text":"DVC is enabled if:\n\n• per output option allows it\n\n• No DVC for Bluetooth Absolute Volume option allows it","quote":false},{"t":"head","text":"Bluetooth"},{"t":"native","key":"no_dvc_bt_absvol","title":"No DVC for Bluetooth Absolute Volume","desc":"Automatically disable DVC for Bluetooth when Absolute Volume is detected or it's not possible to detect it","kind":"switch","dependency":"dvc_enabled","format":"%d","default":true},{"t":"note","text":"• this option may temporarily change volume for a few seconds on Bluetooth connection\n\n• volume may be constantly changed and probed on this page","quote":false},{"t":"note","text":"• it's not possible to detect Absolute Volume on your device\n\n• on you device this option just disables DVC for Bluetooth by default\n\n• uncheck if you know that Absolute Volume is disabled for your device","quote":true},{"t":"native","key":"dvc_bt_msg","title":"Disable Bluetooth Absolute Volume","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"no_dvc_gain_mb","title":"No DVC - Preamp Reduction","desc":"Allows equalization/basses without distortion","kind":"knob","min":-1000,"max":0,"step":50,"scale":100.0,"format":"%.1fdB","default":-600},{"t":"native","key":"compensate_dvc_vol","title":"Compensate DVC Volume","desc":"Specifically compensate low volume in DVC mode on buggy Android 15+ firmwares. Applied only when the issue is detected","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"audio_dvc"},"equalizer":{"title":"Equalizer","items":[{"t":"note","text":"Depending on the loaded preset, the equalizer can be in Graphic or Parametric mode\n\nPreset list has the Graphic and Parametric filters (both can be activated)\n\nGraphic mode is easy to use 5-32 preconfigured bands","quote":true},{"t":"native","key":"peq_equ_bands","title":"Graphic Equalizer Bands","desc":"Set number of bands, configure frequencies","kind":"nav","page":"peq_equ_bands","format":"%d","default":0},{"t":"native","key":"peq_equ_tone","title":"Tone","desc":"Set Bass/Treble frequencies and Q factors","kind":"nav","page":"peq_equ_tone","format":"%d","default":0},{"t":"native","key":"eq_labels","title":"Equalizer Values","desc":"","kind":"chips","options":[[0,"Hidden"],[1,"dB"],[2,"%"]],"format":"%d","default":1},{"t":"native","key":"tone_labels","title":"Tone Values","desc":"","kind":"chips","options":[[0,"Hidden"],[1,"dB"],[2,"%"]],"format":"%d","default":2},{"t":"native","key":"_autosave","title":"Auto Save","desc":"Auto save current preset","kind":"switch","format":"%d","default":false},{"t":"native","key":"dsp_border_gain","title":"Smooth Equalizer/Tone Gains","desc":"Automatically reduce Equalizer/Tone band gains near maximum volume to avoid overloading","kind":"switch","format":"%d","default":true},{"t":"native","key":"suggest_autoeq","title":"Suggest AutoEq Presets","desc":"Show suggestion to assign AutoEq preset for the connected Bluetooth/USB device","kind":"switch","format":"%d","default":false},{"t":"native","key":"_clear_autoeq_known_devices","title":"Reset the Disabled AutoEq Suggestions","desc":"","kind":"action","dependency":"suggest_autoeq","format":"%d","default":0},{"t":"native","key":"_presets_to_peq","title":"Export Presets to the Poweramp Equalizer app","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"_import_autoeq","title":"Import AutoEq Presets","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"reset_eq_presets","title":"Restore Equalizer Presets","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"audio_equ"},"focus":{"title":"Audio Focus","items":[{"t":"native","key":"resume_after_call","title":"Resume After Call","desc":"Resume playing on hang up (if paused by call)","kind":"switch","format":"%d","default":true},{"t":"native","key":"resume_on_start","title":"Resume On Start","desc":"Resume playing when Poweramp is started","kind":"switch","format":"%d","default":false},{"t":"native","key":"resume_on_resume","title":"Resume On Reopen","desc":"Also resume when Poweramp is already running and reopened from the launcher","kind":"switch","dependency":"resume_on_start","format":"%d","default":true},{"t":"native","key":"resume_on_mount","title":"Wait For Storage","desc":"Wait for a storage (up to 30s.) to mount before resuming on start","kind":"switch","dependency":"resume_on_start","format":"%d","default":false},{"t":"native","key":"cc_af_warning","title":"Chromecast output may ignore calls and short Audio Focus completely. Press here to configure","desc":"","kind":"link","page":"audio_output_device_opts","anchor":"no_af","format":"%d","default":0},{"t":"head","text":"Audio Focus"},{"t":"native","key":"","title":"On Android 8 and up Poweramp can be unloaded by the system while paused. Press here to avoid that via Keep Notification option","desc":"","kind":"link","page":"notifications","anchor":"keep_notification_always","format":"%d","default":0},{"t":"native","key":"af_short","title":"Short Audio Focus Change / Calls","desc":"Temporarily pause on short audio focus change (calls/notifications/navigation/etc.)","kind":"switch","format":"%d","default":true},{"t":"native","key":"pause_in_call","title":"Pause In Call","desc":"Pause when phone call happens. Poweramp always pauses for call via Bluetooth","kind":"switch","format":"%d","default":true},{"t":"native","key":"resume_on_focus","title":"Resume On Focus Gain","desc":"Resume after getting back the focus. If disabled, player stays paused","kind":"switch","dependency":"af_short","format":"%d","default":true},{"t":"native","key":"af_short_duck","title":"Duck Volume","desc":"When possible, allow lowering the volume on short audio focus. This option can be overridden by Audio output settings","kind":"switch","dependency":"af_short","format":"%d","default":true},{"t":"native","key":"af_permanent","title":"Permanent Audio Focus Change","desc":"Pause on permanent audio focus change (other player/game/etc.)","kind":"switch","format":"%d","default":true},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"audio_focus"},"audio_output":{"title":"Audio Output","items":[{"t":"head","text":"Use For Output Devices:"},{"t":"native","key":"output_headset","title":"Wired Headset/AUX","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_speaker","title":"Speaker","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_bt","title":"Bluetooth","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_usb","title":"USB DAC","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_chromecast","title":"Chromecast","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_other","title":"Other Output Devices","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"audio_output"},"audio_output_device_opts":{"title":"Audio Output Device Opts","items":[{"t":"note","text":"Enable","quote":false},{"t":"native","key":"sample_rate","title":"Sample Rate","desc":"","kind":"select","format":"%d","default":0},{"t":"native","key":"sample_fmt","title":"Sample Format","desc":"","kind":"select","format":"%d","default":0},{"t":"note","text":"Sample rate/format may be detected only when playback is active","quote":false},{"t":"note","text":"Global sound effects, like Dolby, may force standard definition audio (48 kHz/16 bit)","quote":false},{"t":"native","key":"float","title":"Float32 Sample Format","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"no_dvc","title":"No DVC","desc":"Disable Direct Volume Control for this output/device","kind":"switch","format":"%d","default":false},{"t":"native","key":"no_headroom","title":"No Headroom Gain","desc":"Don't reduce output gain when DVC is disabled. May cause distortion for high equ/tone gains","kind":"switch","format":"%d","default":false},{"t":"native","key":"buffer_size","title":"Buffer Size","desc":"Tweak if audio skips","kind":"action","format":"%d","default":0},{"t":"native","key":"vis_latency_ms","title":"Visualization/Lyrics Delay","desc":"","kind":"slider","min":0,"max":2500,"format":"Extra delay to apply to visualization/lyrics for a better sync: %d ms","default":0},{"t":"native","key":"oem_variant","title":"Use OEM Variant","desc":"Use OEM API Variant for this output/device","kind":"switch","format":"%d","default":false},{"t":"native","key":"cc_force_aa","title":"Force Send Album Art","desc":"Send album art to Chromecast device even if it reports it has no display","kind":"switch","format":"%d","default":false},{"t":"native","key":"cc_show_meta","title":"Show Meta Information","desc":"Show additional meta information (track format, category, next track) on the Chromecast devices with a screen","kind":"switch","format":"%d","default":false},{"t":"native","key":"no_equ","title":"No Equ/Tone","desc":"Disable equalizer/tone DSP for this output/device","kind":"switch","format":"%d","default":false},{"t":"native","key":"no_duck","title":"No Duck","desc":"Disable volume ducking for this output, e.g. when notifications cause issues with this output. Temporarily pause player instead","kind":"switch","format":"%d","default":false},{"t":"native","key":"no_af","title":"Ignore Audio Focus","desc":"Ignore calls/short Audio Focus requests, including notification sounds and ringtones","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"audio_output_device_opts"},"output":{"title":"Output","items":[{"t":"head","text":"Output Plugins"},{"t":"native","kind":"nav","page":"output_at","title":"AudioTrack Output","desc":"Java based output"},{"t":"native","kind":"nav","page":"output_osl","title":"OpenSL ES Output","desc":"Native optimized output"},{"t":"native","kind":"nav","page":"output_aa","title":"AAudio Output","desc":"Hi-Res (Android 14+) native output"},{"t":"native","kind":"nav","page":"output_oslhd","title":"OpenSL ES Hi-Res Output","desc":"Experimental native 24+ bit 96/192+ kHz"},{"t":"native","kind":"nav","page":"output_athd","title":"Hi-Res Output","desc":"Experimental direct hardware 24+ bit 96/192+ kHz"},{"t":"native","kind":"nav","page":"output_cc","title":"Chromecast Output","desc":""},{"t":"native","kind":"nav","page":"output_bench","title":"Built-in Benchmark (silent) Output","desc":""}],"source":"audio_outputs"},"audio_platform_log":{"title":"Audio Outputs Detection Log","items":[],"source":"audio_platform_log"},"resampler":{"title":"Resampler","items":[{"t":"native","key":"resampler_type","title":"Resampler Type","desc":"","kind":"chips","options":[[0,"SW - high quality"],[1,"SoX - very high quality, higher power consumption"]],"format":"%d","default":0},{"t":"native","key":"resampler_cutoff","title":"Resampler Cutoff Frequency Ratio","desc":"","kind":"knob","min":800,"max":990,"scale":10.0,"format":"%.1f%%","default":970},{"t":"native","key":"dither","title":"Dither","desc":"","kind":"select","options":[[0,"None (fastest)"],[1,"Rectangular (fast)"],[2,"Triangular (fast)"],[3,"Triangular with high pass (fast)"],[4,"F-weighted noise shaping (slow)"],[5,"Modified-e-weighted noise shaping (slow)"],[6,"Improved-e-weighted noise shaping (slow)"],[7,"Shibata noise shaping (slow)"],[8,"Low shibata noise shaping (slow)"]],"format":"%s. Output plugin can override this setting","default":0},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"audio_resampler"},"tweaks":{"title":"Advanced Tweaks","items":[{"t":"head","text":"Volume"},{"t":"native","key":"volume_levels","title":"Volume Levels","desc":"","kind":"select","options":[[0,"System Default"],[30,"30"],[51,"50"],[76,"75"],[101,"100"]],"format":"Number of volume levels: %s","default":0},{"t":"note","text":"Starting from Android 12 this option is limited by Google and may work only inside Poweramp or may not work at all\n\nSamsung Sound Assistant changed volume step is supported automatically (up to 150 levels)\n\nThe option may cause issues with Android Auto","quote":false},{"t":"native","key":"volume_popup","title":"Volume Panel","desc":"Custom volume panel. Shown when volume is adjusted in Poweramp UI","kind":"switch","format":"%d","default":false},{"t":"native","key":"pause_on_volume","title":"Pause/Resume on Volume","desc":"Pause when volume is set to 0, resume when volume increased from 0","kind":"switch","format":"%d","default":false},{"t":"native","key":"","title":"Change Tracks By Long Volume Keys Press","desc":"Press here for Volume keys long press option","kind":"nav","page":"misc","anchor":"volume_keys_long_press_hint","format":"%d","default":0},{"t":"head","text":"Other"},{"t":"native","key":"allow_platform_fx","title":"MusicFX","desc":"Enable MusicFX Button (Android system audio effects) in Volume tab","kind":"switch","format":"%d","default":false},{"t":"native","key":"force_no_speaker","title":"Force Speaker Off (for Hi-Res Output)","desc":"Enable this if speaker doesn't switch off after calls, some notifications, etc.","kind":"switch","format":"%d","default":false},{"t":"native","key":"force_audio_on_focus","title":"Force Audio On Audio Focus Change","desc":"Enable this if audio stops after notifications","kind":"switch","format":"%d","default":false},{"t":"native","key":"use_stream3_player","title":"Emulate Media Stream (for Hi-Res output)","desc":"Enable this if volume or other media actions don't work for the lock screen or when screen is off","kind":"switch","format":"%d","default":false},{"t":"native","key":"mod_gain_mb","title":"Tracker Decoder Extra Gain","desc":"Extra gain applied to tracker formats, such as .mod, *.s3c, *.xm, *.it","kind":"knob","min":-1000,"max":1000,"step":100,"scale":100.0,"format":"%.1fdB","default":0},{"t":"native","key":"mod_separation","title":"Tracker Decoder Stereo Separation","desc":"","kind":"knob","min":0,"max":200,"step":10,"scale":1.0,"format":"%.0f%%","default":0},{"t":"native","key":"reset_eq_presets","title":"Restore Equalizer Presets","desc":"Built-in and AutoEq equalizer presets will be restored to defaults","kind":"action","format":"%d","default":0},{"t":"native","key":"reset_reverb_presets","title":"Restore Reverb Presets","desc":"Built-in reverb presets will be restored/set to defaults","kind":"action","format":"%d","default":0},{"t":"native","key":"audio_platform_log","title":"Audio Outputs Detection Log","desc":"","kind":"nav","page":"audio_platform_log","format":"%d","default":0},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"audio_tweaks"},"commands_history":{"title":"Last Processed Commands","items":[],"source":"commands_history"},"crossfade":{"title":"Crossfade, Fade, and Gapless","items":[{"t":"native","key":"crossfade_auto_advance","title":"Auto-advance Fading","desc":"","kind":"chips","options":[[0,"No fading"],[1,"Non-gapless/cue"],[2,"All songs"],[3,"Shuffled songs"]],"format":"When song is changed automatically, apply crossfade: %s","default":0},{"t":"native","key":"fade_manual_advance","title":"Manual Track Change Fading","desc":"","kind":"chips","options":[[0,"No fading"],[1,"Short crossfade"],[2,"Crossfade"]],"format":"Output plugin can override this setting. When song is changed manually, apply: %s","default":1},{"t":"native","key":"fade_play_pause","title":"Fade Play/Pause/Stop","desc":"","kind":"switch","format":"%d","default":true},{"t":"native","key":"fade_seek","title":"Fade on Seek","desc":"","kind":"switch","format":"%d","default":true},{"t":"native","key":"gapless_preload_ms","title":"Preload Gapless Tracks","desc":"Increase (to Normal or more) for slow storages to improve gapless","kind":"slider","min":0,"max":5000,"step":100,"format":"%dms","ends":["None","More"],"default":0},{"t":"native","key":"track_end_silence_ms","title":"Silence Between Tracks","desc":"Applied to all tracks excluding CUE tracks. Elapsed time may go beyond track duration","kind":"slider","min":0,"max":5000,"step":100,"format":"%dms","default":0},{"t":"native","key":"crossfade_length_ms","title":"Crossfade Length","desc":"","kind":"slider","min":100,"max":15000,"step":50,"format":"%dms","default":5000},{"t":"native","key":"fade_short_xfade_ms","title":"Short Manual Crossfade Length","desc":"","kind":"slider","min":10,"max":1000,"step":10,"format":"%dms","default":400},{"t":"native","key":"fade_short_ms","title":"Play/Pause/Stop Fade Length","desc":"","kind":"slider","min":10,"max":1000,"format":"%dms","default":400},{"t":"native","key":"fade_seek_ms","title":"Seek Fade Length","desc":"","kind":"slider","min":10,"max":500,"format":"%dms","default":100},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"fade"},"feature_packages":{"title":"Feature Packages","items":[{"t":"note","text":"a number of upgrades, new cool features, and options in a single package","quote":false},{"t":"note","text":"list of the included features","quote":false},{"t":"note","text":"request and vote for the next package features on the Poweramp forum","quote":false},{"t":"note","text":"the same package gets even more features in the subsequent updates","quote":false},{"t":"note","text":"packages allow us to continue Poweramp development","quote":false},{"t":"note","text":"one time package purchase, instead of a 🤢 subscription","quote":false},{"t":"note","text":"a discounted, minimal price, if you recently purchased Full Version","quote":false},{"t":"note","text":"Hide Feature Packages from the Settings top","quote":false},{"t":"head","text":"Other"},{"t":"native","key":"buy_uber_badges","title":"Buy Uberpatron Badges","desc":"","kind":"action","format":"%d","default":0},{"t":"note","text":"● support Poweramp development\n\n● get Uberpatron Edition Badges\n\n● currently these are purely cosmetic items","quote":false},{"t":"native","key":"restore_purchase","title":"Restore Purchases","desc":"","kind":"action","format":"%d","default":0}],"source":"feature_packages"},"about":{"title":"About","items":[{"t":"note","text":"DrawerCast Player 0.5.0\nPoweramp reference implementation"},{"t":"native","kind":"action","key":"drawercast_details","title":"Implementation Status"},{"t":"native","kind":"nav","page":"storage","title":"Storage"},{"t":"native","kind":"action","key":"drawercast_server","title":"A15 Music Server"}]},"headset":{"title":"Headset/Bluetooth","items":[{"t":"head","text":"Connection"},{"t":"native","key":"pause_on_headset","title":"Pause On Headset Disconnect","desc":"Pause when wired/Bluetooth headset/USB DAC disconnected","kind":"switch","format":"%d","default":false},{"t":"native","key":"resume_on_headset","title":"Resume On Wired Headset","desc":"Resume playing when wired headset is connected","kind":"switch","format":"%d","default":false},{"t":"native","key":"resume_on_bt","title":"Resume On Bluetooth","desc":"Resume playing when Bluetooth device is connected","kind":"switch","format":"%d","default":false},{"t":"native","key":"","title":"Audio Focus","desc":"Few other play/resume options are available in Audio Focus settings","kind":"nav","page":"focus","format":"%d","default":0},{"t":"head","text":"Buttons"},{"t":"native","key":"enable_headset_controls","title":"Respond To Buttons","desc":"Enable Headset/Bluetooth controls","kind":"switch","format":"%d","default":false},{"t":"native","key":"headset_controls","title":"Wired Headset","desc":"","kind":"chips","options":[[0,"Single press"],[1,"Double/triple press for next/prev. track"],[2,"Long press for next track (when playing)"]],"format":"%d","default":0},{"t":"native","key":"avrcp_controls","title":"Bluetooth","desc":"","kind":"chips","options":[[0,"Single press"],[1,"Double/triple press for next/prev. track"],[2,"Long press for next track (when playing)"]],"format":"%d","default":0},{"t":"native","key":"long_volume_press","title":"Press here for Volume keys long press option","desc":"","kind":"link","page":"misc","anchor":"long_volume_controls","format":"%d","default":0},{"t":"native","key":"follow_pl_exact","title":"Strict Resume/Pause/Stop","desc":"Use for headunits/devices generating stray play/pause/stop key press commands, which are interpreted as undesired playback toggle or double press","kind":"switch","dependency":"enable_headset_controls","format":"%d","default":false},{"t":"native","key":"ignore_bt_sec","title":"Ignore Bluetooth Commands","desc":"Ignore all Bluetooth commands for a period of time after a connection","kind":"slider","min":0,"max":20,"format":"%d","ends":["0","20"],"default":0},{"t":"native","key":"bt_ignore_repeat_shuffle","title":"Ignore Repeat/Shuffle","desc":"Ignore Bluetooth Repeat and Shuffle commands completely","kind":"switch","format":"%d","default":false},{"t":"native","key":"headset_beep","title":"Beep","desc":"","kind":"switch","dependency":"enable_headset_controls","format":"%d","default":false},{"t":"native","key":"beep_more","title":"Beep More","desc":"Beep on all commands, such as from notifications or other controls","kind":"switch","dependency":"headset_beep","format":"%d","default":false},{"t":"native","key":"headset_vibrate","title":"Vibrate","desc":"","kind":"switch","dependency":"enable_headset_controls","format":"%d","default":false},{"t":"native","key":"no_android_long_press","title":"Disable Default Long Press","desc":"Disable long press activated voice search while Poweramp is playing","kind":"switch","format":"%d","default":false},{"t":"native","key":"commands_history","title":"Last Processed Commands","desc":"","kind":"nav","page":"commands_history","format":"%d","default":0},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"headset"},"library":{"title":"Library","items":[{"t":"native","key":"rescan_folders","title":"Rescan","desc":"","kind":"action","format":"%d","default":0},{"t":"note","text":"Poweramp retains track info (e.g., ratings, playlists) from removed storage even after a Rescan. Use Full Rescan to clear it\n\nPoweramp scans files only during active use or playback, not in the background, to save battery\n\nFor very large libraries, Poweramp scans in chunks during playback as resources allow","quote":true},{"t":"native","key":"erase_and_rescan","title":"Full Rescan","desc":"Clear tag info database and rescan Library/Folders. Use when storage/SD card changed, on major ROM updates, or when folders are moved on storage","kind":"action","format":"%d","default":0},{"t":"native","key":"music_folders_button","title":"Music Folders","desc":"","kind":"action","format":"%d","default":0},{"t":"note","text":"Android may not allow certain folders to be added, such as Download or a storage root. In this case please add their subfolders instead. This restriction is imposed by Google","quote":true},{"t":"native","key":"file_access_legacy","title":"File Access Legacy Mode","desc":"Direct file access mode. Requires extra permission","kind":"switch","format":"%d","default":false},{"t":"native","key":"scan_min_track_duration","title":"Ignore Short Tracks (Notifications, etc.)","desc":"","kind":"select","options":[[0,"Don't ignore - include all"],[2,"2"],[6,"6"],[10,"10"],[15,"15"],[30,"30"],[45,"45"],[60,"60"]],"format":"Less than (seconds): %s","default":6},{"t":"native","key":"skip_video","title":"Ignore Video Tracks","desc":"Tracks with video stream will be ignored","kind":"switch","format":"%d","default":false},{"t":"native","key":"auto_find_button","title":"Auto-Find Music Folders","desc":"Use this option to find music folders automatically","kind":"action","format":"%d","default":0},{"t":"head","text":"Advanced"},{"t":"native","key":"restore_pos","title":"Store/Restore Per Track Progress","desc":"Useful for podcasts, long sets","kind":"switch","format":"%d","default":true},{"t":"native","key":"long_skip_rewind","title":"-10/+10s Rewind Pro Buttons","desc":"Change >> (category change) pro buttons to -10/+10s rewinding buttons for long tracks. Also applies to Long category","kind":"switch","format":"%d","default":true},{"t":"native","key":"restore_pos_min_dur","title":"Track Duration For Per Track Progress and -10/+10s Buttons","desc":"","kind":"slider","min":0,"max":60,"format":"At least: %d min.","default":45},{"t":"native","key":"played_dur","title":"Count As Played","desc":"","kind":"slider","min":0,"max":100,"format":"Count track as played after playing at least: %d%%","default":50},{"t":"note","text":"Individual playlists and folders can be set to keep each track progress via their header menu / List Options","quote":true},{"t":"native","key":"library_lists","title":"Lists","desc":"List click action, lists/categories options","kind":"nav","page":"listui","format":"%d","default":0},{"t":"native","key":"library_search","title":"Search","desc":"Search results playback options","kind":"nav","page":"library_search","format":"%d","default":0},{"t":"native","key":"library_queue","title":"Queue","desc":"Queue options","kind":"nav","page":"library_queue","format":"%d","default":0},{"t":"native","key":"library_playlists","title":"Playlists","desc":"User created playlists import/export and options","kind":"nav","page":"library_playlists","format":"%d","default":0},{"t":"native","key":"library_shuffle","title":"Shuffle","desc":"Shuffle options","kind":"nav","page":"library_shuffle","format":"%d","default":0},{"t":"native","key":"library_scanner","title":"Scanner","desc":"Poweramp folders and library scanner options","kind":"nav","page":"library_scanner","format":"%d","default":0},{"t":"native","key":"reset_stats","title":"Reset stats","desc":"Reset tracks played times, last played, and related stats","kind":"action","format":"%d","default":0},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"library"},"listui":{"title":"Lists","items":[{"t":"head","text":"Look and Feel"},{"t":"native","key":"library_list_opts","title":"Library List Options","desc":"Select top visible Library categories. Also available from Library header menu","kind":"action","format":"%d","default":0},{"t":"native","key":"static_navbar","title":"Static Navbar","desc":"Don't move Navbar away in lists","kind":"switch","format":"%d","default":false},{"t":"native","key":"navbar_seekbar","title":"Seekbar in Navbar","desc":"Show track seekbar in Navbar. Increases Navbar size","kind":"switch","format":"%d","default":false},{"t":"native","key":"headers_meta","title":"Headers With Meta","desc":"Show number of songs and some other meta information in headers","kind":"switch","format":"%d","default":true},{"t":"native","key":"az_scroll","title":"A-Z Scroll","desc":"Use alphabetical A-Z scroll in lists","kind":"switch","format":"%d","default":true},{"t":"native","key":"localized_az","title":"Localized A-Z Scroll","desc":"A-Z scroll includes alphabet for the selected UI language","kind":"switch","dependency":"az_scroll","format":"%d","default":false},{"t":"native","key":"list_header_buttons","title":"Header Buttons","desc":"Action buttons shown in the list header","kind":"chips","options":[[0,"Disabled"],[1,"Enabled"]],"format":"%d","default":1},{"t":"native","key":"list_bottom_toolbar","title":"Bottom Buttons","desc":"Action buttons are displayed on the bottom of lists when header is scrolled away or header buttons are disabled","kind":"chips","options":[[0,"Disabled"],[1,"Semi-transparent"],[2,"Enabled"]],"format":"%d","default":0},{"t":"native","key":"track_num_type","title":"Show Track Number","desc":"","kind":"chips","options":[[0,"Disabled"],[1,"Separate number - relevant categories"],[2,"In the meta - relevant categories"],[3,"In the title - everywhere"]],"format":"%d","default":0},{"t":"native","key":"track_disc_meta","title":"Show Disc","desc":"Disc tag is shown in the track meta","kind":"switch","dependency":"track_num_type","format":"%d","default":false},{"t":"native","key":"title_filename","title":"Filename As Title","desc":"Always use track filename instead of tag. Applies to all categories as well","kind":"switch","format":"%d","default":false},{"t":"native","key":"list_action_resets","title":"Click Restarts Track","desc":"If disabled, continue playing the same track, but still change category and re-shuffle if needed","kind":"switch","format":"%d","default":false},{"t":"native","key":"list_item_action","title":"List Item Action","desc":"","kind":"chips","options":[[1,"Play and go to Main UI"],[2,"Play and stay in the list"],[3,"Enqueue and stay in the list"]],"format":"%d","default":1},{"t":"native","key":"enable_deletion","title":"Delete Action","desc":"Enable the Delete menu action that deletes song files (after confirmation)","kind":"switch","format":"%d","default":true},{"t":"head","text":"Albums"},{"t":"native","key":"join_albums","title":"Join Albums","desc":"If disabled, separate albums are shown for tracks without album artist tag","kind":"switch","format":"%d","default":true},{"t":"native","key":"use_albumartist","title":"Album Artist Label for Tracks","desc":"Show Album Artist tag (if exists) instead of just Artist tag for tracks","kind":"switch","format":"%d","default":false},{"t":"native","key":"use_albumartist_albums","title":"Album Artist Label for Albums","desc":"Show Album Artist tag (if exists) instead of just Artist tag for Albums. Also changes sorting by Artist","kind":"switch","format":"%d","default":false},{"t":"native","key":"use_albumartist_albumartists","title":"Album Artist Label for Album Artist Tracks","desc":"Show Album Artist tag (if exists) instead of just Artist tag for Album Artists tracks. Also changes sorting by Artist","kind":"switch","format":"%d","default":true},{"t":"native","key":"hide_unknown_album","title":"Hide Unknown Album","desc":"No Unknown Album shown in track labels","kind":"switch","format":"%d","default":true},{"t":"native","key":"hide_unknown_artist","title":"Hide Unknown Artist","desc":"No Unknown Artist shown in track labels when possible. This may hide the 2nd track label completely","kind":"switch","dependency":"hide_unknown_album","feature":"1","format":"%d","default":false},{"t":"head","text":"Advanced"},{"t":"native","key":"show_unsplit_cats","title":"Show Unsplit Combined Categories","desc":"Unsplit combined Artists, Album Artists, Composers are visible in the appropriate categories","kind":"switch","format":"%d","default":false},{"t":"native","key":"hier_no_advance","title":"No \"Play All Categories\" For Hier Folders","desc":"Don't apply Play All Categories mode when Folders Hierarchy playback started with the list header play button","kind":"switch","format":"%d","default":false},{"t":"native","key":"root_hier_immediate","title":"Folders Hierarchy Immediate Root","desc":"If only one root music folder exists, show its contents immediately in top Folders Hierarchy category. This option will go deeper until folder with tracks or multiple subfolders","kind":"switch","format":"%d","default":false},{"t":"native","key":"hier_files_zoom","title":"Hierarchy Files Zoom Level","desc":"Apply Folder Files zoom level for Folders Hierarchy category when a folder contains files only","kind":"switch","format":"%d","default":false},{"t":"native","key":"no_sort_field","title":"Don't Ignore Articles For Sort","desc":"Don't ignore articles (\"the\", \"a\", \"an\") in the beginning of albums, artists, and composers","kind":"switch","format":"%d","default":false},{"t":"native","key":"show_cue_source","title":"Show CUE Disc Image Files","desc":"Big undivided CUE disc image files will be visible in lists","kind":"switch","format":"%d","default":false},{"t":"native","key":"stream_name_in_title","title":"Stream Name In Title","desc":"Use \"Stream - Track Title\" pattern for stream titles, instead of just \"Track Title\". Applied to the next played stream","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"library_lists"},"library_playlists":{"title":"Playlists","items":[{"t":"note","text":"Poweramp automatically recognizes file based playlists (.m3u, .m3u8, .pls, .wpl) from the selected Music Folders\n\nPoweramp also imports playlist if opened via file manager","quote":true},{"t":"native","key":"playlists_import","title":"Import System Library Playlists","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"playlists_export","title":"Export Poweramp Playlists","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"pl_import_ratings","title":"Import Ratings","desc":"Update track ratings from imported playlists (when new playlist is imported) or from playlists opened in file managers","kind":"switch","format":"%d","default":true},{"t":"note","text":"Poweramp always saves track ratings to the exported m3u8 playlists","quote":true},{"t":"native","key":"playlist_insert_pos","title":"Playlist Insert Position","desc":"","kind":"chips","options":[[1,"Insert at start"],[0,"Add to end"],[2,"Shuffled"]],"format":"%d","default":0},{"t":"note","text":"Insert position can also be changed by long pressing the button in the selection menu","quote":true},{"t":"native","key":"pl_del_entry_w_track","title":"Remove Playlist Entries On Track Deletion","desc":"Playlist entries are automatically removed for the deleted tracks. If disabled, non-playable items stay in the playlist and can be resolved to matching tracks later","kind":"switch","format":"%d","default":true},{"t":"native","key":"pl_auto_resolve","title":"Resolve Playlist Entries","desc":"Automatically match unresolved playlist entries on Folders/Library auto scan. If disabled, non-playable items may appear in playlists after a storage change, folders renaming/moving, etc. \n\nPlaylist entries always can be corrected manually by the Rescan menu action from Playlists category","kind":"switch","format":"%d","default":true},{"t":"native","key":"pl_no_dups","title":"Don't Add Duplicates","desc":"Duplicates won't be added to playlist","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"library_playlists"},"library_queue":{"title":"Queue","items":[{"t":"note","text":"Poweramp Queue is a separate dynamic playlist","quote":true},{"t":"native","key":"queue_start","title":"Start Playing Queue","desc":"","kind":"chips","options":[[1,"Immediately"],[2,"After the current song"],[3,"After the current category/folder/album/..."]],"format":"%d","default":2},{"t":"native","key":"queue_end","title":"On Queue End","desc":"","kind":"chips","options":[[0,"Stay in Queue / repeat Queue"],[1,"Return to previous category"]],"format":"%d","default":1},{"t":"native","key":"queue_insert_pos","title":"Queue Insert Position","desc":"","kind":"chips","options":[[0,"Normal"],[2,"Shuffled"]],"format":"%d","default":0},{"t":"native","key":"play_next_insert_pos","title":"Play Next Insert Position","desc":"","kind":"chips","options":[[0,"Normal"],[2,"Shuffled"]],"format":"%d","default":0},{"t":"note","text":"Insert position can also be changed by long pressing the button in the selection menu","quote":true},{"t":"native","key":"q_next_forces_after_song","title":"Play Next: Start Queue","desc":"Play Next forces option: After the current Song","kind":"switch","format":"%d","default":true},{"t":"native","key":"queue_clear_on_add","title":"Always Clear On Add","desc":"If enabled, Queue is always cleared on track(s) addition. If disabled, Queue is cleared only after all songs have been played","kind":"switch","format":"%d","default":false},{"t":"native","key":"queue_never_clear_on_add","title":"Never Clear On Add","desc":"If enabled, Queue is never cleared on track(s) addition. Search results playback still clears Queue","kind":"switch","format":"%d","default":false},{"t":"native","key":"queue_no_shuffle","title":"Ignore Shuffle","desc":"Queue is always played in-order. Also affects Search results Shuffle","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"library_queue"},"library_scanner":{"title":"Scanner","items":[{"t":"head","text":"Scanner"},{"t":"native","key":"auto_scan","title":"Auto-scan","desc":"Enable automatic SD card/storages scan. If disabled, only manual Rescan is available","kind":"switch","format":"%d","default":true},{"t":"native","key":"scan_no_wait","title":"Rescan Immediately","desc":"Rescan immediately when something changed on the storage. Tracks appear faster, but this may introduce more rescans when you upload multiple files to the device","kind":"switch","dependency":"auto_scan","format":"%d","default":false},{"t":"native","key":"initial_scan","title":"Initial Scan","desc":"Quick scan when Poweramp is started for first time","kind":"switch","dependency":"auto_scan","format":"%d","default":true},{"t":"native","key":"scan_providers","title":"Scan Providers","desc":"Automatically scan 3rd party track provider plugins on startup","kind":"switch","dependency":"auto_scan","format":"%d","default":false},{"t":"native","key":"scan_post_usb_mount","title":"USB Disconnection/SD Card Mount","desc":"Scan on USB disconnection and/or SD card mount","kind":"switch","dependency":"auto_scan","format":"%d","default":true},{"t":"native","key":"scan_post_system","title":"System Media Scanner/MTP","desc":"Scan once Android System/MTP Media Scanner finishes","kind":"switch","dependency":"auto_scan","format":"%d","default":true},{"t":"head","text":"Other"},{"t":"native","key":"","title":"Press here to show/hide unsplit combined categories","desc":"","kind":"link","page":"listui","anchor":"show_unsplit_cats","format":"%d","default":0},{"t":"native","key":"artists_split_chars","title":"Symbols to Split Multiple Artists","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"artists_split_ignore","title":"Unsplit Artists","desc":"","kind":"action","format":"%d","default":"AC/DC | +/-"},{"t":"native","key":"composers_split_chars","title":"Symbols to Split Multiple Composers","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"genres_split_chars","title":"Symbols to Split Multiple Genres","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"tag_encoding","title":"Tag Encoding","desc":"Encoding for non-Unicode tags and playlists","kind":"select","options":[["_default_","Default"],["Big5","Chinese Traditional (Big5)"],["GB2312","Chinese Simplified (GB2312)"],["GBK","Chinese Simplified (GBK)"],["ISO-8859-2","Eastern European (ISO-8859-2)"],["Windows-1250","Eastern European (Win-1250)"],["ISO-8859-7","Greek (ISO-8859-7)"],["Windows-1253","Greek (Windows-1253)"],["ISO-8859-8","Hebrew (ISO-8859-8)"],["Windows-1255","Hebrew (Win-1255)"],["SJIS","Japanese (Shift_JIS)"],["ISO-2022-JP","Japanese (ISO-2022-JP)"],["EUC-JP","Japanese (EUC-JP)"],["EUC-KR","Korean (EUC-KR)"],["Windows-1251","Russian (Win-1251)"],["TIS-620","Thai (Win-874)"],["Windows-1252","Western (Win-1252)"],["ISO-8859-1","Western (ISO-8859-1)"]],"format":"%d","default":"_default_"},{"t":"native","key":"m3u_utf8","title":"Always Use UTF-8 for .m3u","desc":"If disabled, Tag Encoding setting is used for .m3u playlists. UTF-8 is always used for .m3u8 playlists","kind":"switch","format":"%d","default":true},{"t":"native","key":"process_cues","title":"Parse CUE Files","desc":"Virtual folders are created for CUE files with multiple tracks","kind":"switch","format":"%d","default":true},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"library_scanner"},"library_search":{"title":"Search","items":[{"t":"native","key":"list_opts","title":"Search Categories","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"search_play_tracks","title":"Play Tracks Only","desc":"If some tracks are found, play only the tracks and ignore other found categories. If there are no tracks, found categories will be played","kind":"switch","format":"%d","default":false},{"t":"native","key":"search_track_titles_only","title":"Search Track Titles Only","desc":"If disabled, track album and artist are also used for the search","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"library_search"},"library_shuffle":{"title":"Shuffle","items":[{"t":"native","key":"shuffle_random_factor","title":"Shuffle Randomization","desc":"","kind":"slider","min":0,"max":12,"step":2,"format":"%d","ends":["Less Random","Full Random"],"default":0},{"t":"note","text":"Less Random prefers least played tracks or other shuffled items\n\nFull Random does complete randomization\n\nThe option applies to the next shuffle session","quote":true},{"t":"native","key":"no_reshuffle","title":"No Reshuffle","desc":"Don't apply a new shuffle when any track is selected from the current playing list","kind":"switch","format":"%d","default":false},{"t":"native","key":"no_reshuffle_for_large_lists","title":"No Reshuffle For Large Lists","desc":"Don't reset shuffle order when a new track is manually selected from a very large list","kind":"switch","format":"%d","default":false},{"t":"native","key":"category_shuffle","title":"Category Items Shuffle","desc":"","kind":"chips","options":[[4,"Shuffle Songs/Categories"],[3,"Shuffle Categories"],[2,"Shuffle Songs"]],"format":"%d","default":4},{"t":"native","key":"hier_flat_shf","title":"Shuffle All Songs In Folder Hierarchy","desc":"Shuffle Songs mode shuffles all songs from the whole folder hierarchy. If enabled, header Shuffle button uses this mode as well","kind":"switch","format":"%d","default":true},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"library_shuffle"},"lock":{"title":"Lock Screen","items":[{"t":"head","text":"Android Lock Screen"},{"t":"note","text":"Android Lock Screen support is always enabled, as it's required for Bluetooth track info, smart watch support, other apps, etc.","quote":true},{"t":"native","key":"ics_ls_aa","title":"Album Art","desc":"Show album art on Android lock screen. This option may also affect Android Auto covers. Not supported by some devices/ROMs","kind":"switch","format":"%d","default":true},{"t":"native","key":"ls_aa_blur","title":"Blur","desc":"Lock screen album art is blurred. The album art background isn't shown by some devices. This option is not recommended for smart watches or apps that use Poweramp album art","kind":"switch","dependency":"ics_ls_aa","format":"%d","default":false},{"t":"native","key":"ls_default_aa","title":"Show Default Image","desc":"Send default placeholder image when no album art exists for the track. Also affects smart watches, other apps utilizing media APIs. Default image is defined by skin","kind":"switch","format":"%d","default":false},{"t":"head","text":"Poweramp Lock Screen"},{"t":"native","key":"ls_enable","title":"Show On Lock Screen","desc":"Poweramp shows itself on top of system lock screen if music is playing. Settings, deletion, edit tag, etc. actions trigger device lock screen","kind":"switch","format":"%d","default":false},{"t":"native","key":"ls_force_timeout","title":"Shorter Timeout","desc":"Apply shorter screen timeout when Poweramp is on lock screen","kind":"switch","dependency":"ls_enable","format":"%d","default":true},{"t":"native","key":"ls_app_settings","title":"Open App Settings","desc":"","kind":"action","dependency":"ls_enable","format":"%d","default":0},{"t":"native","key":"ls_enable_land","title":"Landscape Layout","desc":"Enable rotation to landscape layout","kind":"switch","dependency":"ls_enable","format":"%d","default":false},{"t":"native","key":"direct_unlock","title":"Direct Unlock","desc":"Unlock directly to home screen (if possible) instead of Android lockscreen","kind":"switch","dependency":"ls_enable","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"lockscreen"},"misc":{"title":"Misc","items":[{"t":"head","text":"Scrobbling"},{"t":"native","key":"scrobble_to_last_fm","title":"Scrobble via Official Last.fm app","desc":"Scrobble via Last.fm app","kind":"switch","format":"%d","default":false},{"t":"native","key":"scrobble_to_simple_last_fm","title":"Scrobble via Simple Scrobbler","desc":"Scrobble to Last.fm/Libre.fm via Simple Scrobbler (previously Simple Last.fm)","kind":"switch","format":"%d","default":false},{"t":"note","text":"Most scrobbler apps should work without extra configuration","quote":true},{"t":"head","text":"Android Auto"},{"t":"native","key":"buttons","title":"Buttons","desc":"Media action buttons","kind":"nav","page":"ui_mediaactions","format":"%d","default":0},{"t":"native","key":"mb_a_grid","title":"Grid View for Categories","desc":"If enabled, Albums, Artists, Folders, etc. categories are shown as grid. May require category re-opening for view to apply","kind":"switch","format":"%d","default":false},{"t":"native","key":"mb_a_aa_cats","title":"Images for Categories","desc":"If enabled, album art and other relevant images are shown for categories","kind":"switch","format":"%d","default":true},{"t":"native","key":"mb_a_aa_tracks","title":"Album Art for Tracks","desc":"If enabled, album art is shown for track entries","kind":"switch","format":"%d","default":true},{"t":"native","key":"send_mediasession_q","title":"Now Playing List For Connected Devices/Apps","desc":"Enable Now Playing List/Queue for the connected devices (e.g. Wear) and apps (Android Auto). Poweramp activates this option if some device/app requests Now Playing list","kind":"switch","format":"%d","default":false},{"t":"head","text":"Tweaks"},{"t":"native","key":"send_metachanged","title":"Metachanged Intent","desc":"For external apps","kind":"switch","format":"%d","default":true},{"t":"native","key":"use_wakelock","title":"Use Wakelock","desc":"Check this if audio stops when screen is off","kind":"switch","format":"%d","default":false},{"t":"native","key":"send_old_api_aa","title":"Send Album Art for old API","desc":"Send Album Art for old Poweramp v2 API. Updated Poweramp API allows much higher res images, but this may be needed for old API apps","kind":"switch","format":"%d","default":false},{"t":"native","key":"check_for_skin_reload","title":"Always Reload Skin","desc":"For skin developers. Always check skin for a change when app activity goes background","kind":"switch","format":"%d","default":false},{"t":"native","key":"shutdown_intent","title":"Shutdown Intent","desc":"Listen to this shutdown intent and pauses itself/stores state when the intent is received","kind":"text","format":"%d","default":""},{"t":"native","key":"pause_on_screen_off","title":"Pause on Screen Off","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"op_framerate","title":"Apply OP High Framerate","desc":"Force higher display framerate via non-standard APIs. May be required for some devices/firmwares","kind":"switch","format":"%d","default":false},{"t":"native","key":"migrate_data_29","title":"Migrate Data to Android 10","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"stream_timeout_ms","title":"Network Stream Timeout","desc":"","kind":"slider","options":[[1000,"1"],[5000,"5"],[10000,"10"],[15000,"15"],[30000,"30"],[60000,"60"],[120000,"120"],[300000,"300"],[2147483647,"Never"]],"scale":1000.0,"format":"%s","ends":["Small","Never"],"default":30000},{"t":"native","key":"stream_buffer_bytes","title":"Network Stream Buffer","desc":"%1$.1fMB","kind":"slider","min":524288,"max":4194304,"step":10240,"scale":1048576.0,"format":"%d","ends":["Small","More"],"default":1048576},{"t":"note","text":"Increasing buffer size also increases stream start time","quote":false},{"t":"native","key":"user_agent","title":"User Agent","desc":"User Agent header value to use for the streaming","kind":"text","format":"%d","default":0},{"t":"native","key":"load_user_so","title":"Load custom .so library","desc":"Try to load custom ffmpeg_neon.so from the path:","kind":"switch","format":"%d","default":false},{"t":"native","key":"override_region","title":"Override Region","desc":"","kind":"switch","format":"%d","default":false},{"t":"head","text":"Volume Keys Long Press"},{"t":"native","key":"long_volume_controls","title":"Change Tracks By Long Volume Keys Press","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"misc"},"peq_equ_bands":{"title":"Graphic Equalizer Bands","items":[{"t":"native","key":"equ_bands_num","title":"Number of Bands","desc":"Predefined number of bands, including ISO recommended bands distribution","kind":"chips","options":[[5,"5"],[10,"10 (ISO)"],[12,"12"],[15,"15 (ISO)"],[16,"16"],[24,"24"],[31,"31 (ISO)"],[32,"32"]],"format":"%d","default":10},{"t":"note","text":"High number of bands may require manual Block Size adjustment for the increased frequency resolution","quote":false},{"t":"head","text":"Advanced"},{"t":"native","key":"equ_custom_bands","title":"Enable Custom Bands","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"equ_custom_bands_num","title":"Custom Number of Bands","desc":"","kind":"slider","dependency":"equ_custom_bands","min":5,"max":32,"format":"%d","ends":["5","32"],"default":10},{"t":"native","key":"equ_custom_bands_first_fr","title":"First Frequency","desc":"%.0fHz","kind":"slider","dependency":"equ_custom_bands","min":5,"max":200,"scale":1.0,"format":"%.0fHz","ends":["5","200"],"default":20},{"t":"native","key":"equ_custom_bands_last_fr","title":"Last Frequency","desc":"%.1fkHz","kind":"slider","dependency":"equ_custom_bands","min":14000,"max":20000,"step":500,"scale":1000.0,"format":"%.1fkHz","ends":["14K","20K"],"default":16000},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"peq_equ_bands"},"peq_equ_tone":{"title":"Tone","items":[{"t":"note","text":"Long press value to edit","quote":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"peq_equ_tone"},"rg":{"title":"Replay Gain (RG)","items":[{"t":"native","key":"rg_type","title":"Replay Gain","desc":"","kind":"chips","options":[[0,"Don't apply"],[1,"Apply Gain"],[2,"Apply Gain/prevent clipping according to Peak"]],"format":"%d","default":0},{"t":"native","key":"rg_source","title":"Source","desc":"","kind":"chips","options":[[0,"Album"],[1,"Track"]],"format":"%d","default":0},{"t":"native","key":"rg_preamp_mb","title":"RG preamp","desc":"","kind":"knob","min":-1600,"max":1600,"step":10,"scale":100.0,"format":"%.1fdB","default":0},{"t":"native","key":"rg_default_mb","title":"Preamp for songs without RG info","desc":"","kind":"knob","min":-1600,"max":1600,"step":10,"scale":100.0,"format":"%.1fdB","default":0},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"rg"},"root":{"title":"Settings","items":[{"t":"head","text":"Settings"},{"t":"native","key":"ui","title":"Look and Feel","desc":"Skin, player interface, language, notifications","kind":"nav","page":"look","format":"%d","default":0,"icon":"palette","color":"#8170ab"},{"t":"native","key":"audio","title":"Audio","desc":"Crossfade, replay gain, volume, output","kind":"nav","page":"audio","format":"%d","default":0,"icon":"speakerwave","color":"#aa5075"},{"t":"native","key":"vis","title":"Visualization","desc":"Faded controls opacity, preset duration","kind":"nav","page":"viz","format":"%d","default":0,"icon":"viz","color":"#a355c1"},{"t":"native","key":"aa_bg","title":"Background","desc":"Blur, details, intensity, saturation","kind":"nav","page":"background","format":"%d","default":0,"icon":"image","color":"#67a294"},{"t":"native","key":"aa","title":"Album Art","desc":"Download, quality, cache cleanup","kind":"nav","page":"art","format":"%d","default":0,"icon":"image","color":"#72975f"},{"t":"native","key":"folders_library","title":"Library","desc":"Rescan, music folders, list, queue options","kind":"nav","page":"library","format":"%d","default":0,"icon":"folder","color":"#668dc0"},{"t":"native","key":"headset","title":"Headset/Bluetooth","desc":"Pause/resume on connection, headset buttons","kind":"nav","page":"headset","format":"%d","default":0,"icon":"headphones","color":"#aaa2ad"},{"t":"native","key":"lockscreen","title":"Lock Screen","desc":"Poweramp lock screen options","kind":"nav","page":"lock","format":"%d","default":0,"icon":"lock","color":"#c07d50"},{"t":"native","key":"misc","title":"Misc","desc":"Scrobbling, Android Auto, other tweaks","kind":"nav","page":"misc","format":"%d","default":0,"icon":"more","color":"#519896"},{"t":"native","key":"general","title":"About","desc":"Version/changelog, translations info","kind":"nav","page":"about","format":"%d","default":0,"icon":"wave","color":"#a69bbc"},{"t":"head","text":"Other"},{"t":"native","key":"equalizer_for_spot_ytm_etc","title":"Equalizer for Spotify and YouTube Music","desc":"Free Poweramp Equalizer app with the signature Poweramp sound for the streaming players such as Spotify and YouTube Music","kind":"nav","url":"https://play.google.com/store/apps/details?id=com.maxmpz.equalizer&referrer=utm_source%3Dapp%26utm_medium%3Dapp%26utm_campaign%3Dpa1","format":"%d","default":0},{"t":"native","key":"get_support","title":"Get Support","desc":"","kind":"nav","page":"support","format":"%d","default":0},{"t":"native","key":"settings_export","title":"Export Settings/Data","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"settings_import","title":"Import Settings/Data","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"send_errors","title":"Send Errors To Developer","desc":"Suggest sending a crash log via email","kind":"switch","format":"%d","default":true}],"source":"singlepane"},"support":{"title":"Get Support","items":[{"t":"native","key":"faq","title":"FAQ","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"purchase_faq","title":"Purchase FAQ","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"poweramp_forum","title":"Forum","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"send_log","title":"Send Log","desc":"","kind":"action","format":"%d","default":0}],"source":"support"},"translations":{"title":"Translations","items":[{"t":"native","key":"visit_crowdin","title":"Poweramp Crowdin Project","desc":"Visit/join Poweramp translation project at Crowdin.net","kind":"action","format":"%d","default":0},{"t":"head","text":"Translators"},{"t":"native","key":"","title":"Arabic","desc":"BLueBLaze, mohjif, Abdullah S Almalki, tictac, Sajed ALAJATI, khansaab, zaid.m.alani, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Bengali","desc":"abualam002, MD: Ashikur Rahman, Emilia Mihai, Dok Dok, fuadhasanmaruf, Mahdi Jaman, MD: Ashikrrahman, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Chinese Simplified","desc":"Cye3s, sincostandx, Ihon Liu, 天外来客bin, 琳 曹, Miao Zhang, Jane Zhang, Budi Pang, 吴天豪, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Chinese Traditional","desc":"Francis Yeh, 人工知能, Jane Zhang, KaiChing Chang, Fu Chun Hsu, 明城, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Czech","desc":"MySQL, andrewz, Ondřej Zástěra, Ghull, karanco, Jan Havlík, Michal, Dominik Matus, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Danish","desc":"NCAA, chreddy, John Hansen","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Dutch","desc":"Erik Paelman, wsnel57, Naxiz, KevinHofstede, charliehpoels, JayJay1989, YolandaCarati","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"French","desc":"AlbatorV, クリスDownix, AsTro, Fauque Benoit, Sceap, tictac, Rose, Francesco Masini, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"German","desc":"Andreas Laufer, Fusionplayz, Vincent T., Saintscar, Stefan Druwe, 明城liebst20","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Greek","desc":"koliglia, tkredmond, Nikos, BillKan, DainBramaged, DimitrisSalonika, horion70, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Hebrew","desc":"Rami Heled, Lidor Elmaliach, benjo24, elyashiv_sabach, עמרי עטייה, Yoel IL, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Hindi","desc":"Ankush Jain, jznsamuel, santosh_sahu, Shivaji Kute, Vatsal_Vala, Vogendra Sahu (Raj. C.G), and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Hungarian","desc":"Z737, Tomi_Ohl, nvi9, Gyula Király, Szilard Kovacs, Gyula Juhász, Bence Ujj, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Indonesian","desc":"M Akmal, Muhammad Bintang, Ali Muhammad Reyhan, Amirul Huda, M Arif Majidi, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Italian","desc":"Federico Di Lorenzo, Tiwi90, Carlo369, DarkRevenger, Fabrizio Cacicia, Francesco Masini, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Japanese","desc":"Kanako Inazu, \"sunatomo\", kik0220","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Korean","desc":"신윤호, David Cho, WhiteClover, ENVY, PBJUN","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Persian","desc":"Ismail Barinkar, AhmadH, alpha1657, Barinkar, esshx8, mahmoodbaghelani, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Polish","desc":"0kti, Maciej Minklejn, TiGerPL v19, Kszemek, Piotr Patalong, oskar, Błażej Jeżewski, Povilas Grebliunas","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Portuguese, Brazilian","desc":"Skellingtor, Lucas Vinícius, Loui's, André Gama, Henry F., Vinicius Camargo, Leandro Sales, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Romanian","desc":"adi petcu, Andrei Sângeorzan, Cornel_Pavel, flor90, Dee Norbert","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Russian","desc":"Ka3u6y6a, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Serbian","desc":"Ivan Pesic, emv441, Nebojsa Nikolic, Nikola Vukovic, Nikola Đurić, Stefan Marinkovic, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Spanish","desc":"Mihai Pantazi, Lesther Tabares, Bruno Herrera, Brandon Zuriel Alonso Alvarado, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Slovak","desc":"Maťo, RandomTypek, marttin, wupuchim, profile.trololol","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Thai","desc":"BugviewTH, Nana Jipataa, อรรถพล เติมสายทอง","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Turkish","desc":"Fatih Fırıncı, Semih Yeşilyurt, sonysinger, elmasevmem, rserdar, Oğuzcan, KBD, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Ukrainian","desc":"taras-ko, Bohdan Antokhov, rapkonig, Ka3u6y6a, Oleksandr, taras0012, rapkonig, and others","kind":"action","format":"%d","default":0},{"t":"native","key":"","title":"Vietnamese","desc":"alienyd, Nguyễn Trung Hậu, robot_boy_tn, Thế, thanhtai2009, Quoc Thanh, tandat nguyen, Hoàng Hải Long","kind":"action","format":"%d","default":0}],"source":"translations"},"look":{"title":"Look and Feel","items":[{"t":"native","key":"ui_theme","title":"Skin","desc":"Change Poweramp visual theme. Set per-skin options like extra Pro Buttons, Static Seekbar","kind":"nav","page":"skin","format":"%d","default":0},{"t":"native","key":"follow_night_mode","title":"Follow Day/Night Mode","desc":"Follow system Day/Night Mode if selected skin supports light/dark themes","kind":"switch","format":"%d","default":false},{"t":"native","key":"settings_theme","title":"Settings Theme","desc":"","kind":"chips","options":[[0,"Default"],[1,"Light"],[2,"Dark"],[3,"Follow Day/Night Mode"]],"format":"%d","default":0},{"t":"native","key":"settings_font","title":"Settings Font","desc":"","kind":"chips","options":[[0,"Default"],[1,"Alternative font"],[2,"Bold"],[3,"Bold+"]],"format":"%d","default":2},{"t":"head","text":"General"},{"t":"native","key":"ui_player","title":"Player Screen","desc":"","kind":"nav","page":"player","format":"%d","default":0},{"t":"native","key":"ui_lyrics","title":"Lyrics","desc":"","kind":"nav","page":"lyrics","format":"%d","default":0},{"t":"native","key":"ui_notify","title":"Notifications","desc":"","kind":"nav","page":"notifications","format":"%d","default":0},{"t":"native","key":"","title":"Press here for the additional List UI options like Filename As Title, Show Track Number, etc.","desc":"","kind":"link","page":"listui","format":"%d","default":0},{"t":"head","text":"Misc"},{"t":"native","key":"lang","title":"Language","desc":"","kind":"select","options":[["","Auto"],["ar","العربية"],["bn","বাংলা"],["in","Bahasa Indonesia"],["cs","Čeština"],["zh_CN","中文(简体)"],["zh_TW","中文(繁體)"],["da","Dansk"],["de","Deutsch"],["en_US","English"],["es","Español"],["fa","فارسی"],["fr","Français"],["el","ελληνικά"],["iw","עברית"],["hi","हिन्दी"],["it","Italiano"],["ro","Limba română"],["hu","Magyar"],["nl","Nederlands"],["ja","日本語"],["ko","한국어"],["pl","Polski"],["pt_BR","Português brasileiro"],["ru","Русский"],["sk","Slovenčina"],["sr","Cрпски"],["th","ไทย"],["vi","Tiếng Việt"],["tr","Türkçe"],["uk","Українська мова"]],"format":"%s","default":""},{"t":"native","key":"ui_icon","title":"Icon","desc":"Set launcher icon","kind":"nav","page":"ui_icon","format":"%d","default":0},{"t":"native","key":"orientation","title":"Screen Orientation","desc":"","kind":"chips","options":[[0,"Default"],[1,"Portrait (Vertical)"],[2,"Landscape (Horizontal)"]],"format":"%d","default":0},{"t":"native","key":"anim_speed","title":"Animations","desc":"Disable/enable or change UI animation speed where possible","kind":"chips","feature":"1","options":[[0,"Disabled"],[2,"Fast"],[1,"Default"]],"format":"%d","default":0},{"t":"native","key":"start_at_lib","title":"Start at Library","desc":"Changes startup screen. Back action returns from the Player Screen to the current list","kind":"switch","format":"%d","default":false},{"t":"native","key":"hide_status_bar","title":"Hide Status Bar","desc":"","kind":"switch","format":"%d","default":false},{"t":"note","text":"Some firmwares are unable to change status bar/nav bar dynamically. You may need to exit/enter the app once for these options to apply","quote":true},{"t":"native","key":"keep_screen_on","title":"Keep Screen On","desc":"Always keep screen on in the app","kind":"switch","format":"%d","default":false},{"t":"native","key":"num_settings_tags","title":"Settings Shortcuts in Main Menu","desc":"","kind":"slider","options":[[0,"Disabled"]],"min":0,"max":10,"format":"%s","ends":["Disabled","Max"],"default":0},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"ui"},"ui_icon":{"title":"Icon","items":[{"t":"note","text":"Actual icon look may vary depending on Android version, launcher, and system settings\n\nIt may take a few seconds for the launcher to update the icon","quote":false},{"t":"head","text":"Icons"}],"source":"ui_icon"},"lyrics":{"title":"Lyrics","items":[{"t":"note","text":"When lyrics swipe is enabled, swipe album art up to show lyrics.\n\nReturn from lyrics by swipe to side or scrolling up.\n\nPinch-to-zoom  for zooming","quote":true},{"t":"native","key":"main_lyrics_swipe","title":"Lyrics Swipe Up","desc":"Swipe action on the Player Screen/cover","kind":"chips","options":[[0,"Disabled"],[1,"When local lyrics available"],[2,"Always"]],"format":"%d","default":0},{"t":"note","text":"Local lyrics: lyrics tag, LRC file, or lyrics previously downloaded by a lyrics plugin\n\nFull Rescan is required","quote":true},{"t":"native","key":"main_lyrics_button","title":"Lyrics Button","desc":"Button on the Player Screen/cover","kind":"chips","options":[[0,"Disabled"],[1,"When local lyrics available"],[2,"Always"]],"format":"%d","default":0},{"t":"note","text":"Long press on lyrics button always opens 3rd party app","quote":false},{"t":"native","key":"lyrics_in_menu","title":"Lyrics Item In The Track Menu","desc":"","kind":"chips","options":[[0,"Open lyrics UI"],[1,"Open 3rd party app"]],"format":"%d","default":0},{"t":"note","text":"Long press on lyrics item in track menu always opens 3rd party app","quote":false},{"t":"native","key":"lyrics_keep_screen","title":"Keep Screen On","desc":"Keep screen on for the lyrics","kind":"switch","format":"%d","default":false},{"t":"native","key":"lyrics_offset","title":"Lyrics Time Offset","desc":"Applied to synced lyrics in addition to the offset tag","kind":"slider","min":-5000,"max":5000,"step":50,"format":"%d","ends":["-5000","5000"],"default":0},{"t":"note","text":"Positive value makes lyrics text appear earlier\n\nNegative value delays lyrics text\n\nPer-output Visualization/Lyrics latency is also applied","quote":false},{"t":"native","key":"list_zoom_lyrics","title":"Lyrics Size","desc":"Pinch-to-zoom  for zooming","kind":"chips","options":[[-1,"Small Font"],[0,"Default"],[1,"Large Font"]],"format":"%d","default":0},{"t":"note","text":"Poweramp loads lyrics from track tags or from the LRC file\n\nIf lyrics plugin is installed, Poweramp also queries the plugin for the lyrics\n\nIf no lyrics found, lyrics text can be searched in the preferred lyrics app or in browser","quote":true},{"t":"native","key":"lyrics_plugin","title":"Preferred Lyrics App","desc":"","kind":"select","options":[[-1,"None"],[6,"Browser via custom URL"],[2,"Google"],[3,"Google (Web)"],[0,"MusiXmatch"],[1,"Genius"],[4,"QuickLyric"],[5,"Walkman Lyrics Extension"]],"format":"3rd party app to search lyrics when no lyrics found (if installed): %s","default":0},{"t":"native","key":"lyrics_custom_url","title":"Custom URL","desc":"For the Browser via custom URL","kind":"text","format":"%d","default":0},{"t":"head","text":"Scanner"},{"t":"native","key":"rescan_lyrics_tags","title":"Rescan Lyrics Tags","desc":"Force rescan tracks which may contain lyrics tags, including SYLT","kind":"action","format":"%d","default":0},{"t":"native","key":"lrc_scan","title":"Scan LRC Files","desc":"If enabled, Poweramp searches for LRC files in the Music Folders, matching LRC files by their tags, file names, and folders","kind":"switch","format":"%d","default":false},{"t":"native","key":"lrc_utf8","title":"Always Use UTF-8","desc":"If disabled, Tag Encoding setting is used for non-Unicode files","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"ui_lyrics"},"ui_mediaactions":{"title":"Buttons","items":[{"t":"note","text":"The media buttons are unified for all media controllers, such as Android 13+ media notification, Android Auto, watches, etc.\n\nThe playback control buttons (play/pause/prev./next) are fixed and can't be changed\n\nFirst two buttons are available in the media notification, other actions are usually visible only in other media controllers (Android Auto)","quote":false},{"t":"head","text":"Notification/Android Auto"},{"t":"native","key":"notify_action1","title":"Button 1","desc":"","kind":"chips","options":[[0,"None"],[1,"Repeat"],[2,"Shuffle"],[3,"Close"],[4,"Like"],[5,"Unlike"],[6,"Rating"],[8,"-10"],[7,"+10"],[10,"Prev. category"],[9,"Next category"]],"format":"%d","default":0},{"t":"native","key":"notify_action2","title":"Button 2","desc":"","kind":"chips","options":[[0,"None"],[1,"Repeat"],[2,"Shuffle"],[3,"Close"],[4,"Like"],[5,"Unlike"],[6,"Rating"],[8,"-10"],[7,"+10"],[10,"Prev. category"],[9,"Next category"]],"format":"%d","default":0},{"t":"head","text":"Android Auto/Other"},{"t":"native","key":"notify_action3","title":"Button 3","desc":"","kind":"chips","options":[[0,"None"],[1,"Repeat"],[2,"Shuffle"],[3,"Close"],[4,"Like"],[5,"Unlike"],[6,"Rating"],[8,"-10"],[7,"+10"],[10,"Prev. category"],[9,"Next category"]],"format":"%d","default":0},{"t":"native","key":"notify_action4","title":"Button 4","desc":"","kind":"chips","options":[[0,"None"],[1,"Repeat"],[2,"Shuffle"],[3,"Close"],[4,"Like"],[5,"Unlike"],[6,"Rating"],[8,"-10"],[7,"+10"],[10,"Prev. category"],[9,"Next category"]],"format":"%d","default":0},{"t":"native","key":"notify_action5","title":"Button 5","desc":"","kind":"chips","options":[[0,"None"],[1,"Repeat"],[2,"Shuffle"],[3,"Close"],[4,"Like"],[5,"Unlike"],[6,"Rating"],[8,"-10"],[7,"+10"],[10,"Prev. category"],[9,"Next category"]],"format":"%d","default":0},{"t":"native","key":"notify_action6","title":"Button 6","desc":"","kind":"chips","options":[[0,"None"],[1,"Repeat"],[2,"Shuffle"],[3,"Close"],[4,"Like"],[5,"Unlike"],[6,"Rating"],[8,"-10"],[7,"+10"],[10,"Prev. category"],[9,"Next category"]],"format":"%d","default":0},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"ui_mediaactions"},"notifications":{"title":"Notifications","items":[{"t":"native","key":"notification_colors","title":"Notification Colors","desc":"Adjust if notification text/icons are not visible due to the non-standard colors","kind":"chips","options":[[0,"Auto"],[1,"Black"],[2,"White"]],"format":"%d","default":0},{"t":"native","key":"notify_colorize","title":"Colorize Notification","desc":"Match notification colors and background to the track album art image","kind":"switch","format":"%d","default":true},{"t":"native","key":"buttons","title":"Buttons","desc":"Media action buttons","kind":"nav","page":"ui_mediaactions","format":"%d","default":0},{"t":"native","key":"status_lib","title":"Navigate to the List","desc":"Notification navigates to the current list on touch","kind":"switch","format":"%d","default":false},{"t":"head","text":"Notification Keeping"},{"t":"native","key":"keep_notification","title":"Keep Notification","desc":"Notification stays even if Poweramp paused in its UI, when playback auto-ends, etc.","kind":"switch","format":"%d","default":false},{"t":"note","text":"If disabled, notification still stays when player is paused via notification\n\nNotification can be removed by swiping away, X button, using Stop action in Poweramp, etc.","quote":true},{"t":"native","key":"notify_resume","title":"Keep Inactive Media Notification","desc":"Player can be resumed via Media Notification suggestion when inactive or unloaded (depending on firmware)","kind":"switch","format":"%d","default":false},{"t":"native","key":"keep_service","title":"Keep Service","desc":"Poweramp player service won't be unloaded when in idle","kind":"switch","format":"%d","default":false},{"t":"native","key":"no_keep_notif_on_dscn","title":"Remove Notification on Disconnection","desc":"Notification is removed on Headset/BT disconnection if player is paused","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"ui_notify"},"player":{"title":"Player Screen","items":[{"t":"native","key":"","title":"Press here for the additional Skin options like Static Seekbar, Pro Buttons. 3rd party skins may support even more options","desc":"","kind":"link","page":"skin","format":"%d","default":0},{"t":"native","key":"aa_anim","title":"Album Art Animation","desc":"Animate on track advance. Also applies to bottom bar","kind":"switch","format":"%d","default":true},{"t":"native","key":"anim_long_labels","title":"Animate Long Labels","desc":"Animate long track title and album/artist labels","kind":"switch","format":"%d","default":true},{"t":"native","key":"anim_long_labels_in_lists","title":"Animate Long Labels Everywhere","desc":"Animate long track labels also in lists and the miniplayer","kind":"switch","dependency":"anim_long_labels","format":"%d","default":true},{"t":"head","text":"Player Screen Buttons"},{"t":"note","text":"Player screen buttons appear as an optionally scrollable row below the track cover\n\nThe button customizations are separate for portrait and landscape orientations\n\nTo customize, long-press the empty space between buttons or use the item below","quote":true},{"t":"native","key":"edit_player_screen_buttons","title":"Edit Player Screen Buttons","desc":"","kind":"action","feature":"1","format":"%d","default":0},{"t":"native","key":"sub_aa_buttons_no_gap","title":"Prefer No Gap","desc":"Minimize gaps between buttons for the centered layout","kind":"switch","feature":"1","format":"%d","default":false},{"t":"native","key":"sub_aa_buttons_no_lp_edit","title":"Do Not Edit On Long Press","desc":"Prevents accidental long press started button editing","kind":"switch","feature":"1","format":"%d","default":false},{"t":"native","key":"","title":"Restore Player Screen Buttons","desc":"","kind":"action","feature":"1","format":"%d","default":0},{"t":"head","text":"Other Buttons"},{"t":"native","key":"cc_button","title":"Chromecast Button","desc":"","kind":"chips","options":[[0,"Disabled"],[1,"Player Screen"],[4,"Player Screen Button"],[2,"Main Menu"],[3,"Player Screen and Main Menu"]],"format":"%d","default":1},{"t":"native","key":"rating_type","title":"Rating Type","desc":"","kind":"chips","options":[[0,"Disabled"],[1,"Like/unlike thumbs"],[2,"5 stars"],[3,"5 stars (menu/lists only)"]],"format":"%d","default":1},{"t":"note","text":"Swipe over stars to select rating. Touch an empty space where star should be placed for immediate rating. Long press to toggle between 5 or 0 stars","quote":false},{"t":"native","key":"hide_menu","title":"Menu Button","desc":"Menu can be opened by long pressing the cover","kind":"chips","options":[[1,"Disabled"],[0,"Enabled"]],"format":"%d","default":0},{"t":"native","key":"menu_button_long_press","title":"Menu Button Long Press","desc":"Long press action for the track menu button","kind":"chips","dependency":"hide_menu","feature":"1","options":[[0,"Disabled"],[1,"Delete"],[2,"Add to Playlist"],[3,"Info/Tags"],[4,"Album Art"],[5,"Artist"],[6,"Album"],[7,"Folder"],[8,"Genre"],[9,"Share"],[10,"Like"],[11,"Unlike"]],"format":"%d","default":0},{"t":"native","key":"main_lyrics_button","title":"Lyrics Button","desc":"Button on the Player Screen/cover","kind":"chips","options":[[0,"Disabled"],[1,"When local lyrics available"],[2,"Always"]],"format":"%d","default":0},{"t":"native","key":"line2_click","title":"Line2 Press","desc":"Handle press on the 2nd track text line","kind":"chips","feature":"1","options":[[0,"Disabled"],[1,"Artist"],[2,"Album"],[3,"Folder"],[4,"Genre"]],"format":"%d","default":0},{"t":"native","key":"line2_long_click","title":"Line2 Long Press","desc":"Handle long press on the 2nd track text line","kind":"chips","feature":"1","options":[[0,"Disabled"],[1,"Artist"],[2,"Album"],[3,"Folder"],[4,"Genre"]],"format":"%d","default":0},{"t":"native","key":"show_counter","title":"Track Counter","desc":"Show track number/total tracks counter (if supported by skin)","kind":"switch","format":"%d","default":false},{"t":"note","text":"Track Counter is available via Player Screen Buttons customization","quote":true},{"t":"native","key":"previous_resets","title":"<< Button Resets Current Track","desc":"First press rewinds track, second press changes track. Includes headset/bluetooth button presses, notification button","kind":"switch","format":"%d","default":false},{"t":"note","text":"To reset a track to 0:00 on the Player Screen use a long press on Elapsed time (left to Play button)","quote":false},{"t":"native","key":"long_skip_rewind","title":"-10/+10s Rewind Pro Buttons","desc":"Change >> (category change) pro buttons to -10/+10s rewinding buttons for long tracks. Also applies to Long category","kind":"switch","format":"%d","default":true},{"t":"native","key":"","title":"Press here to set long track duration","desc":"","kind":"link","page":"library","anchor":"restore_pos_min_dur","format":"%d","default":0},{"t":"native","key":"menu_nav_to_folders","title":"Navigate to the Folders","desc":"Track menu / Folders button navigates to the Folders category instead of the Folders Hierarchy","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"ui_player"},"skin":{"title":"Skin","items":[{"t":"head","text":"Built-in Skins"},{"t":"native","kind":"skinselect","key":"skin_theme","title":"","default":"dark","options":[["light","Light"],["dark","Dark"]]},{"t":"native","key":"skin_alt_layout","kind":"radio","title":"Layout","desc":"","options":[[0,"Default","Track labels and buttons on cover. Best for small or wide screens"],[1,"Alternative layout","Moves track labels below cover, makes on-cover buttons smaller and faded"],[2,"Full cover","Moves all track labels and buttons below cover. Works best on long screen phones"]],"default":1},{"t":"note","quote":true,"text":"Use Player Screen and Lyrics options to hide/show menu/lyrics/Chromecast buttons and rating"},{"t":"native","key":"skin_track_labels_align","kind":"chips","title":"Track Labels","desc":"","options":[[0,"Default",""],[1,"Centered",""]],"default":0},{"t":"native","key":"skin_labels_bg","kind":"chips","title":"Labels Background","desc":"","options":[[0,"Enabled",""],[1,"Hidden",""]],"default":0},{"t":"native","key":"skin_player_buttons_bg","kind":"chips","title":"Player Buttons Background","desc":"","options":[[0,"Enabled",""],[1,"Hidden",""]],"default":0},{"t":"native","key":"skin_mu_colors","kind":"chips","title":"Material You colors","desc":"","options":[[0,"Disabled",""],[1,"More pronounced",""],[2,"Less pronounced",""]],"default":1},{"t":"native","key":"skin_font_variant","kind":"chips","title":"Font","desc":"","options":[[0,"Default",""],[1,"Alternative font",""],[2,"Bold",""]],"default":2},{"t":"native","key":"skin_rounding","kind":"chips","title":"Rounded Corners","desc":"","options":[[0,"More rounded",""],[1,"Less rounded",""]],"default":0},{"t":"native","key":"skin_seekbar","kind":"chips","title":"Seekbar Style","desc":"","options":[[0,"Default",""],[1,"Static Seekbar",""],[2,"Simple Seekbar (with Pro Buttons)",""]],"default":0},{"t":"native","key":"skin_more_buttons","kind":"switch","title":"Pro Buttons","desc":"Track and category change buttons. Always enabled for Simple Seekbar","default":true},{"t":"native","key":"skin_knob_hilite","kind":"chips","title":"Knob Highlight","desc":"","options":[[0,"None",""],[1,"Monochromatic",""],[2,"Colorful",""]],"default":2},{"t":"native","key":"skin_graphic_frs_color","kind":"chips","title":"Eq. Graphic Mode Curve","desc":"","options":[[0,"Monochromatic",""],[1,"Colorful",""]],"default":1},{"t":"native","key":"skin_statusbar_bg","kind":"chips","title":"Transparent Status Bar","desc":"","options":[[0,"Default",""],[1,"No Background",""]],"default":0},{"t":"note","quote":true,"text":"Some covers may make status bar icons not readable. In this case you can adjust Background options"},{"t":"native","key":"skin_navbar_bg","kind":"chips","title":"Transparent Navbar","desc":"Applied on the Player Screen","options":[[0,"Default",""],[1,"Semi-transparent",""],[2,"No Background",""]],"default":1},{"t":"note","quote":true,"text":"Some firmwares are unable to change status bar/nav bar dynamically. You may need to exit/enter the app once for these options to apply"},{"t":"native","key":"skin_navbar_offset","kind":"switch","title":"Offset Navbar","desc":"Move Navbar slightly away from the corners (for display with large corner radius)","default":true},{"t":"native","key":"skin_android_navbar_bg","kind":"chips","title":"Android Navigation Bar","desc":"","options":[[0,"Default",""],[1,"No Background",""]],"default":1},{"t":"native","key":"restore_defaults","kind":"action","title":"Restore Defaults"},{"t":"head","text":"3rd Party Skins"},{"t":"note","text":"No 3rd Party Skins Found"}],"source":"poweramp_builtin_skins"},"viz":{"title":"Visualization","items":[{"t":"native","key":"enable_vis","title":"Visualization On Player Screen","desc":"Visualization can be switched on with Player Screen  button","kind":"switch","format":"%d","default":false},{"t":"native","key":"vis_frs_type","title":"Equalizer Screen Spectrum","desc":"","kind":"chips","options":[[0,"Disabled"],[1,"Classic"],[2,"Rounded"]],"format":"%d","default":2},{"t":"native","key":"vis_in_lib","title":"Visualization in Library","desc":"Visible when visualization on Player Screen is enabled. Depending on visualization preset used, some UI elements may become poorly visible","kind":"switch","format":"%d","default":false},{"t":"native","key":"vis_preset_change_sec","title":"Preset Duration","desc":"For By Duration and Shuffle modes","kind":"slider","min":3,"max":120,"format":"%d","default":15},{"t":"native","key":"vis_panel_faded_alpha","title":"Top Visualization Panel Opacity","desc":"","kind":"slider","min":0,"max":100,"format":"%d%%","default":60},{"t":"native","key":"vis_controls_faded_alpha","title":"Faded Controls Opacity","desc":"","kind":"slider","min":0,"max":100,"format":"%d%%","default":50},{"t":"native","key":"vis_temp_ui_ms","title":"UI Timeout","desc":"Time to show UI during active visualization","kind":"slider","min":500,"max":15000,"step":100,"format":"%d","default":1500},{"t":"native","key":"vis_aa_visible","title":"Visible Album Art","desc":"Keep album art visible during visualization","kind":"switch","format":"%d","default":true},{"t":"native","key":"vis_ignore_touch_faded","title":"Ignore Touch","desc":"Ignore first touch in Fade Controls mode","kind":"switch","format":"%d","default":false},{"t":"native","key":"vis_list_faded_alpha","title":"Track Opacity","desc":"Track labels, rating, menu, and album art (if visible) opacity","kind":"slider","min":0,"max":100,"format":"%d","default":25},{"t":"native","key":"vis_fs_hide_bars","title":"Hide System Bars For Full Screen","desc":"Hide status bar and navigation completely when in Full Screen mode","kind":"switch","feature":"1","format":"%d","default":false},{"t":"native","key":"vis_use_compact_bars","title":"Scaled Bars For Faded Controls","desc":"Scale bars visualization to album art area in Fade Controls mode. If disabled, bar visualization is always full-screen","kind":"switch","format":"%d","default":true},{"t":"native","key":"milk_hd","title":"HD","desc":"Increased visualization resolution, reduces performance","kind":"switch","format":"%d","default":false},{"t":"native","key":"milk_crop_aspect","title":"Crop Aspect","desc":"Crop visualization instead of scaling it, reduces performance for a better visual match","kind":"switch","format":"%d","default":false},{"t":"native","key":"milk_30_fps","title":"Force 30 FPS","desc":"Reduce frame rate to 30 frames per second","kind":"switch","format":"%d","default":false},{"t":"native","key":"milk_strict","title":"Strict","desc":"Slower .milk presets rendering for a bit better visual match","kind":"switch","format":"%d","default":false},{"t":"native","key":"vis_extra_delay_info","title":"Visualization Delay","desc":"Extra delay for better audio/visualization/lyrics match is set per each Output/Device type","kind":"nav","page":"","format":"%d","default":0},{"t":"head","text":"Presets"},{"t":"native","key":"vis_rescan","title":"Rescan Presets","desc":"","kind":"action","format":"%d","default":0},{"t":"native","key":"vis_full_rescan","title":"Full Presets Rescan","desc":"Clear scanned presets info and do the full presets rescan","kind":"action","format":"%d","default":0},{"t":"native","key":"milk_hide_unliked","title":"Hide Unliked Presets","desc":"Unliked presets are completely hidden. Preset list is reloaded when closed","kind":"switch","format":"%d","default":false},{"t":"note","text":"Presets disabling removes their ratings","quote":false},{"t":"head","text":"3rd Party Presets"},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}],"source":"vis"},"output_at":{"title":"AudioTrack Output","source":"audio_output","items":[{"t":"note","text":"Default Android audio API. Stable and supported by all Android devices"},{"t":"head","text":"Use For Output Devices:"},{"t":"native","key":"output_headset","title":"Wired Headset/AUX","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_speaker","title":"Speaker","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_bt","title":"Bluetooth","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_usb","title":"USB DAC","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_chromecast","title":"Chromecast","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_other","title":"Other Output Devices","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}]},"output_osl":{"title":"OpenSL ES Output","source":"audio_output","items":[{"t":"note","text":"Native Android audio API"},{"t":"head","text":"Use For Output Devices:"},{"t":"native","key":"output_headset","title":"Wired Headset/AUX","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_speaker","title":"Speaker","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_bt","title":"Bluetooth","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_usb","title":"USB DAC","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_chromecast","title":"Chromecast","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_other","title":"Other Output Devices","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}]},"output_aa":{"title":"AAudio Output","source":"audio_output","items":[{"t":"note","text":"Hi-Res capable optimized audio output. Hi-Res is supported by a subset of Android devices"},{"t":"head","text":"Use For Output Devices:"},{"t":"native","key":"output_headset","title":"Wired Headset/AUX","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_speaker","title":"Speaker","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_bt","title":"Bluetooth","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_usb","title":"USB DAC","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_chromecast","title":"Chromecast","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_other","title":"Other Output Devices","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}]},"output_oslhd":{"title":"OpenSL ES Hi-Res Output","source":"audio_output","items":[{"t":"note","text":"Experimental Hi-Res audio API. Supported by subset of Android devices"},{"t":"head","text":"Use For Output Devices:"},{"t":"native","key":"output_headset","title":"Wired Headset/AUX","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_speaker","title":"Speaker","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_bt","title":"Bluetooth","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_usb","title":"USB DAC","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_chromecast","title":"Chromecast","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_other","title":"Other Output Devices","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}]},"output_athd":{"title":"Hi-Res Output","source":"audio_output","items":[{"t":"note","text":"Experimental Hi-Res audio API. Supported by a subset of Android devices"},{"t":"head","text":"Use For Output Devices:"},{"t":"native","key":"output_headset","title":"Wired Headset/AUX","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_speaker","title":"Speaker","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_bt","title":"Bluetooth","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_usb","title":"USB DAC","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_chromecast","title":"Chromecast","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_other","title":"Other Output Devices","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}]},"output_cc":{"title":"Chromecast Output","source":"audio_output","items":[{"t":"note","text":""},{"t":"head","text":"Use For Output Devices:"},{"t":"native","key":"output_headset","title":"Wired Headset/AUX","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_speaker","title":"Speaker","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_bt","title":"Bluetooth","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_usb","title":"USB DAC","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_chromecast","title":"Chromecast","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_other","title":"Other Output Devices","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}]},"output_bench":{"title":"Built-in Benchmark (silent) Output","source":"audio_output","items":[{"t":"note","text":""},{"t":"head","text":"Use For Output Devices:"},{"t":"native","key":"output_headset","title":"Wired Headset/AUX","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_speaker","title":"Speaker","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_bt","title":"Bluetooth","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_usb","title":"USB DAC","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_chromecast","title":"Chromecast","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"output_other","title":"Other Output Devices","desc":"","kind":"switch","format":"%d","default":false},{"t":"native","key":"restore_defaults","title":"Restore Defaults","desc":"","kind":"action","format":"%d","default":0}]}};
+const ZoomProfile={"library":3,"files":1,"folders":3,"folder_files":3,"folders_hier":3,"albums":1,"album_files":3,"albums_by_artist":3,"albums_by_artist_files":3,"album_artists":3,"album_artists_files":3,"album_artists_albums":3,"album_artists_albums_files":3,"artists":3,"artist_files":3,"artists_albums":3,"artists_albums_files":3,"genres":3,"genres_files":3,"genres_albums":3,"genres_albums_files":3,"composers":3,"composers_files":3,"composers_albums":3,"composers_albums_files":3,"playlists":3,"playlists_files":3,"queue":3,"most_played_files":3,"top_rated_files":3,"low_rated_files":3,"recently_added_files":3,"recently_played_files":3,"long_files":3,"years":3,"years_files":3,"years_albums":3,"years_albums_files":3,"streams":3,"bookmarks":3,"search":3,"lyrics":0};
+/* Per-category display choices never reorder the engine queue. */
+const ListOptions={
+  sorts:[
+    ['track','By track #','track'],['discTrack','By disc and track #','track'],
+    ['title','By title','title'],['filename','By filename','path'],['path','By path','path'],
+    ['artist','By artist','artist'],['album','By album','album'],['year','By year','year'],
+    ['yearAlbum','By year/album','year'],['added','By date added to Library','added'],
+    ['mtime','By date added/modified','mtime','Filesystem date/time'],['rating','By rating','rating'],
+    ['duration','By duration','dur'],['lastPlayed','By time last played','lastPlayed','Uses saved play time'],
+    ['plays','By play count','plays','Uses saved play count'],['shuffle','By shuffle order',null,'Matches actual playback shuffle order']
+  ],
+  key(spec){return ListZoom.key(spec||Views.currentSpec||{kind:'all'});},
+  get(spec){
+    const key=typeof spec==='string'?spec:this.key(spec),saved=SET.listOptions?.[key]||{};
+    const kind=typeof spec==='string'?Object.keys(ListZoom.keys).find(k=>ListZoom.keys[k]===key):spec?.kind;
+    const defaults={recent:'added',history:'lastPlayed',played:'plays',rated:'rating',disliked:'rating',album:'discTrack',folder:'discTrack'};
+    const grouped=['folders','albums','artists','aartists','genres','years','composers','playlists','tree'].includes(kind);
+    const sort=saved.sort||defaults[kind]||(grouped?'title':kind==='playlist'||kind==='bookmarks'?'original':SET.sortTracks||'title');
+    return {sort,reverse:!!saved.reverse,titlesOnly:!!saved.titlesOnly};
+  },
+  save(spec,change){const key=this.key(spec);SET.listOptions=Object.assign({},SET.listOptions,{[key]:Object.assign({},SET.listOptions?.[key],change)});saveSet();},
+  shuffleMap(items){
+    // Repeated IDs are ambiguous outside the explicit queue's occurrence contract.
+    if(!SET.shuffleOn||!items.length||new Set(items.map(t=>t.id)).size!==items.length)return null;
+    const wanted=new Set(items.map(t=>t.id)),indices=[];
+    for(const index of Engine.order||[]){const t=Engine.queue[index];if(t&&wanted.has(t.id)){indices.push(index);wanted.delete(t.id);}}
+    if(wanted.size||indices.length!==items.length)return null;
+    const counts=new Map();for(const t of Engine.queue)counts.set(t.id,(counts.get(t.id)||0)+1);
+    for(const item of items)if(counts.get(item.id)!==1)return null;
+    return indices;
+  },
+  availability(id,data,spec){
+    if(spec?.kind==='queue')return 'Queue keeps its occurrence and playback order';
+    if(data.type!=='tracks')return id==='title'?'':'Track metadata sorting is available inside a category';
+    if(id==='shuffle')return this.shuffleMap(data.items)?'':'Start shuffle playback for this complete category first';
+    const field=this.sorts.find(s=>s[0]===id)?.[2];
+    if(!field)return '';
+    const numeric=['track','year','added','mtime','rating','dur','lastPlayed','plays'].includes(field);
+    const found=data.items.some(t=>numeric?Number.isFinite(Number(t[field]))&&t[field]!=null&&t[field]!==''&&(!['track','year','dur','added','mtime','lastPlayed'].includes(field)||Number(t[field])>0):!!t[field]);
+    return found?'':'No '+({mtime:'filesystem date',added:'date added',lastPlayed:'last-played time',plays:'play-count',track:'track-number',dur:'duration'}[field]||field)+' data in this category';
+  },
+  comparator(id){
+    const text=fn=>(a,b)=>sortNat(fn(a)||'',fn(b)||'');
+    const number=(field,desc=false)=>(a,b)=>{
+      const av=Number(a[field]),bv=Number(b[field]),positive=['track','disc','year','dur','added','mtime','lastPlayed'].includes(field),ak=a[field]!=null&&a[field]!==''&&Number.isFinite(av)&&(!positive||av>0),bk=b[field]!=null&&b[field]!==''&&Number.isFinite(bv)&&(!positive||bv>0);
+      return ak!==bk?(ak?-1:1):ak?(av-bv)*(desc?-1:1):0;
+    };
+    const title=text(t=>t.title),track=number('track'),disc=number('disc');
+    const compare={track,discTrack:(a,b)=>disc(a,b)||track(a,b),title,
+      filename:text(t=>baseName(t.path||'')),path:text(t=>t.path),artist:text(trackArtist),
+      album:(a,b)=>text(trackAlbum)(a,b)||disc(a,b)||track(a,b),year:number('year'),
+      yearAlbum:(a,b)=>number('year')(a,b)||text(trackAlbum)(a,b)||disc(a,b)||track(a,b),
+      added:number('added',true),mtime:number('mtime',true),rating:number('rating',true),
+      duration:number('dur'),lastPlayed:number('lastPlayed',true),plays:number('plays',true)}[id]||(()=>0);
+    return (a,b)=>compare(a,b)||title(a,b);
+  },
+  prepare(data,spec){
+    if(spec.kind==='queue')return data;
+    const options=this.get(spec),items=data.items;if(!Array.isArray(items))return data;
+    if(data.type==='tracks'){
+      if(options.sort==='shuffle'){
+        const indices=this.shuffleMap(items);
+        if(indices){if(options.reverse)indices.reverse();return Object.assign({},data,{items:indices.map(i=>Engine.queue[i]),indices,mappedPlayback:true});}
+        // A saved unavailable choice is retained, but its fallback is explicit.
+        data=Object.assign({},data,{sortNotice:'Shuffle order is unavailable for this category. Showing its library order.'});
+      }else if(options.sort!=='original'&&!this.availability(options.sort,data,spec)){
+        data=Object.assign({},data,{items:items.slice().sort(this.comparator(options.sort))});
+      }else if(options.sort!=='original')data=Object.assign({},data,{sortNotice:this.availability(options.sort,data,spec)});
+      if(options.reverse)data=Object.assign({},data,{items:data.items.slice().reverse()});
+      const alphaField={filename:'filename',path:'path',artist:'artist',album:'album'}[options.sort]||'title';
+      return Object.assign({},data,{alphaField});
+    }
+    if(data.type==='groups'||data.type==='playlists'){const field=data.type==='groups'?'key':'name',sorted=items.slice().sort((a,b)=>sortNat(a[field],b[field]));if(options.reverse)sorted.reverse();return Object.assign({},data,{items:sorted});}
+    if(data.type==='tree'){const sorted=items.slice().sort(this.comparator('title')),dirs=data.dirs.slice().sort(sortNat);if(options.reverse){sorted.reverse();dirs.reverse();}return Object.assign({},data,{items:sorted,dirs});}
+    return data;
+  },
+  show(box){
+    if(!box)return;
+    const spec=box.__spec||Views.currentSpec||{kind:'all'},data=Views.currentData||{type:'tracks',items:box.__items||[]},options=this.get(spec),s=$('#sheet');
+    s.innerHTML='<div class="list-options-content"><header class="list-options-head"><h3>'+esc('List Options: '+(spec.title||spec.key||Views.title(spec)))+'</h3><button class="iconbtn" data-list-settings aria-label="Open library settings">'+icoHTML('settings')+'</button></header><div class="list-options-body"><h4>Sort</h4><div class="list-sort-options"></div><label class="list-choice"><input type="checkbox" data-list-reverse '+(options.reverse?'checked ':'')+(spec.kind==='queue'?'disabled':'')+'><span>Reverse</span></label><h4>Layout</h4><label class="list-choice"><input type="checkbox" data-list-titles '+(options.titlesOnly?'checked':'')+'><span>Show titles only</span></label><h4>View As</h4><p class="list-pinch-hint">'+icoHTML('info')+' Pinch-to-zoom for zooming</p><div class="list-view-options"></div></div><footer class="list-options-footer"><button class="btn" data-list-close>Close</button></footer></div>';
+    const activeBox=()=>{const live=$('#list-body .zoom-list');return live&&this.key(live.__spec||Views.currentSpec)===this.key(spec)?live:null;};
+    const change=value=>{if(!activeBox())return;this.save(spec,value);const scroll=s.querySelector('.list-options-body').scrollTop;Views.render(Views.currentSpec||spec,true);this.show($('#list-body .zoom-list'));s.querySelector('.list-options-body').scrollTop=scroll;};
+    const sorts=s.querySelector('.list-sort-options');
+    for(const [id,label,field,hint] of this.sorts){
+      const reason=this.availability(id,data,spec),row=el('label','list-choice'+(reason?' unavailable':''));
+      row.innerHTML='<input type="radio" name="list-sort" value="'+id+'" '+(options.sort===id?'checked ':'')+(reason?'disabled':'')+'><span>'+esc(label)+((reason||hint)?'<small>'+esc(reason||hint)+'</small>':'')+'</span>';
+      row.querySelector('input').onchange=()=>change({sort:id});sorts.append(row);
+    }
+    if(spec.kind==='queue'||options.sort==='original')sorts.prepend(el('p','list-options-note',spec.kind==='queue'?'Queue order follows its Added queue or Playback order tab. Sorting and reversing are disabled.':'Current order is preserved until you choose a sort.'));
+    const layoutLabels={[-4]:'Grid - 1 line small',[-3]:'1 line extra small',[-2]:'1 line',[-1]:'List - no images',0:'List - compact',3:'List - small',4:'List',1:'Grid - extra small',2:'Grid - small',5:'Grid'};
+    for(const id of [-4,-3,-2,-1,0,3,4,1,2,5]){
+      const row=el('label','list-choice');row.innerHTML='<input type="radio" name="list-view" value="'+id+'" '+(+box.dataset.zoom===id?'checked':'')+'><span>'+layoutLabels[id]+'</span>';
+      row.querySelector('input').onchange=()=>{const live=activeBox();if(live)ListZoom.set(live,id,live.querySelector('.trow'));};s.querySelector('.list-view-options').append(row);
+    }
+    s.querySelector('[data-list-reverse]').onchange=e=>change({reverse:e.target.checked});
+    s.querySelector('[data-list-titles]').onchange=e=>change({titlesOnly:e.target.checked});
+    s.querySelector('[data-list-settings]').onclick=()=>{closeSheet();Settings.open('library');};
+    s.querySelector('[data-list-close]').onclick=closeSheet;openSheet('sheet');
+  }
+};
+Views.listOptions=spec=>ListOptions.get(spec);
+
 const ListZoom={
   states:[
     {id:-4,name:'Compact text · 2 columns',mode:'text',cols:2,size:26,lines:1},
@@ -6781,7 +7952,7 @@ const ListZoom={
     {id:0,name:'Small thumbnails',mode:'rows',cols:1,size:58,art:44,lines:2},
     {id:1,name:'Small grid · 4 columns',mode:'grid',cols:4,lines:2},
     {id:2,name:'Grid · 3 columns',mode:'grid',cols:3,lines:2},
-    {id:3,name:'List',mode:'rows',cols:1,size:84,art:68,lines:3},
+    {id:3,name:'Small list',mode:'rows',cols:1,size:98,art:80,lines:3},
     {id:4,name:'Large list',mode:'rows',cols:1,size:122,art:106,lines:3},
     {id:5,name:'Large grid · 2 columns',mode:'grid',cols:2,lines:3}
   ],
@@ -6790,6 +7961,8 @@ const ListZoom={
   get(key){const v=Number(SET.listZoom?.[key]??ZoomProfile[key]??3);return Number.isFinite(v)?clamp(Math.round(v),-4,5):3;},
   apply(box,key,id){
     const s=this.states.find(x=>x.id===id)||this.states[7];
+    box.classList.toggle('titles-only',!!SET.listOptions?.[key]?.titlesOnly);
+    box.dataset.titlesOnly=String(!!SET.listOptions?.[key]?.titlesOnly);
     if(box.dataset.zoomKey===key&&box.dataset.zoom===String(s.id))return;
     box.classList.add('zoom-list');box.classList.toggle('track-grid',s.mode==='grid');box.classList.remove('grid2');
     box.dataset.zoomKey=key;box.dataset.zoom=String(s.id);box.dataset.zoomMode=s.mode;box.dataset.zoomLines=String(s.lines);
@@ -6832,13 +8005,7 @@ const ListZoom={
     }
     saveSet();
   },
-  options(box){
-    if(!box)return;
-    const s=$('#sheet');s.innerHTML='<h3>List Options</h3><div class="note">Pinch to change the layout</div><div class="zoom-options"></div>';
-    const opts=s.querySelector('.zoom-options');
-    this.states.forEach(z=>{const b=el('button','zoom-option'+(+box.dataset.zoom===z.id?' on':''),'<span class="zoom-preview" data-mode="'+z.mode+'" style="--cols:'+z.cols+'">'+Array.from({length:z.cols===1?3:z.cols*2},()=>'<i></i>').join('')+'</span><span>'+esc(z.name)+'</span>');b.setAttribute('aria-pressed',String(+box.dataset.zoom===z.id));b.onclick=()=>{this.set(box,z.id,box.querySelector('.trow'));closeSheet();};opts.appendChild(b);});
-    openSheet('sheet');
-  },
+  options(box){ListOptions.show(box);},
   install(){
     ['#list-body','#q-body'].forEach(sel=>{
       const container=$(sel);if(container.__listTouchInstalled)return;container.__listTouchInstalled=true;
@@ -6899,7 +8066,16 @@ const nativeGroupList=Views.groupList,nativePlaylistList=Views.playlistList;
 Views.groupList=function(data){const box=nativeGroupList.call(Views,Object.assign({},data,{grid:false}));return ListZoom.attach(box,ListZoom.key({kind:Nav.cur==='search'?'search':Views.currentSpec?.kind||data.open+'s'}));};
 Views.playlistList=function(items){return ListZoom.attach(nativePlaylistList.call(Views,items),'playlists');};
 const oldCtxMenuList=ctxMenuList;
-ctxMenuList=function(data,spec){oldCtxMenuList(data,spec);const b=el('button','mi full',icoHTML('grid')+'<span>List Options</span>');b.onclick=()=>ListZoom.options($('#list-body .zoom-list'));$('#sheet .menugrid').prepend(b);};
+ctxMenuList=function(data,spec){
+  const s=$('#sheet');
+  if(data.type==='groups'||data.type==='playlists')s.innerHTML='<h3>'+esc(spec.title||spec.key||Views.title(spec))+'</h3><div class="menugrid"></div>';
+  else oldCtxMenuList(data,spec);
+  s.querySelectorAll('[data-a^="sort-"]').forEach(b=>b.remove());
+  const b=el('button','mi full',icoHTML('settings')+'<span>List Options</span>');b.onclick=()=>ListZoom.options($('#list-body .zoom-list'));s.querySelector('.menugrid').prepend(b);
+  const play=s.querySelector('[data-a="play"]');
+  if(play&&data.mappedPlayback)play.onclick=()=>{closeSheet();const index=data.indices?.[0],track=data.items[0];Engine.categoryKind=spec.kind;if(index!=null&&Engine.queue[index]?.id===track?.id&&Engine.order.includes(index))Engine.playIndex(index,true);else if(track)Engine.setQueue(data.items,0,true);};
+  s.firstElementChild?.classList.add('list-menu-title');const content=el('div','list-menu-content');while(s.firstChild)content.append(s.firstChild);s.append(content);Sheets.show('sheet');
+};
 
 const NativeSettings={
   values:{},scrolls:{},searching:false,
@@ -6955,6 +8131,7 @@ const NativeSettings={
   },
   action(it){
     const page=Settings.stack.at(-1);
+    if(it.key==='list_opts'&&page==='library_search')return ()=>{Nav.go('search');Search.listOptions();};
     if(it.key==='restore_defaults'&&!PAGES[page]?.items.some(row=>row.key&&this.binding(row)))return null;
     const actions={
       audio_info:audioInfo,drawercast_server:()=>DrawerCast.show(),
@@ -7092,7 +8269,7 @@ const NativeSettings={
 // have the same ratio on the user's phone. Keep transport readable as height shrinks.
 /* Read the actual dock bounds, including browser viewport and settings changes. */
 const DockLayout={frame:0,
-  schedule(){if(!this.frame)this.frame=requestAnimationFrame(()=>{this.frame=0;this.measure();UI.fitPlayer();if(Nav.cur==='player')UI.drawViz();});},
+  schedule(){if(!this.frame)this.frame=requestAnimationFrame(()=>{this.frame=0;if(typeof SharedPlayerMotion!=='undefined'&&SharedPlayerMotion.deferLayout())return;this.measure();UI.fitPlayer();if(Nav.cur==='player')UI.drawViz();});},
   measure(){
     UI.seekWidth=$('#seek').clientWidth||UI.seekWidth||0;
     const nav=$('#nav'),mini=$('#mini'),list=$('#sc-list'),fabs=$('#list-fabs');
@@ -7119,6 +8296,7 @@ const DockLayout={frame:0,
   }
 };
 UI.fitPlayer=function(){
+  if(typeof SharedPlayerMotion!=='undefined'&&SharedPlayerMotion.deferLayout())return;
   const wrap=$('#sc-player .player-wrap'),screen=$('#sc-player');if(!wrap||screen.hidden)return;
   const px=(style,key)=>parseFloat(style[key])||0;
   const width=wrap.clientWidth||window.innerWidth,u=Math.min(width/393,1.6),nav=$('#nav');
@@ -7537,6 +8715,7 @@ NativeSettings.apply=function(){
   b.classList.toggle('list-no-gradient',Nav.cur!=='player'&&!SET.bgGradientLists);
   $('#bg-art').style.visibility=v.aa_force_default?'hidden':'';b.classList.toggle('lyrics-no-bg',Nav.cur==='lyrics'&&!SET.lyricsBg);
   b.classList.toggle('force-default-art',!!v.aa_force_default);b.dataset.seekbar=String(SET.nativeSeekbar||0);applyPlayerButtons();
+  LibraryPresentation.updateDock();
 };
 
 const PLAYER_BUTTONS={viz:['Visualization','wave'],timer:['Sleep Timer','timer'],repeat:['Repeat','repeat'],shuffle:['Shuffle','shuffle'],lyrics:['Lyrics','lyrics'],queue:['Queue','queue'],eq:['Equalizer','eq'],info:['Audio Info','info'],spacer:['Space','more']};
@@ -7558,12 +8737,12 @@ function editPlayerButtons(){
 function measurePlayerLabels(){for(const id of ['#p-title','#p-sub']){const n=$(id);if(!n)continue;if(!n.querySelector('.label-text')){const text=n.textContent;n.textContent='';n.append(el('span','label-text',esc(text)));}const label=n.querySelector('.label-text');n.style.setProperty('--label-travel',Math.max(0,label.scrollWidth-n.clientWidth)+'px');n.classList.toggle('has-long-label',label.scrollWidth>n.clientWidth+4);}}
 
 Views.rowHTML=function(t,i,spec){
-  const v=nativeValues(),category=spec?.kind||Views.currentSpec?.kind,numbered=['album','folder','playlist','queue'].includes(category),kind=SET.trackNumType??0;
-  const meta=[];if(SET.showDuration)meta.push(fmtTime(t.dur));if(SET.showBitrate&&t.dur&&t.size)meta.push(Math.round(t.size*8/t.dur/1000)+' kbps');if(SET.showFileType)meta.push(t.ext);if(v.track_disc_meta&&t.disc)meta.push('Disc '+t.disc);if(kind===2&&numbered&&t.track)meta.push('#'+t.track);
+  const v=nativeValues(),category=spec?.kind||Views.currentSpec?.kind,options=Views.listOptions?.(spec||Views.currentSpec)||{},numbered=['album','folder','playlist','queue'].includes(category),kind=SET.trackNumType??0;
+  const meta=[];if(SET.showDuration)meta.push(Number.isFinite(Number(t.dur))&&Number(t.dur)>0?fmtTime(t.dur):'Duration unavailable');if(SET.showBitrate&&t.dur&&t.size)meta.push(Math.round(t.size*8/t.dur/1000)+' kbps');if(SET.showFileType&&t.ext)meta.push(t.ext);if(v.track_disc_meta&&t.disc)meta.push('Disc '+t.disc);if(kind===2&&numbered&&t.track)meta.push('#'+t.track);
   const title=(kind===3&&t.track?t.track+'. ':'')+(SET.listUiFilenameAsTitle?baseName(t.path||t.title):t.title),playing=Engine.current?.id===t.id;
   const artist=v.use_albumartist?(t.albumArtist||trackArtist(t)):trackArtist(t);
   const stars=(SET.ratingType===2||SET.ratingType===3)&&t.rating>0?' <span class="list-stars">'+'★'.repeat(Math.min(5,t.rating))+'</span>':'';
-  return '<div class="trow'+(playing?' playing':'')+'" role="button" tabindex="0" aria-label="'+esc(title+' — '+artist+' — '+trackAlbum(t))+'" data-id="'+esc(t.id)+'" data-i="'+i+'"><span class="selection-check" aria-hidden="true"></span><div class="art" data-art="'+esc(t.id)+'"><div class="ph">'+icoHTML('note')+'</div></div>'+(kind===1&&numbered&&t.track?'<span class="row-track-number">'+t.track+'</span>':'')+'<div class="tmeta"><div class="t1">'+esc(title)+stars+'</div><div class="t2">'+esc(artist+' — '+trackAlbum(t))+'</div>'+(meta.length&&SET.showMetaLine?'<div class="t3">'+esc(meta.join(' · '))+'</div>':'')+'</div></div>';
+  return '<div class="trow'+(playing?' playing':'')+'" role="button" tabindex="0" aria-label="'+esc(title+' — '+artist+' — '+trackAlbum(t))+'" data-id="'+esc(t.id)+'" data-i="'+i+'"><span class="selection-check" aria-hidden="true"></span><div class="art" data-art="'+esc(t.id)+'"><div class="ph">'+icoHTML('note')+'</div></div>'+(kind===1&&numbered&&t.track?'<span class="row-track-number">'+t.track+'</span>':'')+'<div class="tmeta"><div class="t1">'+esc(title)+stars+'</div>'+(options.titlesOnly?'':'<div class="t2">'+esc(artist+' — '+trackAlbum(t))+'</div>')+(meta.length&&SET.showMetaLine&&!options.titlesOnly?'<div class="t3">'+icoHTML('note')+'<span>'+esc(meta.join(' | '))+'</span></div>':'')+'</div></div>';
 };
 const groupsBeforeRework=Views.groupList;
 Views.groupList=function(data){const v=nativeValues();if(data.open==='album'&&v.hide_unknown_album)data=Object.assign({},data,{items:data.items.filter(i=>i.key!=='Unknown album')});if(data.open==='artist'&&v.hide_unknown_artist)data=Object.assign({},data,{items:data.items.filter(i=>i.key!=='Unknown artist')});return groupsBeforeRework.call(this,data);};
@@ -7572,7 +8751,57 @@ trackAction=function(action,t,items,i){if(action==='Like'||action==='Unlike'){t.
 const menuTrackBeforeRework=ctxMenuTrack;
 ctxMenuTrack=async function(...args){const opened=menuTrackBeforeRework(...args),request=Sheets.request;await opened;if(Sheets.open==='sheet'&&Sheets.request===request&&nativeValues().enable_deletion===false)$('#sheet [data-a="Delete"]')?.remove();};
 const renderListBeforeRework=Views.render;
-Views.render=function(spec,keep){renderListBeforeRework.call(this,spec,keep);const data=this.currentData,items=data.type==='tracks'?data.items:[];if(!items.length)return;const upcoming=spec.kind==='queue'&&spec.queueView==='upcoming',summary=el('div','list-summary');summary.innerHTML='<span class="list-summary-meta">'+items.length+' songs · '+fmtTime(items.reduce((n,t)=>n+(t.dur||0),0))+'</span><div class="list-summary-buttons"><button class="btn" data-header-play>'+icoHTML('play')+'Play</button>'+(!upcoming?'<button class="btn" data-header-shuffle>'+icoHTML('shuffle')+'Shuffle</button>':'')+'</div>';$('#list-body').prepend(summary);summary.querySelector('[data-header-play]').onclick=()=>{Engine.categoryKind=spec.kind;if(upcoming){const index=data.indices[0];if(Engine.queue[index]?.id===items[0].id)Engine.playIndex(index,true);}else if(spec.kind==='queue')PlaybackQueue.play(0);else Engine.setQueue(items,0,true);};const shuffle=summary.querySelector('[data-header-shuffle]');if(shuffle)shuffle.onclick=()=>{SET.shuffleOn=true;SET.shuffleMode=1;Engine.categoryKind=spec.kind;if(spec.kind==='queue')PlaybackQueue.play(0);else Engine.setQueue(items,0,true);saveSet();UI.renderToggles();};};
+/* Pixel-grounded category header. Header controls and dock controls are exclusive. */
+const LibraryPresentation={
+  render(spec,data){
+    const body=$('#list-body'),screen=$('#sc-list'),fabs=$('#list-fabs'),scroll=body.scrollTop;
+    screen.classList.add('reference-list');screen.classList.toggle('album-page',spec.kind==='album');
+    const category=CATS.find(c=>c.k===spec.kind)||CATS.find(c=>c.k==='all'),title=spec.title||spec.key||Views.title(spec);
+    const parent=Views.stack.length>1?Views.stack[Views.stack.length-2]:null;
+    const backLabel=parent?(parent.title||Views.title(parent)):(spec.kind==='album'?'Albums':'Library');
+    const header=el('header','library-page-head'+(spec.kind==='album'?' album-hero':''));
+    const back=el('button','library-back',icoHTML('back')+'<span>'+esc(backLabel)+'</span>');
+    // A fresh touch after page dragging may have no compatibility click.
+    back.setAttribute('aria-label','Back to '+backLabel);bindTapButton(back,()=>Views.back());header.append(back);
+    const items=data.type==='tracks'?data.items:[],first=items[0];
+    if(spec.kind==='album'){
+      const art=el('div','album-hero-art art');if(first)art.dataset.art=first.id;art.innerHTML='<div class="ph">'+icoHTML('album')+'</div>';header.prepend(art);
+      const labels=el('div','album-hero-labels');
+      labels.append(el('h2','album-title-pill',esc(title)));
+      if(first)labels.append(el('div','album-artist-pill',esc(first.albumArtist||trackArtist(first))));
+      const years=[...new Set(items.map(t=>t.year).filter(Boolean))],durationKnown=items.length&&items.every(t=>Number.isFinite(Number(t.dur))&&Number(t.dur)>0),meta=[String(items.length),durationKnown?fmtTime(items.reduce((n,t)=>n+Number(t.dur),0)):'Duration unavailable',years.length===1?years[0]:null].filter(v=>v!=null);
+      labels.append(el('div','album-meta-pill',icoHTML('note')+'<span>'+esc(meta.join(' | '))+'</span>'));header.append(labels);
+      if(first){const id=first.id;getArtURL(first,false).then(url=>{if(url&&art.isConnected&&art.dataset.art===id&&body.__referenceHeader===header)UI.setArtEl(art,url);}).catch(()=>{});}
+    }else{
+      const heading=el('div','library-category-heading');
+      heading.innerHTML='<div class="catico" style="background:'+category.c+'">'+icoHTML(category.ic)+'</div><h2>'+esc(title)+'</h2>';header.append(heading);
+    }
+    const actions=el('div','library-header-actions');
+    for(const button of fabs.querySelectorAll('.fab')){const copy=button.cloneNode(true);copy.onclick=button.onclick;copy.classList.add('header-action');actions.append(copy);}
+    // Group and playlist pages still need search and the real List Options menu.
+    if(!actions.children.length){
+      const search=el('button','fab header-action',icoHTML('search'));search.setAttribute('aria-label','Search library');search.onclick=()=>Nav.go('search');
+      const more=el('button','fab header-action',icoHTML('more'));more.setAttribute('aria-label','List actions');more.onclick=()=>ctxMenuList(data,spec);actions.append(search,more);
+      for(const button of [search,more]){const dock=button.cloneNode(true);dock.onclick=button.onclick;dock.classList.remove('header-action');fabs.append(dock);}
+    }
+    header.append(actions);body.prepend(header);
+    if(data.sortNotice)header.append(el('p','list-sort-notice',esc(data.sortNotice)));
+    fabs.classList.remove('top');fabs.dataset.referenceDock='1';
+    body.__referenceHeader=header;body.__referenceActions=actions;
+    if(!body.__referenceScroll){body.__referenceScroll=true;body.addEventListener('scroll',()=>this.updateDock(),{passive:true});}
+    body.scrollTop=scroll;this.updateDock();requestAnimationFrame(()=>this.updateDock());
+    // Adding the header changes the window origin, not its complete item array.
+    body.querySelector('.zoom-list')?.__window?.refresh();
+  },
+  updateDock(){
+    const body=$('#list-body'),actions=body.__referenceActions,fabs=$('#list-fabs');if(!actions)return;
+    const bounds=body.getBoundingClientRect(),headerDisabled=document.body.classList.contains('no-header-buttons');
+    const visible=!headerDisabled&&(!bounds.height||actions.getBoundingClientRect().bottom>bounds.top);
+    fabs.hidden=visible;fabs.setAttribute('aria-hidden',String(visible));fabs.inert=visible;
+    if(fabs.__referenceVisible!==!visible){fabs.__referenceVisible=!visible;DockLayout.schedule();}
+  }
+};
+Views.render=function(spec,keep){renderListBeforeRework.call(this,spec,keep);LibraryPresentation.render(spec,this.currentData);};
 
 const PlaylistFiles={
   export(){downloadText('DrawerCast-playlists.json',JSON.stringify({format:'DrawerCast-playlists',playlists:Playlists.data.map(p=>({name:p.name,tracks:p.ids.map(id=>LIB.map.get(id)).filter(Boolean).map(t=>({id:t.id,path:t.path,title:t.title,artist:trackArtist(t)}))}))},null,2),'application/json');},
@@ -7581,10 +8810,9 @@ const PlaylistFiles={
 Playlists.addTo=function(id,ids){const list=this.get(id);if(!list)return;let add=nativeValues().pl_no_dups===false?ids.slice():ids.filter(i=>!list.ids.includes(i));if(nativeValues().playlist_insert_pos===2)add=shuffleArray(add);if(nativeValues().playlist_insert_pos===1)list.ids.unshift(...add);else list.ids.push(...add);this.save();toast('Added to '+list.name);};
 function shuffleArray(items){const a=items.slice();for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a;}
 function installSearchPlayback(){
-  const run=Search.run;Search.run=function(){run.call(this);if(!$('#q').value.trim())return;const body=$('#q-body'),tracks=[...body.querySelectorAll('.zoom-list')].flatMap(n=>n.__items||[]),categories=[...body.querySelectorAll('[data-g]')].flatMap(n=>n.parentNode.__groups?.[+n.dataset.g]?.tracks||[]);
-    const found=nativeValues().search_play_tracks!==false&&tracks.length?tracks:tracks.concat(categories),ids=new Set(),items=found.filter(t=>{if(ids.has(t.id))return false;ids.add(t.id);return true;});if(!items.length)return;
-    const actions=el('div','search-play-actions','<button class="btn" data-search-play>Play results</button><button class="btn" data-search-shuffle>Shuffle</button>');body.prepend(actions);actions.querySelector('[data-search-play]').onclick=()=>{Engine.setQueue(items,0,true);Nav.go('player');};actions.querySelector('[data-search-shuffle]').onclick=()=>{SET.shuffleOn=true;SET.shuffleMode=1;Engine.setQueue(items,0,true);UI.renderToggles();saveSet();Nav.go('player');};
-  };
+  // Keep the controls in their reference position above the native result scroller.
+  // This wrapper also resets actions when the history renderer handles an empty query.
+  const run=Search.run;Search.run=function(){run.call(this);this.refreshActions();};
 }
 function installSettingsShortcuts(){
   window.addEventListener('resize',()=>MainMenu.align());
@@ -7621,7 +8849,7 @@ function setupRework(){
   $('#art-more').oncontextmenu=e=>{e.preventDefault();const value=nativeValues().menu_button_long_press,choice=PAGES.player.items.find(i=>i.key==='menu_button_long_press')?.options.find(i=>i[0]===value);if(!choice||!value||!Engine.current)return;const name=choice[1]==='Add to Playlist'?'Playlist':choice[1];trackAction(name,Engine.current,Engine.queue,Engine.pos);};
   const meta=UI.renderMeta;UI.renderMeta=function(){meta.call(this);const t=Engine.current;if(t)$('#outinfo-txt').textContent=[t.sr?(t.sr/1000)+' KHZ':'',t.dur&&t.size?Math.round(t.size*8/t.dur/1000)+' KBPS':'',(t.codec||t.ext||'').toUpperCase()].filter(Boolean).join(' · ');};
   const play=UI.renderNowPlaying;UI.renderNowPlaying=async function(t){await play.call(UI,t);if(Engine.current?.id===t?.id){measurePlayerLabels();Waveform.load(t);}};
-  const sync=EQ.sync;EQ.sync=function(){sync.call(this);if(AudioQuality.transparent())$('#eqstat').textContent='Transparent · effects bypassed';const v=nativeValues();if(v.eq_labels===2){$$('#bands [data-gain-label]').forEach(b=>b.textContent=Math.round((Math.pow(10,SET.eqGains[+b.dataset.gainLabel]/20)-1)*100)+'%');if($('#pv'))$('#pv').textContent=Math.round((Math.pow(10,SET.preamp/20)-1)*100)+'%';}if(v.tone_labels===1){$('#bass-v').textContent=(SET.bass*15).toFixed(1)+' dB';$('#treble-v').textContent=(SET.treble*15).toFixed(1)+' dB';}};
+  const sync=EQ.sync;EQ.sync=function(){sync.call(this);const v=nativeValues();if(v.eq_labels===2){$$('#bands [data-gain-label]').forEach(b=>b.textContent=Math.round((Math.pow(10,SET.eqGains[+b.dataset.gainLabel]/20)-1)*100)+'%');if($('#pv'))$('#pv').textContent=Math.round((Math.pow(10,SET.preamp/20)-1)*100)+'%';}if(v.tone_labels===1){$('#bass-v').textContent=(SET.bass*15).toFixed(1)+' dB';$('#treble-v').textContent=(SET.treble*15).toFixed(1)+' dB';}};
   const item=PAGES.skin.items.find(i=>i.key==='skin_seekbar');if(item)item.desc='Waveform scrolls beneath a fixed center marker. Drag left to seek forward, right to go back. Static mode shows the whole track.';
   const nav=Nav.go;Nav.go=function(...args){nav.apply(Nav,args);NativeSettings.syncNavigation();wakeLock(SET.keepScreenOn||Nav.cur==='lyrics'&&nativeValues().lyrics_keep_screen);};
   window.addEventListener('pagehide',()=>Engine.checkpoint());
@@ -7723,15 +8951,16 @@ function installPlaybackRework(){
     return playIndex.call(this,index,autoplay,position||0);
   };
   Engine.setGain=function(i,value,ms){const node=this.gains[i];if(node&&this.ctx){const now=this.ctx.currentTime;node.gain.cancelScheduledValues(now);node.gain.setValueAtTime(Math.max(0,node.gain.value),now);ms>0?node.gain.linearRampToValueAtTime(Math.max(0,value),now+ms/1000):node.gain.setValueAtTime(Math.max(0,value),now);}else if(this.els[i])this.els[i].volume=clamp(value,0,1)*SET.volume*SET.volume;};
-  const pause=Engine.pause;Engine.pause=function(){this._playRequest=(this._playRequest||0)+1;this._loadingRequest=null;if(this._pendingSeek)this._pendingSeek.request=this._playRequest;PlaybackTransitions.cancel();clearTimeout(this.silenceTimer);return pause.call(this);};
+  const pause=Engine.pause;Engine.pause=function(){restoreTrackStepOrigin();this._playRequest=(this._playRequest||0)+1;this._loadingRequest=null;if(this._pendingSeek)this._pendingSeek.request=this._playRequest;PlaybackTransitions.cancel();clearTimeout(this.silenceTimer);return pause.call(this);};
   const play=Engine.play;Engine.play=function(){clearTimeout(this.fadeTimer);clearTimeout(this.silenceTimer);return play.call(this);};
-  const stop=Engine.stop;Engine.stop=function(){AudioQuality.reset();this._playRequest=(this._playRequest||0)+1;this._loadingRequest=null;this._pendingSeek=null;this._resumePosition=null;PlaybackTransitions.cancel();clearTimeout(this.silenceTimer);return stop.call(this);};
-  const seek=Engine.seek;Engine.seek=function(seconds){PlaybackTransitions.cancel();AudioQuality.reset();const result=seek.call(this,seconds);this.listenedLast=this.time();if(this.playing&&SET.audioMode!=='transparent'&&nativeValues().fade_seek){this.setGain(this.cur,0,0);this.setGain(this.cur,this.rgGain(this.current),nativeValues().fade_seek_ms||100);}return result;};
+  const stop=Engine.stop;Engine.stop=function(){restoreTrackStepOrigin();AudioQuality.reset();this._playRequest=(this._playRequest||0)+1;this._loadingRequest=null;this._pendingSeek=null;this._resumePosition=null;PlaybackTransitions.cancel();clearTimeout(this.silenceTimer);return stop.call(this);};
+  const seek=Engine.seek;Engine.seek=function(seconds){restoreTrackStepOrigin();PlaybackTransitions.cancel();AudioQuality.reset();const result=seek.call(this,seconds);this.listenedLast=this.time();if(this.playing&&SET.audioMode!=='transparent'&&nativeValues().fade_seek){this.setGain(this.cur,0,0);this.setGain(this.cur,this.rgGain(this.current),nativeValues().fade_seek_ms||100);}return result;};
   const next=Engine.next;
   Engine.next=function(auto){
     const previous=this._autoAdvance;this._autoAdvance=!!auto;
     try{
-      if(auto&&SET.repeatMode==='one')return next.call(this,true);
+      if(!auto)return next.call(this,auto);
+      if(SET.repeatMode==='one')return next.call(this,true);
       if(PlaybackQueue.shouldStart()){PlaybackQueue.begin(false,0,!!auto||this.wantsPlayback());return;}
       if(PlaybackQueue.active&&this.pos+1>=this.order.length){PlaybackQueue.finish(!!auto||this.wantsPlayback());return;}
       return next.call(this,auto);
@@ -8016,11 +9245,342 @@ const MusicSources={
   }
 };
 
+/* =====================================================================
+   LIBRARY PAGE HISTORY AND FINGER-TRACKED HORIZONTAL NAVIGATION
+   ===================================================================== */
+/* Visits and nested ancestry are separate: a swipe follows visited pages;
+   the Back button follows the current category's parent. Neither destroys
+   the page just left, so Forward restores its exact spec and scroll. */
+const LibraryPageHistory={
+  limit:32,entries:[],index:-1,serial:0,restoring:false,mutating:false,installed:false,
+  active(){return Nav.cur==='library'||Nav.cur==='list';},
+  copy(spec){return spec?Object.assign({},spec):null;},
+  key(screen,spec,stack=[]){return JSON.stringify([screen,spec,stack].map(value=>value));},
+  current(){return this.entries[this.index]||null;},
+  peek(delta){return this.entries[this.index+(delta<0?-1:1)]||null;},
+  make(screen,spec,stack=[]){return {id:++this.serial,screen,spec:this.copy(spec),stack:stack.map(s=>this.copy(s)),scrollTop:Number(spec?.scrollTop)||0,scrollLeft:0,snapshot:null,snapshotDeferred:false};},
+  same(entry,screen,spec,stack=[]){
+    if(!entry||entry.screen!==screen)return false;
+    const identity=s=>{if(!s)return null;const value=Object.assign({},s);delete value.scrollTop;return value;};
+    return this.key(screen,identity(entry.spec),entry.stack.map(identity))===this.key(screen,identity(spec),stack.map(identity));
+  },
+  seed(){if(this.index<0){this.entries=[this.make('library',null)];this.index=0;}return this.current();},
+  save({snapshot=true}={}){
+    const entry=this.current();if(!entry||!this.active()||entry.screen!==Nav.cur)return;
+    const scroll=$(entry.screen==='list'?'#list-body':'#lib-cats');entry.scrollTop=scroll?.scrollTop||0;entry.scrollLeft=scroll?.scrollLeft||0;
+    if(entry.screen==='list'){
+      if(Views.currentSpec)Views.currentSpec.scrollTop=entry.scrollTop;
+      entry.spec=this.copy(Views.currentSpec);entry.stack=Views.stack.map(s=>this.copy(s));
+    }
+    // A player detour keeps this page's DOM. Save its small navigation state
+    // now, not a deep viewport clone inside the mini-player release handler.
+    // Horizontal motion refreshes the live snapshot before using it; a later
+    // category change captures the retained DOM before replacing it.
+    if(snapshot){entry.snapshot=LibraryPageMotion.capture(entry.screen);entry.snapshotDeferred=false;}
+    else entry.snapshotDeferred=true;
+  },
+  captureDeferred(){
+    const entry=this.current();if(!entry?.snapshotDeferred)return;
+    // Never replace a valid prior picture with a newer category's live DOM.
+    // The wrappers below flush before replacement, but a direct caller may
+    // already have changed the spec or removed the source.
+    const sameSource=entry.screen!=='list'||this.same(entry,'list',Views.currentSpec,Views.stack);
+    const snapshot=sameSource?LibraryPageMotion.capture(entry.screen,{id:entry.screen==='list'?'list-body':'lib-cats',top:entry.scrollTop,left:entry.scrollLeft}):null;
+    if(snapshot)entry.snapshot=snapshot;
+    entry.snapshotDeferred=false;
+  },
+  visit(screen,spec,stack=[]){
+    this.seed();const current=this.current();
+    if(this.same(current,screen,spec,stack))return current;
+    this.captureDeferred();
+    this.entries.splice(this.index+1);this.entries.push(this.make(screen,spec,stack));this.index=this.entries.length-1;
+    while(this.entries.length>this.limit){this.entries.shift();this.index--;}
+    return this.current();
+  },
+  restore(entry){
+    this.restoring=true;
+    try{
+      Views.stack=entry.stack.map(s=>this.copy(s));
+      if(entry.screen==='list'){
+        const spec=Views.stack.at(-1)||this.copy(entry.spec);if(!Views.stack.length)Views.stack.push(spec);
+        Views.render(spec);
+      }else Views.renderLibrary();
+      // Horizontal pages own their own geometry, never a second vertical scene.
+      ScreenDrag.activate(entry.screen,false);ScreenDrag.ownership();
+      const scroll=$(entry.screen==='list'?'#list-body':'#lib-cats');
+      // A fresh window initially has short spacers, so a distant scroll can
+      // clamp before its range is measured. Expand it, then mount the restored
+      // viewport synchronously, including zero-duration/reduced-motion commits.
+      const windows=Array.from(scroll.querySelectorAll('.list')).map(box=>box.__window).filter(Boolean);
+      windows.forEach(window=>window.refresh());
+      scroll.scrollTop=entry.scrollTop;windows.forEach(window=>window.refresh());
+      scroll.scrollTop=entry.scrollTop;
+      if(entry.screen==='list'&&Views.currentSpec)Views.currentSpec.scrollTop=entry.scrollTop;
+      Nav.lastLibrary=entry.screen;
+    }finally{this.restoring=false;}
+  },
+  moveTo(index){
+    if(index<0||index>=this.entries.length||index===this.index)return false;
+    this.save();this.captureDeferred();this.index=index;this.restore(this.current());return true;
+  },
+  move(delta){return this.moveTo(this.index+(delta<0?-1:1));},
+  back(){
+    if(Selection.mode){Selection.exit();return false;}
+    LibraryPageMotion.abort();this.save();this.captureDeferred();this.seed();
+    const chain=Views.stack.slice(0,-1),screen=chain.length?'list':'library',spec=chain.at(-1)||null;
+    let index=this.index-1;
+    if(index<0||!this.same(this.entries[index],screen,spec,chain)){
+      // A shortcut can have a different chronological predecessor; a deep
+      // parent can also outlive the visit ring. Put the parent immediately
+      // behind this page so Forward always returns to the page just left.
+      const previous=this.entries.slice(0,this.index).reverse().find(entry=>this.same(entry,screen,spec,chain));
+      const parent=this.make(screen,spec,chain);parent.scrollTop=previous?.scrollTop??(Number(spec?.scrollTop)||0);parent.snapshot=previous?.snapshot||null;
+      this.entries.splice(this.index,0,parent);this.index++;
+      if(this.entries.length>this.limit){if(this.index>1){this.entries.shift();this.index--;}else this.entries.pop();}
+      index=this.index-1;
+    }
+    return this.moveTo(index);
+  },
+  install(){
+    if(this.installed)return;this.installed=true;this.seed();
+    const push=Views.push,render=Views.render,go=Nav.go;let navDepth=0;
+    Views.push=spec=>{
+      LibraryPageMotion.abort();this.save();this.captureDeferred();this.seed();
+      const stack=Nav.cur==='list'?Views.stack.slice():[];
+      const root=this.current();if(!root.snapshot&&root.screen==='library')root.snapshot=LibraryPageMotion.capture('library');
+      this.mutating=true;
+      try{Views.stack=stack;push.call(Views,spec);}finally{this.mutating=false;}
+      this.visit('list',Views.currentSpec,Views.stack);
+    };
+    Views.back=()=>this.back();
+    Views.render=(spec,keep)=>{
+      if(!this.restoring&&!this.mutating&&!this.active())this.captureDeferred();
+      const result=render.call(Views,spec,keep);
+      if(!this.restoring&&!this.mutating&&Nav.cur==='list'&&this.current()?.screen==='list'){
+        const entry=this.current();entry.spec=this.copy(Views.currentSpec);entry.stack=Views.stack.map(s=>this.copy(s));entry.scrollTop=$('#list-body').scrollTop;
+      }
+      return result;
+    };
+    Nav.go=(name,pushState)=>{
+      const outer=navDepth===0,from=Nav.cur;
+      if(outer&&!this.restoring&&!this.mutating){
+        LibraryPageMotion.abort();this.save({snapshot:name!=='player'});
+        const entry=this.current();
+        // Returning to the retained page needs no picture. A new library visit
+        // must preserve the old one before navigation can replace its DOM.
+        if(!this.active()&&['library','list'].includes(name)&&!this.same(entry,name,name==='list'?Views.currentSpec:null,name==='list'?Views.stack:[]))this.captureDeferred();
+      }
+      navDepth++;try{go.call(Nav,name,pushState);}finally{navDepth--;}
+      if(!outer||this.restoring||this.mutating||!['library','list'].includes(name)||Nav.cur!==name)return;
+      if(name==='library'){
+        this.visit('library',null);Views.stack=[];
+      }else if(Views.currentSpec&&(!this.same(this.current(),'list',Views.currentSpec,Views.stack)||from==='library'))this.visit('list',Views.currentSpec,Views.stack);
+    };
+    // The existing browser Back path handles nested lists. Its one-category
+    // edge also belongs to the library, rather than jumping to the player.
+    window.addEventListener('popstate',e=>{
+      if(Nav.cur!=='list'||Views.stack.length!==1||Sheets.open||Selection.mode||UI.vizFull)return;
+      e.stopImmediatePropagation();Views.back();try{history.pushState({},'');}catch(_){}
+    },true);
+    LibraryPageMotion.install();
+  }
+};
+/* Snapshots contain only the source page's mounted viewport. They retain its
+   source selectors and scroll geometry, but have unique IDs and no actions. */
+const LibraryPageMotion={
+  state:null,finish:null,host:null,serial:0,installed:false,styleSignature:'',
+  capture(screen,savedScroll=null){
+    const source=$(SCREENS[screen]);if(!source)return null;
+    const clone=source.cloneNode(true),original=[source,...source.querySelectorAll('*')],nodes=[clone,...clone.querySelectorAll('*')];
+    const prefix='library-snapshot-'+(++this.serial)+'-',ids=new Map(),scroll=[];
+    original.forEach((n,i)=>{if(n.id){const id=prefix+i+'-'+n.id;ids.set(n.id,id);nodes[i].dataset.pageSourceId=n.id;nodes[i].id=id;}const saved=savedScroll?.id===n.id,top=saved?savedScroll.top:n.scrollTop,left=saved?savedScroll.left:n.scrollLeft;if(top||left)scroll.push([i,top||0,left||0]);if(n.tagName==='CANVAS')try{nodes[i].getContext('2d')?.drawImage(n,0,0);}catch(_){};});
+    nodes.forEach(n=>{
+      n.removeAttribute('autofocus');n.removeAttribute('tabindex');
+      for(const a of Array.from(n.attributes||[])){
+        if(/^on/i.test(a.name)){n.removeAttribute(a.name);continue;}
+        if(['aria-labelledby','aria-describedby','for'].includes(a.name))n.setAttribute(a.name,a.value.split(/\s+/).map(id=>ids.get(id)||id).join(' '));
+        else if((a.name==='href'||a.name==='xlink:href')&&a.value[0]==='#')n.setAttribute(a.name,'#'+(ids.get(a.value.slice(1))||a.value.slice(1)));
+        else if(a.value.includes('url(#'))n.setAttribute(a.name,a.value.replace(/url\(#([^)]+)\)/g,(value,id)=>'url(#'+(ids.get(id)||id)+')'));
+      }
+    });
+    clone.hidden=false;clone.inert=true;clone.setAttribute('aria-hidden','true');clone.dataset.librarySnapshot=screen;
+    clone.classList.remove('library-page-covered');clone.classList.add('library-page-snapshot');clone.style.transition='none';clone.style.transform='';clone.style.visibility='';clone.style.zIndex='';
+    delete clone.dataset.scene;delete clone.dataset.gesturePreview;
+    return {node:clone,scroll};
+  },
+  mirrorStyles(){
+    const ids=new Set();for(const name of Object.keys(SCREENS)){const source=$(SCREENS[name]);if(source?.id)ids.add(source.id);source?.querySelectorAll('[id]').forEach(n=>ids.add(n.id));}
+    const rules=list=>Array.from(list||[]).map(rule=>{
+      if(rule.selectorText){const selector=rule.selectorText.replace(/#([a-zA-Z_][\w-]*)/g,(token,id)=>ids.has(id)?':is(#library-page-style-id,[data-page-source-id="'+id+'"])':token);return selector!==rule.selectorText?selector+'{'+rule.style.cssText+'}':'';}
+      if(rule.cssRules){const body=rules(rule.cssRules);return body?rule.cssText.slice(0,rule.cssText.indexOf('{')+1)+body+'}':'';}return '';
+    }).join('\n');
+    let css='';for(const sheet of Array.from(document.styleSheets||[])){if(sheet.ownerNode?.id==='library-page-snapshot-styles')continue;try{css+=rules(sheet.cssRules);}catch(_){};}
+    if(css===this.styleSignature)return;this.styleSignature=css;
+    let style=$('#library-page-snapshot-styles');if(!style){style=document.createElement('style');style.id='library-page-snapshot-styles';document.head.appendChild(style);}style.textContent=css;
+  },
+  mount(snapshot){
+    if(!snapshot)return null;const node=snapshot.node.cloneNode(true);node.inert=true;
+    // scrollTop has no effect without a CSS box. Attach to the laid-out host
+    // before replaying the frozen viewport, including transient peer scrolling.
+    this.host.hidden=false;this.host.appendChild(node);
+    const original=[snapshot.node,...snapshot.node.querySelectorAll('*')],nodes=[node,...node.querySelectorAll('*')];
+    original.forEach((n,i)=>{if(n.tagName==='CANVAS')try{nodes[i].getContext('2d')?.drawImage(n,0,0);}catch(_){};});
+    snapshot.scroll.forEach(([i,top,left])=>{if(nodes[i]){nodes[i].scrollTop=top;nodes[i].scrollLeft=left;}});
+    return node;
+  },
+  shield(){
+    for(const name of ['library','list']){const node=$(SCREENS[name]);node.inert=true;node.setAttribute('aria-hidden','true');node.classList.add('library-page-covered');}
+    this.host.hidden=false;
+  },
+  transform(x,y=0){return `translateX(${x}px)`+(y?` translateY(${y}px)`:'');},
+  begin(){
+    const scene=ScreenDrag.state||ScreenDrag.settling;
+    if(this.state||scene?.morph)return;
+    const entry=LibraryPageHistory.current();if(!entry||!LibraryPageHistory.active())return;
+    const live=$(SCREENS[Nav.cur]),y=GestureMotion.offset(live,'y');
+    // Cross-axis takeover freezes both painted participants before retiring
+    // their vertical owner. A single inert peer preserves the uncovered area.
+    const peer=scene?(live===scene.from?scene.to:scene.from):null;
+    const peerName=peer===scene?.to?scene?.target:scene?.fromName;
+    const peerPosition=peer?{x:GestureMotion.offset(peer),y:GestureMotion.offset(peer,'y')}:null;
+    const peerSnapshot=peer&&SCREENS[peerName]?this.capture(peerName):null;
+    LibraryPageHistory.save();this.mirrorStyles();
+    const backdropNode=this.mount(peerSnapshot),from=this.mount(entry.snapshot||this.capture(entry.screen));
+    if(!from){this.host.replaceChildren();this.host.hidden=true;return;}
+    const backdrop=backdropNode?{node:backdropNode,...peerPosition,height:peer.clientHeight||scene.height||innerHeight}:null;
+    if(backdrop){backdrop.node.classList.add('library-page-backdrop');backdrop.node.style.transform=this.transform(backdrop.x,backdrop.y);backdrop.exitY=Math.sign(backdrop.y||-y||1)*backdrop.height;}
+    from.style.transform=this.transform(0,y);
+    this.state={entry,from,to:null,target:null,delta:0,x:0,y,base:0,width:live.clientWidth||innerWidth,commit:false,backdrop};
+    ScreenDrag.abort();this.shield();
+  },
+  neighbor(sign){
+    const s=this.state;if(!s)return;
+    const delta=sign>0?-1:1,target=LibraryPageHistory.peek(delta);
+    if(s.delta===delta&&s.target===target)return;
+    s.to?.remove();s.to=null;s.delta=delta;s.target=target;
+    if(target){
+      // Unvisited live roots and an evicted ancestor may lack a stored picture.
+      const snapshot=target.snapshot||(target.screen==='library'?this.capture('library'):null);
+      s.to=this.mount(snapshot);
+      if(!s.to){s.target=null;}
+    }
+  },
+  move(dx){
+    const s=this.state;if(!s)return;
+    const position=s.base+dx;this.neighbor(position>=0?1:-1);
+    s.x=s.target?clamp(position,-s.width,s.width):position*.22;
+    s.from.style.transform=this.transform(s.x,s.y);
+    if(s.to)s.to.style.transform=this.transform(s.x+(s.x>=0?-s.width:s.width),s.y);
+  },
+  pause(){
+    const s=this.state;if(!s||!this.finish?.pending)return false;
+    const current=s.commit?s.to:s.from,other=s.commit?s.from:s.to;
+    const positions=new Map([s.from,s.to,s.backdrop?.node].filter(Boolean).map(n=>[n,{x:GestureMotion.offset(n),y:GestureMotion.offset(n,'y')}])),at=positions.get(current);
+    this.finish.cancel();this.finish=null;InputLifecycle.unwatchSettle(this.host);
+    if(s.commit){s.from=current;s.to=other;s.entry=LibraryPageHistory.current();s.delta=-s.delta;s.target=LibraryPageHistory.peek(s.delta);}
+    s.commit=false;s.x=at.x;s.base=s.target?at.x:at.x/.22;s.y=at.y;
+    // Edge offsets are already resisted. Reconstruct their input-space base
+    // so only the new displacement is resisted and crossing zero stays smooth.
+    for(const [n,position] of positions){n.style.transition='none';n.style.transform=this.transform(position.x,position.y);}
+    if(s.backdrop)Object.assign(s.backdrop,positions.get(s.backdrop.node));
+    return true;
+  },
+  end(velocity=0,allowCommit=true){
+    const s=this.state;if(!s)return;
+    const commit=allowCommit&&!!s.target&&GestureMotion.commits(s.x,velocity,s.width);
+    if(commit){
+      const moved=LibraryPageHistory.move(s.delta);if(!moved){this.abort();return;}
+      s.commit=true;this.shield();
+    }
+    const sign=s.x>=0?1:-1,nodes=s.to?[s.from,s.to]:[s.from];
+    const targets=s.to?[this.transform(commit?sign*s.width:0),this.transform(commit?0:-sign*s.width)]:[this.transform(0)];
+    let distance=Math.max(commit?s.width-Math.abs(s.x):Math.abs(s.x),Math.abs(s.y));
+    if(s.backdrop){nodes.push(s.backdrop.node);targets.push(this.transform(s.backdrop.x,s.backdrop.exitY));distance=Math.max(distance,Math.abs(s.backdrop.exitY-s.backdrop.y));}
+    const finish=GestureMotion.settle(nodes,targets,GestureMotion.duration(distance,velocity),()=>{if(this.state===s)this.abort();});
+    this.finish=finish.pending?finish:null;
+    if(this.finish)InputLifecycle.watchSettle(this.host,()=>this.abort(),e=>this.host.contains(e.target));
+  },
+  abort(){
+    if(LibraryPageHistory.restoring||(!this.state&&!this.finish&&(!this.host||this.host.hidden)))return;
+    this.finish?.cancel?.();this.finish=null;InputLifecycle.unwatchSettle(this.host);this.state=null;
+    if(this.host){this.host.hidden=true;this.host.replaceChildren();}
+    for(const name of ['library','list'])$(SCREENS[name])?.classList.remove('library-page-covered');
+    // A no-op horizontal reset must never hide a participant in another scene.
+    ScreenDrag.ownership(ScreenDrag.state||ScreenDrag.settling);
+  },
+  install(){
+    if(this.installed)return;this.installed=true;
+    this.host=document.createElement('div');this.host.id='library-page-motion';this.host.hidden=true;this.host.setAttribute('aria-hidden','true');$('#app').appendChild(this.host);
+    for(const node of [$('#sc-library'),$('#sc-list'),this.host])bindLibraryPageGesture(node);
+    InputLifecycle.register(()=>this.abort());
+  }
+};
+/* Unlike artwork's eager capture, a broad list gesture stays unclaimed until
+   clear horizontal intent. Taps, native pan-y, pinch and long press retain
+   their original event target and owner. */
+function bindLibraryPageGesture(node){
+  let state=null,frame=0,canceledContact=null;const blockClick=InputLifecycle.clickGuard(node);
+  const ignore=e=>{
+    if(Sheets.open||Selection.mode||UI.vizFull)return true;
+    if(e.target.closest?.('button,input,textarea,select,a,[contenteditable]:not([contenteditable="false"]),[role="slider"],#mini,#nav,#alpha,.alpha,.queue-tabs,.bands,[data-horizontal-gesture],[data-library-gesture-ignore]'))return true;
+    for(let n=e.target;n&&n!==node;n=n.parentElement){if(n.scrollWidth>n.clientWidth+2&&typeof getComputedStyle==='function'&&/auto|scroll/.test(getComputedStyle(n).overflowX))return true;}
+    return false;
+  };
+  const release=s=>{if(!s?.claimed)return;InputLifecycle.release(node,s.id);try{if(node.hasPointerCapture?.(s.id))node.releasePointerCapture(s.id);}catch(_){};};
+  const paint=()=>{frame=0;if(state?.claimed)LibraryPageMotion.move(state.dx);};
+  const reset=()=>{
+    if(LibraryPageHistory.restoring)return;cancelAnimationFrame(frame);frame=0;const done=state;state=null;
+    if(done){canceledContact=done.id;blockClick({pointerId:done.id});}
+    release(done);
+  };
+  node.addEventListener('pointerdown',e=>{
+    if(e.isPrimary===false||InputLifecycle.contacts.size>1){if(canceledContact!==null)blockClick({pointerId:canceledContact});return;}
+    if(state||e.button>0||ignore(e)||(!InputLifecycle.active(node)&&node!==LibraryPageMotion.host))return;
+    canceledContact=null;
+    const paused=node===LibraryPageMotion.host&&LibraryPageMotion.pause();
+    state={id:e.pointerId,x:e.clientX,y:e.clientY,dx:0,dy:0,travel:0,vx:0,claimed:false,paused,samples:[{x:e.clientX,t:GestureMotion.time(e)}]};
+  });
+  node.addEventListener('pointermove',e=>{
+    const s=state;if(!s||s.id!==e.pointerId)return;
+    const now=GestureMotion.time(e);s.dx=e.clientX-s.x;s.dy=e.clientY-s.y;s.travel=Math.max(s.travel,Math.hypot(s.dx,s.dy));
+    if(!s.claimed){
+      if(Math.abs(s.dy)>9&&Math.abs(s.dy)>Math.abs(s.dx)*1.2){canceledContact=s.id;blockClick(e);state=null;if(s.paused)LibraryPageMotion.end(0,false);return;}
+      if(Math.abs(s.dx)<=10||Math.abs(s.dx)<=Math.abs(s.dy)*1.25)return;
+      // Shared player scenes have their own contact plane and remain its owner.
+      if(!LibraryPageMotion.state&&(ScreenDrag.state||ScreenDrag.settling)?.morph){canceledContact=s.id;blockClick(e);state=null;return;}
+      if(ignore(e)||!InputLifecycle.claim(node,s.id)){canceledContact=s.id;blockClick(e);state=null;if(s.paused)LibraryPageMotion.end(0,false);return;}
+      s.claimed=true;InputLifecycle.gesture.phase='drag';node.setPointerCapture?.(s.id);LibraryPageMotion.begin();
+    }
+    const previous=s.samples.at(-1),step=e.clientX-previous.x;
+    if(Math.abs(step)>4&&s.samples.length>1&&Math.sign(step)!==Math.sign(previous.x-s.samples.at(-2).x))s.samples=[previous];
+    s.samples.push({x:e.clientX,t:now});while(s.samples.length>2&&s.samples[0].t<now-90)s.samples.shift();
+    const first=s.samples[0];s.vx=(e.clientX-first.x)/Math.max(1,now-first.t);
+    if(e.cancelable)e.preventDefault();if(!frame)frame=requestAnimationFrame(paint);
+  },{passive:false});
+  const end=e=>{
+    // Touch starts with implicit capture on the hit-tested row/category. Taking
+    // capture on this broad surface emits a bubbling loss from that OLD child.
+    // Only this surface losing its own capture cancels the page's live stream.
+    const s=state;if(!s||s.id!==e.pointerId)return;
+    if(e.type==='lostpointercapture'&&s.claimed&&e.target!==node)return;
+    state=null;cancelAnimationFrame(frame);frame=0;
+    const canceled=e.type!=='pointerup';if(canceled||s.claimed||s.travel>7)blockClick(e);
+    if(s.claimed){
+      if(!canceled){s.dx=e.clientX-s.x;LibraryPageMotion.move(s.dx);}
+      release(s);const velocity=GestureMotion.time(e)-s.samples.at(-1).t>100?0:s.vx;
+      LibraryPageMotion.end(velocity,!canceled);
+    }else if(s.paused)LibraryPageMotion.end(0,false);
+  };
+  for(const type of ['pointerup','pointercancel','lostpointercapture'])node.addEventListener(type,end);
+  InputLifecycle.register(reset,node);
+}
+
 async function boot(){
   bindStatic();
   setupParity();
   setupRevision();
   setupRework();
+  LibraryPageHistory.install();
   SourceLibrary.load();MusicSources.install();
   DockLayout.install();
   applySettings();
@@ -8029,6 +9589,7 @@ async function boot(){
   setupArtGestures();
   setupSeekGestures();
   setupMiniGestures();
+  SharedPlayerMotion.install();
   setupVizGestures();
   setupAlphaScrub();
   setupPlayerSwipeDown();
@@ -8084,6 +9645,6 @@ if(document.readyState==='loading') document.addEventListener('DOMContentLoaded'
 else boot();
 
 /* expose a little for debugging */
-window.PA = {Selection,Visualization, TruePeakGuard,gainLedger,normalization, AudioDSP,SamplePeakLimiter,AudioQuality,ConfigIO,BackupSQLite,AutoEqCatalog,SyncedLyrics,Waveform,PlaybackQueue,PlaybackTransitions,PlaylistFiles,proSkip, ListZoom:ListZoom, NativeSettings:NativeSettings, EqMath:EqMath, Search:Search, Sheets:Sheets, PAGES:PAGES, setupParity:setupParity, DrawerCast:DrawerCast, DriveSource,R2Source,SourceLibrary,MusicSources, setVal:setVal, DUR:DUR, queueDurations:queueDurations, applySettings:applySettings, CAP:CAP, ROOTS:ROOTS, BG:BG, TagPool:TagPool, IOSTAT:IOSTAT, linkFolder:linkFolder, rescanRoot:rescanRoot, unlinkRoot:unlinkRoot, loadRoots:loadRoots, Engine:Engine, LIB:LIB, SET:SET, UI:UI, Views:Views, Nav:Nav, Settings:Settings, EQ:EQ, Playlists:Playlists, Bookmarks:Bookmarks, addFiles:addFiles, IDB:IDB, readTags:readTags, closeSheet:closeSheet };
+window.PA = {LibraryPageHistory,LibraryPageMotion,Selection,Visualization, TruePeakGuard,gainLedger,normalization, AudioDSP,SamplePeakLimiter,AudioQuality,ConfigIO,BackupSQLite,AutoEqCatalog,SyncedLyrics,Waveform,PlaybackQueue,PlaybackTransitions,PlaylistFiles,proSkip, ListZoom:ListZoom, NativeSettings:NativeSettings, EqMath:EqMath, Search:Search, Sheets:Sheets, PAGES:PAGES, setupParity:setupParity, DrawerCast:DrawerCast, DriveSource,R2Source,SourceLibrary,MusicSources, setVal:setVal, DUR:DUR, queueDurations:queueDurations, applySettings:applySettings, CAP:CAP, ROOTS:ROOTS, BG:BG, TagPool:TagPool, IOSTAT:IOSTAT, linkFolder:linkFolder, rescanRoot:rescanRoot, unlinkRoot:unlinkRoot, loadRoots:loadRoots, Engine:Engine, LIB:LIB, SET:SET, UI:UI, Views:Views, Nav:Nav, Settings:Settings, EQ:EQ, Playlists:Playlists, Bookmarks:Bookmarks, addFiles:addFiles, IDB:IDB, readTags:readTags, closeSheet:closeSheet };
 
 })();

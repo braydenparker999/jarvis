@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {readFile} from 'node:fs/promises';
-const source=await readFile(new URL('../public/drawercast/player.js',import.meta.url),'utf8');
-function node(){const handlers={};return {handlers,style:{setProperty(){}},hidden:false,clientWidth:100,classList:{add(){},remove(){},contains:()=>false},dataset:{},setAttribute(){},closest:()=>null,addEventListener(n,fn){(handlers[n]??=[]).push(fn)},setPointerCapture(){},hasPointerCapture:()=>false,getBoundingClientRect:()=>({left:0,width:100}),fire(type,event={}){const e={type,pointerId:1,isPrimary:true,button:0,clientX:20,clientY:20,target:this,preventDefault(){},...event};for(const fn of handlers[type]||[])fn(e);return e;}};}
+const source=await readFile(process.env.POWERAMP_PLAYER_FILE||new URL('../public/drawercast/player.js',import.meta.url),'utf8');
+function node(){const handlers={};return {handlers,style:{setProperty(){}},hidden:false,clientWidth:100,classList:{add(){},remove(){},contains:()=>false},dataset:{},setAttribute(){},closest:()=>null,addEventListener(n,fn){(handlers[n]??=[]).push(fn)},setPointerCapture(){},hasPointerCapture:()=>false,getBoundingClientRect:()=>({left:0,width:100}),fire(type,event={}){const e={type,pointerId:1,pointerType:'touch',isPrimary:true,button:0,detail:1,clientX:20,clientY:20,target:this,preventDefault(){this.prevented=true},stopPropagation(){},stopImmediatePropagation(){this.stopped=true},...event};for(const fn of handlers[type]||[]){fn(e);if(e.stopped)break;}if(type==='click'&&!e.prevented)this.onclick?.(e);return e;}};}
 function harness(){
   let now=1000,sequence=0;const timers=new Map(),intervals=new Map(),nodes=new Map(),seeks=[],skips=[];
   const Engine={current:{id:'one'},_playRequest:1,duration:()=>100,time:()=>20,seek:v=>seeks.push(v),seekBy:v=>seeks.push(v)};
@@ -17,16 +17,16 @@ function harness(){
   return {context,Engine,seeks,skips,nodes,timers,intervals,advance:ms=>now+=ms,flush(){for(const [id,fn] of [...timers]){timers.delete(id);fn()}}};
 }
 test('a short category tap skips once; a held seek never also skips',()=>{
-  const h=harness();vm.runInContext(source.slice(source.indexOf('function bindTransportButton('),source.indexOf('function setupSeekGestures(')),h.context);
+  const h=harness();vm.runInContext(source.slice(source.indexOf('function bindTapButton('),source.indexOf('function setupSeekGestures(')),h.context);
   const b=node();b.dataset.act='ff';h.context.b=b;vm.runInContext('bindTransportButton(b)',h.context);
-  b.fire('pointerdown');b.fire('pointerup');b.onclick({preventDefault(){}});assert.deepEqual(h.skips,[1]);assert.deepEqual(h.seeks,[]);
-  b.fire('pointerdown');h.advance(450);h.flush();b.fire('pointerup');b.onclick({preventDefault(){}});
+  b.fire('pointerdown');b.fire('pointerup');b.fire('click');assert.deepEqual(h.skips,[1]);assert.deepEqual(h.seeks,[]);
+  b.fire('pointerdown');h.advance(450);h.flush();b.fire('pointerup');b.fire('click');
   assert.deepEqual(h.seeks,[10]);assert.deepEqual(h.skips,[1]);assert.equal(h.intervals.size,0);
 });
 test('moving a held category button cancels its timer and trailing click',()=>{
-  const h=harness();vm.runInContext(source.slice(source.indexOf('function bindTransportButton('),source.indexOf('function setupSeekGestures(')),h.context);
+  const h=harness();vm.runInContext(source.slice(source.indexOf('function bindTapButton('),source.indexOf('function setupSeekGestures(')),h.context);
   const b=node();b.dataset.act='rew';h.context.b=b;vm.runInContext('bindTransportButton(b)',h.context);
-  b.fire('pointerdown');b.fire('pointermove',{clientX:50});h.flush();b.fire('pointerup');b.onclick({preventDefault(){}});
+  b.fire('pointerdown');b.fire('pointermove',{clientX:50});h.flush();b.fire('pointerup');b.fire('click');
   assert.deepEqual(h.seeks,[]);assert.deepEqual(h.skips,[]);
 });
 function seekHarness(){const h=harness();const start=source.indexOf('function setupSeekGestures('),end=source.indexOf('\nfunction ',start+10);vm.runInContext(source.slice(start,end)+'\nsetupSeekGestures();',h.context);return h;}
