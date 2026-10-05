@@ -183,7 +183,7 @@ function persistentMorph(){
   for(const key of ['title','sub'])pairNodes[key].mini.firstElementChild=fakeNode();
   const appearance={fontFamily:'Fixture Sans',fontSize:16,fontWeight:700,lineHeight:19.2,color:'white',background:'transparent',borderColor:'#666',borderWidth:0,padding:{left:0,top:0},radius:[0,0,0,0]};
   const appearances={};for(const key of ['title','sub','play'])appearances[key]={mini:{...appearance},full:{...appearance,fontSize:28,lineHeight:33.6}};
-  return {p:0,endpoints,pairs:pairNodes,appearances,mini:fakeNode(),full:fakeNode(),A:fakeNode(),B:fakeNode(),mask:fakeNode(),content:fakeNode(),backgroundMask:fakeNode(),backgroundContent:fakeNode(),background:fakeNode(),input:fakeNode(),dim:fakeNode(),nav:fakeNode(),styles:[],original:{},retired:false,viewport:{width:393,height:852},
+  return {p:0,endpoints,pairs:pairNodes,appearances,mini:fakeNode(),full:fakeNode(),A:fakeNode(),B:fakeNode(),mask:fakeNode(),content:fakeNode(),backgroundMask:fakeNode(),backgroundContent:fakeNode(),background:fakeNode(),backgroundCover:fakeNode(),backdropBlend:{opaque:false},input:fakeNode(),dim:fakeNode(),nav:fakeNode(),styles:[],original:{},retired:false,
     miniRadius:[29,29,0,0],artRadius:{mini:[12,12,12,12],full:[60,60,60,60]},navRadius:{mini:[0,0,29,29],full:[29,29,29,29]},artMiniSize:'cover',artFullSize:'contain',nativeSeekVisible:true};
 }
 function persistentHarness(m){
@@ -198,8 +198,7 @@ test('persistent paint has one actual widget owner and exact geometry at every c
   const m=persistentMorph(),{motion}=persistentHarness(m),owners=Object.fromEntries(Object.entries(m.pairs).map(([key,pair])=>[key,pair.mini]));
   for(const p of [0,.001,.25,.5,.75,.8,.9,.999,1,.5,0]){
     motion.paint(m,p);
-    expectRect(transformedBox(m.mask,endpoints.surface.mini),endpoints.surface.mini,endpoints.surface.full,p,`persistent shell@${p}`);
-    const clip=m.backgroundMask.style.clipPath.slice(6,-1).split(' round ')[0].split(' ').map(parseFloat);expectRect(rect(clip[3],clip[0],393-clip[1]-clip[3],852-clip[0]-clip[2]),endpoints.surface.mini,endpoints.surface.full,p,`stationary backdrop reveal@${p}`);assert.equal(m.backgroundMask.style.transform,'');assert.equal(m.backgroundContent.style.transform,'');
+    for(const mask of [m.mask,m.backgroundMask])expectRect(transformedBox(mask,endpoints.surface.mini),endpoints.surface.mini,endpoints.surface.full,p,`persistent shell@${p}`);
     for(const [key,pair] of Object.entries(m.pairs)){assert.equal(pair.mini,owners[key]);expectRect(paintedRect(pair.mini),endpoints[key].mini,endpoints[key].full,p,`actual ${key}@${p}`);assert.equal(pair.mini.style.opacity,'1');if(key!=='art')assert.equal(pair.full.style.opacity,'0');}
     assert.equal(m.A.style.opacity,'0');assert.equal(m.B.style.opacity,'0');assert.equal(m.mini.style.opacity,'1');assert.equal(m.background.style.opacity,String(p));
     assert.ok(Math.abs(Number(m.full.style.opacity)-Math.max(0,Math.min(1,(p-.8)/.2)))<1e-9,'full-only controls reveal late without exposing shared duplicates');
@@ -224,4 +223,3 @@ test('persistent cleanup is idempotent and resets presentation without removing 
   assert.equal(m.mini.hidden,false);assert.equal(m.mini.inert,false);assert.equal(m.mini.getAttribute('aria-hidden'),'false');assert.equal(m.full.hidden,true);assert.equal(m.full.inert,true);assert.equal(m.full.getAttribute('aria-hidden'),'true');
   const transform=m.pairs.art.mini.style.transform;motion.paint(m,1);assert.equal(m.pairs.art.mini.style.transform,transform,'a retired owner cannot repaint live widgets');
 });
-

@@ -147,9 +147,11 @@ body.no-bg #bg-art,body.no-bg #bg-art-next{display:none}
 #player-live-mask:not([data-active]):has(#sc-player[data-gesture-preview]){z-index:3}
 #player-live-mask:not([data-active]):has(#sc-player[data-scene]:not([data-gesture-preview])){z-index:0}
 #player-live-mask[data-active],#player-live-backdrop-mask[data-active]{z-index:21;overflow:hidden;contain:layout paint style;will-change:transform}
-#player-live-backdrop-mask[data-active]{z-index:19;background:var(--dock);border-radius:0;will-change:clip-path}
+#player-live-backdrop-mask[data-active]{z-index:19;background:var(--dock)}
 #player-live-backdrop-mask[hidden]{display:none}
 #player-live-mask[data-active] #player-live-content,#player-live-backdrop-mask[data-active] #player-live-backdrop-content{will-change:transform}
+#player-live-dock-cover{position:absolute;background:var(--dock);pointer-events:none;will-change:opacity}
+#player-live-dock-cover[hidden]{display:none}
 #player-live-background{display:none;position:absolute;overflow:hidden;background:var(--bg0);pointer-events:none}
 #player-live-backdrop-mask[data-active] #player-live-background{display:block;will-change:opacity}
 #player-live-background .player-live-bg-art,#player-live-background .player-live-bg-art-next{position:absolute;inset:-14%;background-size:cover;background-position:center;filter:blur(var(--bg-blur,16px)) saturate(var(--bg-sat,150%)) brightness(var(--bg-int,1));transform:scale(1.25);transition:opacity var(--dur-slow) var(--ease);will-change:opacity}

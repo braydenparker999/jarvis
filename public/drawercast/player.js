@@ -6388,12 +6388,12 @@ Object.assign(SharedPlayerMotion,{
   },
   install(){
     if(this.presenter)return;
-    const full=$('#sc-player'),mini=$('#mini'),mask=document.createElement('div'),content=document.createElement('div'),backgroundMask=document.createElement('div'),backgroundContent=document.createElement('div'),background=document.createElement('div'),input=document.createElement('div');
-    mask.id='player-live-mask';content.id='player-live-content';backgroundMask.id='player-live-backdrop-mask';backgroundContent.id='player-live-backdrop-content';background.id='player-live-background';input.id='player-live-input';input.hidden=backgroundMask.hidden=true;input.setAttribute('aria-hidden','true');
+    const full=$('#sc-player'),mini=$('#mini'),mask=document.createElement('div'),content=document.createElement('div'),backgroundMask=document.createElement('div'),backgroundContent=document.createElement('div'),background=document.createElement('div'),backgroundCover=document.createElement('div'),input=document.createElement('div');
+    mask.id='player-live-mask';content.id='player-live-content';backgroundMask.id='player-live-backdrop-mask';backgroundContent.id='player-live-backdrop-content';background.id='player-live-background';backgroundCover.id='player-live-dock-cover';backgroundCover.hidden=true;backgroundCover.setAttribute('aria-hidden','true');input.id='player-live-input';input.hidden=backgroundMask.hidden=true;input.setAttribute('aria-hidden','true');
     root.style.setProperty('--player-live-top',this.rect($('#app')).top+'px');
-    mini.before(backgroundMask);mini.before(mask);mask.appendChild(content);content.appendChild(full);backgroundMask.appendChild(backgroundContent);backgroundContent.appendChild(background);document.body.appendChild(input);
+    mini.before(backgroundMask);mini.before(mask);mask.appendChild(content);content.appendChild(full);backgroundMask.appendChild(backgroundContent);backgroundContent.appendChild(background);backgroundContent.appendChild(backgroundCover);document.body.appendChild(input);
     const backgroundParts={};for(const name of ['art','art-next','grad','vig']){const node=document.createElement('div');node.className='player-live-bg-'+name;background.appendChild(node);backgroundParts[name]=node;}
-    this.presenter={full,mini,mask,content,backgroundMask,backgroundContent,background,input,backgroundParts};
+    this.presenter={full,mini,mask,content,backgroundMask,backgroundContent,background,input,backgroundCover,backgroundParts};
     for(const selector of ['#mini-title','#mini-sub']){const node=$(selector);this.setMiniLabel(node,node.textContent);}
     const artWriter=UI.setArtEl;UI.setArtEl=function(node,url){const m=SharedPlayerMotion.active()||SharedPlayerMotion.transaction;if(m&&m.trackId!==Engine.current?.id){ScreenDrag.abort();return artWriter.call(UI,node,url);}if(m&&node===m.pairs.art.mini)m.producerMiniArt=url?'url("'+url+'")':'';const result=artWriter.call(UI,node,url);if(m&&(node.id==='mini-art'||node.id==='artA'))SharedPlayerMotion.paintArtwork(m);return result;};
     const playWriter=UI.renderPlayState;UI.renderPlayState=function(...args){const result=playWriter.apply(UI,args),m=SharedPlayerMotion.active()||SharedPlayerMotion.transaction;if(m&&!m.retired)SharedPlayerMotion.ownGlyph(m);return result;};
@@ -6406,7 +6406,7 @@ Object.assign(SharedPlayerMotion,{
     const geometryObserver=new MutationObserver(()=>{if(this.active()&&this.active().trackId!==Engine.current?.id)ScreenDrag.abort();this.scheduleAppearance();});
     for(const selector of ['#p-title','#p-sub','.outinfo'])geometryObserver.observe($(selector),{childList:true,characterData:true,subtree:true});
     geometryObserver.observe(document.body,{attributes:true,attributeFilter:['class']});
-    const paletteObserver=new MutationObserver(()=>{const m=this.active();if(!m){this.models=null;this.scheduleAppearance();return;}const color=getComputedStyle(m.mini).color;for(const key of ['title','sub','play']){const style=getComputedStyle(m.pairs[key].full);m.appearances[key].mini.color=color;m.appearances[key].full.color=style.color;m.appearances[key].full.background=style.backgroundColor;m.appearances[key].full.borderColor=style.borderTopColor;}m.geometry=null;this.paint(m,m.p);});paletteObserver.observe(root,{attributes:true,attributeFilter:['style']});
+    const paletteObserver=new MutationObserver(()=>{const m=this.active();if(!m){this.models=null;this.scheduleAppearance();return;}const color=getComputedStyle(m.mini).color;for(const key of ['title','sub','play']){const style=getComputedStyle(m.pairs[key].full);m.appearances[key].mini.color=color;m.appearances[key].full.color=style.color;m.appearances[key].full.background=style.backgroundColor;m.appearances[key].full.borderColor=style.borderTopColor;}this.refreshBackdropBlend(m);m.geometry=null;this.paint(m,m.p);});paletteObserver.observe(root,{attributes:true,attributeFilter:['style']});
     window.addEventListener('resize',()=>{root.style.setProperty('--player-live-top',this.rect($('#app')).top+'px');this.scheduleAppearance();});document.fonts?.ready.then(()=>this.scheduleAppearance());
     this.updateBackground();this.scheduleAppearance();
   },
@@ -6445,11 +6445,19 @@ Object.assign(SharedPlayerMotion,{
       for(const key of ['background-image','opacity']){const value=source.style.getPropertyValue(key);if(copy.style.getPropertyValue(key)!==value){if(value)copy.style.setProperty(key,value);else copy.style.removeProperty(key);}}
     }
   },
+  refreshBackdropBlend(m){
+    const dock=getComputedStyle(m.backgroundMask).backgroundColor,base=getComputedStyle(m.background).backgroundColor;
+    // Conservative known-format guard. Other colour/alpha models retain v8.
+    const opaqueRGB=/^rgb\(\s*\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?\s*\)$/;
+    const opaque=opaqueRGB.test(dock)&&opaqueRGB.test(base);m.backdropBlend={opaque,dock,base};
+    m.backgroundCover.hidden=!opaque;m.background.style.willChange=opaque?'auto':'opacity';
+    if(opaque)this.setStyle(m.background,'opacity','1');
+  },
   create(scene){
     const opening=scene.target==='player',other=opening?scene.fromName:scene.target;
     if((scene.fromName!=='player'&&!opening)||other==='settings'||!Engine.current||GestureMotion.reduced()||UI.instantNav)return null;
     const presenter=this.presenter;if(!presenter)return null;
-    const {mini,full,mask,content,backgroundMask,backgroundContent,input,background}=presenter,nav=$('#nav'),dim=$('#bg-dim');
+    const {mini,full,mask,content,backgroundMask,backgroundContent,input,background,backgroundCover}=presenter,nav=$('#nav'),dim=$('#bg-dim');
     const original={miniHidden:mini.hidden,miniInert:mini.inert,miniAria:mini.getAttribute('aria-hidden'),fullHidden:full.hidden,fullInert:full.inert,fullAria:full.getAttribute('aria-hidden')};
     const pairs={art:{mini:$('#mini-art'),full:$('#artstage')},title:{mini:$('#mini-title'),full:$('#p-title')},sub:{mini:$('#mini-sub'),full:$('#p-sub')},play:{mini:$('#mini-play'),full:$('#btn-play')},seek:{mini:$('#mini-seek'),full:$('#seek')}};
     const motionKeys=['position','inset','left','top','width','height','margin','overflow','max-width','max-height','min-width','min-height','padding','border-width','border-color','border-style','color','transform','transform-origin','transition','opacity','will-change','z-index','border-radius','border-top-left-radius','border-top-right-radius','border-bottom-right-radius','border-bottom-left-radius','background','background-image','background-size','box-shadow'];
@@ -6466,15 +6474,13 @@ Object.assign(SharedPlayerMotion,{
       // The authored joined dock has square top corners only while mini shows.
       const navFull=[navMini[2],navMini[3],navMini[2],navMini[3]];
       const model=this.models?.key===this.modelKey()?this.models:this.readModels(pairs,A),{appearances,artMiniSize,artFullSize,nativeSeekVisible}=model;
-      m={...presenter,opening,p:opening?0:1,endpoints,pairs,appearances,slide,overlay,A,B,artMiniSize,artFullSize,nativeSeekVisible,viewport:{width:innerWidth,height:innerHeight},producerMiniArt:pairs.art.mini.style.backgroundImage,miniRadius,navRadius:{mini:navMini,full:navFull},artRadius,nav,dim,styles,focus,original,trackId:Engine.current.id,geometry:null,retired:false};
+      m={...presenter,opening,p:opening?0:1,endpoints,pairs,appearances,slide,overlay,A,B,artMiniSize,artFullSize,nativeSeekVisible,producerMiniArt:pairs.art.mini.style.backgroundImage,miniRadius,navRadius:{mini:navMini,full:navFull},artRadius,nav,dim,styles,focus,original,trackId:Engine.current.id,geometry:null,retired:false};
       this.transaction=m;
       const base=endpoints.surface.mini,fullBox=endpoints.surface.full;
-      Object.assign(mask.style,{inset:'auto',left:base.left+'px',top:base.top+'px',width:base.width+'px',height:base.height+'px'});
-      Object.assign(backgroundMask.style,{inset:'auto',left:'0',top:'0',width:innerWidth+'px',height:innerHeight+'px',borderRadius:'0'});
-      Object.assign(content.style,{inset:'auto',left:'0',top:'0',width:fullBox.width+'px',height:fullBox.height+'px'});
-      Object.assign(backgroundContent.style,{inset:'auto',left:fullBox.left+'px',top:fullBox.top+'px',width:fullBox.width+'px',height:fullBox.height+'px'});
-      Object.assign(background.style,{left:-fullBox.left+'px',top:-fullBox.top+'px',width:innerWidth+'px',height:innerHeight+'px'});
-      mini.dataset.sharedPlayer=full.dataset.sharedPlayer='1';mask.dataset.active=backgroundMask.dataset.active='1';input.hidden=backgroundMask.hidden=false;input.className='player-scene-input';mini.style.background='transparent';
+      for(const node of [mask,backgroundMask])Object.assign(node.style,{inset:'auto',left:base.left+'px',top:base.top+'px',width:base.width+'px',height:base.height+'px'});
+      for(const node of [content,backgroundContent])Object.assign(node.style,{inset:'auto',left:'0',top:'0',width:fullBox.width+'px',height:fullBox.height+'px'});
+      for(const node of [background,backgroundCover])Object.assign(node.style,{left:-fullBox.left+'px',top:-fullBox.top+'px',width:innerWidth+'px',height:innerHeight+'px'});
+      mini.dataset.sharedPlayer=full.dataset.sharedPlayer='1';mask.dataset.active=backgroundMask.dataset.active='1';input.hidden=backgroundMask.hidden=false;input.className='player-scene-input';mini.style.background='transparent';this.refreshBackdropBlend(m);
       for(const [key,nodes] of Object.entries(pairs)){const node=nodes.mini,box=endpoints[key].mini;Object.assign(node.style,{position:'absolute',inset:'auto',left:(box.left-base.left)+'px',top:(box.top-base.top)+'px',width:box.width+'px',height:box.height+'px',margin:'0',minWidth:'0',minHeight:'0',maxWidth:'none',maxHeight:'none',transformOrigin:'0 0',transition:'none',willChange:'transform,opacity',zIndex:key==='art'?'20':'23'});if(key!=='art')nodes.full.style.opacity='0';}
       Object.assign(mini.style,{position:'absolute',inset:'auto',left:base.left+'px',top:base.top+'px',width:base.width+'px',height:base.height+'px',margin:'0',transform:'none',willChange:'auto',zIndex:'auto',overflow:'visible',boxShadow:'none'});
       if(slide){slide.style.transform='none';slide.style.willChange='auto';}A.style.opacity=B.style.opacity='0';pairs.art.full.style.overflow='visible';
@@ -6493,11 +6499,9 @@ Object.assign(SharedPlayerMotion,{
     p=clamp(p,0,1);if(m.geometry&&m.p===p)return;m.p=p;const g=this.sceneGeometry(m.endpoints,p);m.geometry=g;
     const base=m.endpoints.surface.mini,r=g.surface,full=m.endpoints.surface.full,sx=r.width/base.width,sy=r.height/base.height;
     const transform=`translate(${r.left-base.left}px,${r.top-base.top}px) scale(${sx},${sy})`,radius=m.miniRadius.map(value=>value*(1-p)/sx+'px').join(' ')+' / '+m.miniRadius.map(value=>value*(1-p)/sy+'px').join(' ');
-    m.mask.style.transform=transform;m.mask.style.borderRadius=radius;
-    m.content.style.transform=`translate(${(full.left-r.left)/sx}px,${(full.top-r.top)/sy}px) scale(${1/sx},${1/sy})`;
-    // The backdrop keeps one raster scale. Only its rounded reveal clip moves.
-    m.backgroundMask.style.clipPath=`inset(${r.top}px ${m.viewport.width-r.left-r.width}px ${m.viewport.height-r.top-r.height}px ${r.left}px round ${m.miniRadius.map(value=>value*(1-p)+'px').join(' ')})`;
-    m.background.style.opacity=String(p);m.full.style.opacity=String(clamp((p-.8)/.2,0,1));m.mini.style.opacity='1';
+    for(const node of [m.mask,m.backgroundMask]){node.style.transform=transform;node.style.borderRadius=radius;}
+    for(const node of [m.content,m.backgroundContent])node.style.transform=`translate(${(full.left-r.left)/sx}px,${(full.top-r.top)/sy}px) scale(${1/sx},${1/sy})`;
+    if(m.backdropBlend.opaque){this.setStyle(m.background,'opacity','1');m.backgroundCover.style.opacity=String(1-p);}else m.background.style.opacity=String(p);m.full.style.opacity=String(clamp((p-.8)/.2,0,1));m.mini.style.opacity='1';
     for(const [key,nodes] of Object.entries(m.pairs)){
       const node=nodes.mini,box=m.endpoints[key].mini,target=g[key];if(!box.width||!box.height){node.style.opacity='0';continue;}
       const scaleX=target.width/box.width,scaleY=target.height/box.height;node.style.transform=`translate(${target.left-box.left}px,${target.top-box.top}px) scale(${scaleX},${scaleY})`;node.style.opacity=String(key==='seek'&&!m.nativeSeekVisible?1-p:1);
@@ -6514,7 +6518,7 @@ Object.assign(SharedPlayerMotion,{
     if(!m||m.retired)return;m.retired=true;
     // Reset every property we own even when construction/retarget/cancel throws.
     // The live library was never hidden, moved, cloned or detached by this owner.
-    m.releaseInput?.();m.input.hidden=m.backgroundMask.hidden=true;m.input.className='';delete m.mask.dataset.active;delete m.backgroundMask.dataset.active;for(const node of [m.mask,m.content,m.backgroundMask,m.backgroundContent,m.background])node.removeAttribute('style');
+    m.releaseInput?.();m.input.hidden=m.backgroundMask.hidden=m.backgroundCover.hidden=true;m.input.className='';delete m.mask.dataset.active;delete m.backgroundMask.dataset.active;for(const node of [m.mask,m.content,m.backgroundMask,m.backgroundContent,m.background,m.backgroundCover])node.removeAttribute('style');
     for(const snapshot of m.styles||[])this.restore(snapshot);
     for(const item of m.focus||[])if(item.tabindex==null)item.node.removeAttribute('tabindex');else item.node.setAttribute('tabindex',item.tabindex);
     if(m.pairs?.art?.mini){const node=m.pairs.art.mini;node.style.backgroundImage=m.producerMiniArt||'';const ph=node.querySelector('.ph');if(ph)ph.style.display=m.producerMiniArt?'none':'grid';}

@@ -24,7 +24,7 @@ const stats=values=>({samples:values.length,mean_ms:values.length?values.reduce(
 function installProbe(){
   const motion=fixtureTraceMotion,scene=fixtureTraceScene;
   const probe=window.fixtureTraceProbe={label:null,operations:[],settles:[],gaps:[],actions:[],anchor:0};
-  const paint=motion.paint;motion.paint=function(m,p){const at=performance.now(),phase=scene.phase;try{return paint.call(this,m,p);}finally{probe.operations.push({operation:'paint',label:probe.label,phase,opening:m.opening,at,ms:performance.now()-at,p:m.p});}};
+  const paint=motion.paint;motion.paint=function(m,p){const at=performance.now(),phase=scene.phase;try{return paint.call(this,m,p);}finally{probe.operations.push({operation:'paint',label:probe.label,phase,opening:m.opening,at,ms:performance.now()-at,p:m.p,backdropBlend:m.backdropBlend??null,backgroundOpacity:m.background?.style.opacity,coverOpacity:m.backgroundCover?.style.opacity,coverHidden:m.backgroundCover?.hidden});}};
   const create=scene.create;scene.create=function(...args){const at=performance.now();try{return create.apply(this,args);}finally{probe.operations.push({operation:'scene.create',label:probe.label,phase:'setup',at,ms:performance.now()-at,target:args[0]});}};
   const settle=motion.settle;motion.settle=function(m,target,ms,done){const sample={label:probe.label,opening:m.opening,at:performance.now(),requested_ms:ms,start_p:m.p,target_p:target,completed:null};probe.settles.push(sample);performance.mark('poweramp-settle-'+probe.settles.length);return settle.call(this,m,target,ms,()=>{try{done?.();}finally{sample.completed=performance.now();sample.elapsed_ms=sample.completed-sample.at;}});};
   const clean=scene.clean;window.fixtureTraceIdle=[];
@@ -64,7 +64,7 @@ function summarizeTrace(trace,probe){
 async function runCase(browser,built,{name,cpu,variant},environment){
   const context=await browser.newContext(profile),page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));page.setDefaultTimeout(12000);
   await context.route('**/*',route=>/^https?:/.test(route.request().url())?route.abort('blockedbyclient'):route.continue());
-  const result={name,cpu,variant,source:built.sourceHash,profile,environment,meaning:'Isolated browser trace of unchanged v8. Diagnostic variants are not production candidates; timings are not Android FPS or display latency.'};
+  const result={name,cpu,variant,source:built.sourceHash,profile,environment,meaning:'Isolated pinned v8 versus opaque-backdrop candidate. Timings are not Android FPS or display latency.'};
   let cdp,complete,traceStarted=false;
   try{
     await page.goto(pathToFileURL(built.output).href);await page.waitForFunction(()=>powerampPreview?.ready);await page.locator('#preview-size').tap();await page.waitForFunction(()=>powerampPreview.ready&&powerampPreview.count===5000);
@@ -107,7 +107,7 @@ async function runCase(browser,built,{name,cpu,variant},environment){
   }catch(error){result.error=String(error);if(traceStarted){try{const bytes=await readTrace(cdp,complete);await save('render-trace-'+name+'-failure.json.gz',gzipSync(bytes));}catch(e){result.traceError=String(e);}}await save('render-trace-'+name+'-report.json',result);throw error;}
   finally{await context.close();}
 }
-test('serial pinned v8 versus stationary-clip candidate render attribution, reverse-order repeats and pixel parity',{timeout:240000},async t=>{
+test('serial pinned v8 versus opaque-backdrop candidate render attribution, reverse-order repeats and pixel parity',{timeout:240000},async t=>{
   assert.ok(executablePath,'Chrome is mandatory');const directory=await mkdtemp(join(tmpdir(),'poweramp-render-trace-'));let browser;
   const report={source:sourceHash,cases:[],scope:'Pinned v8 versus candidate; fresh contexts, both orders, normal and 4x CPU, same 220ms duration. No phone FPS inference.'};
   try{
