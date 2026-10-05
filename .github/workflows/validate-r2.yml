@@ -41,6 +41,7 @@ jobs:
             ${{ runner.temp }}/poweramp-browser/render-trace-*-timings.json
             ${{ runner.temp }}/poweramp-browser/render-trace-*-events.json.gz
             ${{ runner.temp }}/poweramp-browser/render-visual-*.png
+            ${{ runner.temp }}/poweramp-browser/render-baked-backdrop-*.png
           if-no-files-found: warn
           retention-days: 14
       - name: Measure persistent live-node Poweramp prototype
