@@ -138,6 +138,22 @@ body.no-bg #bg-art,body.no-bg #bg-art-next{display:none}
 .player-scene-layer .player-scene-pseudo::before,.player-scene-layer .player-scene-pseudo::after{content:none!important}
 #mini[data-shared-player] *,#sc-player[data-shared-player] *{pointer-events:none!important}
 
+/* Persistent live presentation. IDs, listeners, canvases and CSS ancestry stay
+   intact; only these bounded transforms/opacities change during contact. */
+#player-live-mask,#player-live-content{position:absolute;inset:0;transform-origin:0 0}
+#player-live-mask[data-active]{z-index:21;overflow:hidden;contain:layout paint style;will-change:transform;pointer-events:none}
+#player-live-mask[data-active] #player-live-content{will-change:transform}
+#player-live-background{display:none;position:absolute;overflow:hidden;background:var(--bg0);pointer-events:none}
+#player-live-mask[data-active] #player-live-background{display:block;will-change:opacity}
+#player-live-background .player-live-bg-art,#player-live-background .player-live-bg-art-next{position:absolute;inset:-14%;background-size:cover;background-position:center;filter:blur(var(--bg-blur,16px)) saturate(var(--bg-sat,150%)) brightness(var(--bg-int,1));transform:scale(1.25);transition:opacity var(--dur-slow) var(--ease);will-change:opacity}
+#player-live-background .player-live-bg-art-next{opacity:0}
+#player-live-background .player-live-bg-grad{position:absolute;inset:0;background:linear-gradient(180deg,color-mix(in srgb,var(--grad-color,#000) 0%,transparent) 0%,color-mix(in srgb,var(--grad-color,#000) calc(var(--grad-strength,40) * 1%),transparent) 55%,color-mix(in srgb,var(--grad-color,#000) calc(var(--grad-strength,40) * 1.9%),transparent) 100%)}
+#player-live-background .player-live-bg-vig{position:absolute;inset:0;background:radial-gradient(120% 80% at 50% 40%,transparent 40%,rgba(0,0,0,.55) 100%)}
+body.no-bg #player-live-background .player-live-bg-art,body.no-bg #player-live-background .player-live-bg-art-next{display:none}
+#mini[data-shared-player] .tmeta{overflow:visible}
+#player-live-input[hidden]{display:none}
+
+
 /* Horizontal history uses visual-only pages above the live library, below the dock. */
 #sc-library,#sc-list{touch-action:pan-y}
 #library-page-motion{position:absolute;inset:0;z-index:10;overflow:hidden;touch-action:pan-y;isolation:isolate}

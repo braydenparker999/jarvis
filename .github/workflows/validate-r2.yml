@@ -14,11 +14,22 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 3
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
       - name: Install pinned test dependencies
         run: npm ci
+      - name: Measure persistent live-node Poweramp prototype
+        if: always()
+        env:
+          POWERAMP_EVIDENCE_DIR: ${{ runner.temp }}/poweramp-browser
+          POWERAMP_BASELINE_REF: HEAD^2^
+        run: |
+          export JARVIS_CHROME="$(command -v google-chrome || command -v chromium)"
+          test -n "$JARVIS_CHROME"
+          node --test tests/poweramp-persistent-prototype-browser.mjs
       - name: Run frontend regression tests
         env:
           POWERAMP_EVIDENCE_DIR: ${{ runner.temp }}/poweramp-browser

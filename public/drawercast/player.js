@@ -6216,7 +6216,7 @@ const SharedPlayerMotion={
     };
     const events={pointerdown:down,pointermove:move,pointerup:end,pointercancel:end,lostpointercapture:end};
     for(const [type,handler] of Object.entries(events))node.addEventListener(type,handler);
-    m.resetInput=()=>{release();ScreenDrag.cancel();};InputLifecycle.register(m.resetInput,node);
+    m.releaseInput=release;m.resetInput=()=>{release();ScreenDrag.cancel();};InputLifecycle.register(m.resetInput,node);
     m.disposeInput=()=>{release();for(const [type,handler] of Object.entries(events))node.removeEventListener(type,handler);InputLifecycle.resets.delete(m.resetInput);};
   },
   setStyle(node,key,value){if(node.style[key]!==value)node.style[key]=value;},
@@ -6351,6 +6351,126 @@ const SharedPlayerMotion={
     if((m.layoutDeferred||m.vizDeferred)&&typeof DockLayout!=='undefined')DockLayout.schedule();
   }
 };
+const SnapshotReferenceMotion={...SharedPlayerMotion};
+/* The presentation owns persistent live nodes, not frozen copies. Installation
+   happens at boot. Input work is bounded geometry plus compositor properties. */
+Object.assign(SharedPlayerMotion,{
+  captureMode:'persistent',appearanceEnabled:false,appearanceJob:null,preparedAppearance:null,
+  appearanceStats:{prepared:0,hits:0,cold:0,invalidated:0,lastMiss:null},presenter:null,geometryFrame:0,geometryDirty:true,
+  active(){return typeof ScreenDrag!=='undefined'?(ScreenDrag.state||ScreenDrag.settling)?.morph:null;},
+  deferLayout(){const m=this.active();if(!m)return false;m.layoutDeferred=true;return true;},
+  deferViz(){const m=this.active();if(!m)return false;m.vizDeferred=true;return true;},
+  rect:SnapshotReferenceMotion.rect,mixRect:SnapshotReferenceMotion.mixRect,sceneGeometry:SnapshotReferenceMotion.sceneGeometry,
+  styleSnapshot:SnapshotReferenceMotion.styleSnapshot,restore:SnapshotReferenceMotion.restore,radius:SnapshotReferenceMotion.radius,
+  setStyle:SnapshotReferenceMotion.setStyle,settle:SnapshotReferenceMotion.settle,
+  // These explicit reference utilities remain accessible to pixel-baseline QA.
+  // Production create/paint/update never invoke them.
+  clone:SnapshotReferenceMotion.clone,snapshotCSS:SnapshotReferenceMotion.snapshotCSS,snapshotPlan:SnapshotReferenceMotion.snapshotPlan,snapshotKeys:SnapshotReferenceMotion.snapshotKeys,copyCanvas:SnapshotReferenceMotion.copyCanvas,
+  clearAppearance(){if(this.geometryFrame)cancelAnimationFrame(this.geometryFrame);this.geometryFrame=0;},
+  claimAppearance(){return null;},
+  scheduleAppearance(){
+    this.geometryDirty=true;if(!this.presenter||this.active()||this.geometryFrame)return;
+    this.geometryFrame=requestAnimationFrame(()=>{this.geometryFrame=0;if(this.active()||InputLifecycle.contacts.size||document.hidden)return;
+      const full=this.presenter.full,hidden=full.hidden,opacity=full.style.opacity;
+      // Layout fitting belongs to settled playback/settings, never first input.
+      try{this.settingUp=true;full.hidden=false;full.style.opacity='0';UI.fitPlayer();this.geometryDirty=false;}
+      finally{full.hidden=hidden;full.style.opacity=opacity;this.settingUp=false;}
+    });
+  },
+  install(){
+    if(this.presenter)return;
+    const full=$('#sc-player'),mini=$('#mini'),mask=document.createElement('div'),content=document.createElement('div'),background=document.createElement('div'),input=document.createElement('div');
+    mask.id='player-live-mask';content.id='player-live-content';background.id='player-live-background';input.id='player-live-input';input.hidden=true;input.setAttribute('aria-hidden','true');
+    full.before(mask);mask.appendChild(content);content.appendChild(background);content.appendChild(full);document.body.appendChild(input);
+    const backgroundParts={};for(const name of ['art','art-next','grad','vig']){const node=document.createElement('div');node.className='player-live-bg-'+name;background.appendChild(node);backgroundParts[name]=node;}
+    this.presenter={full,mini,mask,content,background,input,backgroundParts};
+    SnapshotReferenceMotion.bindInput.call(this,this.presenter);
+    // Input listeners/contact plane are installed once and reused. Retirement
+    // releases capture but does not remove/recreate the presentation.
+    this.presenter.disposeInput=null;
+    const sync=()=>this.updateBackground();
+    const observer=new MutationObserver(sync);for(const selector of ['#bg-art','#bg-art-next'])observer.observe($(selector),{attributes:true,attributeFilter:['style']});
+    const geometryObserver=new MutationObserver(()=>{if(this.active()&&this.active().trackId!==Engine.current?.id)ScreenDrag.abort();this.scheduleAppearance();});
+    for(const selector of ['#p-title','#p-sub','.outinfo'])geometryObserver.observe($(selector),{childList:true,characterData:true,subtree:true});
+    geometryObserver.observe(document.body,{attributes:true,attributeFilter:['class']});
+    window.addEventListener('resize',()=>this.scheduleAppearance());document.fonts?.ready.then(()=>this.scheduleAppearance());
+    this.updateBackground();this.scheduleAppearance();
+  },
+  updateBackground(){
+    const presenter=this.presenter;if(!presenter)return;
+    for(const name of ['art','art-next']){const source=$('#bg-'+name),copy=presenter.backgroundParts[name];
+      // Same known artwork writer and CSS variables as the real background.
+      // No computed-style enumeration, raster copy, parser or subtree clone.
+      for(const key of ['background-image','opacity']){const value=source.style.getPropertyValue(key);if(copy.style.getPropertyValue(key)!==value){if(value)copy.style.setProperty(key,value);else copy.style.removeProperty(key);}}
+    }
+  },
+  create(scene){
+    const opening=scene.target==='player',other=opening?scene.fromName:scene.target;
+    if((scene.fromName!=='player'&&!opening)||other==='settings'||!Engine.current||GestureMotion.reduced()||UI.instantNav)return null;
+    const presenter=this.presenter;if(!presenter)return null;
+    const {mini,full,mask,content,input,background}=presenter,nav=$('#nav'),dim=$('#bg-dim');
+    const original={miniHidden:mini.hidden,miniInert:mini.inert,miniAria:mini.getAttribute('aria-hidden'),fullHidden:full.hidden,fullInert:full.inert,fullAria:full.getAttribute('aria-hidden')};
+    const pairs={art:{mini:$('#mini-art'),full:$('#artstage')},title:{mini:$('#mini-title'),full:$('#p-title')},sub:{mini:$('#mini-sub'),full:$('#p-sub')},play:{mini:$('#mini-play'),full:$('#btn-play')},seek:{mini:$('#mini-seek'),full:$('#seek')}};
+    const motionKeys=['transform','transform-origin','transition','opacity','will-change','z-index','border-radius'];
+    const styles=[mini,full,dim,nav,...Object.values(pairs).flatMap(pair=>[pair.mini,pair.full])].map(node=>this.styleSnapshot(node,motionKeys));
+    let m=null;this.settingUp=true;
+    try{
+      mini.hidden=full.hidden=false;mini.style.transition=full.style.transition='none';mini.style.transform=full.style.transform='none';mini.style.opacity=full.style.opacity='1';
+      const endpoints={surface:{mini:this.rect(mini),full:this.rect(full)}};
+      for(const [key,nodes] of Object.entries(pairs))endpoints[key]={mini:this.rect(nodes.mini),full:this.rect(nodes.full)};
+      if(!endpoints.surface.mini.width||!endpoints.surface.mini.height||!endpoints.surface.full.width)return null;
+      const miniRadius=this.radius(mini),navMini=this.radius(nav),artRadius={mini:this.radius(pairs.art.mini),full:this.radius(pairs.art.full)};
+      // The authored joined dock has square top corners only while mini shows.
+      const navFull=[navMini[2],navMini[3],navMini[2],navMini[3]];
+      m={...presenter,opening,p:opening?0:1,endpoints,pairs,miniRadius,navRadius:{mini:navMini,full:navFull},artRadius,nav,dim,styles,original,trackId:Engine.current.id,geometry:null,retired:false};
+      this.transaction=m;
+      const base=endpoints.surface.mini,app=this.rect($('#app')),fullBox=endpoints.surface.full;
+      Object.assign(mask.style,{inset:'auto',left:(base.left-app.left)+'px',top:(base.top-app.top)+'px',width:base.width+'px',height:base.height+'px'});
+      Object.assign(content.style,{inset:'auto',left:'0',top:'0',width:fullBox.width+'px',height:fullBox.height+'px'});
+      Object.assign(background.style,{left:-fullBox.left+'px',top:-fullBox.top+'px',width:innerWidth+'px',height:innerHeight+'px'});
+      mini.dataset.sharedPlayer=full.dataset.sharedPlayer='1';mask.dataset.active='1';input.hidden=false;input.className='player-scene-input';
+      for(const nodes of Object.values(pairs))for(const node of Object.values(nodes)){node.style.transformOrigin='0 0';node.style.transition='none';node.style.willChange='transform,opacity';}
+      mini.style.transformOrigin='0 0';mini.style.zIndex='20';full.style.zIndex='2';this.paint(m,m.p);return m;
+    }catch(error){this.clean(m||{...presenter,styles,original,retired:false});throw error;}
+    finally{this.settingUp=false;if(!m){for(const snapshot of styles)this.restore(snapshot);mini.hidden=original.miniHidden;full.hidden=original.fullHidden;}}
+  },
+  lockOriginals(m){
+    const gesture=typeof InputLifecycle!=='undefined'?InputLifecycle.gesture:null,owner=gesture?.node;
+    for(const node of [m.mini,m.full]){const held=owner&&(owner===node||node.contains?.(owner))&&owner.hasPointerCapture?.(gesture.id);node.inert=!held;node.setAttribute('aria-hidden','true');}
+  },
+  paint(m,p){
+    if(m.retired)return;this.lockOriginals(m);m.mini.hidden=m.full.hidden=false;
+    p=clamp(p,0,1);if(m.geometry&&m.p===p)return;m.p=p;const g=this.sceneGeometry(m.endpoints,p);m.geometry=g;
+    const base=m.endpoints.surface.mini,r=g.surface,full=m.endpoints.surface.full,sx=r.width/base.width,sy=r.height/base.height;
+    const transform=`translate(${r.left-base.left}px,${r.top-base.top}px) scale(${sx},${sy})`,radius=m.miniRadius.map(value=>value*(1-p)/sx+'px').join(' ')+' / '+m.miniRadius.map(value=>value*(1-p)/sy+'px').join(' ');
+    m.mask.style.transform=transform;m.mask.style.borderRadius=radius;
+    m.content.style.transform=`translate(${(full.left-r.left)/sx}px,${(full.top-r.top)/sy}px) scale(${1/sx},${1/sy})`;
+    m.background.style.opacity=String(p);m.full.style.opacity=String(p);
+    m.mini.style.transform=transform;m.mini.style.borderRadius=radius;m.mini.style.opacity='1';
+    for(const [key,nodes] of Object.entries(m.pairs))for(const end of ['mini','full']){
+      const node=nodes[end],box=m.endpoints[key][end],target=g[key];if(!box.width||!box.height){node.style.opacity='0';continue;}
+      if(end==='mini')node.style.transform=`translate(${(target.left-r.left)/sx-(box.left-base.left)}px,${(target.top-r.top)/sy-(box.top-base.top)}px) scale(${target.width/box.width/sx},${target.height/box.height/sy})`;
+      else node.style.transform=`translate(${target.left-box.left}px,${target.top-box.top}px) scale(${target.width/box.width},${target.height/box.height})`;
+      node.style.opacity=String(end==='mini'?1-p:1);
+      if(key==='art'){const scaleX=target.width/box.width/(end==='mini'?sx:1),scaleY=target.height/box.height/(end==='mini'?sy:1),radii=m.artRadius.mini.map((value,i)=>value+(m.artRadius.full[i]-value)*p);node.style.borderRadius=radii.map(value=>value/scaleX+'px').join(' ')+' / '+radii.map(value=>value/scaleY+'px').join(' ');}
+    }
+    m.dim.style.transition='none';m.dim.style.opacity=String((SET.listBg===false?.94:.66)*(1-p));
+    ['border-top-left-radius','border-top-right-radius','border-bottom-right-radius','border-bottom-left-radius'].forEach((key,i)=>m.nav.style.setProperty(key,(m.navRadius.mini[i]+(m.navRadius.full[i]-m.navRadius.mini[i])*p)+'px'));
+  },
+  canvasPainted(){},refreshDynamic(){},refreshCanvases(){},refreshBackground(){this.updateBackground();},
+  clean(m){
+    if(!m||m.retired)return;m.retired=true;
+    // Reset every property we own even when construction/retarget/cancel throws.
+    // The live library was never hidden, moved, cloned or detached by this owner.
+    m.releaseInput?.();m.input.hidden=true;m.input.className='';delete m.mask.dataset.active;m.mask.removeAttribute('style');m.content.removeAttribute('style');m.background.removeAttribute('style');
+    for(const snapshot of m.styles||[])this.restore(snapshot);
+    delete m.mini.dataset.sharedPlayer;delete m.full.dataset.sharedPlayer;
+    m.mini.style.removeProperty('opacity');m.full.style.removeProperty('opacity');m.mini.style.removeProperty('transform');m.full.style.removeProperty('transform');
+    m.mini.hidden=Nav.cur==='player'||Nav.cur==='settings'||!Engine.current;m.mini.inert=false;m.mini.setAttribute('aria-hidden',m.mini.hidden?'true':'false');
+    m.full.hidden=Nav.cur!=='player';m.full.inert=m.full.hidden;m.full.setAttribute('aria-hidden',m.full.hidden?'true':'false');
+    this.transaction=null;if(m.layoutDeferred||m.vizDeferred)DockLayout.schedule();
+  }
+});
 const ScreenDrag={
   state:null,finish:null,settling:null,phase:'idle',activating:false,
   activate(name,push){this.activating=true;try{Nav.go(name,push);}finally{this.activating=false;}},
@@ -6396,7 +6516,8 @@ const ScreenDrag={
     from.hidden=to.hidden=false;from.style.transition=to.style.transition='none';
     from.dataset.scene=to.dataset.scene='1';to.dataset.gesturePreview='1';to.style.zIndex='3';
     const s={from,to,fromName,target,direction,height,progress:0,baseProgress:0,fromBaseY:fromY,commit:false,preparedAppearance};
-    s.morph=carryMorph||(typeof SharedPlayerMotion!=='undefined'?SharedPlayerMotion.create(s):null);
+    try{s.morph=carryMorph||(typeof SharedPlayerMotion!=='undefined'?SharedPlayerMotion.create(s):null);}
+    catch(error){this.clean(s);throw error;}
     if(carryMorph){carryMorph.opening=target==='player';s.progress=(carryMorph.opening?carryMorph.p:1-carryMorph.p)*height;s.baseProgress=s.progress;}
     this.state=s;this.phase='drag';this.ownership(s);
     // The original captured gesture remains live, but no new background contact
@@ -8122,6 +8243,7 @@ const DockLayout={frame:0,
   }
 };
 UI.fitPlayer=function(){
+  if(typeof SharedPlayerMotion!=='undefined'&&SharedPlayerMotion.deferLayout())return;
   const wrap=$('#sc-player .player-wrap'),screen=$('#sc-player');if(!wrap||screen.hidden)return;
   const px=(style,key)=>parseFloat(style[key])||0;
   const width=wrap.clientWidth||window.innerWidth,u=Math.min(width/393,1.6),nav=$('#nav');
@@ -9414,6 +9536,7 @@ async function boot(){
   setupArtGestures();
   setupSeekGestures();
   setupMiniGestures();
+  SharedPlayerMotion.install();
   setupVizGestures();
   setupAlphaScrub();
   setupPlayerSwipeDown();

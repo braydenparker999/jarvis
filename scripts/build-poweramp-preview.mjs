@@ -388,9 +388,9 @@ export function classicRuntime({analysis,core,player}){
   return runtime;
 }
 
-export async function buildPreview(output=defaultOutput){
+export async function buildPreview(output=defaultOutput,{inputs=null}={}){
   const inputNames=['index.html','audio-analysis.js','audio-core.js','player.js'];
-  const [htmlInput,analysis,core,player]=await Promise.all(inputNames.map(file=>readFile(resolve(appRoot,file),'utf8')));
+  const [htmlInput,analysis,core,player]=inputs||await Promise.all(inputNames.map(file=>readFile(resolve(appRoot,file),'utf8')));
   const runtime=classicRuntime({analysis,core,player});
   const sourceHash=createHash('sha256').update([htmlInput,analysis,core,player].join('\0')).digest('hex');
   // Never carry a personalized embedded server credential into the preview.
