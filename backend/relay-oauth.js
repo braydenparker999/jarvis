@@ -1,5 +1,5 @@
 // OAuth 2.1 broker. GitHub authenticates the one owner; public Relay keys are never identity.
-import {RELAY_OWNER, RELAY_OAUTH_OBJECT, RELAY_SCOPES, RELAY_CALLBACK, random, hash, challenge, equal, boundedText, fields, isObject, json, relayEnabled, relayIssuer, relayResource} from './relay-common.js';
+import {RELAY_OWNER, RELAY_OAUTH_OBJECT, RELAY_SCOPES, RELAY_PUBLIC_SCOPES, RELAY_OWNER_SCOPE, RELAY_CALLBACK, random, hash, challenge, equal, boundedText, fields, isObject, json, relayEnabled, relayIssuer, relayResource} from './relay-common.js';
 const REGISTRY = RELAY_OAUTH_OBJECT;
 const SESSION_MS = 600000;
 const ACCESS_MS = 3600000;
@@ -38,12 +38,12 @@ function oauthRedirect(p, env, params) {
   for (const [k, v] of Object.entries({...params, state: p.state, iss: relayIssuer(env) + '/relay'})) url.searchParams.set(k, v);
   return redirect(url.href, {'Set-Cookie': cookieHeader('', 0)});
 }
-function consentPage(csrf) {
+function consentPage(csrf, scope) {
   // No interpolated upstream content or script. CSRF is random lowercase hex.
   // no-referrer makes browser form POSTs send Origin:null. Keep same-origin
   // Origin validation and suppress referrers across origins. Chrome also checks
   // form-action on redirects, so include the fixed OAuth return destination.
-  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Connect Jarvis Relay</title><body><h1>Connect Jarvis Relay</h1><p>Allow ChatGPT to read the public Relay inbox, post replies in that inbox, and subscribe to new messages. Public messages are unverified visitor content. This connection does not authorize account actions or secret sharing.</p><form method="post" action="/relay/oauth/approve"><input type="hidden" name="csrf" value="${csrf}"><button name="decision" value="allow">Allow this connection</button> <button name="decision" value="deny">Cancel</button></form></body></html>`, {headers: {'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': `default-src 'none'; form-action 'self' ${RELAY_CALLBACK}; frame-ancestors 'none'; base-uri 'none'`, 'Referrer-Policy': 'same-origin', 'X-Content-Type-Options': 'nosniff'}});
+  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Connect Jarvis Relay</title><body><h1>Connect Jarvis Relay</h1><p>Allow ChatGPT to read the public Relay inbox, post replies in that inbox, and subscribe to new messages. Public messages are unverified visitor content. This connection does not authorize account actions or secret sharing.</p>${scope.split(' ').includes(RELAY_OWNER_SCOPE) ? '<p><strong>Owner chat access:</strong> Allow ChatGPT to inspect and approve individual phone pairing requests, list and revoke paired devices, read and reply in your private owner inbox, and subscribe to private message events. Each phone approval separately grants persistent device access with a 365-day inactivity expiry renewed on use. Private replies stay outside the public inbox. This connection alone does not pair a phone or approve account actions.</p>' : ''}<form method="post" action="/relay/oauth/approve"><input type="hidden" name="csrf" value="${csrf}"><button name="decision" value="allow">Allow this connection</button> <button name="decision" value="deny">Cancel</button></form></body></html>`, {headers: {'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': `default-src 'none'; form-action 'self' ${RELAY_CALLBACK}; frame-ancestors 'none'; base-uri 'none'`, 'Referrer-Policy': 'same-origin', 'X-Content-Type-Options': 'nosniff'}});
 }
 export async function relayGrantActive(env, grantId, requiredScope) {
   if (!relayEnabled(env) || typeof grantId !== 'string') return false;
@@ -102,7 +102,7 @@ export async function relayOAuth(request, env, fetcher = fetch) {
     }
     if (path === '/relay/oauth/authorize' && request.method === 'GET') {
       if (!env.RELAY_GITHUB_CLIENT_ID || !env.RELAY_GITHUB_CLIENT_SECRET) return err('temporarily_unavailable', 503);
-      const p = Object.fromEntries(url.searchParams); p.scope ||= RELAY_SCOPES.join(' ');
+      const p = Object.fromEntries(url.searchParams); p.scope ||= RELAY_PUBLIC_SCOPES.join(' ');
       if ([...url.searchParams.keys()].some(k => url.searchParams.getAll(k).length !== 1)) return err('invalid_request', 400, 'duplicate_parameter');
       const issue = authParamsError(p, await read(env, 'client:' + p.client_id), env);
       if (issue) return err('invalid_request', 400, issue);
@@ -146,7 +146,7 @@ export async function relayOAuth(request, env, fetcher = fetch) {
       const stored = await put(env, 'consent:' + await hash(session), {p: login.p, csrf}, Date.now() + SESSION_MS, 'session');
       if (stored.error) return err('temporarily_unavailable', 503, 'consent_capacity_unavailable');
       processingFailure = 'consent_response_unavailable';
-      const response = consentPage(csrf), headers = new Headers(response.headers); headers.set('Set-Cookie', cookieHeader(session));
+      const response = consentPage(csrf, login.p.scope), headers = new Headers(response.headers); headers.set('Set-Cookie', cookieHeader(session));
       return new Response(response.body, {status: 200, headers});
     }
     if (path === '/relay/oauth/approve' && request.method === 'POST') {
@@ -302,3 +302,4 @@ export function relayOAuthStore(ctx, b, now = Date.now()) {
     return json({error: 'Invalid operation'}, 400);
   });
 }
+

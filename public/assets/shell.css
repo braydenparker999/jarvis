@@ -94,3 +94,73 @@ body.launcher-page::before {
 .launcher .launcher-link:active, .launcher .launcher-topbar .icon-button:active {
   background-color: #ffffff0d;
 }
+
+/* Owner Relay only. Existing public chat and specialized modules keep their UI. */
+.relay-owner-content .relay-owner-panel {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 24px 20px max(24px, env(safe-area-inset-bottom));
+}
+.relay-owner-content .relay-owner-panel h2 { margin: 0 0 16px; }
+.relay-owner-content .relay-owner-note {
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.relay-owner-content .relay-owner-error {
+  color: var(--error);
+  font-size: 14px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.relay-owner-content .relay-owner-panel > button { margin: 8px 8px 0 0; }
+.relay-owner-content #relay-owner-pair-form > label:first-child { display: block; margin: 20px 0 8px; }
+.relay-owner-content .relay-owner-remember {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  margin-top: 16px;
+  cursor: pointer;
+}
+.relay-owner-content .relay-owner-remember input {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  accent-color: var(--accent);
+}
+.relay-owner-content .relay-owner-code {
+  font-size: clamp(28px, 8vw, 40px);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .08em;
+  color: var(--text);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+.relay-owner-content .relay-owner-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-shrink: 0;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--line);
+}
+.relay-owner-content .relay-owner-heading h2 { font-size: 16px; margin: 0; }
+.relay-owner-content .relay-owner-badge { color: var(--muted); font-size: 13px; }
+.relay-owner-content .relay-owner-chat {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+.relay-owner-content .relay-owner-chat .bubble { white-space: pre-wrap; }
+.relay-owner-content .relay-owner-chat > .relay-owner-error,
+.relay-owner-content .relay-owner-chat > .relay-owner-note { margin: 0; padding: 8px 20px; flex-shrink: 0; }
+.relay-owner-content .relay-owner-chat > button { margin: 0 20px 8px; flex-shrink: 0; }
+.relay-owner-content .relay-owner-device { padding: 16px 0; border-bottom: 1px solid var(--line); }
+.relay-owner-content .relay-owner-device h3 { margin: 0; font-size: 17px; }
+.relay-owner-content .relay-owner-device p { margin: 8px 0; }

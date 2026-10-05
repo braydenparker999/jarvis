@@ -36,6 +36,16 @@ GitHub publication flow, Muse, and daily briefings are unchanged.
 
 See [JARVIS-HANDOFF.md](JARVIS-HANDOFF.md). Scheduling is configured in a separate chat after live delivery is verified. Do not claim an hourly task is active until an actual scheduled run succeeds. Quick Chat and other modules remain future work.
 
+## Private owner Relay (staged)
+
+An optional in-page phone-pairing/private chat lane is implemented behind
+`RELAY_OWNER_ENABLED`, which remains disabled until separately approved.
+It keeps the original Relay URL unchanged, requires a newly consented
+`relay:owner` connector capability and per-phone matching-code approval, and
+supports independent revocable sessions with a 365-day sliding inactivity expiry.
+The public visitor inbox and existing response tasks are unchanged. See
+[owner pairing, privacy, and rollout](docs/relay-owner-pairing.md).
+
 ## Deployment and costs
 
 GitHub main is the source. `public/` is published to the Azure Storage static website `missionarytube` by the existing pinned-release workflow in the Missionarytube repository, which validates the public Quick AI configuration and injects the unrelated Drive key and backs up current blobs before upload. There is no frontend build or Azure API deployment. The former Static Web App (`gray-meadow-09216fd10`) is retired: its deploy workflow was removed and the Worker no longer accepts its origin. `public/staticwebapp.config.json` is ignored by Storage hosting, so its per-route security headers do not apply there. Keep large media and data outside Azure.
@@ -59,3 +69,4 @@ Quick Chat keeps its existing `jarvis.quick-ai.v1` text chats and drafts; new im
 The composer shows reported token usage for completed replies in the current saved chat and Tavily credits for searches made after usage reporting was added. It includes searches even if the model request fails. Groq's remaining daily requests and minute tokens appear when the browser can read its response headers; a rate-limit error without exposed headers is labeled as such. These chat totals omit other devices and consumers of the same public keys and are not an account balance. Gemini project quotas must be checked in AI Studio.
 
 Rollback: pin a previous *public-config* Jarvis revision or disable Quick Chat while preserving the local chat storage. Do not roll back to the older exposed `apiKey` format or reintroduce a Cloudflare Worker dependency. Rotate the old Groq key only after confirming other consumers and the new frontend release.
+
