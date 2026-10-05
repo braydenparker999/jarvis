@@ -14,7 +14,7 @@ const sourceHash='a6d0fb71df79ca8cc3d80627fb911e5894bb9fff465818ada78feb81b26887
 const profile={viewport:{width:519,height:988},deviceScaleFactor:2.0818214416503906,isMobile:true,hasTouch:true};
 const executablePath=[process.env.JARVIS_CHROME,'/usr/bin/chromium','/usr/bin/google-chrome',chromium.executablePath()].find(p=>p&&existsSync(p));
 const output=resolve(process.env.POWERAMP_EVIDENCE_DIR||'/tmp/poweramp-render-trace');
-const categories='devtools.timeline,disabled-by-default-devtools.timeline,disabled-by-default-devtools.timeline.frame,blink.user_timing,cc,disabled-by-default-cc.debug,gpu,toplevel,benchmark';
+const categories='devtools.timeline,disabled-by-default-devtools.timeline.frame,blink.user_timing,cc,gpu,toplevel,benchmark';
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
 async function save(name,value){await mkdir(output,{recursive:true});await writeFile(join(output,name),Buffer.isBuffer(value)?value:JSON.stringify(value,null,2)+'\n');}
 const stats=values=>({samples:values.length,mean_ms:values.length?values.reduce((a,b)=>a+b,0)/values.length:0,max_ms:values.length?Math.max(...values):0,over_33ms:values.filter(v=>v>33).length,over_50ms:values.filter(v=>v>50).length});
@@ -90,8 +90,9 @@ async function runCase(browser,built,{name,cpu,variant},environment){
       await action('held-open-'+suffix,'player',async()=>{const p=await center('#mini-title'),height=await page.locator('#sc-list').evaluate(n=>n.clientHeight);await start(p.x,p.y);for(let i=1;i<=6;i++){await move(p.x,p.y-height*.5*i/6);await frame();}await page.waitForTimeout(150);await end();});
       await action('held-close-'+suffix,'list',async()=>{const p=await center('#artA'),height=await page.locator('#sc-player').evaluate(n=>n.clientHeight);await start(p.x,p.y);for(let i=1;i<=6;i++){await move(p.x,p.y+height*.5*i/6);await frame();}await page.waitForTimeout(150);await end();});
     }
-    await page.evaluate(()=>{PA.Engine.pause();fixtureTraceProbe.label=null;});const bytes=await readTrace(cdp,complete);traceStarted=false;
-    const probe=await page.evaluate(()=>fixtureTraceProbe),summary=summarizeTrace(JSON.parse(bytes.toString()),probe);result.probe=probe;result.summary={...summary,selected:undefined};result.errors=errors;assert.deepEqual(errors,[]);
+    await page.evaluate(()=>{PA.Engine.pause();fixtureTraceProbe.label=null;});const probe=await page.evaluate(()=>fixtureTraceProbe);result.probe=probe;await save('render-trace-'+name+'-timings.json',{source:built.sourceHash,cpu,variant,probe});
+    const bytes=await readTrace(cdp,complete);traceStarted=false;
+    const summary=summarizeTrace(JSON.parse(bytes.toString()),probe);result.probe=probe;result.summary={...summary,selected:undefined};result.errors=errors;assert.deepEqual(errors,[]);
     await save('render-trace-'+name+'.json.gz',gzipSync(bytes));await save('render-trace-'+name+'-events.json.gz',gzipSync(Buffer.from(JSON.stringify({traceEvents:summary.selected}))));await save('render-trace-'+name+'-report.json',result);
     await page.screenshot({path:join(output,'render-trace-'+name+'-endpoint.png'),fullPage:false});
     return result;
