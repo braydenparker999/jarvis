@@ -10,6 +10,9 @@ on:
       - 'public/assets/**'
       - 'public/jarvis/**'
       - 'tests/relay-*'
+      - 'tests/oauth-consent-browser.test.js'
+      - 'tests/ci-workflow.test.js'
+      - 'tests/helpers/ci-test-inventory.mjs'
       - 'tests/shared.test.js'
       - 'tests/publications.test.js'
       - 'tests/origins.test.js'
@@ -22,8 +25,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: relay-owner-validation-${{ github.ref }}
-  cancel-in-progress: true
+  group: relay-owner-validation-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   owner-regression:
@@ -52,11 +55,10 @@ jobs:
           test -x "$chromium_path"
           printf 'CHROMIUM_PATH=%s\n' "$chromium_path" >> "$GITHUB_ENV"
           printf 'PLAYWRIGHT_CHROMIUM_EXECUTABLE=%s\n' "$chromium_path" >> "$GITHUB_ENV"
+          printf 'JARVIS_CHROME=%s\n' "$chromium_path" >> "$GITHUB_ENV"
       - name: Bundle the proposed Worker without deployment
         run: npx --no-install esbuild backend/worker.js --bundle --platform=browser --format=esm --outfile="$RUNNER_TEMP/relay-owner-worker.mjs"
       - name: Run owner browser and affected regression tests
-        # Deliberately scoped. oauth-consent-browser.test.js and unrelated
-        # launcher/media browser suites have their own fixtures and gates.
-        run: >-
-          node --test tests/relay-*.test.js tests/shared.test.js
-          tests/publications.test.js tests/origins.test.js tests/hub.test.js
+        # Includes real OAuth consent/catalog routing, without unrelated media
+        # measurements. Owner Chromium remains mandatory for this Node 24 job.
+        run: node tests/helpers/ci-test-inventory.mjs run relay --require-browser

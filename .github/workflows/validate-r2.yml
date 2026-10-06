@@ -8,6 +8,12 @@ on:
 permissions:
   contents: read
 
+# Superseded PR validation can stop. Main runs have unique groups and never
+# cancel one another; deployment concurrency is unchanged in its own workflows.
+concurrency:
+  group: r2-validation-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -21,8 +27,26 @@ jobs:
           node-version: '22'
       - name: Install pinned test dependencies
         run: npm ci
+      - name: Verify complete test inventory and mandatory Chromium
+        run: |
+          export JARVIS_CHROME="$(command -v google-chrome || command -v chromium)"
+          test -n "$JARVIS_CHROME"
+          printf 'JARVIS_CHROME=%s\n' "$JARVIS_CHROME" >> "$GITHUB_ENV"
+          node tests/helpers/ci-test-inventory.mjs check > "$RUNNER_TEMP/ci-test-inventory.json"
+          cat "$RUNNER_TEMP/ci-test-inventory.json"
+          node --input-type=module -e 'import {requireBrowser} from "./tests/helpers/ci-test-inventory.mjs"; requireBrowser()'
+      - name: Run fast Relay contracts and real OAuth consent browser
+        run: node tests/helpers/ci-test-inventory.mjs run relay --require-browser
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check migration syntax and integrity tests
+        run: |
+          python -m py_compile scripts/migrate-drive-to-r2.py
+          test -f tests/test_r2_migration.py
+          python -m unittest discover -s tests -p 'test_r2*.py' -v
       - name: Trace isolated unchanged Poweramp rendering
-        if: always()
+        if: ${{ !cancelled() }}
         env:
           POWERAMP_EVIDENCE_DIR: ${{ runner.temp }}/poweramp-browser
         run: |
@@ -46,7 +70,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
       - name: Measure persistent live-node Poweramp prototype
-        if: always()
+        if: ${{ !cancelled() }}
         env:
           POWERAMP_EVIDENCE_DIR: ${{ runner.temp }}/poweramp-browser
           POWERAMP_BASELINE_REF: 8aa7fce4dd83d5417614ae112134631dd98df7b6
@@ -55,23 +79,23 @@ jobs:
           test -n "$JARVIS_CHROME"
           node --test tests/poweramp-persistent-prototype-browser.mjs
       - name: Verify actual library visibility after mini round trips
-        if: always()
+        if: ${{ !cancelled() }}
         env:
           POWERAMP_EVIDENCE_DIR: ${{ runner.temp }}/poweramp-browser
         run: |
           export JARVIS_CHROME="$(command -v google-chrome || command -v chromium)"
           test -n "$JARVIS_CHROME"
-          node --test tests/poweramp-blank-library-browser.test.js
+          node tests/helpers/ci-test-inventory.mjs run blankLibrary --require-browser
       - name: Run frontend regression tests
-        if: always()
+        if: ${{ !cancelled() }}
         env:
           POWERAMP_EVIDENCE_DIR: ${{ runner.temp }}/poweramp-browser
         run: |
           export JARVIS_CHROME="$(command -v google-chrome || command -v chromium)"
           test -n "$JARVIS_CHROME"
-          npm test
+          node tests/helpers/ci-test-inventory.mjs run regressions --require-browser
       - name: Measure isolated cold and playing Poweramp input setup
-        if: always()
+        if: ${{ !cancelled() }}
         env:
           POWERAMP_EVIDENCE_DIR: ${{ runner.temp }}/poweramp-browser
         run: |
@@ -91,7 +115,7 @@ jobs:
           export JARVIS_CHROME="$(command -v google-chrome || command -v chromium)"
           test -n "$JARVIS_CHROME"
           export JARVIS_SCREENSHOT_DIR="$RUNNER_TEMP/podcast-screenshots"
-          node --test tests/podcasts-browser.test.js
+          node tests/helpers/ci-test-inventory.mjs run podcasts --require-browser
       - name: Preserve podcast browser evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -100,12 +124,11 @@ jobs:
           path: ${{ runner.temp }}/podcast-screenshots
           if-no-files-found: ignore
           retention-days: 14
-      - uses: actions/setup-python@v5
+      - name: Preserve exact test coverage inventory
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          python-version: '3.12'
-      - name: Check migration syntax and integrity tests
-        run: |
-          python -m py_compile scripts/migrate-drive-to-r2.py
-          test -f tests/test_r2_migration.py
-          python -m unittest discover -s tests -p 'test_r2*.py' -v
-
+          name: ci-test-inventory-${{ github.run_id }}
+          path: ${{ runner.temp }}/ci-test-inventory.json
+          if-no-files-found: warn
+          retention-days: 14
