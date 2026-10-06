@@ -207,8 +207,9 @@ export async function relayOwnerPasswordStore(ctx, body, hooks) {
           // recovery choices. Return no bearer until a new explicit selection.
           throw new RelayError(-32013, 'Owner device limit reached', {status: 429, code: 'device_limit', devices: active.map(row => hooks.device(row))});
         }
-        ctx.storage.sql.exec(`INSERT INTO relay_owner_sessions(device_id,token_hash,principal,label,created_ms,last_seen_ms,expires_ms,revoked_ms,approval_grant_id,authentication_source,credential_version) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-          deviceId, tokenHash, RELAY_OWNER, label, now, now, now + sessionMs, null, original.approval_grant_id, 'owner-password-session', original.version);
+        ctx.storage.sql.exec(`INSERT INTO relay_owner_sessions(device_id,token_hash,principal,label,created_ms,last_seen_ms,expires_ms,revoked_ms,approval_grant_id) VALUES(?,?,?,?,?,?,?,?,?)`,
+          deviceId, tokenHash, RELAY_OWNER, label, now, now, now + sessionMs, null, original.approval_grant_id);
+        ctx.storage.sql.exec('INSERT INTO relay_owner_session_audit(device_id,authentication_source,credential_version) VALUES(?,?,?)', deviceId, 'owner-password-session', original.version);
         const device = shortDevice(rows(ctx, 'SELECT * FROM relay_owner_sessions WHERE device_id=?', deviceId)[0]);
         return json({status: 'approved', device_token: token, device, access_days: 365}, 201);
       });

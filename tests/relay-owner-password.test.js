@@ -52,6 +52,35 @@ test('native salted scrypt verifier uses the OWASP 32 MiB profile and matches th
   assert.notEqual(actual, await relayOwnerPasswordVerifier(VALUE, '13'.repeat(32)));
 });
 
+test('new credential schema preserves the old Worker nine-column positional session insert and legacy session behavior', async () => {
+  const f = fixture();
+  const canonical = ['device_id', 'token_hash', 'principal', 'label', 'created_ms', 'last_seen_ms', 'expires_ms', 'revoked_ms', 'approval_grant_id'];
+  const original = f.sql('SELECT * FROM relay_owner_sessions');
+  await f.configure(); const signed = await (await f.login()).json();
+  relayOwnerSchema(f.ctx); // Repeat initialization after password data exists.
+  assert.deepEqual(f.sql('PRAGMA table_info(relay_owner_sessions)').map(row => row.name), canonical);
+  const now = Date.now(), deviceId = crypto.randomUUID(), tokenHash = 'e'.repeat(64);
+  // Exact positional SQL used by immutable109d985f's pairing approval. An old
+  // Worker can still add devices after the new feature has written credentials.
+  f.sql('INSERT INTO relay_owner_sessions VALUES(?,?,?,?,?,?,?,?,?)', deviceId, tokenHash, RELAY_OWNER,
+    'paired by restored old worker', now, now, now + RELAY_OWNER_SESSION_MS, null, f.grantId);
+  assert.equal(f.sql('SELECT COUNT(*) AS n FROM relay_owner_session_audit')[0].n, 1);
+  const legacy = await (await f.store({op: 'session', token_hash: tokenHash})).json();
+  assert.equal(legacy.status, 'approved'); assert.equal(legacy.device.authentication_source, 'owner-device-session');
+  const written = await f.store({op: 'message', token_hash: tokenHash, id: crypto.randomUUID(), body: 'synthetic old-worker paired message'});
+  assert.equal(written.status, 201); assert.equal((await written.json()).entry.authentication_source, 'owner-device-session');
+  const devices = await (await f.store({op: 'devices_list', token_hash: tokenHash})).json();
+  assert.equal(devices.devices.find(row => row.id === signed.device.id).authentication_source, 'owner-password-session');
+  assert.equal(devices.devices.find(row => row.id === deviceId).authentication_source, 'owner-device-session');
+  // Old revocation SQL remains authoritative for a new password-created row.
+  f.sql('UPDATE relay_owner_sessions SET revoked_ms=COALESCE(revoked_ms,?) WHERE device_id=? AND principal=?', now, signed.device.id, RELAY_OWNER);
+  assert.equal((await f.store({op: 'session', token_hash: await hash(signed.device_token)})).status, 401);
+  for (const column of canonical.filter(name => !['last_seen_ms', 'expires_ms'].includes(name))) {
+    assert.equal(f.sql('SELECT * FROM relay_owner_sessions WHERE device_id=?', f.deviceId)[0][column], original[0][column]);
+  }
+  f.db.close();
+});
+
 test('setup requires authenticated one-use device-bound consent and explicit session policy', async () => {
   const f = fixture();
   assert.equal((await f.store({op: 'credentials_status', token_hash: 'c'.repeat(64)})).status, 401);
@@ -96,7 +125,7 @@ test('fresh login creates a server-stamped, renewable, individually revocable ow
   const response = await f.login({username: 'FIXTURE.OWNER'}); assert.equal(response.status, 201);
   const signed = await response.json(); assert.match(signed.device_token, /^[a-f0-9]{64}$/);
   assert.equal(signed.device.principal, RELAY_OWNER); assert.equal(signed.device.authentication_source, 'owner-password-session');
-  const tokenHash = await hash(signed.device_token), session = f.sql('SELECT * FROM relay_owner_sessions WHERE token_hash=?', tokenHash)[0];
+  const tokenHash = await hash(signed.device_token), session = f.sql('SELECT s.*,a.authentication_source,a.credential_version FROM relay_owner_sessions s LEFT JOIN relay_owner_session_audit a USING(device_id) WHERE token_hash=?', tokenHash)[0];
   assert.equal(session.expires_ms - session.last_seen_ms, RELAY_OWNER_SESSION_MS);
   assert.equal(session.credential_version, 1); assert.equal(session.approval_grant_id, f.grantId);
   assert.deepEqual(f.sql('SELECT * FROM relay_owner_sessions WHERE device_id=?', f.deviceId)[0], before);
@@ -213,7 +242,7 @@ test('device capacity is explicit and does not revoke existing sessions on login
   const signed = await replacement.json(), all = f.sql('SELECT * FROM relay_owner_sessions');
   assert.equal(all.filter(row => row.revoked_ms === null).length, 10);
   assert.ok(all.find(row => row.device_id === picked.id).revoked_ms);
-  assert.equal(all.find(row => row.device_id === signed.device.id).authentication_source, 'owner-password-session');
+  assert.equal(f.sql('SELECT authentication_source FROM relay_owner_session_audit WHERE device_id=?', signed.device.id)[0].authentication_source, 'owner-password-session');
   for (const old of before.filter(row => row.device_id !== picked.id)) assert.deepEqual(all.find(row => row.device_id === old.device_id), old);
   f.db.close();
 });
@@ -232,6 +261,32 @@ test('replacement never exposes choices to a bad password or revokes a different
   };
   assert.equal((await f.login({replace_device_id: f.deviceId, confirm_replacement: true})).status, 503);
   assert.equal(f.sql('SELECT revoked_ms FROM relay_owner_sessions WHERE device_id=?', f.deviceId)[0].revoked_ms, null);
+  f.db.close();
+});
+
+test('audit insert failure rolls back canonical session insertion and explicit replacement revocation together', async () => {
+  const f = fixture(); await f.configure();
+  const before = f.sql('SELECT * FROM relay_owner_sessions'), execute = f.ctx.storage.sql.exec;
+  f.ctx.storage.sql.exec = (q, ...v) => {
+    if (q.startsWith('INSERT INTO relay_owner_session_audit')) throw Error('synthetic audit insert failure');
+    return execute(q, ...v);
+  };
+  assert.equal((await f.login()).status, 503);
+  assert.deepEqual(f.sql('SELECT * FROM relay_owner_sessions'), before);
+  assert.equal((await f.login({replace_device_id: f.deviceId, confirm_replacement: true})).status, 503);
+  assert.deepEqual(f.sql('SELECT * FROM relay_owner_sessions'), before);
+  assert.equal(f.sql('SELECT COUNT(*) AS n FROM relay_owner_session_audit')[0].n, 0);
+  f.db.close();
+});
+
+test('malformed password audit metadata refuses private session authentication', async () => {
+  const f = fixture(); await f.configure(); const signed = await (await f.login()).json();
+  f.db.exec('PRAGMA ignore_check_constraints=ON');
+  f.sql('UPDATE relay_owner_session_audit SET credential_version=? WHERE device_id=?', 'malformed', signed.device.id);
+  assert.equal((await f.store({op: 'session', token_hash: await hash(signed.device_token)})).status, 503);
+  f.sql('UPDATE relay_owner_session_audit SET credential_version=1,authentication_source=? WHERE device_id=?', 'unknown-session-source', signed.device.id);
+  assert.equal((await f.store({op: 'session', token_hash: await hash(signed.device_token)})).status, 503);
+  assert.equal((await f.auth({op: 'session'})).status, 200);
   f.db.close();
 });
 

@@ -64,10 +64,12 @@ test('real SQLite Durable Object completes owner password setup, login, private 
           if (new URL(request.url).pathname === '/fixture/seed') {
             relayOwnerSchema(this.ctx);
             const now = Date.now();
-            this.ctx.storage.sql.exec('INSERT INTO relay_owner_sessions(device_id,token_hash,principal,label,created_ms,last_seen_ms,expires_ms,revoked_ms,approval_grant_id) VALUES(?,?,?,?,?,?,?,?,?)',
+            // The old deployed Worker uses this exact 9-value positional
+            // shape. New schema initialization must preserve that contract.
+            this.ctx.storage.sql.exec('INSERT INTO relay_owner_sessions VALUES(?,?,?,?,?,?,?,?,?)',
               crypto.randomUUID(), await hash('a'.repeat(64)), RELAY_OWNER, 'synthetic verified owner',
               now, now, now + RELAY_OWNER_SESSION_MS, null, 'c'.repeat(64));
-            return Response.json({seeded: true});
+            return Response.json({seeded: true, sessionColumns: [...this.ctx.storage.sql.exec('PRAGMA table_info(relay_owner_sessions)')].map(row => row.name)});
           }
           return super.fetch(request);
         }
@@ -96,7 +98,10 @@ test('real SQLite Durable Object completes owner password setup, login, private 
     body: JSON.stringify(body),
   });
   try {
-    assert.equal((await mf.dispatchFetch(issuer + '/fixture/seed')).status, 200);
+    const seeded = await mf.dispatchFetch(issuer + '/fixture/seed');
+    assert.equal(seeded.status, 200);
+    assert.deepEqual((await seeded.json()).sessionColumns,
+      ['device_id', 'token_hash', 'principal', 'label', 'created_ms', 'last_seen_ms', 'expires_ms', 'revoked_ms', 'approval_grant_id']);
     const prepared = await post('/credentials/prepare', {purpose: 'setup'});
     assert.equal(prepared.status, 200);
     const consent = await prepared.json();

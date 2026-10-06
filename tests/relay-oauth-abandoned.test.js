@@ -123,7 +123,7 @@ function seedSideState(s) {
   s.sql('INSERT INTO relay_activations VALUES(?,?,?)', 'fixture-activation', 'fixture-revision', s.now + SESSION_MS);
   s.sql('INSERT INTO relay_event_meta VALUES(?,?)', 'floor', 0);
   s.sql('INSERT INTO relay_owner_event_bodies VALUES(?,?)', 'fixture-event', 'private fixture body');
-  s.sql('INSERT INTO relay_owner_sessions(device_id,token_hash,principal,label,created_ms,last_seen_ms,expires_ms,revoked_ms,approval_grant_id) VALUES(?,?,?,?,?,?,?,?,?)', 'fixture-device', 'fixture-device-token-hash', RELAY_OWNER, 'fixture device', s.now, s.now, s.now + REFRESH_MS, null, globalId('unrelated-side-grant'));
+  s.sql('INSERT INTO relay_owner_sessions VALUES(?,?,?,?,?,?,?,?,?)', 'fixture-device', 'fixture-device-token-hash', RELAY_OWNER, 'fixture device', s.now, s.now, s.now + REFRESH_MS, null, globalId('unrelated-side-grant'));
   s.sql('INSERT INTO relay_owner_pairings VALUES(?,?,?,?,?,?,?,?,?)', 'fixture-pairing', '123456', 'fixture-pairing-token-hash', 'fixture-pairing-device', 'fixture pairing', s.now, s.now + SESSION_MS, s.now, globalId('unrelated-side-grant'));
   s.sql('INSERT INTO relay_owner_entries VALUES(?,?,?,?,?,?,?,?,?)', 1, 'fixture-private-message', 'user', null, 'private fixture body', '2026-10-06T02:30:00.000Z', RELAY_OWNER, 'fixture-device', 'fixture-device');
   s.sql('INSERT INTO relay_owner_meta VALUES(?,?)', 'fixture-meta', 'fixture-value');
@@ -138,7 +138,7 @@ function seedSideReference(s, id, kind, {expiresAt = s.now + SESSION_MS, active 
   } else {
     relayOwnerSchema(s.ctx);
     if (kind === 'session') {
-      s.sql('INSERT INTO relay_owner_sessions(device_id,token_hash,principal,label,created_ms,last_seen_ms,expires_ms,revoked_ms,approval_grant_id) VALUES(?,?,?,?,?,?,?,?,?)', 'fixture-device-' + id, 'fixture-hash-' + id,
+      s.sql('INSERT INTO relay_owner_sessions VALUES(?,?,?,?,?,?,?,?,?)', 'fixture-device-' + id, 'fixture-hash-' + id,
         RELAY_OWNER, 'fixture device', s.now, s.now, expiresAt, active ? null : s.now, globalId(id));
     } else {
       s.sql('INSERT INTO relay_owner_pairings VALUES(?,?,?,?,?,?,?,?,?)', 'fixture-request-' + id, '123456',
