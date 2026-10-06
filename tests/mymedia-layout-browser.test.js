@@ -119,21 +119,22 @@ test('My Media video-feed layout and preserved browsing/playback flows',
     await t.test('search, chips, save, queue, folder controls and navigation are retained',async()=>{
       const {page,context,errors}=await session();
       await page.locator('#creator-filters button').first().click();await page.waitForURL('**/#collection=*');
+      await page.waitForFunction(()=>document.querySelector('#view-title').textContent==='Preview channel');
       assert.equal(await page.locator('#sections .video-tile').count(),60,'channel includes matching root files');
       await page.locator('#search').fill('quiet');assert.equal(await page.locator('#sections .video-tile').count(),18);
       await page.locator('#time-filter').click();await page.getByRole('button',{name:'Under 10 minutes',exact:true}).click();
       assert.equal(await page.locator('#sections .video-tile').count(),9);
       await page.locator('.video-menu').first().click();await page.getByRole('button',{name:'Save for later',exact:true}).click();
-      await page.locator('[data-view="saved"]').click();await page.waitForURL('**/#saved');assert.equal(await page.locator('#sections .video-tile').count(),1);
+      await page.locator('[data-view="saved"]').click();await page.waitForURL('**/#saved');await page.waitForFunction(()=>document.querySelector('#view-title').textContent==='Saved');assert.equal(await page.locator('#sections .video-tile').count(),1);
       await page.locator('#search').fill('');await page.locator('#all-videos').click();
-      await page.locator('[data-view="explore"]').click();await page.waitForURL('**/#explore');
+      await page.locator('[data-view="explore"]').click();await page.waitForURL('**/#explore');await page.waitForFunction(()=>document.querySelector('#view-title').textContent==='Explore');
       await page.locator('.video-menu').first().click();await page.getByRole('button',{name:'Add to queue',exact:true}).click();
       assert.equal(await page.evaluate(()=>JSON.parse(localStorage.getItem('mymedia.queue.v1')).length),1);
-      await page.locator('[data-view="library"]').click();await page.waitForURL('**/#library');
+      await page.locator('[data-view="library"]').click();await page.waitForURL('**/#library');await page.locator('.folder-shelf').first().waitFor();
       assert.equal(await page.locator('.folder-shelf').count(),2);
       await page.locator('#toggle-folders').click();assert.equal(await page.locator('.folder-shelf[open]').count(),2);
       await page.locator('#toggle-folders').click();assert.equal(await page.locator('.folder-shelf[open]').count(),0);
-      await page.goBack();await page.waitForURL('**/#explore');assert.equal(await page.locator('.feed-grid .video-tile').count(),60);
+      await page.goBack();await page.waitForURL('**/#explore');await page.locator('.feed-grid').waitFor();assert.equal(await page.locator('.feed-grid .video-tile').count(),60);
       await page.locator('#search').fill('no possible match');assert.equal(await page.getByRole('heading',{name:'No matching videos'}).count(),1);
       await layout(page);assert.deepEqual(errors,[]);await context.close();
     });
@@ -172,13 +173,13 @@ test('My Media video-feed layout and preserved browsing/playback flows',
     await t.test('real archive covers in phone, tablet, desktop and watch previews',async()=>{
       for(const width of [360,390,430,768,1200]){
         const {page,context,errors}=await session(width,true,true);
-        await page.waitForFunction(()=>[...document.querySelectorAll('.feed-grid .thumb img')].slice(0,4).every(img=>img.complete && img.naturalWidth>0),{timeout:30000});
+        await page.waitForFunction(()=>{const images=[...document.querySelectorAll('.feed-grid .thumb img')];return images.length>=4 && images.slice(0,4).every(img=>img.complete && img.naturalWidth>0);},null,{timeout:30000});
         await screenshot(page,'my-media-feed-'+width);
         if(width===390 || width===1200){
           await page.locator('.feed-grid .video-card').first().click();
           await page.waitForFunction(()=>document.querySelector('#video').readyState>=2);
           await page.locator('#video').evaluate(n=>n.pause());
-          await page.waitForFunction(()=>document.querySelector('#next-list .thumb img')?.naturalWidth>0,{timeout:30000});
+          await page.waitForFunction(()=>document.querySelector('#next-list .thumb img')?.naturalWidth>0,null,{timeout:30000});
           await screenshot(page,'my-media-watch-'+width);
         }
         await layout(page);assert.deepEqual(errors,[]);await context.close();
