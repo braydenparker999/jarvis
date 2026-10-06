@@ -3,7 +3,8 @@ import {RELAY_OWNER, RELAY_OAUTH_OBJECT, RELAY_SCOPES, RELAY_PUBLIC_SCOPES, RELA
 const REGISTRY = RELAY_OAUTH_OBJECT;
 const SESSION_MS = 600000;
 const ACCESS_MS = 3600000;
-const REFRESH_MS = 30 * 86400000;
+const DEFAULT_REFRESH_DAYS = 30;
+const REFRESH_DAYS = [DEFAULT_REFRESH_DAYS, 365];
 // Public DCR identity is not a session or bearer credential. ChatGPT registers
 // once per connection and reuses the client even after a cancelled first login.
 const CLIENT_EXPIRY = Number.MAX_SAFE_INTEGER;
@@ -43,7 +44,7 @@ function consentPage(csrf, scope) {
   // no-referrer makes browser form POSTs send Origin:null. Keep same-origin
   // Origin validation and suppress referrers across origins. Chrome also checks
   // form-action on redirects, so include the fixed OAuth return destination.
-  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Connect Jarvis Relay</title><body><h1>Connect Jarvis Relay</h1><p>Allow ChatGPT to read the public Relay inbox, post replies in that inbox, and subscribe to new messages. Public messages are unverified visitor content. This connection does not authorize account actions or secret sharing.</p>${scope.split(' ').includes(RELAY_OWNER_SCOPE) ? '<p><strong>Owner chat access:</strong> Allow ChatGPT to inspect and approve individual phone pairing requests, list and revoke paired devices, read and reply in your private owner inbox, and subscribe to private message events. Each phone approval separately grants persistent device access with a 365-day inactivity expiry renewed on use. Private replies stay outside the public inbox. This connection alone does not pair a phone or approve account actions.</p>' : ''}<form method="post" action="/relay/oauth/approve"><input type="hidden" name="csrf" value="${csrf}"><button name="decision" value="allow">Allow this connection</button> <button name="decision" value="deny">Cancel</button></form></body></html>`, {headers: {'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': `default-src 'none'; form-action 'self' ${RELAY_CALLBACK}; frame-ancestors 'none'; base-uri 'none'`, 'Referrer-Policy': 'same-origin', 'X-Content-Type-Options': 'nosniff'}});
+  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Connect Jarvis Relay</title><body><h1>Connect Jarvis Relay</h1><p>Allow ChatGPT to read the public Relay inbox, post replies in that inbox, and subscribe to new messages. Public messages are unverified visitor content. This connection does not authorize account actions or secret sharing.</p>${scope.split(' ').includes(RELAY_OWNER_SCOPE) ? '<p><strong>Owner chat access:</strong> Allow ChatGPT to inspect and approve individual phone pairing requests, list and revoke paired devices, read and reply in your private owner inbox, and subscribe to private message events. Each phone approval separately grants persistent device access with a 365-day inactivity expiry renewed on use. Private replies stay outside the public inbox. This connection alone does not pair a phone or approve account actions.</p>' : ''}<form method="post" action="/relay/oauth/approve"><input type="hidden" name="csrf" value="${csrf}"><fieldset><legend>How long may ChatGPT renew this connection?</legend><label><input type="radio" name="refresh_days" value="30" checked>30 days (default)</label> <label><input type="radio" name="refresh_days" value="365">365 days</label><p>Choosing 365 days authorizes ChatGPT to renew this Relay connection for up to 365 days from this approval. Access tokens last at most one hour. Renewing does not extend the chosen expiry. A stolen refresh token could let someone renew this access until expiry or revocation. You can revoke the connection sooner. ChatGPT may require reconnection earlier; this does not guarantee that ChatGPT will retain the connection for the full period.</p></fieldset><button name="decision" value="allow">Allow this connection</button> <button name="decision" value="deny">Cancel</button></form></body></html>`, {headers: {'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': `default-src 'none'; form-action 'self' ${RELAY_CALLBACK}; frame-ancestors 'none'; base-uri 'none'`, 'Referrer-Policy': 'same-origin', 'X-Content-Type-Options': 'nosniff'}});
 }
 export async function relayGrantActive(env, grantId, requiredScope) {
   if (!relayEnabled(env) || typeof grantId !== 'string') return false;
@@ -159,13 +160,16 @@ export async function relayOAuth(request, env, fetcher = fetch) {
       if (!/^[a-f0-9]{64}$/.test(session)) return err('invalid_request', 400, 'consent_cookie_invalid');
       if (!/^[a-f0-9]{64}$/.test(b.csrf || '')) return err('invalid_request', 400, 'consent_csrf_invalid');
       if (!['allow', 'deny'].includes(b.decision)) return err('invalid_request', 400, 'consent_decision_invalid');
+      // Only this owner-submitted consent form selects a longer lifetime.
+      // Missing selection preserves the thirty-day contract for older forms.
+      if (b.decision === 'allow' && b.refresh_days !== undefined && !['30', '365'].includes(b.refresh_days)) return err('invalid_request', 400, 'consent_duration_invalid');
       processingFailure = 'consent_registry_unavailable';
       const consumed = await consume(env, 'consent:' + await hash(session), {csrf: b.csrf}), consent = consumed.value;
       if (!consent) return err('invalid_request', 400, consumed.reason === 'binding_mismatch' ? 'consent_csrf_mismatch' : 'consent_session_expired_or_used');
       if (b.decision === 'deny') return oauthRedirect(consent.p, env, {error: 'access_denied'});
       const code = random(), grantId = random();
       processingFailure = 'consent_grant_processing_failed';
-      const stored = await registry(env, {op: 'authorize', grantId, codeKey: 'code:' + await hash(code), params: consent.p, resource});
+      const stored = await registry(env, {op: 'authorize', grantId, codeKey: 'code:' + await hash(code), params: consent.p, resource, durationDays: b.refresh_days === '365' ? 365 : DEFAULT_REFRESH_DAYS});
       if (stored.error) return stored.error === 'Client expired'
         ? err('invalid_request', 400, 'consent_client_not_registered')
         : err('temporarily_unavailable', 503, 'consent_grant_capacity_unavailable');
@@ -253,7 +257,9 @@ export function relayOAuthStore(ctx, b, now = Date.now()) {
       remove(b.key); return json({value});
     }
     if (b.op === 'authorize') {
-      const p = b.params, expiration = now + REFRESH_MS;
+      const durationDays = b.durationDays === undefined ? DEFAULT_REFRESH_DAYS : b.durationDays;
+      if (!REFRESH_DAYS.includes(durationDays)) return json({error: 'Invalid duration'}, 400);
+      const p = b.params, expiration = now + durationDays * 86400000;
       const client=get('client:'+p.client_id);
       if(!client)return json({error:'Client expired'});
       // Legacy Allow stored a thirty-day grant before its ten-minute code was
@@ -294,11 +300,12 @@ export function relayOAuthStore(ctx, b, now = Date.now()) {
           && typeof grant.client_id==='string' && /^[a-f0-9]{64}$/.test(grant.client_id) && scopes(grant.scope)
           && knownResource && Number.isSafeInteger(grant.expiresAt) && grant.expiresAt>now
           && Number.isSafeInteger(row.expires_at) && row.expires_at>now && row.expires_at<=grant.expiresAt
-          && Object.keys(grant).every(key=>['principal','client_id','scope','resource','expiresAt','revoked'].includes(key));
+          && (grant.consentDurationDays===undefined||REFRESH_DAYS.includes(grant.consentDurationDays))
+          && Object.keys(grant).every(key=>['principal','client_id','scope','resource','expiresAt','revoked','consentDurationDays'].includes(key));
         return !knownPending || referenced.has(row.key.slice(6));
       });
       if(counted.length>=10)return json({error:'Registry full'});
-      const grant = {principal: RELAY_OWNER, client_id: p.client_id, scope: p.scope, resource: b.resource, expiresAt: expiration, revoked: false};
+      const grant = {principal: RELAY_OWNER, client_id: p.client_id, scope: p.scope, resource: b.resource, expiresAt: expiration, revoked: false, consentDurationDays: durationDays};
       // Pending grants physically expire with the code. Keep the original
       // absolute lifetime in the value: a valid atomic exchange below promotes
       // this same family to that expiry, including on an older rollback worker.

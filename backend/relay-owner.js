@@ -3,6 +3,7 @@
 import {RELAY_OWNER, RELAY_OWNER_SCOPE, RELAY_OWNER_INBOX, RELAY_OAUTH_OBJECT, RelayError, fields, uuid, cursor, random, hash, equal, boundedText, json, relayEnabled, relayIssuer} from './relay-common.js';
 import {relayTokenActiveInStore} from './relay-oauth.js';
 import {FRONTEND_ORIGINS} from './origins.js';
+import {relayOwnerPasswordSchema, relayOwnerPasswordStore} from './relay-owner-password.js';
 
 export {RELAY_OWNER_SCOPE, RELAY_OWNER_INBOX};
 export const RELAY_OWNER_SESSION_MS = 365 * 86400000;
@@ -24,6 +25,12 @@ export function relayOwnerSchema(ctx) {
     label TEXT NOT NULL, created_ms INTEGER NOT NULL, last_seen_ms INTEGER NOT NULL,
     expires_ms INTEGER NOT NULL, revoked_ms INTEGER, approval_grant_id TEXT NOT NULL)`);
   sql.exec('CREATE INDEX IF NOT EXISTS relay_owner_session_expiry ON relay_owner_sessions(expires_ms)');
+  // Keep the original nine session columns: a restored older Worker still
+  // pairs devices with positional INSERTs. New provenance lives separately.
+  sql.exec(`CREATE TABLE IF NOT EXISTS relay_owner_session_audit (
+    device_id TEXT PRIMARY KEY, authentication_source TEXT NOT NULL
+      CHECK(authentication_source='owner-password-session'),
+    credential_version INTEGER NOT NULL CHECK(credential_version>=1))`);
   sql.exec(`CREATE TABLE IF NOT EXISTS relay_owner_entries (
     seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
     kind TEXT NOT NULL CHECK(kind IN ('user','reply')), reply_to TEXT UNIQUE,
@@ -32,6 +39,7 @@ export function relayOwnerSchema(ctx) {
   sql.exec('CREATE INDEX IF NOT EXISTS relay_owner_entry_kind_seq ON relay_owner_entries(kind,seq)');
   sql.exec('CREATE TABLE IF NOT EXISTS relay_owner_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
   sql.exec('CREATE TABLE IF NOT EXISTS relay_owner_pair_rates (identity TEXT PRIMARY KEY, count INTEGER NOT NULL, expires_ms INTEGER NOT NULL)');
+  relayOwnerPasswordSchema(ctx);
 }
 function entry(row) {
   return {id: row.id, sequence: row.seq, body: row.body, role: row.kind === 'user' ? 'user' : 'assistant', createdAt: row.created_at,
@@ -48,17 +56,25 @@ export function relayOwnerMessage(ctx, id) {
 }
 function device(row, current) {
   return {id: row.device_id, label: row.label, label_verified: false, principal: RELAY_OWNER, createdAt: iso(row.created_ms),
+    authentication_source: row.authentication_source || 'owner-device-session',
     lastSeenAt: iso(row.last_seen_ms), expiresAt: iso(row.expires_ms),
     revokedAt: row.revoked_ms === null ? null : iso(row.revoked_ms),
     ...(current ? {current: row.device_id === current} : {})};
 }
 function shortDevice(row) {
-  return {id: row.device_id, label: row.label, label_verified: false, expiresAt: iso(row.expires_ms), principal: RELAY_OWNER};
+  return {id: row.device_id, label: row.label, label_verified: false, expiresAt: iso(row.expires_ms), principal: RELAY_OWNER, authentication_source: row.authentication_source || 'owner-device-session'};
+}
+function sessionAudit(ctx, row) {
+  if (!row) return row;
+  const audit = rows(ctx, 'SELECT authentication_source,credential_version FROM relay_owner_session_audit WHERE device_id=?', row.device_id)[0];
+  if (audit && (audit.authentication_source !== 'owner-password-session' || !Number.isSafeInteger(audit.credential_version) || audit.credential_version < 1)) fail(503, 'Owner session audit storage unavailable');
+  return {...row, authentication_source: audit?.authentication_source || 'owner-device-session', credential_version: audit?.credential_version ?? null};
 }
 function requireSession(ctx, tokenHash, now) {
   if (!hex(tokenHash)) fail(401, 'Owner device authentication required');
-  const row = rows(ctx, 'SELECT * FROM relay_owner_sessions WHERE token_hash=?', tokenHash)[0];
-  if (!row || row.principal !== RELAY_OWNER) fail(401, 'Owner device authentication required');
+  const row = sessionAudit(ctx, rows(ctx, 'SELECT * FROM relay_owner_sessions WHERE token_hash=?', tokenHash)[0]);
+  if (!row || row.principal !== RELAY_OWNER || !['owner-device-session', 'owner-password-session'].includes(row.authentication_source)
+    || !Number.isSafeInteger(row.expires_ms) || !Number.isSafeInteger(row.last_seen_ms)) fail(401, 'Owner device authentication required');
   if (row.revoked_ms !== null) fail(401, 'Owner device session revoked', 'session_revoked');
   if (row.expires_ms <= now) fail(401, 'Owner device session expired', 'session_expired');
   return row;
@@ -110,7 +126,7 @@ function insertMessage(ctx, session, body, enqueue, now) {
   if (count >= 200) fail(429, 'Private daily message limit reached');
   ctx.storage.sql.exec("DELETE FROM relay_owner_meta WHERE key LIKE 'messages:%' AND key<>?", key);
   ctx.storage.sql.exec('INSERT OR REPLACE INTO relay_owner_meta VALUES(?,?)', key, String(count + 1));
-  ctx.storage.sql.exec("INSERT INTO relay_owner_entries(id,kind,body,created_at,principal,device_id,authentication_source) VALUES(?,'user',?,?,?,?,?)", body.id, content, iso(now), RELAY_OWNER, session.device_id, 'owner-device-session');
+  ctx.storage.sql.exec("INSERT INTO relay_owner_entries(id,kind,body,created_at,principal,device_id,authentication_source) VALUES(?,'user',?,?,?,?,?)", body.id, content, iso(now), RELAY_OWNER, session.device_id, session.authentication_source);
   const value = entry(rows(ctx, 'SELECT * FROM relay_owner_entries WHERE id=?', body.id)[0]);
   // This seam must enqueue synchronously in this very transaction. An event
   // failure rolls the message and rate accounting back rather than losing it.
@@ -130,8 +146,14 @@ function revokeDevice(ctx, id, now) {
 // supplied identity fields. All session checks and writes are synchronous.
 export async function relayOwnerStore(ctx, env, body, enqueueOwnerMessage = () => {}) {
   if (!relayOwnerEnabled(env)) return json({error: 'Owner Relay is not activated', code: 'owner_not_enabled'}, 503);
-  relayOwnerSchema(ctx);
+  const passwordOperation = ['credentials_status', 'credentials_prepare', 'credentials_save', 'password_login'].includes(body?.op);
   try {
+    relayOwnerSchema(ctx);
+    if (passwordOperation) {
+      return await relayOwnerPasswordStore(ctx, body, {requireSession, renew,
+        shortDevice: row => shortDevice(sessionAudit(ctx, row)), device: row => device(sessionAudit(ctx, row)), label,
+        sessionMs: RELAY_OWNER_SESSION_MS, maxDevices: MAX_DEVICES});
+    }
     if (body?.op === 'pair_start') {
       fields(body, ['op', 'label', 'rate_hash'], ['op', 'label', 'rate_hash']);
       const name = label(body.label);
@@ -177,7 +199,7 @@ export async function relayOwnerStore(ctx, env, body, enqueueOwnerMessage = () =
       if (body.op === 'messages_list') result = listMessages(ctx, body.after, body.limit);
       if (body.op === 'conversation') result = conversation(ctx, body.message_id);
       if (body.op === 'message') result = insertMessage(ctx, session, body, enqueueOwnerMessage, now);
-      if (body.op === 'devices_list') result = {devices: rows(ctx, 'SELECT * FROM relay_owner_sessions WHERE principal=? ORDER BY created_ms,device_id', RELAY_OWNER).map(row => device(row.device_id === session.device_id ? {...row, last_seen_ms: now, expires_ms: now + RELAY_OWNER_SESSION_MS} : row, session.device_id))};
+      if (body.op === 'devices_list') result = {devices: rows(ctx, 'SELECT * FROM relay_owner_sessions WHERE principal=? ORDER BY created_ms,device_id', RELAY_OWNER).map(row => device(sessionAudit(ctx, row.device_id === session.device_id ? {...row, last_seen_ms: now, expires_ms: now + RELAY_OWNER_SESSION_MS} : row), session.device_id))};
       if (body.op === 'device_revoke') result = revokeDevice(ctx, body.device_id, now);
       // Nothing asynchronous, including hashing, may occur between this check
       // and the transaction's writes/revocation. Failed routes do not renew.
@@ -185,7 +207,10 @@ export async function relayOwnerStore(ctx, env, body, enqueueOwnerMessage = () =
       return json(result, result.newWrite ? 201 : 200);
     });
   } catch (error) {
-    if (error instanceof RelayError) return json({error: error.message, ...(error.data?.code ? {code: error.data.code} : {})}, error.data?.status || 400);
+    if (error instanceof RelayError) return json({error: error.message, ...(error.data?.code ? {code: error.data.code} : {}),
+      ...(error.data?.code === 'device_limit' && Array.isArray(error.data.devices) ? {devices: error.data.devices} : {})}, error.data?.status || 400,
+      error.data?.status === 429 && error.data?.code === 'rate_limited' ? {'Retry-After': String(error.data?.retry_after || 900)} : {});
+    if (passwordOperation) return json({error: 'Owner Relay storage unavailable'}, 503);
     throw error;
   }
 }
@@ -231,7 +256,7 @@ export async function relayOwnerRpc(ctx, env, principal, name, args, enqueueOwne
       if (!row || row.expires_ms <= now) fail(410, 'Pairing request expired');
       if (name.endsWith('_inspect')) return {request_id: row.request_id, code: row.code, label: row.label, label_verified: false, expires_at: iso(row.expires_ms), status: row.approved_ms === null ? 'pending' : 'approved', access_days: 365, approval_prompt: `Approve only if code ${row.code} matches the device. This grants private owner access for 365 days of inactivity, renewed on successful authenticated use, until revoked.`};
       if (!equal(row.code, args.code)) fail(403, 'Pairing display code mismatch');
-      const previous = rows(ctx, 'SELECT * FROM relay_owner_sessions WHERE device_id=?', row.device_id)[0];
+      const previous = sessionAudit(ctx, rows(ctx, 'SELECT * FROM relay_owner_sessions WHERE device_id=?', row.device_id)[0]);
       if (row.approved_ms !== null) {
         if (!previous || previous.revoked_ms !== null || previous.expires_ms <= now) fail(409, 'Pairing was already used and the device is unavailable');
         return {approved: true, device: shortDevice(previous), access_days: 365};
@@ -239,11 +264,11 @@ export async function relayOwnerRpc(ctx, env, principal, name, args, enqueueOwne
       if (rows(ctx, 'SELECT COUNT(*) AS n FROM relay_owner_sessions WHERE principal=? AND revoked_ms IS NULL AND expires_ms>?', RELAY_OWNER, now)[0].n >= MAX_DEVICES) fail(429, 'Owner device limit reached');
       // The session lifetime is independent of the short-lived MCP grant. The
       // approving grant is audit provenance, not a silent 30-day device limit.
-      ctx.storage.sql.exec('INSERT INTO relay_owner_sessions VALUES(?,?,?,?,?,?,?,?,?)', row.device_id, row.token_hash, RELAY_OWNER, row.label, now, now, now + RELAY_OWNER_SESSION_MS, null, principal.grantId);
+      ctx.storage.sql.exec('INSERT INTO relay_owner_sessions(device_id,token_hash,principal,label,created_ms,last_seen_ms,expires_ms,revoked_ms,approval_grant_id) VALUES(?,?,?,?,?,?,?,?,?)', row.device_id, row.token_hash, RELAY_OWNER, row.label, now, now, now + RELAY_OWNER_SESSION_MS, null, principal.grantId);
       ctx.storage.sql.exec('UPDATE relay_owner_pairings SET approved_ms=?,approval_grant_id=? WHERE request_id=? AND approved_ms IS NULL', now, principal.grantId, row.request_id);
-      return {approved: true, device: shortDevice(rows(ctx, 'SELECT * FROM relay_owner_sessions WHERE device_id=?', row.device_id)[0]), access_days: 365};
+      return {approved: true, device: shortDevice(sessionAudit(ctx, rows(ctx, 'SELECT * FROM relay_owner_sessions WHERE device_id=?', row.device_id)[0])), access_days: 365};
     }
-    if (name === 'relay_owner_devices_list') return {devices: rows(ctx, 'SELECT * FROM relay_owner_sessions WHERE principal=? ORDER BY created_ms,device_id', RELAY_OWNER).map(row => device(row))};
+    if (name === 'relay_owner_devices_list') return {devices: rows(ctx, 'SELECT * FROM relay_owner_sessions WHERE principal=? ORDER BY created_ms,device_id', RELAY_OWNER).map(row => device(sessionAudit(ctx, row)))};
     if (name === 'relay_owner_device_revoke') return revokeDevice(ctx, args.device_id, now);
     if (name === 'relay_owner_list_pending') return {inbox_id: RELAY_OWNER_INBOX, ...listMessages(ctx, args.cursor, args.limit, true), visibility: 'private'};
     const data = conversation(ctx, args.message_id);
@@ -273,7 +298,8 @@ export async function relayOwnerPublic(request, env) {
   if (!relayOwnerEnabled(env)) return wrap(json({error: 'Owner Relay is not activated', code: 'owner_not_enabled'}, 503));
   if (request.method === 'OPTIONS') return wrap(new Response(null, {status: 204, headers: {'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Access-Control-Allow-Headers': 'Authorization, Content-Type', 'Access-Control-Max-Age': '600', 'Cache-Control': 'no-store'}}));
   try {
-    const routes = {'/pair/start': ['POST', 'pair_start'], '/pair/status': ['POST', 'pair_status'], '/session': ['GET', 'session'], '/messages': [request.method === 'POST' ? 'POST' : 'GET', request.method === 'POST' ? 'message' : 'messages_list'], '/conversation': ['GET', 'conversation'], '/devices': ['GET', 'devices_list'], '/devices/revoke': ['POST', 'device_revoke']};
+    const routes = {'/pair/start': ['POST', 'pair_start'], '/pair/status': ['POST', 'pair_status'], '/session': ['GET', 'session'], '/messages': [request.method === 'POST' ? 'POST' : 'GET', request.method === 'POST' ? 'message' : 'messages_list'], '/conversation': ['GET', 'conversation'], '/devices': ['GET', 'devices_list'], '/devices/revoke': ['POST', 'device_revoke'],
+      '/credentials': [request.method === 'POST' ? 'POST' : 'GET', request.method === 'POST' ? 'credentials_save' : 'credentials_status'], '/credentials/prepare': ['POST', 'credentials_prepare'], '/login': ['POST', 'password_login']};
     const suffix = path.slice('/relay/owner'.length), route = Object.hasOwn(routes, suffix) ? routes[suffix] : null;
     if (!route) return wrap(json({error: 'Not found'}, 404));
     if (request.method !== route[0]) return wrap(json({error: 'Method not allowed'}, 405, {Allow: route[0] + ', OPTIONS'}));
@@ -282,13 +308,14 @@ export async function relayOwnerPublic(request, env) {
     let body = {};
     if (request.method === 'POST') {
       if (!origin) fail(403, 'Owner request origin required');
-      if (!request.headers.get('Content-Type')?.startsWith('application/json')) return wrap(json({error: 'Expected JSON'}, 415));
+      if (request.headers.get('Content-Type')?.split(';')[0].trim().toLowerCase() !== 'application/json') return wrap(json({error: 'Expected JSON'}, 415));
       try { body = JSON.parse(await boundedText(request, 16000)); } catch { fail(400, 'Invalid owner JSON'); }
     }
-    const inputFields = {pair_start: ['label'], pair_status: ['request_id'], message: ['id', 'body'], device_revoke: ['device_id']};
-    fields(body, inputFields[route[1]] || [], inputFields[route[1]] || []);
+    const inputFields = {pair_start: ['label'], pair_status: ['request_id'], message: ['id', 'body'], device_revoke: ['device_id'],
+      credentials_prepare: ['purpose'], credentials_save: ['username', 'password', 'password_confirmation', 'current_password', 'consent_token', 'confirm', 'access_days', 'preserve_existing_sessions'], password_login: ['username', 'password', 'label', 'replace_device_id', 'confirm_replacement']};
+    fields(body, inputFields[route[1]] || [], (inputFields[route[1]] || []).filter(k => !['current_password', 'replace_device_id', 'confirm_replacement'].includes(k)));
     const input = {op: route[1], ...body};
-    if (route[1] === 'pair_start') input.rate_hash = await hash('owner-pair-ip:' + (request.headers.get('CF-Connecting-IP') || 'unknown'));
+    if (['pair_start', 'password_login'].includes(route[1])) input.rate_hash = await hash('owner-' + route[1] + '-ip:' + (request.headers.get('CF-Connecting-IP') || 'unknown'));
     else {
       const token = request.headers.get('Authorization')?.match(/^Bearer ([a-f0-9]{64})$/)?.[1];
       if (!token) fail(401, 'Owner device bearer required');

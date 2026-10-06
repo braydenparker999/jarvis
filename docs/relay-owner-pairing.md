@@ -39,7 +39,65 @@ Without Remember, the approved bearer stays in page memory and a reload needs
 new pairing. With Remember, only the opaque bearer and device ID go in the
 separate `jarvis.relay.owner-session.v1` browser key. Private messages, replies,
 drafts and retry bodies remain in page memory and never enter public storage,
-transfer state or the public send queue. Clearing browser data needs re-pairing.
+transfer state or the public send queue. Clearing cookies/site data deletes a
+remembered session. A configured owner password lets the owner sign in again on
+the same Relay page; it does not preserve the deleted browser credential.
+
+## Username and password recovery
+
+An already verified owner phone can open **Account sign-in** inside Relay and
+set its username and password. The owner enters, confirms and submits the
+password privately in that form. There is no default password, and the
+assistant never generates, reads or carries the password through chat or tools.
+Setup needs a short-lived, one-use consent bound to the verified device and
+current credential version, plus an explicit confirmation in the form.
+
+After cookies/site data are cleared, **Connect this phone** offers username and
+password sign-in at the original Relay URL. Successful login creates a separate
+revocable device session with the same 365-day inactivity expiry. Remembering
+the new session requires the existing explicit storage checkbox. Password login
+does not depend on cross-site cookies, another phone, email, GitHub navigation
+or an external CAPTCHA.
+
+The single owner credential has a random 32-byte salt and a native scrypt
+verifier using N=32768, r=8, p=3, a 32-byte output and a 64 MiB memory ceiling.
+This is the [OWASP-listed 32 MiB minimum profile](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html).
+Hashing runs inside the existing
+Durable Object, with per-source admission limits and one concurrent hash to
+bound memory and CPU work. Incorrect and unknown usernames receive the same
+credential error. The username is normalized ASCII; password whitespace and
+Unicode are preserved. Human passwords are never hashed with the fast bearer
+token SHA-256 helper.
+
+The account credential lasts until changed. Changing it requires the current
+password and a new explicit consent; existing phone sessions remain usable
+until expiry or separate revocation. Device controls let the owner revoke them.
+Repeated browser-data deletion can leave forgotten server sessions; when the
+10-device cap is reached, password-verified recovery offers an explicit device
+replacement choice instead of silently revoking another phone or raising the
+cap. No device details are exposed before successful password verification.
+
+Forms clear password values on submit, cancellation, visibility changes and
+navigation. Credentials and private drafts never enter public state, transfer
+data, URLs, MCP outputs, or persistent browser storage. A remembered bearer
+retains the same shared-origin script risk described above. Rate limits bound
+single-source abuse; they cannot guarantee availability against distributed
+attacks on the shared service.
+
+## Connector consent duration
+
+The connector's OAuth family expiry is separate from a phone session. Fresh
+consent defaults to 30 days and offers a clearly disclosed 365-day choice. Only
+the owner's explicit selection and Allow action authorize the longer family.
+Existing grants retain their original expiry and scopes. Access tokens remain
+short-lived, at most one hour; refresh rotates tokens and retains replay
+revocation. The absolute family expiry starts at approval and is not extended
+by use or rotation. Disconnect/revocation can end access sooner.
+
+The longer choice changes only this Relay server's renewal window. ChatGPT may
+require reconnection earlier; it does not guarantee platform retention for a
+year. Password recovery does not grant connector access or change event/task
+permissions. Host event batching remains independent of both login mechanisms.
 
 Persistent browser storage is readable by scripts across the entire Azure
 website origin; it is not an HttpOnly cookie or an isolated vault. An XSS or

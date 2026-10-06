@@ -164,3 +164,13 @@ body.launcher-page::before {
 .relay-owner-content .relay-owner-device { padding: 16px 0; border-bottom: 1px solid var(--line); }
 .relay-owner-content .relay-owner-device h3 { margin: 0; font-size: 17px; }
 .relay-owner-content .relay-owner-device p { margin: 8px 0; }
+
+
+/* Account credentials are entered only in these owner-private forms. */
+.relay-owner-content .relay-owner-auth-form { display: flex; flex-direction: column; gap: 10px; max-width: 480px; margin: 20px 0 28px; }
+.relay-owner-content .relay-owner-auth-form > label:not(.relay-owner-remember) { display: block; margin-top: 8px; }
+.relay-owner-content .relay-owner-auth-form > input, .relay-owner-content .relay-owner-auth-form > select { width: 100%; min-height: 48px; box-sizing: border-box; font-size: 16px; }
+.relay-owner-content .relay-owner-auth-form .relay-owner-remember { align-items: flex-start; line-height: 1.5; }
+.relay-owner-content .relay-owner-auth-form .relay-owner-remember input { margin-top: 2px; }
+.relay-owner-content .relay-owner-auth-form > button { min-height: 48px; width: 100%; }
+.relay-owner-content .relay-owner-heading > button { min-height: 40px; font-size: 13px; padding: 6px 10px; }

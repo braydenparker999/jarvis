@@ -103,15 +103,17 @@ export class Hub {
     const path=new URL(request.url).pathname;
     if(path==='/internal/relay/oauth')return relayOAuthStore(this.ctx,await request.json());
     if(path==='/internal/relay/owner'){
-      const body=await request.json();
-      // The shared journal can replay both inbox kinds even on a fresh owner-only object.
-      sharedStore(this.ctx,'/internal/shared/state');
-      // Persist wake before the atomic message/event insertion; failed requests
-      // are cleaned up by the ordinary scheduler without a busy loop.
-      if(body.op==='message'&&this.ctx.storage.setAlarm)await this.ctx.storage.setAlarm(Date.now()+100);
-      const response=await relayOwnerStore(this.ctx,this.env,body,enqueueRelayOwnerMessage);
-      if(body.op==='message')await scheduleRelayAlarm(this.ctx);
-      return response;
+      try {
+        const body=await request.json();
+        // The shared journal can replay both inbox kinds even on a fresh owner-only object.
+        sharedStore(this.ctx,'/internal/shared/state');
+        // Persist wake before the atomic message/event insertion; failed requests
+        // are cleaned up by the ordinary scheduler without a busy loop.
+        if(body?.op==='message'&&this.ctx.storage.setAlarm)await this.ctx.storage.setAlarm(Date.now()+100);
+        const response=await relayOwnerStore(this.ctx,this.env,body,enqueueRelayOwnerMessage);
+        if(body?.op==='message')await scheduleRelayAlarm(this.ctx);
+        return response;
+      } catch { return json({error:'Owner Relay storage unavailable'},503); }
     }
     if(path==='/internal/relay/rpc'){
       try{const {principal,rpc}=await request.json();return json({result:await relayRpc(this.ctx,this.env,principal,rpc)});}

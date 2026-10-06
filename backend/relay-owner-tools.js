@@ -8,10 +8,11 @@ const inbox = {inbox_id:{type:'string',const:RELAY_OWNER_INBOX}};
 const nextCursor = {type:['string','null']};
 const entry = object({id,sequence:{type:'integer',minimum:1},body:{type:'string'},role:{type:'string',enum:['user','assistant']},createdAt:timestamp,
   author_authenticated:{type:'boolean',const:true},principal:{type:'string',const:RELAY_OWNER},device_id:id,
-  authentication_source:{type:'string',enum:['owner-device-session','owner-oauth-mcp']},visibility,
+  authentication_source:{type:'string',enum:['owner-device-session','owner-password-session','owner-oauth-mcp']},visibility,
   kind:{type:'string',const:'reply'},replyTo:id},
   ['id','body','role','createdAt','author_authenticated','principal','device_id','authentication_source','visibility']);
 const device = object({id,label:{type:'string'},label_verified:{type:'boolean',const:false},principal:{type:'string',const:RELAY_OWNER},expiresAt:timestamp,
+  authentication_source:{type:'string',enum:['owner-device-session','owner-password-session']},
   createdAt:timestamp,lastSeenAt:timestamp,revokedAt:{type:['string','null']},current:{type:'boolean'}},['id','label','principal','expiresAt']);
 const requests = {request_id:{type:'string',pattern:'^[a-f0-9]{64}$'},code:{type:'string',pattern:'^[A-F0-9]{4}-[A-F0-9]{4}$'}};
 const read = {readOnlyHint:true,destructiveHint:false,openWorldHint:false};

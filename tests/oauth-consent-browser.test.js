@@ -6,7 +6,7 @@ import {fileURLToPath} from 'node:url';
 import {build} from 'esbuild';
 import {chromium} from 'playwright-core';
 import {Miniflare, convertV4MiniflareOptions, Response as FixtureResponse} from 'miniflare';
-import {RELAY_CALLBACK, RELAY_EVENT, RELAY_INBOX, RELAY_SCOPES, RELAY_VERSION} from '../backend/relay-common.js';
+import {RELAY_CALLBACK, RELAY_EVENT, RELAY_INBOX, RELAY_OAUTH_OBJECT, RELAY_SCOPES, RELAY_VERSION} from '../backend/relay-common.js';
 
 const ISSUER = 'https://relay.example.test';
 const CHATGPT = 'https://chatgpt.com';
@@ -35,7 +35,7 @@ test('Relay OAuth navigation uses browser-generated origins and real workerd SQL
   // HTTPS document URLs are fulfilled before any network connection. This does
   // not disable certificate validation, downgrade secure cookies, or use live
   // GitHub/ChatGPT accounts. Workerd's entire outbound service is also a fixture.
-  const bundled = await build({entryPoints: [fileURLToPath(new URL('../backend/worker.js', import.meta.url))], bundle: true, write: false, format: 'esm', platform: 'browser', target: 'es2022'});
+  const bundled = await build({entryPoints: [fileURLToPath(new URL('../backend/worker.js', import.meta.url))], bundle: true, write: false, format: 'esm', platform: 'browser', target: 'es2022', external: ['node:crypto']});
   const upstreamChallenges = new Map(), outbound = [], unexpectedOutbound = [];
   let githubSequence = 0;
   const options = convertV4MiniflareOptions({
@@ -73,6 +73,16 @@ test('Relay OAuth navigation uses browser-generated origins and real workerd SQL
     const {client_id: client} = await dcr.json();
     const authorize = ISSUER + '/relay/oauth/authorize?' + new URLSearchParams({response_type: 'code', client_id: client, redirect_uri: RELAY_CALLBACK, code_challenge_method: 'S256', code_challenge: s256(VERIFIER), resource: RESOURCE, state: STATE, scope: RELAY_SCOPES.join(' ')});
     const exchange = code => mf.dispatchFetch(ISSUER + '/relay/oauth/token', form({grant_type: 'authorization_code', client_id: client, redirect_uri: RELAY_CALLBACK, code, code_verifier: VERIFIER, resource: RESOURCE}));
+    async function storedGrant(tokens) {
+      const namespace = await mf.getDurableObjectNamespace('HUBS', WORKER_NAME);
+      const object = namespace.get(namespace.idFromName(RELAY_OAUTH_OBJECT));
+      const read = async key => (await (await object.fetch('https://internal/internal/relay/oauth', {
+        method: 'POST', body: JSON.stringify({op: 'get', key}),
+      })).json()).value;
+      const token = await read('refresh:' + createHash('sha256').update(tokens.refresh_token).digest('hex'));
+      assert.ok(token, 'real workerd stores the refresh token under its hash');
+      return read('grant:' + token.grantId);
+    }
     async function rpc(method, params, token) {
       return mf.dispatchFetch(RESOURCE, {method: 'POST', headers: {'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', Authorization: 'Bearer ' + token, 'MCP-Protocol-Version': RELAY_VERSION, 'Mcp-Method': method, ...(method === 'tools/call' ? {'Mcp-Name': params.name} : {})}, body: JSON.stringify({jsonrpc: '2.0', id: 1, method, params: {_meta: metadata, ...params}}), redirect: 'manual'});
     }
@@ -172,7 +182,12 @@ test('Relay OAuth navigation uses browser-generated origins and real workerd SQL
               const original = await cdp.send('Network.getRequestPostData', {requestId: event.networkId});
               body = Buffer.from(original.postData);
             }
+            if (url.pathname === '/relay/oauth/approve') {
+              record.refreshDays = new URLSearchParams(body?.toString()).get('refresh_days');
+              record.dispatchedAt = Date.now();
+            }
             const response = await mf.dispatchFetch(request.url, {method: request.method, headers: requestHeaders, body, redirect: 'manual'});
+            if (url.pathname === '/relay/oauth/approve') record.receivedAt = Date.now();
             const headers = Object.fromEntries(response.headers);
             const cookies = response.headers.getSetCookie();
             if (cookies.length) headers['set-cookie'] = cookies.join('\n');
@@ -263,6 +278,11 @@ test('Relay OAuth navigation uses browser-generated origins and real workerd SQL
       if (session.githubCancel) { assert.equal(callback.status, 302); await page.waitForURL(RELAY_CALLBACK + '**'); return; }
       assert.equal(callback.status, 200);
       await page.getByRole('button', {name: 'Allow this connection', exact: true}).waitFor();
+      assert.equal(await page.locator('input[name="refresh_days"][value="30"]').isChecked(), true, 'every fresh consent starts with thirty days');
+      assert.equal(await page.locator('input[name="refresh_days"][value="365"]').isChecked(), false, 'one-year access requires a fresh explicit selection');
+      assert.match(await page.locator('fieldset').innerText(), /365 days from this approval/);
+      assert.match(await page.locator('fieldset').innerText(), /stolen refresh token/);
+      assert.match(await page.locator('fieldset').innerText(), /does not guarantee/);
       const [consentCookie] = (await context.cookies(ISSUER)).filter(c => c.name === COOKIE);
       assert.notEqual(consentCookie.value, session.loginCookie, 'consent rotates the owner-login cookie');
       assert.equal(consentCookie.secure, true);
@@ -352,6 +372,10 @@ test('Relay OAuth navigation uses browser-generated origins and real workerd SQL
         assert.equal(tokens.token_type, 'Bearer');
         assert.equal(tokens.scope, RELAY_SCOPES.join(' '));
         assert.equal(tokens.expires_in, 3600);
+        const grant = await storedGrant(tokens), approval = session.records.findLast(record => record.path === '/relay/oauth/approve');
+        assert.equal(approval.refreshDays, '30', 'the browser sends the default selection');
+        assert.equal(grant.consentDurationDays, 30);
+        assert.ok(grant.expiresAt >= approval.dispatchedAt + 30 * 86400000 && grant.expiresAt <= approval.receivedAt + 30 * 86400000);
         assert.match(tokens.access_token, /^[a-f0-9]{64}$/);
         assert.match(tokens.refresh_token, /^[a-f0-9]{64}$/);
         const replay = await exchange(code);
@@ -409,6 +433,28 @@ test('Relay OAuth navigation uses browser-generated origins and real workerd SQL
         const callback = await complete(retry);
         assert.equal((await exchange(callback.searchParams.get('code'))).status, 200, 'same registered ChatGPT client survives a cancelled first login');
       } catch (error) { retry.failure = error; throw error; } finally { await close(retry); }
+    });
+
+    await t.test('explicit 365-day browser selection reaches ChatGPT and retains one-hour access tokens', async () => {
+      const session = await open();
+      try {
+        await begin(session);
+        await session.page.getByRole('radio', {name: '365 days', exact: true}).check();
+        assert.equal(await session.page.locator('input[name="refresh_days"][value="30"]').isChecked(), false);
+        const callback = await complete(session);
+        const response = await exchange(callback.searchParams.get('code'));
+        assert.equal(response.status, 200);
+        const tokens = await response.json();
+        assert.equal(tokens.scope, RELAY_SCOPES.join(' '));
+        assert.equal(tokens.expires_in, 3600);
+        const approval = session.records.findLast(record => record.path === '/relay/oauth/approve');
+        assert.equal(approval.headers.origin, ISSUER);
+        assert.equal(approval.refreshDays, '365', 'the browser sends the explicitly selected year');
+        const grant = await storedGrant(tokens);
+        assert.equal(grant.consentDurationDays, 365);
+        assert.ok(grant.expiresAt >= approval.dispatchedAt + 365 * 86400000 && grant.expiresAt <= approval.receivedAt + 365 * 86400000);
+        t.diagnostic('Explicit year consent: actual radio selection, same-origin browser POST, exact ChatGPT callback, unchanged scopes and one-hour access');
+      } catch (error) { session.failure = error; throw error; } finally { await close(session); }
     });
 
     await t.test('upstream GitHub cancellation returns access_denied without token exchange', async () => {
