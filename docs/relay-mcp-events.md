@@ -53,7 +53,11 @@ Public visitor message text cannot authorize account actions or private-data
 disclosure. Every event and read result marks visitor identity as unauthenticated.
 Replies are public.
 
-OAuth access tokens last one hour; refresh families last 30 days. Both are opaque
+OAuth access tokens last at most one hour; fresh consent defaults to a 30-day
+refresh family and offers an explicit, disclosed 365-day choice. Existing grants
+retain their original expiry and scope. Rotation never extends the absolute
+expiry selected at approval. ChatGPT may require reconnection earlier, so this
+server-controlled window does not guarantee platform retention. Both tokens are opaque
 random values whose IDs are hashed in storage. Refresh is atomic, rotates both
 tokens, and detects reuse for the family lifetime. Revocation is checked on every
 MCP request, before write commits, and before each webhook delivery. Refresh-token
@@ -66,7 +70,8 @@ records; identical public instances of this fixed ChatGPT registration atomicall
 reuse a surviving identity, so new unauthenticated registrations cannot fill a
 permanent pool. Per-consent grants, codes, PKCE and token families remain separate.
 Login, consent and authorization-code sessions still expire in ten minutes, and
-access/refresh grant lifetimes are unchanged.
+the access token remains short-lived and client registration does not extend any
+existing grant.
 
 This preserves ChatGPT's documented one-registration-per-connection reuse:
 [OpenAI client registration requirements](https://developers.openai.com/plugins/build/auth#client-registration).

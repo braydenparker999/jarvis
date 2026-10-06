@@ -21,7 +21,14 @@ export class OwnerApiError extends Error {
       unavailable: 'The owner service is temporarily unavailable. Retry later.',
       disabled: 'Owner pairing is not enabled on this Relay service yet. Public chat remains available.',
       conflict: 'This message could not be accepted. Your text is still here.',
-      rejected: 'The owner service could not complete this action. Retry later.'
+      rejected: 'The owner service could not complete this action. Retry later.',
+      login_failed: 'The username or password could not be verified. Check them and try again.',
+      rate_limited: 'Too many attempts. Wait a while before trying again.',
+      credential_conflict: 'Account sign-in changed while this form was open. Open a fresh form and retry.',
+      consent_required: 'This account sign-in form has expired. Open a fresh form and confirm again.',
+      cancelled: 'This sign-in attempt was closed.',
+      device_unavailable: 'The selected device session is no longer available. Sign in again to refresh the choices.',
+      device_limit: 'Ten device sessions are already active. Re-enter your account credentials and explicitly choose one session to replace.'
     };
     super(messages[kind] || messages.rejected);
     this.name = 'OwnerApiError';
@@ -32,7 +39,7 @@ export class OwnerApiError extends Error {
 
 export function createRelayOwnerApi({ fetcher = globalThis.fetch, origin = API_ORIGIN, storage } = {}) {
   if (storage === undefined) { try { storage = globalThis.localStorage; } catch {} }
-  let credential = null, pending = null, remember = false, storageWarning = '';
+  let credential = null, pending = null, remember = false, storageWarning = '', authenticationEpoch = 0;
   function readStored() {
     try {
       const saved = JSON.parse(storage?.getItem(OWNER_SESSION_KEY) || 'null');
@@ -74,15 +81,38 @@ export function createRelayOwnerApi({ fetcher = globalThis.fetch, origin = API_O
     if (!response.ok) {
       // Never surface raw server error text, response bodies, URLs or credentials.
       const reported = data?.code || data?.error;
-      const unauthenticated = response.status === 401 || (response.status === 403 && ['session_expired', 'session_revoked', 'invalid_session'].includes(reported));
+      if (reported === 'device_limit' && response.status === 429 && path === '/relay/owner/login') {
+        if (!Array.isArray(data.devices) || data.devices.length < 1 || data.devices.length > 10
+          || data.devices.some(d => !identifier(d.id) || typeof d.label !== 'string' || d.label.length > 80
+            || !Number.isFinite(Date.parse(d.lastSeenAt)) || !Number.isFinite(Date.parse(d.expiresAt)))
+          || new Set(data.devices.map(d => d.id)).size !== data.devices.length) throw new OwnerApiError('invalid');
+        const error = new OwnerApiError('device_limit', response.status);
+        error.devices = data.devices.map(d => ({ id: d.id, label: d.label, lastSeenAt: d.lastSeenAt, expiresAt: d.expiresAt }));
+        throw error;
+      }
+      const unauthenticated = (response.status === 401 && reported !== 'invalid_credentials') || (response.status === 403 && ['session_expired', 'session_revoked', 'invalid_session'].includes(reported));
       if (unauthenticated && token) clearCredential(token);
-      const kind = unauthenticated
+      const kind = reported === 'invalid_credentials' ? 'login_failed'
+        : response.status === 429 ? 'rate_limited'
+        : reported === 'device_unavailable' ? 'device_unavailable'
+        : reported === 'credential_conflict' ? 'credential_conflict'
+        : reported === 'consent_required' ? 'consent_required'
+        : unauthenticated
         ? reported === 'session_expired' ? 'expired' : reported === 'session_revoked' ? 'revoked' : 'unauthorized'
         : reported === 'owner_not_enabled' ? 'disabled' : response.status >= 500 ? 'unavailable' : response.status === 409 ? 'conflict' : 'rejected';
       throw new OwnerApiError(kind, response.status);
     }
     if (!data || typeof data !== 'object') throw new OwnerApiError('invalid');
     return data;
+  }
+  function validateAccountPolicy(data) {
+    if (data.access_days !== 365 || data.preserve_existing_sessions !== true
+      || data.policy?.min_password_length !== 16 || data.policy?.max_password_length !== 128
+      || data.policy?.max_password_bytes !== 256 || data.policy?.username_pattern !== '[a-z0-9][a-z0-9._-]{2,31}') throw new OwnerApiError('invalid');
+  }
+  function validateAccountStatus(data) {
+    validateAccountPolicy(data);
+    if (typeof data.configured !== 'boolean' || (data.configured && (typeof data.username !== 'string' || !/^[a-z0-9][a-z0-9._-]{2,31}$/.test(data.username)))) throw new OwnerApiError('invalid');
   }
   const authenticated = (path, body) => {
     if (!credential) throw new OwnerApiError('unauthorized');
@@ -92,7 +122,42 @@ export function createRelayOwnerApi({ fetcher = globalThis.fetch, origin = API_O
     get hasCredential() { return !!credential; },
     get deviceId() { return credential?.device_id || null; },
     get storageWarning() { return storageWarning; },
-    refreshStoredCredential() { pending = null; credential = readStored(); return !!credential; },
+    refreshStoredCredential() { ++authenticationEpoch; pending = null; credential = readStored(); return !!credential; },
+    cancelAuthentication() { ++authenticationEpoch; },
+    async login(username, password, label, { remember: approvedPersistence = false, replaceDeviceId, confirmReplacement } = {}) {
+      const epoch = ++authenticationEpoch;
+      if ((replaceDeviceId !== undefined || confirmReplacement !== undefined) && (!identifier(replaceDeviceId) || confirmReplacement !== true)) throw new OwnerApiError('invalid');
+      const data = await call('/relay/owner/login', { body: { username, password, label,
+        ...(replaceDeviceId === undefined ? {} : { replace_device_id: replaceDeviceId, confirm_replacement: true }) } });
+      if (epoch !== authenticationEpoch) throw new OwnerApiError('cancelled');
+      const device = deviceFrom(data);
+      if (data.status !== 'approved' || !opaque(data.device_token) || data.access_days !== 365) throw new OwnerApiError('invalid');
+      pending = null; remember = approvedPersistence === true; storageWarning = '';
+      const previousToken = credential?.device_token;
+      if (previousToken) clearCredential(previousToken);
+      credential = { device_token: data.device_token, device_id: device.id };
+      persist();
+      return { status: data.status, device, access_days: data.access_days };
+    },
+    async credentials() {
+      const data = await authenticated('/relay/owner/credentials');
+      validateAccountStatus(data);
+      return data;
+    },
+    async prepareCredentials(purpose) {
+      if (!['setup', 'change'].includes(purpose)) throw new OwnerApiError('invalid');
+      const data = await authenticated('/relay/owner/credentials/prepare', { purpose });
+      if (!opaque(data.consent_token) || data.purpose !== purpose || !Number.isFinite(Date.parse(data.expires_at))) throw new OwnerApiError('invalid');
+      validateAccountPolicy(data);
+      return data;
+    },
+    async saveCredentials({ username, password, password_confirmation, consent_token, current_password }) {
+      const data = await authenticated('/relay/owner/credentials', { username, password, password_confirmation, consent_token,
+        confirm: true, access_days: 365, preserve_existing_sessions: true,
+        ...(current_password === undefined ? {} : { current_password }) });
+      validateAccountStatus(data);
+      return data;
+    },
     async startPairing(label, { remember: approvedPersistence = false } = {}) {
       const data = await call('/relay/owner/pair/start', { body: { label } });
       if (!identifier(data.request_id) || !opaque(data.device_token) || typeof data.code !== 'string'

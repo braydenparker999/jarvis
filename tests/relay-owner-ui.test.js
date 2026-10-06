@@ -14,6 +14,8 @@ const tokenA = 'a'.repeat(64), tokenB = 'b'.repeat(64), requestId = 'c'.repeat(6
 const idA = '11111111-1111-4111-8111-111111111111', idB = '22222222-2222-4222-8222-222222222222';
 const device = { id: idA, label: 'My phone', principal: 'github:183016859', expiresAt: '2027-10-05T12:00:00Z' };
 const privateMessage = { id: '33333333-3333-4333-8333-333333333333', body: 'Private text', role: 'user', createdAt: '2026-10-05T12:00:00Z', visibility: 'private', author_authenticated: true, principal: device.principal };
+const accountPolicy = { access_days: 365, preserve_existing_sessions: true, policy: { min_password_length: 16, max_password_length: 128, max_password_bytes: 256, username_pattern: '[a-z0-9][a-z0-9._-]{2,31}' } };
+const mockedPassword = 'Fixture-password-only-243619';
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 // Normalize the trailing slash supplied by fileURLToPath before prefix checks.
 const browserFixtureRoot = resolve(fileURLToPath(new URL('../public/', import.meta.url)));
@@ -35,16 +37,27 @@ function storage(initial = {}) {
   return { values, writes, getItem: key => values.get(key) || null, setItem: (key, value) => { writes.push([key, value]); values.set(key, value); }, removeItem: key => { values.delete(key); } };
 }
 function fixture({ store = storage(), token = tokenA, deviceId = idA, remember = false } = {}) {
-  const calls = [], state = { pairing: 'pending', error: null, sent: [], messages: [], revoked: false };
+  const calls = [], state = { pairing: 'pending', error: null, sent: [], messages: [], revoked: false, account: null, accountWrites: [], consentSequence: 0 };
   const current = { ...device, id: deviceId };
   const fetcher = async (url, options) => {
     calls.push({ url, options });
     if (state.error) { if (state.error instanceof Error) throw state.error; return json(state.error.body, state.error.status); }
     const path = new URL(url).pathname, body = options.body && JSON.parse(options.body);
+    if (path.endsWith('/login')) {
+      if (!state.account || body.username !== state.account.username || body.password !== state.account.password) return json({ code: 'invalid_credentials' }, 401);
+      return json({ status: 'approved', device_token: token, device: current, access_days: 365 }, 201);
+    }
     if (path.endsWith('/pair/start')) return json({ request_id: requestId, code: 'ABCD-EF12', device_token: token, expires_at: '2026-10-05T12:10:00Z' });
     if (path.endsWith('/pair/status')) return json(state.pairing === 'approved' ? { status: 'approved', device: current } : { status: state.pairing });
     if (options.headers.Authorization !== 'Bearer ' + token) return json({ code: 'invalid_session' }, 401);
     if (state.revoked) return json({ code: 'session_revoked' }, 401);
+    if (path.endsWith('/credentials/prepare')) return json({ ...accountPolicy, purpose: body.purpose, consent_token: String(++state.consentSequence).padStart(64, 'c'), expires_at: new Date(Date.now() + 600000).toISOString() });
+    if (path.endsWith('/credentials') && options.method === 'GET') return json({ ...accountPolicy, configured: !!state.account, ...(state.account ? { username: state.account.username } : {}) });
+    if (path.endsWith('/credentials') && options.method === 'POST') {
+      state.accountWrites.push(body);
+      state.account = { username: body.username, password: body.password };
+      return json({ ...accountPolicy, configured: true, username: body.username });
+    }
     if (path.endsWith('/session')) return json({ status: 'approved', device: current });
     if (path.endsWith('/messages') && options.method === 'POST') {
       state.sent.push(body);
@@ -263,7 +276,8 @@ function fakeDocument() {
     contains(node) { return node === this || this.children.some(child => child.contains?.(node)); }
     focus() { doc.activeElement = this; }
   }
-  const doc = { hidden: true, activeElement: null, createElement(tag) { assert.equal(['a', 'iframe'].includes(tag), false, 'Owner UI must be in-page'); return new Node(tag); }, getElementById(id) { return nodes.filter(n => n.isConnected && n.id === id).at(-1); } };
+  const eventHandlers = new Map();
+  const doc = { addEventListener(type, fn) { eventHandlers.set(type, fn); }, removeEventListener(type) { eventHandlers.delete(type); }, dispatch(type) { eventHandlers.get(type)?.(); }, hidden: true, activeElement: null, createElement(tag) { assert.equal(['a', 'iframe'].includes(tag), false, 'Owner UI must be in-page'); return new Node(tag); }, getElementById(id) { return nodes.filter(n => n.isConnected && n.id === id).at(-1); } };
   const root = doc.createElement('main'); return { doc, root, nodes };
 }
 
@@ -403,4 +417,196 @@ test('browser fixture: existing Relay URL, public draft and owner-private isolat
     assert.equal(await page.locator('.relay-owner-content iframe, .relay-owner-content a').count(), 0);
     await context.close();
   } finally { await browser?.close(); await new Promise(resolve => server.close(resolve)); }
+});
+
+
+
+test('password login after cleared storage remembers only an explicitly approved device bearer', async () => {
+  const publicState = JSON.stringify({ composer: 'Public draft', outbox: [] });
+  const f = fixture({ store: storage({ public: publicState }) });
+  f.state.account = { username: 'fixture.owner', password: mockedPassword };
+  const loggedIn = await f.api.login('fixture.owner', mockedPassword, 'Test browser', { remember: true });
+  assert.equal(loggedIn.device.id, idA); assert.equal('device_token' in loggedIn, false);
+  assert.equal(f.api.hasCredential, true);
+  assert.deepEqual(JSON.parse(f.store.getItem(OWNER_SESSION_KEY)), { device_token: tokenA, device_id: idA });
+  assert.equal(f.store.getItem('public'), publicState);
+  assert.deepEqual(f.store.writes.map(([key]) => key), [OWNER_SESSION_KEY]);
+  for (const [_, value] of f.store.writes) {
+    assert.equal(value.includes(mockedPassword), false); assert.equal(value.includes('fixture.owner'), false);
+  }
+  const request = f.calls[0]; assert.equal(request.options.headers.Authorization, undefined);
+  assert.equal(request.options.credentials, 'omit'); assert.equal(request.options.redirect, 'error');
+  assert.equal(request.url.includes(mockedPassword), false); assert.equal(request.url.includes('fixture.owner'), false);
+  for (const remember of [false, 'yes']) {
+    const ephemeral = fixture(); ephemeral.state.account = f.state.account;
+    await ephemeral.api.login('fixture.owner', mockedPassword, 'Test browser', { remember });
+    assert.equal(ephemeral.api.hasCredential, true); assert.equal(ephemeral.store.writes.length, 0);
+  }
+});
+
+test('cancelled or replaced login responses cannot install or persist an obsolete session', async () => {
+  const store = storage(), deliveries = [];
+  const api = createRelayOwnerApi({ storage: store, fetcher: async () => new Promise(resolve => deliveries.push(resolve)) });
+  const first = api.login('fixture.owner', mockedPassword, 'Cancelled browser', { remember: true });
+  api.cancelAuthentication();
+  const second = api.login('fixture.owner', mockedPassword, 'New browser', { remember: true });
+  deliveries[0](json({ status: 'approved', device_token: tokenA, device, access_days: 365 }));
+  await assert.rejects(first, error => error.kind === 'cancelled');
+  assert.equal(api.hasCredential, false); assert.equal(store.writes.length, 0);
+  deliveries[1](json({ status: 'approved', device_token: tokenB, device: { ...device, id: idB }, access_days: 365 }));
+  await second; assert.equal(api.deviceId, idB);
+  assert.deepEqual(JSON.parse(store.getItem(OWNER_SESSION_KEY)), { device_token: tokenB, device_id: idB });
+});
+
+test('bad password and rate limiting use safe errors and preserve an existing verified session', async () => {
+  const f = fixture({ remember: true }); await f.pair();
+  for (const [status, code, kind] of [[401, 'invalid_credentials', 'login_failed'], [429, 'rate_limited', 'rate_limited']]) {
+    f.state.error = { status, body: { code, error: mockedPassword } };
+    await assert.rejects(() => f.api.login('fixture.owner', mockedPassword, 'Phone'), error => error.kind === kind && !error.message.includes(mockedPassword));
+    assert.equal(f.api.hasCredential, true); assert.ok(f.store.getItem(OWNER_SESSION_KEY));
+    await assert.rejects(() => f.api.saveCredentials({ username: 'fixture.owner', password: mockedPassword, password_confirmation: mockedPassword, current_password: 'Wrong current fixture password', consent_token: requestId }), error => error.kind === kind);
+    assert.equal(f.api.hasCredential, true);
+  }
+});
+
+test('credential preparation and saving require a bearer and send explicit narrow consent', async () => {
+  const f = fixture();
+  await assert.rejects(() => f.api.credentials(), error => error.kind === 'unauthorized');
+  await assert.rejects(() => f.api.prepareCredentials('setup'), error => error.kind === 'unauthorized');
+  assert.equal(f.calls.length, 0); await f.pair();
+  assert.equal((await f.api.credentials()).configured, false);
+  const prepared = await f.api.prepareCredentials('setup');
+  const saved = await f.api.saveCredentials({ username: 'fixture.owner', password: mockedPassword, password_confirmation: mockedPassword, consent_token: prepared.consent_token });
+  assert.equal(saved.configured, true); assert.equal(f.state.accountWrites.length, 1);
+  assert.deepEqual(f.state.accountWrites[0], { username: 'fixture.owner', password: mockedPassword, password_confirmation: mockedPassword, consent_token: prepared.consent_token, confirm: true, access_days: 365, preserve_existing_sessions: true });
+  for (const call of f.calls.filter(call => call.url.includes('/credentials'))) assert.equal(call.options.headers.Authorization, 'Bearer ' + tokenA);
+  assert.equal(f.store.writes.length, 0);
+});
+
+test('controller account setup requires explicit consent, preserves sessions and never holds password drafts', async () => {
+  const f = fixture({ remember: true }); await f.pair();
+  const controller = createRelayOwnerController({ api: f.api }); await controller.refresh();
+  controller.setDraft('Private owner draft'); await controller.showAccount();
+  assert.equal(controller.mode, 'account'); assert.equal(controller.snapshot().accountReady, true);
+  const fields = { username: 'fixture.owner', password: mockedPassword, confirmation: mockedPassword, consent: false };
+  await controller.saveCredentials(fields); assert.equal(f.state.accountWrites.length, 0);
+  assert.match(controller.snapshot().error, /Confirm/);
+  await controller.saveCredentials({ ...fields, consent: true });
+  assert.equal(f.state.accountWrites.length, 1); assert.equal(controller.hasCredential, true);
+  assert.equal(controller.snapshot().draft, 'Private owner draft');
+  assert.match(controller.snapshot().accountNotice, /saved/);
+  const snapshot = JSON.stringify(controller.snapshot());
+  assert.equal(snapshot.includes(mockedPassword), false); assert.equal(snapshot.includes('consent_token'), false);
+  assert.equal([...f.store.values.values()].some(value => value.includes('fixture.owner') || value.includes(mockedPassword)), false);
+  await controller.showAccount(); assert.equal(controller.snapshot().account.configured, true);
+  await controller.saveCredentials({ username: 'fixture.owner', password: mockedPassword + 'new', confirmation: mockedPassword + 'new', currentPassword: mockedPassword, consent: true });
+  assert.equal(f.state.accountWrites[1].current_password, mockedPassword);
+  assert.notEqual(f.state.accountWrites[0].consent_token, f.state.accountWrites[1].consent_token);
+});
+
+test('closing account preparation or saving ignores late responses and repeated submit sends once', async () => {
+  const f = fixture(); await f.pair();
+  const controller = createRelayOwnerController({ api: f.api }); await controller.refresh();
+  const originalPrepare = f.api.prepareCredentials; let prepareRelease;
+  f.api.prepareCredentials = () => new Promise(resolve => { prepareRelease = resolve; });
+  const opening = controller.showAccount();
+  while (!prepareRelease) await new Promise(resolve => setImmediate(resolve));
+  controller.showOwner(); prepareRelease({ consent_token: requestId }); await opening;
+  assert.equal(controller.mode, 'owner'); assert.equal(controller.snapshot().accountReady, false);
+  f.api.prepareCredentials = originalPrepare; await controller.showAccount();
+  let saveRelease, writes = 0;
+  f.api.saveCredentials = () => { ++writes; return new Promise(resolve => { saveRelease = resolve; }); };
+  const fields = { username: 'fixture.owner', password: mockedPassword, confirmation: mockedPassword, consent: true };
+  const saving = controller.saveCredentials(fields); await controller.saveCredentials(fields);
+  assert.equal(writes, 1); controller.showPublic();
+  saveRelease({ configured: true, username: 'fixture.owner' }); await saving;
+  assert.equal(controller.mode, 'public'); assert.equal(controller.snapshot().accountNotice, '');
+});
+
+test('actual account renderer clears username and password fields on submit, cancel, hide and unmount', async () => {
+  const f = fixture(); await f.pair(); const { doc, root } = fakeDocument(); doc.hidden = false;
+  const controller = createRelayOwnerController({ api: f.api }); await controller.refresh();
+  const ui = createRelayOwnerUI({ controller, document: doc }); ui.mount(root);
+  try {
+    await controller.showAccount();
+    const form = doc.getElementById('relay-owner-credentials-form');
+    const username = doc.getElementById('relay-owner-account-username'), password = doc.getElementById('relay-owner-new-password'), confirm = doc.getElementById('relay-owner-confirm-password'), consent = doc.getElementById('relay-owner-credentials-consent');
+    username.value = 'fixture.owner'; password.value = mockedPassword; confirm.value = mockedPassword; consent.checked = true;
+    form.onsubmit({ preventDefault() {} });
+    assert.equal(username.value, ''); assert.equal(password.value, ''); assert.equal(confirm.value, ''); assert.equal(consent.checked, false);
+    while (controller.snapshot().busy) await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.state.accountWrites.length, 1); await controller.showAccount();
+    const current = doc.getElementById('relay-owner-current-password'), replacement = doc.getElementById('relay-owner-new-password');
+    current.value = mockedPassword; replacement.value = mockedPassword + 'new';
+    doc.hidden = true; doc.dispatch('visibilitychange');
+    assert.equal(current.value, ''); assert.equal(replacement.value, ''); assert.equal(controller.snapshot().accountReady, false);
+    doc.hidden = false; await controller.showAccount();
+    const cancelled = doc.getElementById('relay-owner-new-password'); cancelled.value = mockedPassword;
+    controller.showOwner(); assert.equal(cancelled.value, '');
+    await controller.showAccount(); const closed = doc.getElementById('relay-owner-new-password'); closed.value = mockedPassword;
+    ui.unmount(); assert.equal(closed.value, ''); assert.equal(controller.snapshot().accountReady, false);
+  } finally { ui.dispose(); }
+});
+
+test('actual login renderer clears secrets and cancellation blocks a late remembered login', async () => {
+  const f = fixture(), { doc, root } = fakeDocument(); doc.hidden = false;
+  let release; f.api.login = () => new Promise(resolve => { release = resolve; });
+  const controller = createRelayOwnerController({ api: f.api }), ui = createRelayOwnerUI({ controller, document: doc });
+  controller.connect(); ui.mount(root);
+  try {
+    const username = doc.getElementById('relay-owner-login-username'), password = doc.getElementById('relay-owner-login-password');
+    username.value = 'fixture.owner'; password.value = mockedPassword;
+    doc.getElementById('relay-owner-login-form').onsubmit({ preventDefault() {} });
+    assert.equal(username.value, ''); assert.equal(password.value, '');
+    controller.showPublic(); release({ status: 'approved', device });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(controller.mode, 'public'); assert.equal(controller.hasCredential, false); assert.equal(f.store.writes.length, 0);
+  } finally { ui.dispose(); }
+});
+
+
+test('device-cap recovery displays only sanitized verified metadata and requires fresh explicit replacement consent', async () => {
+  const f = fixture(), { doc, root } = fakeDocument(); doc.hidden = false;
+  const capped = { ...device, lastSeenAt: '2026-10-05T12:00:00Z', device_token: tokenB, password: mockedPassword };
+  f.state.error = { status: 429, body: { code: 'device_limit', devices: [capped], device_token: tokenA } };
+  const controller = createRelayOwnerController({ api: f.api }), ui = createRelayOwnerUI({ controller, document: doc }); controller.connect(); ui.mount(root);
+  try {
+    const username = doc.getElementById('relay-owner-login-username'), password = doc.getElementById('relay-owner-login-password');
+    username.value = 'fixture.owner'; password.value = 'First-password-not-retained';
+    doc.getElementById('relay-owner-login-form').onsubmit({ preventDefault() {} });
+    while (controller.snapshot().busy) await new Promise(resolve => setImmediate(resolve));
+    assert.equal(username.value, ''); assert.equal(password.value, ''); assert.equal(controller.hasCredential, false);
+    assert.deepEqual(controller.snapshot().loginDevices, [{ id: idA, label: device.label, lastSeenAt: capped.lastSeenAt, expiresAt: device.expiresAt }]);
+    assert.equal(doc.getElementById('relay-owner-login-username').value, ''); assert.equal(doc.getElementById('relay-owner-login-password').value, '');
+    const select = doc.getElementById('relay-owner-replace-device'), consent = doc.getElementById('relay-owner-replacement-consent');
+    assert.equal(select.value, ''); assert.equal(consent.checked, false);
+    await controller.login('fixture.owner', mockedPassword, 'Replacement', true, { deviceId: idA, confirmed: false });
+    assert.equal(f.calls.length, 1); assert.match(controller.snapshot().error, /confirm its replacement/);
+    f.state.error = null; f.state.account = { username: 'fixture.owner', password: mockedPassword };
+    doc.getElementById('relay-owner-login-username').value = 'fixture.owner'; doc.getElementById('relay-owner-login-password').value = mockedPassword;
+    doc.getElementById('relay-owner-replace-device').value = idA; doc.getElementById('relay-owner-replacement-consent').checked = true;
+    doc.getElementById('relay-owner-login-remember').checked = true;
+    doc.getElementById('relay-owner-login-form').onsubmit({ preventDefault() {} });
+    while (controller.snapshot().busy) await new Promise(resolve => setImmediate(resolve));
+    assert.equal(controller.mode, 'owner');
+    const requests = f.calls.filter(call => call.url.endsWith('/login')).map(call => JSON.parse(call.options.body));
+    assert.equal(requests.length, 2); assert.equal(requests[1].password, mockedPassword);
+    assert.equal(requests[1].replace_device_id, idA); assert.equal(requests[1].confirm_replacement, true);
+    assert.equal(JSON.stringify(controller.snapshot()).includes('First-password-not-retained'), false);
+    assert.equal(f.store.writes.length, 1); assert.equal(f.store.writes[0][1].includes(mockedPassword), false);
+  } finally { ui.dispose(); }
+});
+
+test('cancel or hidden-page dismissal forgets a device-cap replacement list without revoking anything', async () => {
+  const f = fixture(), { doc, root } = fakeDocument(); doc.hidden = false;
+  f.state.error = { status: 429, body: { code: 'device_limit', devices: [{ ...device, lastSeenAt: '2026-10-05T12:00:00Z' }] } };
+  const controller = createRelayOwnerController({ api: f.api }), ui = createRelayOwnerUI({ controller, document: doc }); controller.connect(); ui.mount(root);
+  try {
+    await controller.login('fixture.owner', mockedPassword, 'Phone'); assert.equal(controller.snapshot().loginDevices.length, 1);
+    const password = doc.getElementById('relay-owner-login-password'); password.value = mockedPassword;
+    doc.hidden = true; doc.dispatch('visibilitychange');
+    assert.equal(password.value, ''); assert.deepEqual(controller.snapshot().loginDevices, []); assert.equal(f.state.revoked, false);
+    doc.hidden = false; await controller.login('fixture.owner', mockedPassword, 'Phone'); controller.showPublic();
+    assert.deepEqual(controller.snapshot().loginDevices, []); assert.equal(f.state.revoked, false); assert.equal(f.store.writes.length, 0);
+  } finally { ui.dispose(); }
 });
