@@ -132,7 +132,7 @@ test('launcher entry, folder config and page security policy are in place', asyn
   assert.ok(!/unsafe-inline/.test(csp));
   const html = await readFile(new URL('../public/mymedia/index.html', import.meta.url), 'utf8');
   assert.ok(!/\sstyle=/.test(html), 'no inline styles under this CSP');
-  assert.match(html, /mymedia-release" content="0\.36\.0"/);
+  assert.match(html, /mymedia-release" content="0\.37\.0"/);
   assert.match(html, /id="toggle-folders"/);
   const app = await readFile(new URL('../public/mymedia/app.js', import.meta.url), 'utf8');
   const css = await readFile(new URL('../public/mymedia/mymedia.css', import.meta.url), 'utf8');
