@@ -166,7 +166,9 @@ export async function relayOAuth(request, env, fetcher = fetch) {
       const code = random(), grantId = random();
       processingFailure = 'consent_grant_processing_failed';
       const stored = await registry(env, {op: 'authorize', grantId, codeKey: 'code:' + await hash(code), params: consent.p, resource});
-      if (stored.error) return err('temporarily_unavailable', 503, 'consent_grant_capacity_unavailable');
+      if (stored.error) return stored.error === 'Client expired'
+        ? err('invalid_request', 400, 'consent_client_not_registered')
+        : err('temporarily_unavailable', 503, 'consent_grant_capacity_unavailable');
       return oauthRedirect(consent.p, env, {code});
     }
     if (path === '/relay/oauth/token' && request.method === 'POST') {
@@ -251,14 +253,56 @@ export function relayOAuthStore(ctx, b, now = Date.now()) {
       remove(b.key); return json({value});
     }
     if (b.op === 'authorize') {
-      const grantRows=[...sql.exec("SELECT key,value FROM relay_oauth WHERE category='grant'")];
-      if(grantRows.filter(x=>!JSON.parse(x.value).revoked).length>=10)return json({error:'Registry full'});
-      if(grantRows.length>=100)for(const row of grantRows.filter(x=>JSON.parse(x.value).revoked))remove(row.key);
       const p = b.params, expiration = now + REFRESH_MS;
       const client=get('client:'+p.client_id);
       if(!client)return json({error:'Client expired'});
+      // Legacy Allow stored a thirty-day grant before its ten-minute code was
+      // redeemed. An expired, never-issued consent must not exhaust the ten
+      // usable-family slots. Preserve every row; only omit proven abandoned
+      // families from admission accounting, regardless of client/scope/resource.
+      // Pointer absence alone is not proof: legacy tokens, replay evidence and
+      // event/device approvals may still refer to a pointerless grant.
+      const referenced = new Set();
+      const addReference = id => {
+        if(typeof id!=='string'||!/^[a-f0-9]{64}$/.test(id))return false;
+        referenced.add(id);return true;
+      };
+      for(const row of sql.exec("SELECT value FROM relay_oauth WHERE category IN ('code','access','refresh','used') OR key LIKE 'code:%' OR key LIKE 'access:%' OR key LIKE 'refresh:%' OR key LIKE 'used:%'")){
+        const value = JSON.parse(row.value);
+        // Corrupt live reference rows cannot establish which family is safe to
+        // omit. Deny admission rather than guessing that no family depends on it.
+        if(!isObject(value)||!addReference(value.grantId))return json({error:'Registry full'});
+      }
+      const tables = new Set([...sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('relay_subscriptions','relay_owner_sessions','relay_owner_pairings')")]
+        .map(row => row.name));
+      if(tables.has('relay_subscriptions'))for(const row of sql.exec('SELECT grant_id FROM relay_subscriptions WHERE expires_ms>?',now))if(!addReference(row.grant_id))return json({error:'Registry full'});
+      if(tables.has('relay_owner_sessions'))for(const row of sql.exec('SELECT approval_grant_id FROM relay_owner_sessions WHERE expires_ms>? AND revoked_ms IS NULL',now))if(!addReference(row.approval_grant_id))return json({error:'Registry full'});
+      if(tables.has('relay_owner_pairings'))for(const row of sql.exec('SELECT approval_grant_id FROM relay_owner_pairings WHERE expires_ms>? AND approved_ms IS NOT NULL',now))if(!addReference(row.approval_grant_id))return json({error:'Registry full'});
+      const grantRows=[...sql.exec("SELECT key,category,value,expires_at FROM relay_oauth WHERE category='grant' OR key LIKE 'grant:%'")];
+      const counted = grantRows.filter(row => {
+        const grant = JSON.parse(row.value);
+        if(grant?.revoked===true)return false;
+        // Unknown legacy shapes are not proof of a never-issued consent.
+        let knownResource = false;
+        try{
+          const resource = new URL(grant?.resource);
+          knownResource = resource.protocol==='https:' && !resource.username && !resource.password
+            && grant.resource===resource.origin+'/relay/mcp';
+        }catch{}
+        const knownPending = row.category==='grant' && /^grant:[a-f0-9]{64}$/.test(row.key) && isObject(grant)
+          && grant.revoked===false && grant.principal===RELAY_OWNER
+          && typeof grant.client_id==='string' && /^[a-f0-9]{64}$/.test(grant.client_id) && scopes(grant.scope)
+          && knownResource && Number.isSafeInteger(grant.expiresAt) && grant.expiresAt>now
+          && Number.isSafeInteger(row.expires_at) && row.expires_at>now && row.expires_at<=grant.expiresAt
+          && Object.keys(grant).every(key=>['principal','client_id','scope','resource','expiresAt','revoked'].includes(key));
+        return !knownPending || referenced.has(row.key.slice(6));
+      });
+      if(counted.length>=10)return json({error:'Registry full'});
       const grant = {principal: RELAY_OWNER, client_id: p.client_id, scope: p.scope, resource: b.resource, expiresAt: expiration, revoked: false};
-      store('grant:' + b.grantId, 'grant', grant, expiration);
+      // Pending grants physically expire with the code. Keep the original
+      // absolute lifetime in the value: a valid atomic exchange below promotes
+      // this same family to that expiry, including on an older rollback worker.
+      store('grant:' + b.grantId, 'grant', grant, now + SESSION_MS);
       store(b.codeKey, 'code', {grantId: b.grantId, client_id: p.client_id, redirect_uri: p.redirect_uri, challenge: p.code_challenge, resource: b.resource, scope: p.scope}, now + SESSION_MS);
       return json({ok: true});
     }

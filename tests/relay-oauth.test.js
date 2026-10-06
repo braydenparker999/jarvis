@@ -664,6 +664,37 @@ test('owner authorization has a bounded ten-active-grant capacity', async t => {
   assert.equal(oauthRows(s).filter(row => row.category === 'grant' && !JSON.parse(row.value).revoked).length, 10);
 });
 
+test('ten abandoned legacy Allows release quota at code expiry while retaining the original grants', async t => {
+  const s = fixture(t), codes = [];
+  for (let n = 0; n < 10; n++) codes.push((await ownerCode(s)).code);
+  const ctx = s.object(REGISTRY).ctx;
+  // Reproduce deployed pre-repair storage, where Allow's grant outlives its code.
+  for (const row of oauthRows(s).filter(row => row.category === 'grant')) {
+    ctx.storage.sql.exec('UPDATE relay_oauth SET expires_at=? WHERE key=?', JSON.parse(row.value).expiresAt, row.key);
+  }
+  const prior = oauthRows(s).filter(row => row.category === 'grant');
+  const blocked = await callback(s, await start(s));
+  await expectError(await approve(s, blocked), 'temporarily_unavailable', 503, 'consent_grant_capacity_unavailable');
+  s.now += SESSION_MS;
+  const tokens = await ownerTokens(s, {scope: RELAY_PUBLIC_SCOPES.join(' ')});
+  assert.deepEqual(oauthRows(s).filter(row => prior.some(old => old.key === row.key)), prior,
+    'admission never edits, revokes, widens or reuses abandoned legacy families');
+  assert.equal(oauthRows(s).filter(row => row.category === 'grant').length, 11);
+  for (const code of codes) await expectError(await exchangeCode(s, code), 'invalid_grant');
+  assert.deepEqual((await authenticate(s, tokens.access_token)).scopes, RELAY_PUBLIC_SCOPES);
+});
+
+test('missing registered client at consent has a distinct fixed diagnostic even at capacity', async t => {
+  const s = fixture(t);
+  for (let n = 0; n < 10; n++) await ownerTokens(s);
+  const consent = await callback(s, await start(s));
+  const before = oauthRows(s).filter(row => row.category === 'grant');
+  s.object(REGISTRY).ctx.storage.sql.exec('DELETE FROM relay_oauth WHERE key=?', 'client:' + s.client);
+  const response = await approve(s, consent);
+  await expectError(response, 'invalid_request', 400, 'consent_client_not_registered');
+  assert.deepEqual(oauthRows(s).filter(row => row.category === 'grant'), before);
+});
+
 test('duplicate token parameters and oversized bodies are rejected before state mutation', async t => {
   const s = fixture(t), {code} = await ownerCode(s);
   const init = form({grant_type: 'authorization_code', client_id: s.client, redirect_uri: RELAY_CALLBACK, code, code_verifier: VERIFIER, resource: s.resource});
