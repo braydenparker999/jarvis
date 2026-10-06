@@ -44,7 +44,7 @@ test('owner schemas are discoverable, capability is explicit and old grants neve
   const s=fixture(t),ordinary=await grant(s),owner=await grant(s,RELAY_OWNER_SCOPE);
   const unauth=await s.request('/relay/mcp');assert.match(unauth.headers.get('WWW-Authenticate'),/scope="relay:read relay:reply relay:events"/);assert.doesNotMatch(unauth.headers.get('WWW-Authenticate'),/relay:owner/);
   const publicTools=(await s.rpc(ordinary,'tools/list')).result.tools;
-  assert.equal(publicTools.length,10);
+  assert.equal(publicTools.length,11);
   const ownerTools=publicTools.filter(x=>x.name.startsWith('relay_owner_'));
   assert.equal(ownerTools.length,7);
   for(const tool of ownerTools){
@@ -52,7 +52,7 @@ test('owner schemas are discoverable, capability is explicit and old grants neve
     assert.deepEqual(tool._meta.securitySchemes,tool.securitySchemes);
     assert.ok(tool.inputSchema&&tool.outputSchema);
   }
-  assert.equal((await s.rpc(owner,'tools/list')).result.tools.length,7);
+  assert.equal((await s.rpc(owner,'tools/list')).result.tools.length,8);
   assert.deepEqual((await s.rpc(ordinary,'events/list')).result.events.map(x=>x.name),[RELAY_EVENT]);
   assert.deepEqual((await s.rpc(owner,'events/list')).result.events.map(x=>x.name),[RELAY_OWNER_EVENT]);
   await assert.rejects(relayOwnerRpc(s.ctx,s.env,ordinary,'relay_owner_devices_list',{}),e=>e.code===-32012);
@@ -60,8 +60,8 @@ test('owner schemas are discoverable, capability is explicit and old grants neve
   assert.deepEqual(widened,{});
   const stored=s.rows('SELECT value FROM relay_oauth WHERE key=?','grant:'+ordinary.grantId)[0];assert.equal(JSON.parse(stored.value).scope,ordinary.scopes.join(' '));
   s.env.RELAY_OWNER_ENABLED='false';
-  assert.equal((await s.rpc(owner,'tools/list')).result.tools.length,0);
-  assert.equal((await s.rpc(ordinary,'tools/list')).result.tools.length,3);
+  assert.equal((await s.rpc(owner,'tools/list')).result.tools.length,1);
+  assert.equal((await s.rpc(ordinary,'tools/list')).result.tools.length,4);
   assert.deepEqual((await s.rpc(owner,'events/list')).result.events,[]);
   const disabled=await s.rpc(ordinary,'tools/call',{name:'relay_owner_devices_list',arguments:{}});
   assert.equal(disabled.error.code,-32012);assert.equal(disabled.result,undefined);
@@ -107,7 +107,7 @@ test('old public grants get native owner step-up without private reads or owner 
 test('owner step-up preserves only live verified scopes of a partial public grant',async t=>{
   const s=fixture(t),narrow=await grant(s,'relay:read');
   const catalog=(await s.rpc(narrow,'tools/list')).result.tools;
-  assert.equal(catalog.length,9);assert.ok(!catalog.some(x=>x.name==='relay_reply'));
+  assert.equal(catalog.length,10);assert.ok(!catalog.some(x=>x.name==='relay_reply'));
   assert.deepEqual((await s.rpc(narrow,'events/list')).result.events,[]);
   const rpc={method:'tools/call',params:{_meta:{},name:'relay_owner_devices_list',arguments:{}}};
   // A claimed scope does not count as an existing permission or bypass the
@@ -125,7 +125,7 @@ test('owner step-up preserves only live verified scopes of a partial public gran
 
 test('a newly consented full owner grant retains public tools and owner operations',async t=>{
   const s=fixture(t),owner=await grant(s,RELAY_SCOPES.join(' '));
-  assert.equal((await s.rpc(owner,'tools/list')).result.tools.length,10);
+  assert.equal((await s.rpc(owner,'tools/list')).result.tools.length,11);
   assert.deepEqual((await s.rpc(owner,'events/list')).result.events.map(x=>x.name),[RELAY_EVENT,RELAY_OWNER_EVENT]);
   const devices=await s.rpc(owner,'tools/call',{name:'relay_owner_devices_list',arguments:{}});
   assert.equal(devices.result.isError,false);assert.deepEqual(devices.result.structuredContent,{devices:[]});

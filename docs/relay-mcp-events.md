@@ -90,6 +90,9 @@ Public-client reuse is allowed by
 - `relay_read_conversation`: target, accepted reply, and 25 previous public entries
 - `relay_reply`: atomic one-reply-per-target claim; identical retries succeed and
   conflicting replies preserve the first accepted answer
+- `relay_event_access_status`: read-only scope/event status, discoverable to
+  authenticated connections; missing `relay:events` triggers explicit OAuth
+  consent while preserving only live verified scopes, without subscribing
 - `events/list`, `events/subscribe`, `events/unsubscribe`
 - Event `relay.message.created`, inbox `brayden-relay`, optional literal
   case-insensitive `message_contains` filter applied to the complete message

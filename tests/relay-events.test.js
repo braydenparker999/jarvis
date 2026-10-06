@@ -63,12 +63,12 @@ test('MCP 2.0 discovery, scoped catalogs, header/body version validation and no 
   const s = setup(), auth = await grant(s);
   const discovery = await (await s.rpc('server/discover', {}, auth.access)).json();
   assert.equal(discovery.result.resultType, 'complete'); assert.deepEqual(discovery.result.supportedVersions, [RELAY_VERSION]); assert.ok(discovery.result.capabilities.events);
-  const listed = await (await s.rpc('tools/list', {}, auth.access)).json(); assert.deepEqual(listed.result.tools.map(x => x.name), ['relay_list_pending', 'relay_read_conversation', 'relay_reply']); assert.ok(listed.result.tools.every(x => x.outputSchema && x.securitySchemes));
+  const listed = await (await s.rpc('tools/list', {}, auth.access)).json(); assert.deepEqual(listed.result.tools.map(x => x.name), ['relay_list_pending', 'relay_read_conversation', 'relay_reply', 'relay_event_access_status']); assert.ok(listed.result.tools.every(x => x.outputSchema && x.securitySchemes));
   const events = await (await s.rpc('events/list', {}, auth.access)).json(); assert.equal(events.result.events[0].name, RELAY_EVENT);
   const mismatch = await s.rpc('tools/list', {}, auth.access, {'MCP-Protocol-Version': '2025-03-26'}); assert.equal(mismatch.status, 400); assert.equal((await mismatch.json()).error.code, -32020);
   const header = await s.rpc('tools/call', {name: 'relay_list_pending', arguments: {inbox_id: RELAY_INBOX}}, auth.access, {'Mcp-Name': 'relay_reply'}); assert.equal((await header.json()).error.code, -32020);
   assert.equal((await s.rpc('initialize', {}, auth.access)).status, 404);
-  const narrow = await grant(s, 'relay:read'); const catalog = await (await s.rpc('tools/list', {}, narrow.access)).json(); assert.equal(catalog.result.tools.length, 2);
+  const narrow = await grant(s, 'relay:read'); const catalog = await (await s.rpc('tools/list', {}, narrow.access)).json(); assert.equal(catalog.result.tools.length, 3);
   assert.deepEqual((await (await s.rpc('events/list', {}, narrow.access)).json()).result.events, []);
 });
 test('direct tools read the actual shared store and reply once without GitHub import or loops', async () => {

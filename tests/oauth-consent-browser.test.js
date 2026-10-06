@@ -362,7 +362,11 @@ test('Relay OAuth navigation uses browser-generated origins and real workerd SQL
         assert.deepEqual((await discovery.json()).result.supportedVersions, [RELAY_VERSION]);
         const tools = await rpc('tools/list', {}, tokens.access_token);
         assert.equal(tools.status, 200);
-        assert.deepEqual((await tools.json()).result.tools.map(tool => tool.name), ['relay_list_pending', 'relay_read_conversation', 'relay_reply']);
+        const publicTools = (await tools.json()).result.tools;
+        assert.deepEqual(publicTools.map(tool => tool.name), ['relay_list_pending', 'relay_read_conversation', 'relay_reply', 'relay_event_access_status']);
+        const eventAccess = publicTools.find(tool => tool.name === 'relay_event_access_status');
+        assert.deepEqual(eventAccess.securitySchemes, [{type: 'oauth2', scopes: ['relay:events']}]);
+        assert.deepEqual(eventAccess._meta.securitySchemes, eventAccess.securitySchemes);
         const events = await rpc('events/list', {}, tokens.access_token);
         assert.equal(events.status, 200);
         assert.deepEqual((await events.json()).result.events.map(event => event.name), [RELAY_EVENT]);

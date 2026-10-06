@@ -95,6 +95,18 @@ complete an explicit new consent flow; refresh and existing grants remain
 unchanged. Discovery and the challenge disclose no private inbox/device data.
 This follows [OpenAI's tool-level authentication guidance](https://developers.openai.com/plugins/build/auth).
 
+An authenticated connection can also discover the read-only
+`relay_event_access_status` tool, requiring `relay:events` in both OAuth schema
+fields. A connection with `relay:read relay:reply relay:owner` calls it to request
+explicit public-event consent through the same native challenge. Only live
+verified scopes are preserved, so that connection requests all four Relay
+scopes; a narrower connection adds only `relay:events` to its verified access.
+After consent, the tool returns only the public event name, scope and authorized
+status. It does not read messages, expose delivery credentials or create a
+subscription. Refresh never expands a grant. With all four scopes,
+`events/list` advertises both public and private message events while their
+existing operation and feature gates still apply.
+
 `RELAY_OWNER_ENABLED=true` must be separately approved before activation; it is
 not set in the checked-in Worker configuration. Both this flag and existing
 `RELAY_MCP_ENABLED=true` are required. Owner tool schemas are absent unless

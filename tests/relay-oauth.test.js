@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createRelayFixture} from './relay-fixture.js';
 import {relayAuthenticate, relayGrantActive, relayOAuthStore} from '../backend/relay-oauth.js';
-import {RELAY_CALLBACK, RELAY_OWNER, RELAY_SCOPES, RELAY_PUBLIC_SCOPES, RELAY_OWNER_SCOPE, RELAY_VERSION, challenge, hash} from '../backend/relay-common.js';
+import {RELAY_CALLBACK, RELAY_OWNER, RELAY_SCOPES, RELAY_PUBLIC_SCOPES, RELAY_OWNER_SCOPE, RELAY_EVENT, RELAY_OWNER_EVENT, RELAY_VERSION, challenge, hash} from '../backend/relay-common.js';
 import {PUBLIC_KEY} from '../backend/shared.js';
 
 const REGISTRY = 'jarvis-shared-v2';
@@ -191,7 +191,7 @@ test('omitted authorization scope and refresh stay public; explicit owner recons
   await expectError(await refresh(s, publicTokens.refresh_token, {scope: FULL_SCOPE}), 'invalid_grant');
   const rotated = await (await refresh(s, publicTokens.refresh_token)).json();
   assert.equal(rotated.scope, RELAY_PUBLIC_SCOPES.join(' '));
-  assert.equal((await rpc(rotated.access_token, 'tools/list')).result.tools.length, 10);
+  assert.equal((await rpc(rotated.access_token, 'tools/list')).result.tools.length, 11);
   const stepUp = await rpc(rotated.access_token, 'tools/call', {name: 'relay_owner_devices_list', arguments: {}});
   assert.equal(stepUp.result.isError, true);
   const requestedScope = stepUp.result._meta['mcp/www_authenticate'][0].match(/scope="([^"]+)"/)[1];
@@ -203,7 +203,7 @@ test('omitted authorization scope and refresh stay public; explicit owner recons
   const ownerTokens = await (await exchangeCode(s, ownerCode)).json();
   assert.equal(ownerTokens.scope, FULL_SCOPE);
   assert.deepEqual((await authenticate(s, ownerTokens.access_token)).scopes, RELAY_SCOPES);
-  assert.equal((await rpc(ownerTokens.access_token, 'tools/list')).result.tools.length, 10);
+  assert.equal((await rpc(ownerTokens.access_token, 'tools/list')).result.tools.length, 11);
   const devices = await rpc(ownerTokens.access_token, 'tools/call', {name: 'relay_owner_devices_list', arguments: {}});
   assert.equal(devices.result.isError, false); assert.deepEqual(devices.result.structuredContent, {devices: []});
   assert.deepEqual((await authenticate(s, rotated.access_token)).scopes, RELAY_PUBLIC_SCOPES, 'new consent never silently expands the old token');
@@ -219,6 +219,44 @@ test('public browser keys cannot authenticate MCP, bypass GitHub, or approve wit
   assert.equal(s.upstream.length, 0);
   await expectError(await approve(s, {csrf: 'a'.repeat(64), cookie: '__Host-jarvis-relay=' + PUBLIC_KEY}), 'invalid_request', 400, 'consent_session_expired_or_used');
   assert.equal(oauthRows(s).filter(row => row.category === 'grant').length, 0);
+});
+
+test('public-event step-up requires explicit new consent and retains read/reply/owner access', async t => {
+  const s = fixture(t, {env: {RELAY_OWNER_ENABLED: 'true'}}), oldScope = 'relay:read relay:reply relay:owner';
+  const oldTokens = await ownerTokens(s, {scope: oldScope});
+  const rpc = async (token, method, p = {}) => {
+    const response = await s.request('/relay/mcp', {method: 'POST', headers: {Authorization: 'Bearer ' + token,
+      Accept: 'application/json, text/event-stream', 'Content-Type': 'application/json', 'MCP-Protocol-Version': RELAY_VERSION,
+      'Mcp-Method': method, ...(method === 'tools/call' ? {'Mcp-Name': p.name} : {})}, body: JSON.stringify({jsonrpc: '2.0', id: 1, method,
+      params: {...p, _meta: {'io.modelcontextprotocol/protocolVersion': RELAY_VERSION, 'io.modelcontextprotocol/clientCapabilities': {}}}})});
+    assert.equal(response.status, 200); return response.json();
+  };
+  const helperCall = {name: 'relay_event_access_status', arguments: {}};
+  assert.ok((await rpc(oldTokens.access_token, 'tools/list')).result.tools.some(tool => tool.name === helperCall.name));
+  assert.deepEqual((await rpc(oldTokens.access_token, 'events/list')).result.events.map(event => event.name), [RELAY_OWNER_EVENT]);
+  const before = oauthRows(s);
+  const stepUp = await rpc(oldTokens.access_token, 'tools/call', helperCall);
+  assert.equal(stepUp.result.isError, true); assert.equal(stepUp.error, undefined);
+  const requestedScope = stepUp.result._meta['mcp/www_authenticate'][0].match(/scope="([^"]+)"/)[1];
+  assert.equal(requestedScope, FULL_SCOPE); assert.deepEqual(oauthRows(s), before);
+  await expectError(await refresh(s, oldTokens.refresh_token, {scope: requestedScope}), 'invalid_grant');
+  assert.deepEqual(oauthRows(s), before);
+  const cancelledLogin = await start(s, {scope: requestedScope}), cancelledConsent = await callback(s, cancelledLogin);
+  const cancelled = await approve(s, cancelledConsent, {decision: 'deny'});
+  assert.equal(new URL(cancelled.headers.get('Location')).searchParams.get('error'), 'access_denied');
+  assert.equal(oauthRows(s).filter(row => row.category === 'grant').length, 1);
+  assert.deepEqual((await authenticate(s, oldTokens.access_token)).scopes, oldScope.split(' '));
+  const login = await start(s, {scope: requestedScope}), consent = await callback(s, login);
+  assert.match(consent.html, /subscribe to new messages/); assert.match(consent.html, /Owner chat access:/);
+  assert.equal(oauthRows(s).filter(row => row.category === 'grant').length, 1, 'login and consent form alone never grant events');
+  const approved = await approve(s, consent), code = new URL(approved.headers.get('Location')).searchParams.get('code');
+  const tokens = await (await exchangeCode(s, code)).json();
+  assert.equal(tokens.scope, FULL_SCOPE); assert.deepEqual((await authenticate(s, tokens.access_token)).scopes, RELAY_SCOPES);
+  assert.deepEqual((await rpc(tokens.access_token, 'events/list')).result.events.map(event => event.name), [RELAY_EVENT, RELAY_OWNER_EVENT]);
+  assert.deepEqual((await rpc(tokens.access_token, 'tools/call', helperCall)).result.structuredContent, {scope: 'relay:events', event: RELAY_EVENT, authorized: true});
+  assert.deepEqual((await rpc(tokens.access_token, 'tools/call', {name: 'relay_owner_devices_list', arguments: {}})).result.structuredContent, {devices: []});
+  assert.deepEqual((await authenticate(s, oldTokens.access_token)).scopes, oldScope.split(' '), 'explicit new consent leaves the old grant unchanged');
+  assert.equal((await rpc(oldTokens.access_token, 'tools/call', helperCall)).result.isError, true);
 });
 
 test('GitHub numeric owner ID is mandatory; names, string IDs and other accounts are denied', async t => {
