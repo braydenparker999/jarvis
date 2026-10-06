@@ -1727,6 +1727,8 @@
       const audioOnly=player.audioMode;
       stage.innerHTML=audioOnly?audioStageHTML(m,v,s):'<video id="mediaEl" autoplay playsinline preload="metadata"></video>';
       const el=$('#mediaEl');el.playbackRate=playbackRate;el.autoplay=autoplay;
+      const pipDiagnostics=window.JarvisPiPDiagnostics?.observe(el);player.pipDiagnostics=pipDiagnostics;
+      scope.onDispose(()=>{pipDiagnostics?.markOutcome('attempt-dispose');pipDiagnostics?.dispose()});
       if(audioOnly)bindAudioSurface(el,scope);else bindVideoSurface(el,scope);
       const caps=capsNow();
       const adapterKind=player.compatibility?'compatibility':PB.adapters.adapterKindFor(s.kind,caps,s.requestPolicy);
@@ -1890,7 +1892,11 @@
       try{el.currentTime=Math.min(time,Math.max(0,el.duration-.05))}catch{}
     }
     function activePlayerCandidate(snap){return snap?.candidate||snap?.lastFailure?.candidate||null}
-    function playbackReport(){return player.diagnostics?.report({release:APP_VERSION,media:$('#mediaEl'),capabilities:{mediaSource:!!window.MediaSource,webCodecs:!!window.VideoDecoder}})||'No playback attempt recorded.'}
+    function playbackReport(){
+      const report=player.diagnostics?.report({release:APP_VERSION,media:$('#mediaEl'),capabilities:{mediaSource:!!window.MediaSource,webCodecs:!!window.VideoDecoder}});
+      if(!report)return 'No playback attempt recorded.';
+      return JSON.stringify({...JSON.parse(report),pip:player.pipDiagnostics?.snapshot({app:'astra',release:APP_VERSION})||null},null,2);
+    }
     async function copyPlaybackReport(){
       try{await navigator.clipboard.writeText(playbackReport());toast('Playback report copied. Stream links and credentials are excluded.','good')}
       catch{openTrackMenu('diagnostics');toast('Chrome blocked copying. You can select the report below.')}
@@ -2065,11 +2071,12 @@
     }
     async function pictureInPicture(){
       const el=$('#mediaEl');if(!el||player.audioMode)return;
+      const exiting=!!document.pictureInPictureElement,diagnostics=player.pipDiagnostics;
       try{
-        if(document.pictureInPictureElement){await document.exitPictureInPicture();return}
-        if(document.pictureInPictureEnabled&&typeof el.requestPictureInPicture==='function'&&el.readyState>0){await el.requestPictureInPicture();miniPlayer(true)}
-        else {miniPlayer(true);toast('Playing in Astra’s mini player. System picture-in-picture is unavailable in this browser.')}
-      }catch{miniPlayer(true);toast('Chrome could not open picture-in-picture. The mini player is available.')}
+        if(exiting){diagnostics?.markIntent('app-exit');await document.exitPictureInPicture();diagnostics?.markOutcome('exit-resolved');return}
+        if(document.pictureInPictureEnabled&&typeof el.requestPictureInPicture==='function'&&el.readyState>0){diagnostics?.markIntent('app-enter');await el.requestPictureInPicture();diagnostics?.markOutcome('enter-resolved');miniPlayer(true)}
+        else {diagnostics?.markOutcome('system-unavailable');miniPlayer(true);toast('Playing in Astra’s mini player. System picture-in-picture is unavailable in this browser.')}
+      }catch{diagnostics?.markOutcome(exiting?'exit-rejected':'enter-rejected');miniPlayer(true);toast('Chrome could not open picture-in-picture. The mini player is available.')}
     }
     function playerAction(action){
       const session=player.session;
@@ -2214,7 +2221,7 @@
         const message=['NETWORK_OR_BROWSER_ACCESS','ACCESS'].includes(code)?'The video can play directly, but Astra could not read this file for picture or sound repair. The provider may block browser access.':code==='TIMEOUT'?'The playback repair check took too long. You can retry it or choose another source.':PB.diagnostics.describe(player.repairFailure||{});
         menu.innerHTML=`<div class="track-sheet-head"><h4>${pending?'Checking playback…':'Repair unavailable'}</h4><button class="icon-btn" data-player-action="cancel-repair" aria-label="Close playback repair">${icon('close')}</button></div><p class="track-empty" role="status">${pending?'Checking this file while the original video stays available.':esc(message)+' Your original playback is still available.'}</p><div class="track-options">${pending?'<button class="track-option" data-player-action="cancel-repair">Cancel repair</button>':'<button class="track-option" data-player-action="choose">Choose source</button><button class="track-option" data-player-action="external-player">Open in VLC</button><button class="track-option" data-player-action="compatibility">Retry repair</button><button class="track-option" data-player-action="diagnostics">Copy playback report</button>'}</div>`;
       }else if(kind==='diagnostics'){
-        menu.innerHTML=`<div class="track-sheet-head"><h4>Playback details</h4><button class="icon-btn" data-track-menu="diagnostics" aria-label="Close playback details">${icon('close')}</button></div><p class="track-empty">This report contains playback events and media formats. Stream links, titles, and credentials are excluded.</p><pre class="playback-report" tabindex="0">${esc(playbackReport())}</pre><button class="track-option" data-player-action="diagnostics">Copy playback report</button>`;
+        menu.innerHTML=`<div class="track-sheet-head"><h4>Playback details</h4><button class="icon-btn" data-track-menu="diagnostics" aria-label="Close playback details">${icon('close')}</button></div><p class="track-empty">This report contains playback, PiP, and media-format details. Stream links, titles, and credentials are excluded. Native PiP exit controls cannot be identified by the page.</p><pre class="playback-report" tabindex="0">${esc(playbackReport())}</pre><button class="track-option" data-player-action="diagnostics">Copy playback report</button>`;
       }else if(kind==='options'){
         const snap=player.session?.snapshot(),s=activePlayerCandidate(snap)?.stream;
         const qualities=qualityOptions(),tracks=player.adapter?.getAudioTracks?.()||[];

@@ -1,4 +1,5 @@
-import {icon, sheet, readLocal, writeLocal, el} from '../assets/ui.js';
+import {icon, sheet, readLocal, writeLocal, el, copyText} from '../assets/ui.js';
+import '../assets/pip-diagnostics.js?v=0.37.1';
 import {discover, withinTime} from './discovery.js';
 import {createVideoApi, folderId, mediaURL, thumbnails, parseLibrary, parseProgress, recordProgress, resumeTime,
   continueWatching, searchVideos, groupByFolder, formatDuration, srtToVtt,
@@ -152,6 +153,8 @@ async function refresh() {
 /* ---- player ----------------------------------------------------------- */
 
 const video = $('video');
+const pipDiagnostics = globalThis.JarvisPiPDiagnostics.observe(video);
+const pipReport = () => pipDiagnostics.report({app:'mymedia', release:document.querySelector('meta[name="mymedia-release"]')?.content});
 let lastSave = 0;
 
 function remember(ended = false) {
@@ -233,6 +236,7 @@ function openVideo(item) {
 
 function closeVideo() {
   if (!current) return;
+  pipDiagnostics.markOutcome('player-dispose');
   remember();
   current.controller.abort();
   current.handle?.close();
@@ -279,7 +283,23 @@ $('captions').addEventListener('change', () => {
   if (el) el.track.mode = 'showing';
 });
 $('pip').hidden = !document.pictureInPictureEnabled;
-$('pip').addEventListener('click', () => (document.pictureInPictureElement ? document.exitPictureInPicture() : video.requestPictureInPicture()).catch(() => status('Picture in picture is not available for this video.', true, $('player-status'))));
+$('pip').addEventListener('click', () => {
+  const exiting = !!document.pictureInPictureElement;
+  pipDiagnostics.markIntent(exiting ? 'app-exit' : 'app-enter');
+  (exiting ? document.exitPictureInPicture() : video.requestPictureInPicture()).then(
+    () => pipDiagnostics.markOutcome(exiting ? 'exit-resolved' : 'enter-resolved'),
+    () => { pipDiagnostics.markOutcome(exiting ? 'exit-rejected' : 'enter-rejected'); status('Picture in picture is not available for this video.', true, $('player-status')); }
+  );
+});
+$('pip-report').addEventListener('click', () => {
+  const report = pipReport(), dialog = sheet('Picture-in-picture details', []);
+  dialog.append(el('p', 'Chrome controls the system window. This report records window and playback changes, but cannot identify which native exit control was used.'));
+  const output = el('textarea', report); output.readOnly = true; output.rows = 12;
+  output.setAttribute('aria-label', 'Picture-in-picture report'); output.style.width = '100%'; output.style.boxSizing = 'border-box';
+  const copy = el('button', 'Copy PiP report', 'sheet-action'); copy.type = 'button';
+  copy.onclick = async () => { copy.textContent = await copyText(report) ? 'Report copied' : 'Copy blocked. Select the report above.'; };
+  dialog.append(output, copy);
+});
 video.addEventListener('enterpictureinpicture', () => {
   document.body.classList.add('pip-active');
   $('pip').textContent = 'Close pop-out';
@@ -308,6 +328,7 @@ document.addEventListener('fullscreenchange', () => {
 });
 if ('mediaSession' in navigator) {
   const stopPlayback = () => {
+    pipDiagnostics.markIntent('media-stop');
     video.pause();
     if (document.pictureInPictureElement === video) document.exitPictureInPicture().catch(() => {});
     if (current) location.hash = '';
