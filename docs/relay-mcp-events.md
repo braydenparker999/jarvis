@@ -244,3 +244,18 @@ Rollback: set `RELAY_MCP_ENABLED=false`, confirm event deliveries stop and exist
 hourly Relay response still runs, then remove the new connection/subscription only
 with the relevant user authorization. No inbox messages, old credentials, or
 publications are deleted by rollout or rollback.
+
+
+### Reliability boundaries
+
+Current `/shared/messages` writes no longer depend on importing the legacy inbox.
+Current `/shared/state` reads attempt the legacy import but retain the current
+SQLite response if that old inbox fails. Actual current-store failures still
+return 503. Legacy imports remain append-only, preserve old data, and emit no
+live Relay events. The existing publication importer, public/private isolation,
+OAuth scopes, bounded outbox, subscription TTL and journal retention are unchanged.
+
+The private owner UI exposes redacted persisted message/delivery evidence and a
+bounded retry control, described in [owner delivery evidence](relay-owner-pairing.md#private-delivery-evidence-and-bounded-recovery).
+A successful callback is transport acceptance only. Relay never labels the
+assistant “working” without a separate execution claim.

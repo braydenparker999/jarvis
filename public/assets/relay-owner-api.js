@@ -10,6 +10,15 @@ const deviceFrom = data => {
   return device;
 };
 
+const deliveryStates=['saved','queued','callback_accepted','delivery_failed','reply_saved'];
+function validDelivery(value){
+  return value&&deliveryStates.includes(value.state)&&Number.isSafeInteger(value.pending)&&value.pending>=0&&value.pending<=8
+    &&Number.isSafeInteger(value.failed)&&value.failed>=0&&value.failed<=8&&typeof value.retryable==='boolean'
+    &&(value.callbackAcceptedAt===null||typeof value.callbackAcceptedAt==='string'&&Number.isFinite(Date.parse(value.callbackAcceptedAt)))
+    &&(value.retryAfter===null||typeof value.retryAfter==='string'&&Number.isFinite(Date.parse(value.retryAfter)))
+    &&!(value.retryable&&value.state!=='delivery_failed');
+}
+
 export class OwnerApiError extends Error {
   constructor(kind = 'network', status = 0) {
     const messages = {
@@ -195,11 +204,34 @@ export function createRelayOwnerApi({ fetcher = globalThis.fetch, origin = API_O
       const data = await authenticated('/relay/owner/messages?after=' + encodeURIComponent(after));
       if (!Array.isArray(data.messages) || data.messages.some(m => !identifier(m.id) || typeof m.body !== 'string'
         || !['user', 'assistant'].includes(m.role) || !Number.isFinite(Date.parse(m.createdAt))
-        || m.visibility !== 'private' || m.author_authenticated !== true)
+        || m.visibility !== 'private' || m.author_authenticated !== true
+        || m.delivery!==undefined&&!validDelivery(m.delivery))
         || !(data.nextCursor === null || /^\d{1,15}$/.test(String(data.nextCursor)))) throw new OwnerApiError('invalid');
       return data;
     },
-    sendMessage(id, body) { return authenticated('/relay/owner/messages', { id, body }); },
+    async deliveries(messageIds){
+      if(!Array.isArray(messageIds)||messageIds.length>50||messageIds.some(id=>!identifier(id))||new Set(messageIds).size!==messageIds.length)throw new OwnerApiError('invalid');
+      const data=await authenticated('/relay/owner/delivery',{message_ids:messageIds});
+      if(!Array.isArray(data.deliveries)||data.deliveries.length!==messageIds.length||data.deliveries.some((d,i)=>d.message_id!==messageIds[i]||!validDelivery(d)))throw new OwnerApiError('invalid');
+      // Project only the owner-safe evidence fields. Ignore unexpected server data.
+      return {deliveries:data.deliveries.map(d=>({message_id:d.message_id,state:d.state,pending:d.pending,failed:d.failed,
+        callbackAcceptedAt:d.callbackAcceptedAt,retryable:d.retryable,retryAfter:d.retryAfter}))};
+    },
+    async retryDelivery(messageId){
+      if(!identifier(messageId))throw new OwnerApiError('invalid');
+      const data=await authenticated('/relay/owner/delivery/retry',{message_id:messageId});
+      if(!Number.isSafeInteger(data.retried)||data.retried<0||data.retried>8)throw new OwnerApiError('invalid');
+      return {retried:data.retried};
+    },
+    async sendMessage(id, body) {
+      if(!identifier(id)||typeof body!=='string'||!body.trim()||body.length>4000)throw new OwnerApiError('invalid');
+      const data=await authenticated('/relay/owner/messages', { id, body });
+      const entry=data.entry;
+      if(!entry||entry.id!==id||entry.body!==body.trim()||entry.role!=='user'||entry.visibility!=='private'
+        ||entry.author_authenticated!==true||!Number.isFinite(Date.parse(entry.createdAt))||typeof data.newWrite!=='boolean'
+        ||entry.delivery!==undefined&&!validDelivery(entry.delivery))throw new OwnerApiError('invalid');
+      return data;
+    },
     async devices() {
       const data = await authenticated('/relay/owner/devices');
       if (!Array.isArray(data.devices) || data.devices.some(d => !identifier(d.id) || typeof d.label !== 'string')) throw new OwnerApiError('invalid');

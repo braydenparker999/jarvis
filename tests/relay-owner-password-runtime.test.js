@@ -121,10 +121,20 @@ test('real SQLite Durable Object completes owner password setup, login, private 
     assert.equal(message.principal, 'github:183016859');
     assert.equal(message.device_id, session.device.id);
     assert.equal(message.authentication_source, 'owner-password-session');
+    assert.equal(message.delivery.state, 'saved');
+    const deliveryResponse=await post('/delivery',{message_ids:[message.id]},session.device_token);
+    assert.equal(deliveryResponse.status,200);
+    const delivery=(await deliveryResponse.json()).deliveries[0];
+    assert.equal(delivery.message_id,message.id);assert.equal(delivery.state,'saved');
+    assert.equal(delivery.callbackAcceptedAt,null);assert.equal(delivery.retryable,false);
+    assert.equal(JSON.stringify(delivery).includes(session.device_token),false);
+    assert.equal((await (await post('/delivery/retry',{message_id:message.id},session.device_token)).json()).retried,0);
     assert.equal((await post('/devices/revoke', {device_id: session.device.id})).status, 200);
     assert.equal((await mf.dispatchFetch(issuer + '/relay/owner/session', {
       headers: {Authorization: 'Bearer ' + session.device_token},
     })).status, 401);
+    assert.equal((await post('/delivery',{message_ids:[message.id]},session.device_token)).status,401);
+    assert.equal((await post('/delivery/retry',{message_id:message.id},session.device_token)).status,401);
     assert.equal((await mf.dispatchFetch(issuer + '/relay/owner/session', {
       headers: {Authorization: 'Bearer ' + ownerToken},
     })).status, 200);

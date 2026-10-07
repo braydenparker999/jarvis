@@ -45,6 +45,20 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), uuid =
         seen.add(next); cursor = next; after = next;
       } else after = null;
     } while (after !== null);
+    // Entry sequences are append-only; transport state is mutable. Refresh that
+    // evidence separately so an incremental history cursor cannot hide failures.
+    const replied=new Set(state.messages.filter(m=>m.replyTo).map(m=>m.replyTo));
+    const recent=Date.now()-30*86400000;
+    const ids=state.messages.filter(m=>m.role==='user'&&m.delivery&&!replied.has(m.id)&&Date.parse(m.createdAt)>=recent).map(m=>m.id);
+    for(const message of state.messages)if(replied.has(message.id)&&message.delivery)message.delivery={...message.delivery,state:'reply_saved',retryable:false,retryAfter:null};
+    if(api.deliveries)for(let i=0;i<ids.length;i+=50){
+      const result=await api.deliveries(ids.slice(i,i+50));
+      if(epoch!==generation)return;
+      const updates=new Map(result.deliveries.map(d=>[d.message_id,d]));
+      for(const message of state.messages)if(updates.has(message.id)){
+        const {message_id,...delivery}=updates.get(message.id);message.delivery=delivery;
+      }
+    }
   }
   const controller = {
     get mode() { return state.mode; },
@@ -171,6 +185,16 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), uuid =
       } catch (error) { if (epoch === generation) failure(error); }
       finally { if (epoch === generation) { state.sending = false; emit(); } }
     },
+    async retryDelivery(messageId){
+      if(state.busy||state.sending||state.status!=='approved'||!state.messages.some(m=>m.id===messageId&&m.delivery?.retryable))return;
+      const epoch=generation;state.busy=true;state.error='';emit();
+      try{
+        await api.retryDelivery(messageId);
+        if(epoch!==generation)return;
+        await readMessages(epoch);
+      }catch(error){if(epoch===generation)failure(error);}
+      finally{if(epoch===generation){state.busy=false;emit();}}
+    },
     async showDevices() {
       if (!api.hasCredential) { controller.showOwner(); return; }
       if (state.status !== 'approved') await controller.refresh();
@@ -280,6 +304,14 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
       row.append(make('span', m.role === 'user' ? 'You · private' : 'dot · private', 'message-author'),
         // Text only: no auth link, external navigation, iframe or public quote path.
         make('p', m.body, 'bubble'), make('span', stamp(m.createdAt), 'message-time'));
+      if(m.role==='user'){
+        const labels={saved:'Saved privately',queued:'Queued for callback delivery',callback_accepted:'Callback accepted · waiting for a reply',delivery_failed:'Callback delivery failed',reply_saved:'Reply saved'};
+        row.append(make('span',labels[m.delivery?.state]||'Saved privately','message-time relay-delivery-status'));
+        if(m.delivery?.retryable){
+          const retry=action('Retry callback delivery',()=>controller.retryDelivery(m.id));
+          retry.disabled=state.busy||state.sending;row.append(retry);
+        }else if(m.delivery?.state==='delivery_failed'&&m.delivery.retryAfter)row.append(make('span','Retry available after '+stamp(m.delivery.retryAfter),'message-time'));
+      }
       panel.append(row);
     }
     if (!selected.length) panel.append(make('p', state.query ? 'No matching private messages.' : 'Your private conversation with dot appears here.', 'chat-empty'));

@@ -207,3 +207,57 @@ private deliveries. It does not publish/delete private history, silently revoke
 all devices, or change the public inbox and unrelated modules. Re-enabling the
 feature also needs approval; approved unrevoked devices remain subject to their
 stored inactivity expiry.
+
+
+## Private delivery evidence and bounded recovery
+
+Private user entries now include an owner-only `delivery` object. The same
+redacted evidence is available to an authenticated phone through POST
+`/relay/owner/delivery` with up to 50 unique private `message_ids`. This endpoint
+never returns callback URLs, signing keys, payloads, device bearers, grant IDs or
+raw transport errors. Public inbox APIs never include this metadata.
+
+States distinguish the evidence actually persisted:
+
+- `saved`: the private message was stored, without current queued or accepted delivery evidence
+- `queued`: a still-live authorized subscription has a pending callback occurrence
+- `callback_accepted`: the callback returned 2xx; this does not prove the host started a model, read the message or is working
+- `delivery_failed`: a still-live authorized subscription has a failed occurrence
+- `reply_saved`: a private reply is persisted for this message
+
+`callbackAcceptedAt` records the first observed 2xx acceptance. Existing delivered
+rows are recognized during migration without inventing a timestamp. Acceptance
+receipts contain only the event sequence and timestamp and expire with the
+existing 30-day event journal. They survive subscription expiry, unsubscribe and
+object restarts. Counts describe current authorized pending/failed deliveries;
+a reply may exist independently of callback delivery.
+
+Private history reads remain incremental. The phone separately refreshes delivery
+evidence for unresolved messages inside the existing 30-day event window, so a cursor does not freeze transport status.
+A stale delivery response cannot restore private state after session removal or
+confirmed revocation. Message/delivery data and private drafts remain memory-only;
+this change does not add browser draft persistence, attachments or multimedia.
+
+An exhausted transient failure can expose a `Retry callback delivery` control. POST
+`/relay/owner/delivery/retry` accepts only its private `message_id`. It retries
+only the oldest failed occurrence after six transient attempts (timeout, connection/TLS failure, HTTP 408/429 or 5xx) on a still-live, currently authorized private
+subscription, with at most two manual recovery cycles per occurrence and a
+60-second cooldown. Each cycle keeps the existing six-attempt transport budget.
+It preserves the original event ID/body, subscription generation, callback,
+secret, grant and expiry. Duplicate clicks do not create another occurrence.
+HTTP 410/413 and other permanent rejections never expose this recovery. Ordinary subscription renewal preserves permanent failed occurrences and keeps a blocked subscription paused, so it cannot retransmit the same rejected body or create an alarm busy loop.
+Expired/revoked/narrowed grants, expired/unsubscribed subscriptions, public
+messages and answered private messages cannot be recovered through this route.
+Accepted-but-unanswered occurrences are never retransmitted by this control.
+Recovery does not renew OAuth consent or extend the 24-hour subscription.
+
+The Durable Object persists a wake before a message/recovery write or subscription activation. If later
+alarm rescheduling fails, the API returns the committed result instead of falsely
+reporting that the message was lost; the earlier wake remains available. A failed
+pre-write wake remains fail-closed. No existing scheduled tasks are changed.
+Host batching, host wake behavior and host source/tool instructions remain
+outside Relay's transport control.
+
+Delivery enrichment is restricted to the authenticated phone API. Existing MCP
+message-entry output shapes remain unchanged, so this phone feature does not
+depend on a tool catalog refresh or additional OAuth consent.
