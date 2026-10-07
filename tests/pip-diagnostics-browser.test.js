@@ -56,7 +56,7 @@ test('My Media PiP evidence preserves playback and has a selectable copy-denied 
     await page.evaluate(()=>Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:()=>Promise.reject(Error('denied'))}}));
     await page.locator('#pip-report').click();
     const output=page.getByRole('textbox',{name:'Picture-in-picture report'}),report=JSON.parse(await output.inputValue());
-    assert.equal(report.app,'mymedia');assert.equal(report.release,'0.37.1');assert.equal(report.lastExit.visibility,'visible');
+    assert.equal(report.app,'mymedia');assert.equal(report.release,'0.38.0');assert.equal(report.lastExit.visibility,'visible');
     assert.equal(report.nativeExitReason,'unavailable');
     assert.ok(!JSON.stringify(report).includes('private-title-sentinel')&&!JSON.stringify(report).includes('AIza'));
     assert.equal(await output.getAttribute('readonly'),'');
