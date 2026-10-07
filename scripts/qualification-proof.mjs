@@ -74,7 +74,7 @@ export function checkedRun(run, {sourceSha, workflowId} = {}) {
 }
 
 export function checkedJobs(jobs, run, names) {
-  if (!Array.isArray(jobs) || jobs.some(j => j.run_id !== run.id || j.run_attempt !== run.run_attempt)) throw Error('Mixed or missing qualification run attempt');
+  if (!Array.isArray(jobs) || jobs.some(j => j.run_id !== run.id || j.run_attempt !== run.run_attempt || j.head_sha !== run.head_sha)) throw Error('Mixed or missing qualification run attempt or source SHA');
   for (const name of names) {
     const found = jobs.filter(job => job.name === name);
     if (found.length !== 1 || found[0].status !== 'completed' || found[0].conclusion !== 'success') throw Error('Missing, duplicated, failed or skipped qualification job: ' + name);

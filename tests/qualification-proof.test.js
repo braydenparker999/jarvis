@@ -20,7 +20,7 @@ const plan = makePlan(unique,env);
 const goodRun = () => ({id:123, run_attempt:2, workflow_id:777, repository:{full_name:REPOSITORY}, head_repository:{full_name:REPOSITORY,fork:false},
   event:'push',head_branch:'main',path:WORKFLOW,status:'completed',conclusion:'success',head_sha:sha,html_url:'https://github.com/' + REPOSITORY + '/actions/runs/123'});
 const jobs = (p = plan) => ['qualified-source-' + p.digest, ...COMPONENTS.map(name => 'qualified-' + name + '-' + p.components[name].digest)]
-  .map(name => ({name,id:1,run_id:123,run_attempt:2,status:'completed',conclusion:'success'}));
+  .map(name => ({name,id:1,run_id:123,run_attempt:2,head_sha:sha,status:'completed',conclusion:'success'}));
 const tree = () => ({truncated:false,tree:plan.recipe.map(e => ({...e,type:'blob'}))});
 const changed = (path, value = otherSha) => makePlan(unique.map(e => e.path === path ? {...e,sha:value} : e),env);
 
@@ -248,7 +248,7 @@ function multipleRunFetch(candidates, requests = []) {
     throw Error('Unexpected metadata request: ' + url);
   };
 }
-const rebindJobs = (all, run) => all.map(j => ({...j,run_id:run.id,run_attempt:run.run_attempt}));
+const rebindJobs = (all, run) => all.map(j => ({...j,run_id:run.id,run_attempt:run.run_attempt,head_sha:run.head_sha}));
 
 test('reuse can combine independently verified immutable runs but never promote a partial result to exact qualification', async () => {
   const second = {...goodRun(),id:124,run_attempt:3,head_sha:otherSha,html_url:'https://github.com/' + REPOSITORY + '/actions/runs/124'};
@@ -315,4 +315,44 @@ test('every incomplete final or component gate fails closed for exact qualificat
     const proof = await findProof(plan,{fetcher:fixtureFetch({recipe})});
     assert.equal(proof.qualified,false);assert.deepEqual(proof.reuse,{});
   }
+});
+
+test('every job must bind to the trusted run head SHA even when its name is not a requested gate', () => {
+  const all = jobs(), run = goodRun(), final = all[0].name;
+  assert.equal(checkedJobs(all,run,[final]),true);
+  for (const head_sha of [otherSha,undefined,null,'',sha.toUpperCase()]) {
+    for (let index = 0; index < all.length; index++) {
+      const invalid = all.map((j,i) => i === index ? {...j,head_sha} : j);
+      if (head_sha === undefined) delete invalid[index].head_sha;
+      assert.throws(() => checkedJobs(invalid,run,[final]), /source SHA/,all[index].name);
+    }
+  }
+  assert.throws(() => checkedJobs([...all,{name:'unrelated',run_id:run.id,run_attempt:run.run_attempt,head_sha:otherSha,status:'completed',conclusion:'success'}],run,[final]), /source SHA/);
+  const second = {...run,id:124,run_attempt:3,head_sha:otherSha};
+  assert.equal(checkedJobs(rebindJobs(all,second),second,[final]),true,'the binding follows the validated candidate revision, not a fixed source SHA');
+});
+
+test('wrong or absent job heads reject exact source proof and all component reuse from that candidate', async () => {
+  for (const head_sha of [otherSha,undefined,null]) {
+    for (let index = 0; index < jobs().length; index++) {
+      const all = jobs().map((j,i) => i === index ? {...j,head_sha} : j);
+      if (head_sha === undefined) delete all[index].head_sha;
+      for (const sourceSha of [sha,undefined]) {
+        const proof = await findProof(plan,{sourceSha,fetcher:fixtureFetch({all})});
+        assert.equal(proof.qualified,false);assert.deepEqual(proof.reuse,{});
+      }
+    }
+  }
+});
+
+test('an inconsistent later job head contributes no reuse while independently verified earlier provenance remains valid', async () => {
+  const second = {...goodRun(),id:124,run_attempt:3,head_sha:otherSha};
+  const mismatched = rebindJobs(jobs(),second).map((j,i) => i === 1 ? {...j,head_sha:sha} : j);
+  const proof = await findProof(plan,{fetcher:multipleRunFetch([
+    {run:goodRun(),all:jobs(changed('tests/qualification-proof.test.js'))},
+    {run:second,all:mismatched}
+  ])});
+  assert.equal(proof.qualified,false);
+  assert.deepEqual(Object.keys(proof.reuse),COMPONENTS.filter(name => name !== 'frontend'));
+  for (const provenance of Object.values(proof.reuse)) assert.equal(provenance.runId,123);
 });
