@@ -21,6 +21,7 @@ let query = '', sort = read(SORT_KEY) || 'newest';
 let current = null, libraryScroll = 0, depth = 0, ready = false;
 let view='explore', collection='', creator='', browseKind='', minutes=0, onlyUnwatched=false, pageLimit=60;
 let renderedHash='', watchBackHash='#explore', restoring=false;
+const browseStates=new Map();
 const savedRaw=readLocal('mymedia.saved.v1',[]),queueRaw=readLocal('mymedia.queue.v1',[]);
 let saved=new Set(Array.isArray(savedRaw)?savedRaw:[]), queue=Array.isArray(queueRaw)?queueRaw:[];
 document.querySelectorAll('[data-icon]').forEach(n=>n.innerHTML=icon(n.dataset.icon));
@@ -376,7 +377,9 @@ document.addEventListener('keydown', event => {
 // keep Android Back working.
 function saveBrowseState() {
   if(current||restoring||location.hash!==renderedHash)return;
-  history.replaceState({...history.state,mymedia:{hash:renderedHash,query,sort,minutes,onlyUnwatched,pageLimit,scroll:scrollY}},'');
+  const state={hash:renderedHash,query,sort,minutes,onlyUnwatched,pageLimit,scroll:scrollY};
+  browseStates.set(renderedHash,state);
+  history.replaceState({...history.state,mymedia:state},'');
 }
 let scrollFrame=0;
 addEventListener('scroll',()=>{if(!scrollFrame)scrollFrame=requestAnimationFrame(()=>{scrollFrame=0;saveBrowseState();});},{passive:true});
@@ -399,7 +402,7 @@ function route(event) {
   const returning=!!current;
   if(current){closeVideo();}
   const state=history.state?.mymedia;
-  const restore=state?.hash===location.hash?state:null;
+  const restore=state?.hash===location.hash?state:browseStates.get(location.hash);
   if(event?.type==='hashchange'||renderedHash!==location.hash){
     pageLimit=restore?.pageLimit||60;query=restore?.query||'';minutes=restore?.minutes||0;onlyUnwatched=!!restore?.onlyUnwatched;
     libraryScroll=restore?.scroll||0;

@@ -145,6 +145,7 @@ test('My Media video-feed layout and preserved browsing/playback flows',
       await page.locator('[data-view="creators"]').click();await page.waitForURL('**/#creators');
       assert.equal(await page.locator('.creator-directory .creator-link').count(),1);
       assert.equal(await page.locator('#sort').isVisible(),false);
+      await page.locator('#search').fill('Preview');
       await page.locator('.creator-directory .creator-link').click();await page.waitForURL('**/#creator=*');
       await page.locator('#sort').selectOption('title');
       await page.locator('#search').fill('quiet');
@@ -154,11 +155,12 @@ test('My Media video-feed layout and preserved browsing/playback flows',
       await page.locator('#back').click();await page.waitForURL('**/#creator=*');
       assert.equal(await page.locator('#search').inputValue(),'quiet');assert.equal(await page.locator('#sort').inputValue(),'title');
       assert.equal(await page.locator('#sections .video-tile').count(),18);
-      await page.reload();await page.locator('#creator-header').waitFor();
-      assert.equal(await page.locator('#search').inputValue(),'quiet');assert.equal(await page.locator('#sort').inputValue(),'title');
       await page.locator('#back').click();await page.waitForURL('**/#creators');
+      assert.equal(await page.locator('#search').inputValue(),'Preview');
       await page.goBack();await page.waitForURL('**/#creator=*');assert.equal(await page.locator('#search').inputValue(),'quiet');
       await page.goForward();await page.waitForURL('**/#creators');
+      await page.goBack();await page.waitForURL('**/#creator=*');await page.reload();await page.locator('#creator-header').waitFor();
+      assert.equal(await page.locator('#search').inputValue(),'quiet');assert.equal(await page.locator('#sort').inputValue(),'title');
       await layout(page);assert.deepEqual(errors,[]);await context.close();
     });
     await t.test('original YouTube dates sort separately from archive additions; undated videos stay last',async()=>{

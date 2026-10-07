@@ -87,6 +87,7 @@
 .card-text{min-height:0}.card-details{padding-right:44px;min-height:40px;margin-top:5px}
 .card-creator,.card-status{display:block;font-size:12px;line-height:18px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 a.card-creator:hover,.watch-creator[href]:hover{color:var(--text);text-decoration:underline;text-underline-offset:3px}
+a.card-creator{min-height:24px;line-height:24px}
 .video-menu{bottom:0}
 .creator-header{display:flex;align-items:center;gap:18px;padding:26px 0 22px;border-bottom:1px solid var(--line);margin-bottom:18px}
 .creator-monogram{width:48px;height:48px;flex-shrink:0;display:grid;place-items:center;background:var(--raised);color:var(--text);border-radius:50%;font-size:16px;font-weight:550;letter-spacing:-.02em}
