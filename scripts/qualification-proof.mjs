@@ -1,5 +1,5 @@
 import {createHash} from 'node:crypto';
-import {readFileSync, writeFileSync, appendFileSync, readdirSync} from 'node:fs';
+import {readFileSync, writeFileSync, appendFileSync, lstatSync} from 'node:fs';
 import {execFileSync, spawnSync} from 'node:child_process';
 import {resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -34,6 +34,7 @@ export function inputOwners(path, coverage) {
   if (/^public\/assets\/(?:r2-config\.json|drive-config\.json|pip-diagnostics\.js)$/.test(path)) return ['poweramp', 'blankLibrary', 'frontend', 'relay', 'owner24'];
   if (path === 'public/staticwebapp.config.json') return COMPONENTS;
   if (path.startsWith('public/podcasts/')) return ['podcasts', 'frontend'];
+  if (path.startsWith('public/assets/')) return ['frontend', 'relay', 'owner24', 'podcasts'];
   if (path.startsWith('public/')) return ['frontend', 'relay', 'owner24'];
   if (path.startsWith('backend/')) return ['relay', 'owner24', 'frontend', 'podcasts'];
   if (path.startsWith('relay-egress/') || path.startsWith('deploy/relay-egress-vercel/')) return ['relay', 'owner24'];
@@ -43,12 +44,12 @@ export function inputOwners(path, coverage) {
 }
 
 export function makePlan(entries, environment) {
-  if (!Array.isArray(entries) || entries.some(e => !e || typeof e.path !== 'string' || !SHA.test(e.sha))) throw Error('Invalid immutable source inventory');
+  if (!Array.isArray(entries) || entries.some(e => !e || typeof e.path !== 'string' || !SHA.test(e.sha) || !['100644','100755'].includes(e.mode || '100644'))) throw Error('Invalid immutable source inventory or file type');
   if (new Set(entries.map(e => e.path)).size !== entries.length) throw Error('Duplicate source path');
   if (!environment || !/^v22\.[0-9]+\.[0-9]+$/.test(environment.node22) || !/^v24\.[0-9]+\.[0-9]+$/.test(environment.node24) ||
       typeof environment.browser !== 'string' || !/^(?:Google Chrome|Chromium) [0-9]+\./.test(environment.browser) ||
-      environment.platform !== 'ubuntu-24.04-x64' || environment.measurement !== 'full-isolated-serial-v1') throw Error('Missing or unexpected qualification runtime/browser/measurement identity');
-  const sorted = entries.map(({path, sha}) => ({path, sha})).sort((a,b) => a.path.localeCompare(b.path));
+      !/^Python 3\.12\.[0-9]+$/.test(environment.python || '') || environment.platform !== 'ubuntu-24.04-x64' || environment.measurement !== 'full-isolated-serial-v1') throw Error('Missing or unexpected qualification runtime/browser/measurement identity');
+  const sorted = entries.map(({path, sha, mode = '100644'}) => ({path, sha, mode})).sort((a,b) => a.path.localeCompare(b.path));
   const coverage = inventory(sorted.filter(e => /^tests\/[^/]+\.test\.js$/.test(e.path)).map(e => e.path));
   const tests = {...coverage.groups,
     frontend: coverage.groups.regressions.filter(p => !heavyTest(p)),
@@ -84,7 +85,7 @@ export function checkedRecipe(tree, plan) {
   if (!tree || tree.truncated !== false || !Array.isArray(tree.tree)) throw Error('Incomplete immutable recipe tree');
   for (const entry of plan.recipe) {
     const found = tree.tree.filter(e => e.path === entry.path && e.type === 'blob');
-    if (found.length !== 1 || found[0].sha !== entry.sha) throw Error('Qualification implementation differs at the immutable source revision');
+    if (found.length !== 1 || found[0].sha !== entry.sha || (found[0].mode || '100644') !== entry.mode) throw Error('Qualification implementation differs at the immutable source revision');
   }
   return true;
 }
@@ -146,18 +147,26 @@ export async function findProof(plan, {sourceSha, fetcher, currentRunId} = {}) {
 }
 
 export function localEntries(root = process.cwd()) {
-  const paths = execFileSync('git', ['ls-files', '-z'], {cwd:root, encoding:'utf8'}).split('\0').filter(Boolean);
-  return paths.map(path => ({path, sha:blob(readFileSync(resolve(root, path)))}));
+  const rows = execFileSync('git', ['ls-files', '--stage', '-z'], {cwd:root, encoding:'utf8'}).split('\0').filter(Boolean);
+  return rows.map(row => {
+    const match = /^(100644|100755) [a-f0-9]{40} 0\t(.+)$/.exec(row);
+    if (!match) throw Error('Symlink, submodule, unresolved merge or unsupported source entry');
+    const [,mode,path] = match, info = lstatSync(resolve(root,path));
+    if (!info.isFile() || info.isSymbolicLink() || ((info.mode & 0o111) !== 0) !== (mode === '100755')) throw Error('Source file mode/type changed');
+    return {path, mode, sha:blob(readFileSync(resolve(root, path)))};
+  });
 }
 export function localEnvironment(env = process.env) {
   const chrome = requireBrowser(env);
   return {node22:env.QUALIFICATION_NODE22, node24:env.QUALIFICATION_NODE24,
-    browser:execFileSync(chrome, ['--version'], {encoding:'utf8'}).trim(), platform:'ubuntu-24.04-x64', measurement:'full-isolated-serial-v1'};
+    browser:execFileSync(chrome, ['--version'], {encoding:'utf8'}).trim(), python:env.QUALIFICATION_PYTHON,
+    platform:'ubuntu-24.04-x64', measurement:'full-isolated-serial-v1'};
 }
 export function localPlan(root = process.cwd(), env = process.env) {return makePlan(localEntries(root), localEnvironment(env));}
 export function assertCurrent(plan, name, expected, env = process.env) {
   if (!COMPONENTS.includes(name) || !DIGEST.test(expected || '') || plan.components[name].digest !== expected) throw Error('Qualification inputs changed before or after execution');
   if (process.version !== plan.environment[name === 'owner24' ? 'node24' : 'node22']) throw Error('Qualification Node runtime changed');
+  if (name === 'migration' && execFileSync('python',['--version'],{encoding:'utf8'}).trim() !== plan.environment.python) throw Error('Qualification Python runtime changed');
   for (const key of ['POWERAMP_LAYER_PICTURES_ONLY', 'POWERAMP_PLAYER_FILE', 'POWERAMP_HTML_FILE', 'POWERAMP_PLAYER_SOURCE', 'POWERAMP_PUBLIC_ROOT'])
     if (env[key]) throw Error('A shortened or overridden measurement/source plan cannot qualify');
   return true;
@@ -173,7 +182,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
         node:plan.environment[component === 'owner24' ? 'node24' : 'node22'].slice(1), reuse:!!proof.reuse[component], provenance:proof.reuse[component] || null}));
       writeFileSync('qualification-plan.json', JSON.stringify({...plan, proof}, null, 2) + '\n');
       if (!process.env.GITHUB_OUTPUT) throw Error('GitHub outputs required');
-      appendFileSync(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify(matrix)}\ndigest=${plan.digest}\nnode22=${plan.environment.node22.slice(1)}\nnode24=${plan.environment.node24.slice(1)}\n`);
+      appendFileSync(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify(matrix)}\ndigest=${plan.digest}\nnode22=${plan.environment.node22.slice(1)}\nnode24=${plan.environment.node24.slice(1)}\npython=${plan.environment.python.slice(7)}\n`);
       console.log(JSON.stringify({digest:plan.digest, components:matrix.map(({component,reuse,provenance}) => ({component,reuse,provenance}))}));
     } else if (command === 'run' && COMPONENTS.includes(name)) {
       const plan = localPlan(root), expected = process.env.QUALIFICATION_COMPONENT_DIGEST;

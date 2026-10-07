@@ -5,11 +5,12 @@ import {createHash} from 'node:crypto';
 import {makePlan, inputOwners, COMPONENTS, RECIPE, REPOSITORY, WORKFLOW, checkedRun, checkedJobs, checkedRecipe, publicClient, findProof, assertCurrent} from '../scripts/qualification-proof.mjs';
 
 const sha = 'a'.repeat(40), otherSha = 'b'.repeat(40);
-const env = {node22:'v22.20.0', node24:'v24.19.0', browser:'Google Chrome 154.0.8037.57', platform:'ubuntu-24.04-x64', measurement:'full-isolated-serial-v1'};
+const env = {node22:'v22.20.0', node24:'v24.19.0', browser:'Google Chrome 154.0.8037.57', python:'Python 3.12.12', platform:'ubuntu-24.04-x64', measurement:'full-isolated-serial-v1'};
 const files = readdirSync(new URL('./', import.meta.url)).filter(p => p.endsWith('.test.js')).map(p => ({path:'tests/' + p, sha}));
 const entries = [...files, ...RECIPE.map(path => ({path,sha})), {path:'public/drawercast/player.js',sha},
   {path:'public/assets/relay-owner-ui.js',sha}, {path:'public/podcasts/app.js',sha}, {path:'backend/worker.js',sha},
-  {path:'package-lock.json',sha}, {path:'tests/helpers/poweramp-fixture.js',sha}];
+  {path:'package-lock.json',sha}, {path:'tests/helpers/poweramp-fixture.js',sha},
+  ...['shell.css','premium.css','config.js'].map(p => ({path:'public/assets/' + p,sha}))];
 const unique = [...new Map(entries.map(e => [e.path,e])).values()];
 const plan = makePlan(unique,env);
 const goodRun = () => ({id:123, run_attempt:2, workflow_id:777, repository:{full_name:REPOSITORY}, head_repository:{full_name:REPOSITORY,fork:false},
@@ -34,6 +35,7 @@ test('real component edits invalidate relevant checks while unchanged isolated m
   for (const name of ['poweramp','blankLibrary','performance','frontend']) assert.notEqual(player.components[name].digest,plan.components[name].digest);
   const backend = changed('backend/worker.js');
   for (const name of ['relay','owner24','frontend','podcasts']) assert.notEqual(backend.components[name].digest,plan.components[name].digest);
+  for (const path of ['shell.css','premium.css','config.js']) assert.notEqual(changed('public/assets/' + path).components.podcasts.digest,plan.components.podcasts.digest);
 });
 test('dependencies, trusted recipe, new/deleted/renamed tests, unknown paths and environment changes invalidate conservatively', () => {
   for (const path of ['package-lock.json', ...RECIPE]) {
@@ -46,10 +48,13 @@ test('dependencies, trusted recipe, new/deleted/renamed tests, unknown paths and
   }
   assert.deepEqual(inputOwners('unknown/new-path',plan.coverage),COMPONENTS);
   assert.throws(() => makePlan(unique.filter(e => e.path !== 'tests/oauth-consent-browser.test.js'),env), /Missing required/);
-  for (const overrides of [{node22:''},{node24:'v24'}, {browser:''}, {platform:'different'}, {measurement:'shortened'}])
+  for (const overrides of [{node22:''},{node24:'v24'}, {browser:''}, {python:''}, {platform:'different'}, {measurement:'shortened'}])
     assert.throws(() => makePlan(unique,{...env,...overrides}), /identity/);
   const upgraded = makePlan(unique,{...env,browser:'Google Chrome 155.0.1.1'});
   for (const name of COMPONENTS) assert.notEqual(upgraded.components[name].digest,plan.components[name].digest);
+  assert.throws(() => makePlan([...unique,{path:'unsafe-link',sha,mode:'120000'}],env), /file type/);
+  const executable = makePlan(unique.map(e=>e.path==='public/drawercast/player.js'?{...e,mode:'100755'}:e),env);
+  assert.notEqual(executable.components.poweramp.digest,plan.components.poweramp.digest);
 });
 test('wrong repository, source SHA, trigger, branch, workflow, attempt or unsuccessful status cannot qualify', () => {
   checkedRun(goodRun(), {sourceSha:sha,workflowId:777});
@@ -107,5 +112,6 @@ test('public proof reads have a strict host/path/request budget and never accept
 });
 test('changed files/runtime and reduced diagnostic plans cannot satisfy a named qualification', () => {
   assert.throws(() => assertCurrent(plan,'owner24',changed('backend/worker.js').components.owner24.digest), /inputs changed/);
-  assert.throws(() => assertCurrent(plan,'owner24',plan.components.owner24.digest,{POWERAMP_LAYER_PICTURES_ONLY:'1'}), /shortened/);
+  const portable = {...plan,environment:{...plan.environment,node24:process.version}};
+  assert.throws(() => assertCurrent(portable,'owner24',plan.components.owner24.digest,{POWERAMP_LAYER_PICTURES_ONLY:'1'}), /shortened/);
 });

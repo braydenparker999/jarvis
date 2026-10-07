@@ -21,6 +21,7 @@ jobs:
       digest: ${{ steps.plan.outputs.digest }}
       node22: ${{ steps.plan.outputs.node22 }}
       node24: ${{ steps.plan.outputs.node24 }}
+      python: ${{ steps.plan.outputs.python }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,10 +35,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Compute complete coverage and verified unchanged-input reuse
         id: plan
         run: |
           export QUALIFICATION_NODE22="$(node --version)"
+          export QUALIFICATION_PYTHON="$(python --version)"
           export JARVIS_CHROME="$(command -v google-chrome || command -v chromium)"
           test -n "$JARVIS_CHROME"
           test -x "$JARVIS_CHROME"
@@ -64,11 +69,10 @@ jobs:
     env:
       QUALIFICATION_NODE22: v${{ needs.plan.outputs.node22 }}
       QUALIFICATION_NODE24: v${{ needs.plan.outputs.node24 }}
+      QUALIFICATION_PYTHON: Python ${{ needs.plan.outputs.python }}
       QUALIFICATION_COMPONENT_DIGEST: ${{ matrix.digest }}
       QUALIFICATION_REUSE: ${{ matrix.reuse }}
       QUALIFICATION_PROVENANCE: ${{ toJSON(matrix.provenance) }}
-      POWERAMP_EVIDENCE_DIR: ${{ runner.temp }}/poweramp-browser
-      JARVIS_SCREENSHOT_DIR: ${{ runner.temp }}/podcast-browser
     steps:
       - uses: actions/checkout@v4
         with:
@@ -82,12 +86,15 @@ jobs:
         if: ${{ matrix.reuse != true }}
         run: npm ci
       - uses: actions/setup-python@v5
-        if: ${{ matrix.component == 'migration' && matrix.reuse != true }}
+        if: ${{ matrix.component == 'migration' }}
         with:
-          python-version: '3.12'
+          python-version: ${{ needs.plan.outputs.python }}
       - name: Require the exact planned browser and execute or verify this component
         # Independent groups use distinct runners. All three Poweramp
         # measurements stay serial on this isolated performance runner.
+        env:
+          POWERAMP_EVIDENCE_DIR: ${{ runner.temp }}/poweramp-browser
+          JARVIS_SCREENSHOT_DIR: ${{ runner.temp }}/podcast-browser
         run: |
           export JARVIS_CHROME="$(command -v google-chrome || command -v chromium)"
           test -n "$JARVIS_CHROME"
