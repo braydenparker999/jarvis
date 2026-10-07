@@ -13,12 +13,24 @@ export function knownCreators(library) {
 export function videoPresentation(video, creators = []) {
   const title = String(video.title || 'Untitled video');
   const explicit = typeof video.creator === 'string' ? video.creator.trim() : '';
-  const prefix = (explicit ? [explicit] : creators).filter(Boolean).find(name => title.startsWith(name + ' - ') && title.length > name.length + 3);
+  const prefix = (explicit ? [explicit] : creators).filter(Boolean).find(name => title.toLocaleLowerCase().startsWith(name.toLocaleLowerCase() + ' - ') && title.length > name.length + 3);
   return {
     title: prefix ? title.slice(prefix.length + 3) : title,
     creator: explicit || prefix || '',
     collection: String(video.folder || '').split('/').at(-1) || ''
   };
+}
+
+// Folder names alone are collections, not proof of a channel identity.
+export function creatorGroups(library, creators = knownCreators(library)) {
+  const groups = new Map();
+  for (const video of library?.videos || []) {
+    const name = videoPresentation(video, creators).creator;
+    if (!name) continue;
+    if (!groups.has(name)) groups.set(name, {name, items:[]});
+    groups.get(name).items.push(video);
+  }
+  return [...groups.values()].sort((a,b) => a.name.localeCompare(b.name, undefined, {sensitivity:'base'}));
 }
 
 export function sortDisplayedVideos(videos, mode, creators = []) {

@@ -1,4 +1,5 @@
 import {enrichVideos} from './discovery.js';
+import {savedYouTubeDate} from './metadata.js';
 // My Media: Drive folder listing, file naming and watch progress.
 // Pure functions only; the page wires them to the DOM in app.js.
 import {folderId} from '../drawercast/drive-api.js';
@@ -135,6 +136,7 @@ export function parseLibrary(raw, expectedFolder = '') {
     const videos = data.videos.filter(v => v && ID.test(v.id || '') &&
       typeof v.title === 'string' && typeof v.folder === 'string' && typeof v.name === 'string')
       .map(v => ({...v,
+        ...savedYouTubeDate(v),
         image:ID.test(v.image || '') ? v.image : null,
         youtubeId:/^[A-Za-z0-9_-]{11}$/.test(v.youtubeId || '') ? v.youtubeId : '',
         thumbnail:/^https:\/\/[a-z0-9.-]+\.googleusercontent\.com\//.test(v.thumbnail || '') ? v.thumbnail : '',
@@ -193,10 +195,20 @@ export function searchVideos(videos, query) {
   });
 }
 
+const titleOrder = (a, b) => a.title.localeCompare(b.title, undefined, {numeric:true, sensitivity:'base'}) || String(a.id || '').localeCompare(String(b.id || ''));
+const knownFirst = (a, b, field, descending = false) => {
+  const left = Number.isFinite(a[field]) && a[field] > 0 ? a[field] : 0;
+  const right = Number.isFinite(b[field]) && b[field] > 0 ? b[field] : 0;
+  return !left !== !right ? (left ? -1 : 1) : (descending ? right - left : left - right) || titleOrder(a, b);
+};
 export const SORTS = {
-  newest:(a, b) => (b.addedAt||b.modified) - (a.addedAt||a.modified),
+  newest:(a, b) => (b.addedAt||b.modified||0) - (a.addedAt||a.modified||0),
+  oldest:(a, b) => (a.addedAt||a.modified||0) - (b.addedAt||b.modified||0),
+  'youtube-newest':(a,b) => knownFirst(a,b,'youtubeAt',true),
+  'youtube-oldest':(a,b) => knownFirst(a,b,'youtubeAt'),
   title:(a, b) => a.title.localeCompare(b.title, undefined, {numeric:true, sensitivity:'base'}),
-  longest:(a, b) => b.duration - a.duration
+  longest:(a,b) => knownFirst(a,b,'duration',true),
+  shortest:(a,b) => knownFirst(a,b,'duration')
 };
 
 export function sortVideos(videos, mode) {
