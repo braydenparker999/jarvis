@@ -12,7 +12,7 @@ function harness(){
   const {Engine,PlaybackTransitions}=vm.runInContext(block('const Engine = {','function SET_shuffleOn()')+
     block('const PlaybackTransitions={','function installPlaybackRework()')+
     block('function restoreTrackStepOrigin(','/* Shared finger tracking:')+'\n({Engine,PlaybackTransitions})',context);
-  const audio=src=>({src,preload:'auto',paused:false,loads:0,events:{},pause(){this.paused=true;},removeAttribute(){this.src='';},load(){this.loads++;},addEventListener(name,fn){this.events[name]=fn;},removeEventListener(name){delete this.events[name];},play(){return {catch:fn=>{this.reject=fn;}};}});
+  const audio=src=>({src,preload:'auto',paused:false,loads:0,events:{},pause(){this.paused=true;},removeAttribute(){this.src='';},load(){this.loads++;},addEventListener(name,fn){this.events[name]=fn;},removeEventListener(name){delete this.events[name];},play(){this.paused=false;return {catch:fn=>{this.reject=fn;}};}});
   Engine.els=[audio('http://music.example.test/audio/current'),audio('http://music.example.test/audio/next')];
   const ensureCtx=Engine.ensureCtx;
   Engine.cur=0;Engine.setGain=()=>{};Engine.ensureCtx=()=>{};Engine.updateMediaSession=()=>{};Engine._playRequest=1;
@@ -50,9 +50,9 @@ test('released local object URLs are revoked',()=>{
   assert.deepEqual(revoked,['blob:local-track']);assert.equal(Engine.els[1].preload,'metadata');
 });
 test('late failure of an abandoned play attempt cannot pause the new track',()=>{
-  const {Engine,renders}=harness();Engine.play();const reject=Engine.els[0].reject;const before=renders();
-  Engine._playRequest++;Engine.els[0].src='http://music.example.test/audio/new';reject({name:'NotSupportedError'});
-  assert.equal(Engine.playing,true);assert.equal(renders(),before);
+  const {Engine,renders}=harness();Engine.play();const reject=Engine.els[0].reject;
+  Engine._playRequest++;Engine.els[0].src='http://music.example.test/audio/new';Engine.onPlaying(0);const activeRenders=renders();reject({name:'NotSupportedError'});
+  assert.equal(Engine.playing,true);assert.equal(renders(),activeRenders);
 });
 
 for(const cloud of ['drive','r2'])test('rapid manual '+cloud+' skips select immediately without awaiting cloud crossfade readiness',async()=>{
@@ -271,7 +271,7 @@ test('rapid skip starts the final selected song and ignores late prior sources',
   const {Engine,ctx}=installed(),pending=[];ctx.getFileFor=t=>new Promise(resolve=>pending.push({id:t.id,resolve}));
   Engine.queue=['a','b','c'].map(id=>({id,source:'drive'}));Engine.order=[0,1,2];Engine.current=Engine.queue[0];Engine.pos=0;Engine.playing=true;
   const first=Engine.playIndex(1,true);Engine.next();pending[1].resolve({__remoteURL:'https://audio.test/c'});await new Promise(setImmediate);
-  assert.equal(Engine.playing,true);assert.match(Engine.el().src,/\/c$/);
+  assert.equal(Engine.wantsPlayback(),true);assert.equal(Engine.playing,false,'a pending play promise is not actual playback');Engine.onPlaying(Engine.cur);assert.equal(Engine.playing,true);assert.match(Engine.el().src,/\/c$/);
   pending[0].resolve({__remoteURL:'https://audio.test/b'});await first;assert.match(Engine.el().src,/\/c$/);Engine.clearBuffering();
 });
 test('restored remote position is shown before loading and applied when metadata is ready',async()=>{

@@ -256,6 +256,7 @@ const block = (a,b) => source.slice(source.indexOf(a), source.indexOf(b, source.
 function integration(f = partialFixture()) {
   const tracks = f.tracks.slice(), timers = [], messages = [], flags={drive:true,r2:true};
   const ctx = vm.createContext({AbortController, AbortSignal, setTimeout:fn => {timers.push(fn); return timers.length;}, clearTimeout(){},
+    SET:{fadeOnPause:false},
     debounce:fn => fn, baseName:s => s.split('/').at(-1), MusicSources:{refresh(){}},
     SourceLibrary:{enabled:k => flags[k]!==false,kind:t => t?.source || (t?.remote?'server':'local')},
     allTracks:() => tracks, toast:s => messages.push(s), audioSource:f => f.__remoteURL,
