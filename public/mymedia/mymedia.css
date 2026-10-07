@@ -107,4 +107,4 @@ a.card-creator{min-height:24px;line-height:24px}
 .watch-creator{display:block;min-height:32px;line-height:1.5}
 @media(min-width:600px){.creator-directory{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(min-width:900px){.next-list .card-details{margin-left:calc(42% + 12px);margin-top:-34px;min-height:34px}.next-list .card-text{min-height:76px}}
-@media(max-width:430px){.library-tools{flex-wrap:wrap}.library-tools input{flex-basis:100%}.library-tools select{max-width:100%;min-height:44px;width:auto}.library-tools{margin-bottom:8px}.discovery-filters{gap:6px}.discovery-filters button{padding-inline:12px}}
+@media(max-width:430px){.library-tools select{max-width:150px;min-height:44px;width:auto}.library-tools{margin-bottom:8px}.discovery-filters{gap:6px}.discovery-filters button{padding-inline:12px}}

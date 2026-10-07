@@ -106,6 +106,7 @@ test('My Media video-feed layout and preserved browsing/playback flows',
         assert.equal(await page.locator('.feed-grid .video-tile').count(),60);
         assert.equal(await page.locator('.feed-grid').evaluate(n=>getComputedStyle(n).gridTemplateColumns.split(' ').length),columns);
         assert.equal(await page.locator('#continue-grid .video-tile').count(),1);
+        if(width<600)assert.ok(await page.locator('.feed-grid .thumb').first().evaluate(n=>n.getBoundingClientRect().bottom)<775,'the first complete video thumbnail fits above mobile navigation even with watch progress');
         assert.equal(await page.locator('.feed-grid .card-creator').first().textContent(),'Preview channel');
         assert.ok(!(await page.locator('.feed-grid strong').first().textContent()).startsWith('Preview channel - '));
         assert.equal(await page.locator('body').evaluate(n=>getComputedStyle(n).getPropertyValue('--accent').trim()),'#efbc78');
@@ -144,12 +145,12 @@ test('My Media video-feed layout and preserved browsing/playback flows',
       const {page,context,errors}=await session();
       await page.locator('[data-view="creators"]').click();await page.waitForURL('**/#creators');
       assert.equal(await page.locator('.creator-directory .creator-link').count(),1);
-      assert.equal(await page.locator('#sort').isVisible(),false);
+      assert.equal(await page.locator('#sort').isVisible(),false);await screenshot(page,'my-media-creators-390');
       await page.locator('#search').fill('Preview');
       await page.locator('.creator-directory .creator-link').click();await page.waitForURL('**/#creator=*');
       await page.locator('#sort').selectOption('title');
       await page.locator('#search').fill('quiet');
-      assert.equal(await page.locator('#sections .video-tile').count(),18);
+      assert.equal(await page.locator('#sections .video-tile').count(),18);await screenshot(page,'my-media-creator-390');
       await page.locator('.video-menu').first().click();await page.getByRole('button',{name:'Play video',exact:true}).click();
       await page.waitForURL('**/#v=*');await page.locator('#next-list .video-card').first().click();
       await page.locator('#back').click();await page.waitForURL('**/#creator=*');
