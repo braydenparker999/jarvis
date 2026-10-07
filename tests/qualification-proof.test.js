@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readdirSync, readFileSync, mkdtempSync, writeFileSync, chmodSync, symlinkSync, unlinkSync, rmSync} from 'node:fs';
+import {readdirSync, readFileSync, mkdtempSync, writeFileSync, chmodSync, symlinkSync, unlinkSync, rmSync, mkdirSync, copyFileSync, existsSync} from 'node:fs';
 import {createHash} from 'node:crypto';
-import {execFileSync} from 'node:child_process';
+import {execFileSync, spawnSync} from 'node:child_process';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -10,10 +10,12 @@ import {makePlan, inputOwners, COMPONENTS, RECIPE, REPOSITORY, WORKFLOW, checked
 
 const sha = 'a'.repeat(40), otherSha = 'b'.repeat(40);
 const env = {node22:'v22.23.3', node24:'v24.21.0', browser:'Google Chrome for Testing 154.0.8037.97', python:'Python 3.12.15', platform:'ubuntu-24.04-x64', measurement:'full-isolated-serial-v1'};
+const workerPublicInputs = ['public/drawercast/audio-analysis.js','public/drawercast/r2-library.js','public/drawercast/r2-api.js','public/content/jarvis.json'];
 const files = readdirSync(new URL('./', import.meta.url)).filter(p => p.endsWith('.test.js')).map(p => ({path:'tests/' + p, sha}));
 const entries = [...files, ...RECIPE.map(path => ({path,sha})), {path:'public/drawercast/player.js',sha},
   {path:'public/assets/relay-owner-ui.js',sha}, {path:'public/podcasts/app.js',sha}, {path:'backend/worker.js',sha},
   {path:'package-lock.json',sha}, {path:'tests/helpers/poweramp-fixture.js',sha},
+  ...workerPublicInputs.map(path => ({path,sha})),
   ...['shell.css','premium.css','config.js'].map(p => ({path:'public/assets/' + p,sha}))];
 const unique = [...new Map(entries.map(e => [e.path,e])).values()];
 const plan = makePlan(unique,env);
@@ -36,9 +38,9 @@ test('real component edits invalidate relevant checks while unchanged isolated m
   assert.notEqual(relay.components.owner24.digest,plan.components.owner24.digest);
   assert.equal(relay.components.performance.digest,plan.components.performance.digest);
   const player = changed('public/drawercast/player.js');
-  for (const name of ['poweramp','blankLibrary','performance','frontend']) assert.notEqual(player.components[name].digest,plan.components[name].digest);
+  for (const name of COMPONENTS) assert.notEqual(player.components[name].digest,plan.components[name].digest);
   const backend = changed('backend/worker.js');
-  for (const name of ['relay','owner24','frontend','podcasts']) assert.notEqual(backend.components[name].digest,plan.components[name].digest);
+  for (const name of COMPONENTS) assert.notEqual(backend.components[name].digest,plan.components[name].digest);
   for (const path of ['shell.css','premium.css','config.js']) assert.notEqual(changed('public/assets/' + path).components.podcasts.digest,plan.components.podcasts.digest);
 });
 test('dependencies, trusted recipe, new/deleted/renamed tests, unknown paths and environment changes invalidate conservatively', () => {
@@ -122,7 +124,7 @@ test('changed files/runtime and reduced diagnostic plans cannot satisfy a named 
 
 test('every input class has explicit execution owners, with unknown inputs conservatively shared', () => {
   const cases = [
-    ['tests/helpers/poweramp-performance.js', ['poweramp','blankLibrary','performance']],
+    ['tests/helpers/poweramp-performance.js', COMPONENTS],
     ['tests/poweramp-render-trace-browser.mjs', ['performance']],
     ['tests/relay-owner-browser.test.js', ['relay','owner24']],
     ['tests/relay-fixture.js', ['relay','owner24']],
@@ -132,14 +134,15 @@ test('every input class has explicit execution owners, with unknown inputs conse
     ['tests/drawercast-playback.test.js', ['poweramp']],
     ['tests/test_r2_migration.py', ['migration']],
     ['tests/helpers/future-fixture.js', COMPONENTS],
-    ['public/drawercast/player.js', ['poweramp','blankLibrary','performance','frontend']],
+    ['public/drawercast/player.js', COMPONENTS],
+    ['public/content/jarvis.json', COMPONENTS],
     ...['r2-config.json','drive-config.json','pip-diagnostics.js'].map(name =>
-      ['public/assets/' + name, ['poweramp','blankLibrary','frontend','relay','owner24']]),
+      ['public/assets/' + name, COMPONENTS]),
     ['public/staticwebapp.config.json', COMPONENTS],
-    ['public/podcasts/app.js', ['podcasts','frontend']],
+    ['public/podcasts/app.js', ['frontend','relay','owner24','podcasts']],
     ['public/assets/shell.css', ['frontend','relay','owner24','podcasts']],
-    ['public/reader/index.html', ['frontend','relay','owner24']],
-    ['backend/worker.js', ['relay','owner24','frontend','podcasts']],
+    ['public/reader/index.html', ['frontend','relay','owner24','podcasts']],
+    ['backend/worker.js', COMPONENTS],
     ['relay-egress/server.js', ['relay','owner24']],
     ['deploy/relay-egress-vercel/api/index.js', ['relay','owner24']],
     ['scripts/build-poweramp-preview.mjs', ['poweramp','blankLibrary','performance']],
@@ -355,4 +358,89 @@ test('an inconsistent later job head contributes no reuse while independently ve
   assert.equal(proof.qualified,false);
   assert.deepEqual(Object.keys(proof.reuse),COMPONENTS.filter(name => name !== 'frontend'));
   for (const provenance of Object.values(proof.reuse)) assert.equal(provenance.runId,123);
+});
+
+test('each actual Worker-bundled public dependency invalidates security and podcast evidence', async () => {
+  for (const [source, dependency] of [
+    ['backend/music-upload.js','../public/drawercast/audio-analysis.js'],
+    ['backend/music-upload.js','../public/drawercast/r2-library.js'],
+    ['public/drawercast/r2-library.js','./r2-api.js'],
+    ['backend/shared.js','../public/content/jarvis.json']
+  ]) assert.ok(readFileSync(new URL('../' + source,import.meta.url),'utf8').includes(dependency),source + ': actual bundled dependency changed');
+  for (const path of workerPublicInputs) {
+    assert.deepEqual(inputOwners(path,plan.coverage),COMPONENTS,path);
+    for (const mutation of [{sha:otherSha},{mode:'100755'}]) {
+      const next = makePlan(unique.map(e => e.path === path ? {...e,...mutation} : e),env);
+      assert.deepEqual(next.recipe,plan.recipe,'test the input ownership, independently of recipe invalidation');
+      for (const name of COMPONENTS) {
+        assert.ok(next.components[name].inputs.some(e => e.path === path),name + ': ' + path);
+        assert.notEqual(next.components[name].digest,plan.components[name].digest,name + ': ' + path);
+      }
+      const proof = await findProof(next,{fetcher:fixtureFetch()});
+      assert.equal(proof.qualified,false);assert.deepEqual(proof.reuse,{},path + ': stale security/podcast jobs must not be reusable');
+    }
+  }
+});
+
+test('future shared modules and helpers fail closed on addition, edit, removal and rename', async () => {
+  for (const path of ['public/drawercast/future-worker.js','public/content/future.json','backend/future-shared.js','tests/helpers/future-worker.js','tests/helpers/poweramp-future.js']) {
+    const source = [...unique,{path,sha}], before = makePlan(source,env);
+    assert.deepEqual(inputOwners(path,plan.coverage),COMPONENTS,path);
+    const added = await findProof(before,{fetcher:fixtureFetch()});
+    assert.equal(added.qualified,false);assert.deepEqual(added.reuse,{},path + ': new shared inputs cannot inherit old coverage');
+    for (const next of [
+      makePlan(source.map(e => e.path === path ? {...e,sha:otherSha} : e),env),
+      makePlan(source.map(e => e.path === path ? {...e,mode:'100755'} : e),env),
+      plan,
+      makePlan(source.map(e => e.path === path ? {...e,path:path + '.renamed'} : e),env)
+    ]) {
+      assert.deepEqual(next.recipe,before.recipe);
+      for (const name of COMPONENTS) assert.notEqual(next.components[name].digest,before.components[name].digest,name + ': ' + path);
+      const proof = await findProof(next,{fetcher:fixtureFetch({all:jobs(before)})});
+      assert.equal(proof.qualified,false);assert.deepEqual(proof.reuse,{},path + ': changed shared inputs cannot inherit old coverage');
+    }
+  }
+});
+
+test('changed existing shared test helpers and backend files invalidate every lane', async () => {
+  for (const path of ['tests/helpers/poweramp-fixture.js','backend/worker.js']) {
+    const next = changed(path);
+    for (const name of COMPONENTS) assert.notEqual(next.components[name].digest,plan.components[name].digest,name + ': ' + path);
+    const proof = await findProof(next,{fetcher:fixtureFetch()});
+    assert.equal(proof.qualified,false);assert.deepEqual(proof.reuse,{});
+  }
+  for (const path of ['tests/helpers/poweramp-performance.js','tests/helpers/poweramp-png.js','tests/helpers/new-security-fixture.js','backend/new-worker-import.js'])
+    assert.deepEqual(inputOwners(path,plan.coverage),COMPONENTS,path);
+});
+
+test('generic public inputs include security and podcasts while unrelated UI edits preserve isolated performance reuse', async () => {
+  const affected = ['frontend','relay','owner24','podcasts'];
+  for (const path of ['public/assets/future-shared.js','public/podcasts/future-shared.js','public/reader/future-shared.js','public/future/nested-module.js']) {
+    assert.deepEqual(inputOwners(path,plan.coverage),affected,path);
+    const next = makePlan([...unique,{path,sha}],env);
+    for (const name of affected) assert.notEqual(next.components[name].digest,plan.components[name].digest,name + ': ' + path);
+    const proof = await findProof(next,{fetcher:fixtureFetch()});
+    assert.equal(proof.qualified,false);
+    for (const name of affected) assert.equal(proof.reuse[name],undefined,name + ': stale shared Worker evidence');
+  }
+  const next = changed('public/assets/shell.css'), proof = await findProof(next,{fetcher:fixtureFetch()});
+  assert.equal(next.components.performance.digest,plan.components.performance.digest);
+  assert.deepEqual(Object.keys(proof.reuse),COMPONENTS.filter(name => !affected.includes(name)));
+  assert.ok(proof.reuse.performance,'unrelated shell styling must retain independently verified isolated performance');
+});
+
+test('qualification planning loads with built-ins and recipe files alone, without npm installation', () => {
+  const root = mkdtempSync(join(tmpdir(),'jarvis-qualification-builtins-'));
+  try {
+    for (const path of ['scripts/qualification-proof.mjs','scripts/install-qualification-browser.mjs','tests/helpers/ci-test-inventory.mjs']) {
+      mkdirSync(join(root,path.slice(0,path.lastIndexOf('/'))),{recursive:true});
+      copyFileSync(new URL('../' + path,import.meta.url),join(root,path));
+    }
+    assert.equal(existsSync(join(root,'node_modules')),false);
+    writeFileSync(join(root,'verify.mjs'),"import {makePlan} from './scripts/qualification-proof.mjs';\nconsole.log(makePlan(" + JSON.stringify(unique) + ',' + JSON.stringify(env) + ').digest);\n');
+    const result = spawnSync(process.execPath,['verify.mjs'],{cwd:root,encoding:'utf8',env:{...process.env,NODE_PATH:'',NODE_OPTIONS:''}});
+    assert.equal(result.status,0,result.stderr);
+    assert.equal(result.stdout.trim(),plan.digest);
+    assert.equal(existsSync(join(root,'node_modules')),false,'the qualification helper cannot install dependencies implicitly');
+  } finally {rmSync(root,{recursive:true,force:true});}
 });
