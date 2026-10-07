@@ -238,13 +238,14 @@ A stale delivery response cannot restore private state after session removal or
 confirmed revocation. Message/delivery data and private drafts remain memory-only;
 this change does not add browser draft persistence, attachments or multimedia.
 
-A failed message can expose a `Retry callback delivery` control. POST
+An exhausted transient failure can expose a `Retry callback delivery` control. POST
 `/relay/owner/delivery/retry` accepts only its private `message_id`. It retries
-only the oldest failed occurrence on a still-live, currently authorized private
+only the oldest failed occurrence after six transient attempts (timeout, connection/TLS failure, HTTP 408/429 or 5xx) on a still-live, currently authorized private
 subscription, with at most two manual recovery cycles per occurrence and a
 60-second cooldown. Each cycle keeps the existing six-attempt transport budget.
 It preserves the original event ID/body, subscription generation, callback,
 secret, grant and expiry. Duplicate clicks do not create another occurrence.
+HTTP 410/413 and other permanent rejections never expose this recovery. Ordinary subscription renewal preserves permanent failed occurrences and keeps a blocked subscription paused, so it cannot retransmit the same rejected body or create an alarm busy loop.
 Expired/revoked/narrowed grants, expired/unsubscribed subscriptions, public
 messages and answered private messages cannot be recovered through this route.
 Accepted-but-unanswered occurrences are never retransmitted by this control.
@@ -256,3 +257,8 @@ reporting that the message was lost; the earlier wake remains available. A faile
 pre-write wake remains fail-closed. No existing scheduled tasks are changed.
 Host batching, host wake behavior and host source/tool instructions remain
 outside Relay's transport control.
+
+Rollout requires a supported catalog rescan/refresh so installed strict MCP
+schemas recognize the added optional owner-entry `delivery` property. A catalog
+update must not expand scopes, renew consent or create credentials. Verify the
+actual installed schema after refresh rather than inferring it from source.

@@ -30,6 +30,9 @@ async function setup(t){
   return s;
 }
 const status = code=>async()=>new Response([204,205].includes(code)?null:'',{status:code});
+async function exhaust(s,code=503,now=Date.now()){
+  for(const delay of [0,1000,3000,7000,15000,31000])await drainRelayOutbox(s.ctx,s.env,status(code),now+delay);
+}
 
 test('private status distinguishes saved, queued, callback acceptance and persisted reply without leaking transport secrets',async t=>{
   const s=await setup(t),first=await s.send();assert.equal(first.delivery.state,'saved');
@@ -49,20 +52,20 @@ test('private status distinguishes saved, queued, callback acceptance and persis
 test('manual recovery is idempotent, ordered and bounded without changing grant or subscription expiry',async t=>{
   const s=await setup(t),sub=await s.subscribe(),first=await s.send(),second=await s.send();
   const before=s.rows('SELECT * FROM relay_subscriptions WHERE id=?',sub.id)[0],grant=s.rows('SELECT * FROM relay_oauth WHERE key=?','grant:'+s.auth.grantId)[0];
-  await drainRelayOutbox(s.ctx,s.env,status(413));assert.equal((await s.delivery(first.id)).state,'delivery_failed');assert.equal((await s.delivery(first.id)).retryable,true);
+  await exhaust(s);assert.equal((await s.delivery(first.id)).state,'delivery_failed');assert.equal((await s.delivery(first.id)).retryable,true);
   assert.equal(recoverRelayOwnerDelivery(s.ctx,s.env,second.id).retried,0,'cannot skip an older failed occurrence');
   const base=Date.now();assert.equal(recoverRelayOwnerDelivery(s.ctx,s.env,first.id,base).retried,1);
   assert.equal(recoverRelayOwnerDelivery(s.ctx,s.env,first.id,base).retried,0);
-  await drainRelayOutbox(s.ctx,s.env,status(413),base+1);
+  await exhaust(s,503,base+1);
   assert.equal(recoverRelayOwnerDelivery(s.ctx,s.env,first.id,base+2).retried,0);
   assert.equal(relayOwnerDelivery(s.ctx,s.env,first.id,false,base+2).retryable,false);assert.ok(relayOwnerDelivery(s.ctx,s.env,first.id,false,base+2).retryAfter);
   assert.equal(recoverRelayOwnerDelivery(s.ctx,s.env,first.id,base+60001).retried,1);
-  await drainRelayOutbox(s.ctx,s.env,status(413),base+60002);
+  await exhaust(s,503,base+60002);
   assert.equal(recoverRelayOwnerDelivery(s.ctx,s.env,first.id,base+120002).retried,0,'only two recovery cycles');
   const after=s.rows('SELECT * FROM relay_subscriptions WHERE id=?',sub.id)[0];
   for(const field of ['grant_id','expires_ms','generation','callback','secret','ack_seq'])assert.equal(after[field],before[field]);
   assert.deepEqual(s.rows('SELECT * FROM relay_oauth WHERE key=?','grant:'+s.auth.grantId)[0],grant);
-  assert.equal(s.rows('SELECT attempts FROM relay_outbox WHERE subscription_id=? ORDER BY event_seq LIMIT 1',sub.id)[0].attempts,1);
+  assert.equal(s.rows('SELECT attempts FROM relay_outbox WHERE subscription_id=? ORDER BY event_seq LIMIT 1',sub.id)[0].attempts,6);
 });
 
 test('owner delivery endpoints reject public credentials, unknown IDs, malformed batches, disabled or revoked sessions',async t=>{
@@ -79,7 +82,7 @@ test('owner delivery endpoints reject public credentials, unknown IDs, malformed
 
 test('revoked, narrowed, expired and unsubscribed delivery grants cannot be recovered or transmit',async t=>{
   for(const mode of ['revoked','narrowed','expired','unsubscribed']){
-    const s=await setup(t),sub=await s.subscribe(),message=await s.send();await drainRelayOutbox(s.ctx,s.env,status(413));
+    const s=await setup(t),sub=await s.subscribe(),message=await s.send();await exhaust(s);
     if(mode==='unsubscribed')s.rows('DELETE FROM relay_subscriptions WHERE id=?',sub.id);
     else {const row=s.rows('SELECT value FROM relay_oauth WHERE key=?','grant:'+s.auth.grantId)[0],value=JSON.parse(row.value);if(mode==='revoked')value.revoked=true;if(mode==='narrowed')value.scope='relay:read';if(mode==='expired')value.expiresAt=Date.now()-1;s.rows('UPDATE relay_oauth SET value=? WHERE key=?',JSON.stringify(value),'grant:'+s.auth.grantId);if(mode==='expired')s.rows('UPDATE relay_oauth SET expires_at=? WHERE key=?',Date.now()-1,'grant:'+s.auth.grantId);}
     assert.equal(recoverRelayOwnerDelivery(s.ctx,s.env,message.id).retried,0,mode);
@@ -118,7 +121,7 @@ test('current public writes and reads survive legacy inbox outages while actual 
 });
 
 test('expired subscriptions cannot be recovered even with a still-active grant',async t=>{
-  const s=await setup(t),sub=await s.subscribe(),message=await s.send();await drainRelayOutbox(s.ctx,s.env,status(413));
+  const s=await setup(t),sub=await s.subscribe(),message=await s.send();await exhaust(s);
   s.rows('UPDATE relay_subscriptions SET expires_ms=? WHERE id=?',Date.now()-1,sub.id);
   assert.equal(recoverRelayOwnerDelivery(s.ctx,s.env,message.id).retried,0);
   assert.equal(relayOwnerDelivery(s.ctx,s.env,message.id).retryable,false);
@@ -156,4 +159,34 @@ test('activation survives post-commit reschedule failure, and revocation during 
     if(revoke){await assert.rejects(()=>s.subscribe(),e=>e.code===-32012);assert.equal(s.rows('SELECT COUNT(*) AS n FROM relay_subscriptions')[0].n,0);}
     else {const sub=await s.subscribe();assert.ok(sub.id);assert.equal(s.rows('SELECT COUNT(*) AS n FROM relay_subscriptions')[0].n,1);assert.ok(await s.ctx.storage.getAlarm());}
   }
+});
+
+test('permanent callback rejections never expose or accept manual recovery',async t=>{
+  for(const code of [400,401,403,404,410,413,422]){
+    const s=await setup(t);await s.subscribe();const message=await s.send();await drainRelayOutbox(s.ctx,s.env,status(code));
+    assert.equal(relayOwnerDelivery(s.ctx,s.env,message.id).retryable,false,String(code));
+    assert.equal(recoverRelayOwnerDelivery(s.ctx,s.env,message.id).retried,0,String(code));
+    assert.equal((await (await s.phone('/delivery/retry',{message_id:message.id})).json()).retried,0,String(code));
+  }
+});
+
+test('ordinary renewal preserves a permanent413 occurrence and pauses later pending rows without an alarm busy loop',async t=>{
+  const s=await setup(t),sub=await s.subscribe(),first=await s.send(),second=await s.send();let sent=0;
+  await drainRelayOutbox(s.ctx,s.env,status(413));
+  const before=s.rows('SELECT * FROM relay_outbox WHERE subscription_id=? ORDER BY event_seq',sub.id);
+  assert.equal(before[0].status,'failed');assert.equal(before[0].last_error,'http_413');assert.equal(before[1].status,'pending');
+  await s.subscribe();const after=s.rows('SELECT * FROM relay_outbox WHERE subscription_id=? ORDER BY event_seq',sub.id);
+  assert.deepEqual(after,before,'renewal preserves the rejected occurrence, attempt count and payload');
+  assert.equal(s.rows('SELECT state FROM relay_subscriptions WHERE id=?',sub.id)[0].state,'delivery_failed');
+  assert.equal((await s.delivery(first.id)).retryable,false);assert.equal(recoverRelayOwnerDelivery(s.ctx,s.env,second.id).retried,0);
+  await drainRelayOutbox(s.ctx,s.env,async()=>{sent++;return new Response(null,{status:204});});assert.equal(sent,0);
+  assert.ok((await s.ctx.storage.getAlarm())>Date.now()+60000,'wake is bounded by expiry/history, not pending rows behind the failure');
+});
+
+test('ordinary renewal still reactivates an exhausted transient failure with the same occurrence identity',async t=>{
+  const s=await setup(t),sub=await s.subscribe();await s.send();await exhaust(s,429);
+  const before=s.rows('SELECT * FROM relay_outbox WHERE subscription_id=?',sub.id)[0];assert.equal(before.attempts,6);
+  await s.subscribe();const after=s.rows('SELECT * FROM relay_outbox WHERE subscription_id=?',sub.id)[0];
+  assert.equal(after.status,'pending');assert.equal(after.attempts,0);assert.equal(after.body,before.body);assert.equal(after.event_seq,before.event_seq);
+  assert.equal(s.rows('SELECT state FROM relay_subscriptions WHERE id=?',sub.id)[0].state,'active');
 });

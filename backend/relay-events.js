@@ -7,6 +7,8 @@ const VERIFY_TTL = 300000;
 const ROTATION_MS = 300000;
 const MAX_ATTEMPTS = 6;
 const MAX_RECOVERIES = 2, RECOVERY_COOLDOWN_MS = 60000;
+const recoverableFailure = item => item.attempts >= MAX_ATTEMPTS
+  && (['timeout','tls_error','connection_refused'].includes(item.last_error) || /^http_(408|429|5[0-9]{2})$/.test(item.last_error || ''));
 const MAX_SUBSCRIPTIONS = 8;
 const MAX_QUEUED = 2000;
 const rows = (ctx, q, ...v) => [...ctx.storage.sql.exec(q, ...v)];
@@ -230,7 +232,14 @@ export async function relaySubscribe(ctx, principal, p, env, fetcher = webhookTr
     // In-flight acknowledgments must never mutate its replacement subscription.
     ctx.storage.sql.exec('INSERT OR REPLACE INTO relay_subscriptions VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)', id, principal.principal, principal.grantId, p.name, canonical(p.arguments), p.delivery.url, sub.secret, previous, rotate, expires, start, current?.start_seq ?? start, revision, 'active');
     ctx.storage.sql.exec("DELETE FROM relay_outbox WHERE subscription_id=? AND event_seq<=?", id, start);
-    ctx.storage.sql.exec("UPDATE relay_outbox SET status='pending',attempts=0,next_attempt_ms=?,last_error=NULL WHERE subscription_id=? AND status='failed'", now, id);
+    // Renewal can retry exhausted transient failures, never a permanent
+    // rejection such as 413 with the same immutable occurrence/body.
+    ctx.storage.sql.exec(`UPDATE relay_outbox SET status='pending',attempts=0,next_attempt_ms=?,last_error=NULL
+      WHERE subscription_id=? AND status='failed' AND attempts>=?
+      AND (last_error IN ('timeout','tls_error','connection_refused','http_408','http_429') OR last_error GLOB 'http_5[0-9][0-9]')`,now,id,MAX_ATTEMPTS);
+    const oldest=rows(ctx,"SELECT status FROM relay_outbox WHERE subscription_id=? AND status IN ('pending','failed') ORDER BY event_seq LIMIT 1",id)[0];
+    // Pending rows behind a preserved failure must not create a 50ms busy loop.
+    if(oldest?.status==='failed')ctx.storage.sql.exec("UPDATE relay_subscriptions SET state='delivery_failed' WHERE id=?",id);
     const saved = rows(ctx, 'SELECT * FROM relay_subscriptions WHERE id=?', id)[0];
     fillOutbox(ctx,saved,start,now);
     return {id, refreshBefore: new Date(expires).toISOString(), cursor: eventCursor(start), truncated};
@@ -336,14 +345,14 @@ export function relayOwnerDelivery(ctx,env,messageId,replied=false,now=Date.now(
   if(event){
     const receipt=rows(ctx,'SELECT accepted_ms FROM relay_delivery_receipts WHERE event_seq=?',event.seq)[0];
     if(receipt){accepted=true;if(receipt.accepted_ms>0)acceptedAt=new Date(receipt.accepted_ms).toISOString();}
-    for(const sub of rows(ctx,'SELECT s.*,o.status,o.event_seq,r.recoveries,r.last_recovery_ms FROM relay_subscriptions s JOIN relay_outbox o ON o.subscription_id=s.id LEFT JOIN relay_outbox_recoveries r ON r.subscription_id=o.subscription_id AND r.event_seq=o.event_seq WHERE s.name=? AND o.event_seq=?',RELAY_OWNER_EVENT,event.seq)){
+    for(const sub of rows(ctx,'SELECT s.*,o.status,o.event_seq,o.attempts,o.last_error,r.recoveries,r.last_recovery_ms FROM relay_subscriptions s JOIN relay_outbox o ON o.subscription_id=s.id LEFT JOIN relay_outbox_recoveries r ON r.subscription_id=o.subscription_id AND r.event_seq=o.event_seq WHERE s.name=? AND o.event_seq=?',RELAY_OWNER_EVENT,event.seq)){
       if(sub.expires_ms<=now||!subscriptionActive(ctx,env,sub))continue;
       if(sub.status==='delivered')accepted=true;
       if(sub.status==='pending')pending++;
       if(sub.status==='failed'){
         failed++;
         const oldest=rows(ctx,"SELECT event_seq FROM relay_outbox WHERE subscription_id=? AND status IN ('pending','failed') ORDER BY event_seq LIMIT 1",sub.id)[0];
-        if(oldest?.event_seq===event.seq&&(sub.recoveries||0)<MAX_RECOVERIES){
+        if(oldest?.event_seq===event.seq&&recoverableFailure(sub)&&(sub.recoveries||0)<MAX_RECOVERIES){
           const at=(sub.last_recovery_ms||0)+RECOVERY_COOLDOWN_MS;
           if(at<=now)retryable=true;
           else if(!retryAfter||at<Date.parse(retryAfter))retryAfter=new Date(at).toISOString();
@@ -361,7 +370,7 @@ export function recoverRelayOwnerDelivery(ctx,env,messageId,now=Date.now()) {
   if(event)for(const sub of rows(ctx,"SELECT * FROM relay_subscriptions WHERE name=? AND state='delivery_failed' AND expires_ms>?",RELAY_OWNER_EVENT,now)){
     if(!subscriptionActive(ctx,env,sub))continue;
     const first=rows(ctx,"SELECT * FROM relay_outbox WHERE subscription_id=? AND status IN ('pending','failed') ORDER BY event_seq LIMIT 1",sub.id)[0];
-    if(!first||first.status!=='failed'||first.event_seq!==event.seq)continue;
+    if(!first||first.status!=='failed'||first.event_seq!==event.seq||!recoverableFailure(first))continue;
     const recovery=rows(ctx,'SELECT * FROM relay_outbox_recoveries WHERE subscription_id=? AND event_seq=?',sub.id,event.seq)[0];
     if((recovery?.recoveries||0)>=MAX_RECOVERIES||recovery&&recovery.last_recovery_ms+RECOVERY_COOLDOWN_MS>now)continue;
     ctx.storage.sql.exec('INSERT OR REPLACE INTO relay_outbox_recoveries VALUES(?,?,?,?)',sub.id,event.seq,(recovery?.recoveries||0)+1,now);
