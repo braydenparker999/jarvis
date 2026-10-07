@@ -38,8 +38,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install the locked qualification recipe dependencies
-        run: npm ci
       - name: Compute complete coverage and verified unchanged-input reuse
         id: plan
         run: |
@@ -86,12 +84,13 @@ jobs:
           cache: npm
       - name: Install locked test dependencies and browser metadata
         run: npm ci
-      - name: Select the same locked Chromium build on every runner image
-        run: |
-          npx --no-install playwright-core install chromium
-          chromium_path="$(node --input-type=module -e 'import {chromium} from "playwright-core"; process.stdout.write(chromium.executablePath())')"
-          test -x "$chromium_path"
-          printf 'JARVIS_CHROME=%s\n' "$chromium_path" >> "$GITHUB_ENV"
+      - name: Restore only the checksum-verified official browser archive
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/jarvis-qualification-browser/chrome.zip
+          key: jarvis-browser-linux64-154.0.8037.97-487c3b0e89f786d9257a6265a29bacf18b893e90f29c0ef6f7be9706ecc8c7a2
+      - name: Select the exact qualified Chrome154 build across runner images
+        run: node scripts/install-qualification-browser.mjs
       - uses: actions/setup-python@v5
         if: ${{ matrix.component == 'migration' }}
         with:

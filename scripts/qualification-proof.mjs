@@ -4,12 +4,13 @@ import {execFileSync, spawnSync} from 'node:child_process';
 import {resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {inventory, requireBrowser, performance} from '../tests/helpers/ci-test-inventory.mjs';
+import {BROWSER_IDENTITY} from './install-qualification-browser.mjs';
 
 export const REPOSITORY = 'braydenparker999/jarvis';
 export const WORKFLOW = '.github/workflows/validate-r2.yml';
 export const COMPONENTS = ['relay', 'frontend', 'poweramp', 'blankLibrary', 'podcasts', 'migration', 'performance', 'owner24'];
 export const BASELINES = ['04ef034738e6a3ccc2c03391ea9b00e0fc98ae66', '8aa7fce4dd83d5417614ae112134631dd98df7b6'];
-export const RECIPE = [WORKFLOW, 'scripts/qualification-proof.mjs', 'tests/helpers/ci-test-inventory.mjs'];
+export const RECIPE = [WORKFLOW, 'scripts/qualification-proof.mjs', 'scripts/install-qualification-browser.mjs', 'tests/helpers/ci-test-inventory.mjs'];
 const SHA = /^[a-f0-9]{40}$/;
 const DIGEST = /^[a-f0-9]{64}$/;
 const hash = value => createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex');
@@ -47,7 +48,7 @@ export function makePlan(entries, environment) {
   if (!Array.isArray(entries) || entries.some(e => !e || typeof e.path !== 'string' || !SHA.test(e.sha) || !['100644','100755'].includes(e.mode || '100644'))) throw Error('Invalid immutable source inventory or file type');
   if (new Set(entries.map(e => e.path)).size !== entries.length) throw Error('Duplicate source path');
   if (!environment || !/^v22\.[0-9]+\.[0-9]+$/.test(environment.node22) || !/^v24\.[0-9]+\.[0-9]+$/.test(environment.node24) ||
-      typeof environment.browser !== 'string' || !/^(?:Google Chrome|Chromium) [0-9]+\./.test(environment.browser) ||
+      typeof environment.browser !== 'string' || !/^(?:Google Chrome(?: for Testing)?|Chromium) [0-9]+\./.test(environment.browser) ||
       !/^Python 3\.12\.[0-9]+$/.test(environment.python || '') || environment.platform !== 'ubuntu-24.04-x64' || environment.measurement !== 'full-isolated-serial-v1') throw Error('Missing or unexpected qualification runtime/browser/measurement identity');
   const sorted = entries.map(({path, sha, mode = '100644'}) => ({path, sha, mode})).sort((a,b) => a.path.localeCompare(b.path));
   const coverage = inventory(sorted.filter(e => /^tests\/[^/]+\.test\.js$/.test(e.path)).map(e => e.path));
@@ -163,12 +164,10 @@ export function localEnvironment(env = process.env) {
     platform:'ubuntu-24.04-x64', measurement:'full-isolated-serial-v1'};
 }
 export function declaredEnvironment(root = process.cwd(), env = process.env) {
-  const data = JSON.parse(readFileSync(resolve(root,'node_modules/playwright-core/browsers.json'),'utf8'));
-  const browser = data.browsers.find(b => b.name === 'chromium');
-  if (!browser || !/^[0-9]+(?:\.[0-9]+){3}$/.test(browser.browserVersion || '') || !/^[0-9]+$/.test(browser.revision || '')) throw Error('Missing locked Chromium runtime identity');
-  return {node22:env.QUALIFICATION_NODE22,node24:env.QUALIFICATION_NODE24,browser:'Chromium ' + browser.browserVersion,
+  return {node22:env.QUALIFICATION_NODE22,node24:env.QUALIFICATION_NODE24,browser:BROWSER_IDENTITY,
     python:env.QUALIFICATION_PYTHON,platform:'ubuntu-24.04-x64',measurement:'full-isolated-serial-v1'};
 }
+
 export function localPlan(root = process.cwd(), env = process.env) {return makePlan(localEntries(root), localEnvironment(env));}
 export function assertCurrent(plan, name, expected, env = process.env) {
   if (!COMPONENTS.includes(name) || !DIGEST.test(expected || '') || plan.components[name].digest !== expected) throw Error('Qualification inputs changed before or after execution');
