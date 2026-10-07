@@ -38,6 +38,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Install the locked qualification recipe dependencies
+        run: npm ci
       - name: Compute complete coverage and verified unchanged-input reuse
         id: plan
         run: |
@@ -82,9 +84,14 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
-      - name: Install locked test dependencies when current execution is required
-        if: ${{ matrix.reuse != true }}
+      - name: Install locked test dependencies and browser metadata
         run: npm ci
+      - name: Select the same locked Chromium build on every runner image
+        run: |
+          npx --no-install playwright-core install chromium
+          chromium_path="$(node --input-type=module -e 'import {chromium} from "playwright-core"; process.stdout.write(chromium.executablePath())')"
+          test -x "$chromium_path"
+          printf 'JARVIS_CHROME=%s\n' "$chromium_path" >> "$GITHUB_ENV"
       - uses: actions/setup-python@v5
         if: ${{ matrix.component == 'migration' }}
         with:
@@ -96,7 +103,6 @@ jobs:
           POWERAMP_EVIDENCE_DIR: ${{ runner.temp }}/poweramp-browser
           JARVIS_SCREENSHOT_DIR: ${{ runner.temp }}/podcast-browser
         run: |
-          export JARVIS_CHROME="$(command -v google-chrome || command -v chromium)"
           test -n "$JARVIS_CHROME"
           test -x "$JARVIS_CHROME"
           node scripts/qualification-proof.mjs run "${{ matrix.component }}"

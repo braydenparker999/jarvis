@@ -162,6 +162,13 @@ export function localEnvironment(env = process.env) {
     browser:execFileSync(chrome, ['--version'], {encoding:'utf8'}).trim(), python:env.QUALIFICATION_PYTHON,
     platform:'ubuntu-24.04-x64', measurement:'full-isolated-serial-v1'};
 }
+export function declaredEnvironment(root = process.cwd(), env = process.env) {
+  const data = JSON.parse(readFileSync(resolve(root,'node_modules/playwright-core/browsers.json'),'utf8'));
+  const browser = data.browsers.find(b => b.name === 'chromium');
+  if (!browser || !/^[0-9]+(?:\.[0-9]+){3}$/.test(browser.browserVersion || '') || !/^[0-9]+$/.test(browser.revision || '')) throw Error('Missing locked Chromium runtime identity');
+  return {node22:env.QUALIFICATION_NODE22,node24:env.QUALIFICATION_NODE24,browser:'Chromium ' + browser.browserVersion,
+    python:env.QUALIFICATION_PYTHON,platform:'ubuntu-24.04-x64',measurement:'full-isolated-serial-v1'};
+}
 export function localPlan(root = process.cwd(), env = process.env) {return makePlan(localEntries(root), localEnvironment(env));}
 export function assertCurrent(plan, name, expected, env = process.env) {
   if (!COMPONENTS.includes(name) || !DIGEST.test(expected || '') || plan.components[name].digest !== expected) throw Error('Qualification inputs changed before or after execution');
@@ -177,7 +184,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   try {
     const [command, name] = process.argv.slice(2);
     if (command === 'plan') {
-      const plan = localPlan(root), proof = await findProof(plan, {currentRunId:process.env.GITHUB_RUN_ID});
+      const plan = makePlan(localEntries(root), declaredEnvironment(root)), proof = await findProof(plan, {currentRunId:process.env.GITHUB_RUN_ID});
       const matrix = COMPONENTS.map(component => ({component, digest:plan.components[component].digest,
         node:plan.environment[component === 'owner24' ? 'node24' : 'node22'].slice(1), reuse:!!proof.reuse[component], provenance:proof.reuse[component] || null}));
       writeFileSync('qualification-plan.json', JSON.stringify({...plan, proof}, null, 2) + '\n');
