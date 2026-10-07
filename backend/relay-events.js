@@ -6,6 +6,7 @@ const DEFAULT_TTL = 86400000;
 const VERIFY_TTL = 300000;
 const ROTATION_MS = 300000;
 const MAX_ATTEMPTS = 6;
+const MAX_RECOVERIES = 2, RECOVERY_COOLDOWN_MS = 60000;
 const MAX_SUBSCRIPTIONS = 8;
 const MAX_QUEUED = 2000;
 const rows = (ctx, q, ...v) => [...ctx.storage.sql.exec(q, ...v)];
@@ -30,9 +31,19 @@ export function relayEventSchema(ctx) {
     next_attempt_ms INTEGER NOT NULL, last_error TEXT,
     PRIMARY KEY(subscription_id,event_seq))`);
   sql.exec('CREATE INDEX IF NOT EXISTS relay_outbox_due ON relay_outbox(status,next_attempt_ms)');
+  // No callback URL, signing secret, payload or credential is retained here.
+  sql.exec('CREATE TABLE IF NOT EXISTS relay_delivery_receipts (event_seq INTEGER PRIMARY KEY,accepted_ms INTEGER NOT NULL)');
+  sql.exec(`CREATE TABLE IF NOT EXISTS relay_outbox_recoveries (
+    subscription_id TEXT NOT NULL,event_seq INTEGER NOT NULL,recoveries INTEGER NOT NULL,last_recovery_ms INTEGER NOT NULL,
+    PRIMARY KEY(subscription_id,event_seq))`);
   sql.exec('CREATE TABLE IF NOT EXISTS relay_verified (identity TEXT PRIMARY KEY, verified_until INTEGER NOT NULL)');
   sql.exec('CREATE TABLE IF NOT EXISTS relay_activations (id TEXT PRIMARY KEY, revision TEXT NOT NULL, expires_ms INTEGER NOT NULL)');
   sql.exec('CREATE TABLE IF NOT EXISTS relay_event_meta (key TEXT PRIMARY KEY,value INTEGER NOT NULL)');
+  if(!rows(ctx,"SELECT value FROM relay_event_meta WHERE key='receipts-backfilled'").length){
+    // Old delivered rows prove acceptance, but do not record when it happened.
+    sql.exec("INSERT OR IGNORE INTO relay_delivery_receipts SELECT event_seq,0 FROM relay_outbox WHERE status='delivered'");
+    sql.exec("INSERT OR REPLACE INTO relay_event_meta VALUES('receipts-backfilled',1)");
+  }
   // Private filter/replay text is never part of public entries or callback previews.
   sql.exec('CREATE TABLE IF NOT EXISTS relay_owner_event_bodies (event_id TEXT PRIMARY KEY,body TEXT NOT NULL)');
 }
@@ -195,8 +206,12 @@ export async function relaySubscribe(ctx, principal, p, env, fetcher = webhookTr
   // Verification awaits external I/O. Recheck revocation before activating storage.
   if (!relayGrantActiveInStore(ctx,env,principal.grantId,requiredScope)) throw new RelayError(-32012, 'Connection revoked');
   if(principal.accessHash&&!relayTokenActiveInStore(ctx,env,principal,requiredScope))throw new RelayError(-32012,'Connection rotated or revoked');
+  // Persist a wake before the activation/replay transaction. Alarm I/O is an
+  // await boundary, so validate the same live token/grant again inside it.
+  if(ctx.storage.setAlarm)await ctx.storage.setAlarm(Math.max(now,Date.now())+100);
   const expires = Math.max(now,Date.now()) + Math.min(p.ttlMs ?? DEFAULT_TTL, DEFAULT_TTL);
   const result = ctx.storage.transactionSync(() => {
+    if(!relayGrantActiveInStore(ctx,env,principal.grantId,requiredScope)||principal.accessHash&&!relayTokenActiveInStore(ctx,env,principal,requiredScope))throw new RelayError(-32012,'Connection rotated or revoked');
     if(!rows(ctx,'SELECT id FROM relay_activations WHERE id=? AND revision=? AND expires_ms>?',id,revision,Math.max(now,Date.now())).length)throw new RelayError(-32012,'Subscription activation canceled or superseded');
     const current = rows(ctx, 'SELECT * FROM relay_subscriptions WHERE id=?', id)[0];
     const at=Math.max(now,Date.now());
@@ -220,7 +235,9 @@ export async function relaySubscribe(ctx, principal, p, env, fetcher = webhookTr
     fillOutbox(ctx,saved,start,now);
     return {id, refreshBefore: new Date(expires).toISOString(), cursor: eventCursor(start), truncated};
   });
-  await scheduleRelayAlarm(ctx, now);
+  // A committed activation is successful even if fine-grained rescheduling
+  // fails: its earlier durable wake will repair the schedule.
+  try{await scheduleRelayAlarm(ctx, now);}catch(error){if(!ctx.storage.setAlarm)throw error;}
   return result;
   }finally{ctx.storage.sql.exec('DELETE FROM relay_activations WHERE id=? AND revision=?',id,revision);}
 }
@@ -256,12 +273,15 @@ export async function drainRelayOutbox(ctx, env, fetcher = webhookTransport(env)
     if (sub.expires_ms <= now || !relayEnabled(env) || !subscriptionActive(ctx,env,sub)) { stop(sub.id); continue; }
     if (sub.rotate_until && sub.rotate_until <= now) sql.exec('UPDATE relay_subscriptions SET previous_secret=NULL,rotate_until=NULL WHERE id=?', sub.id);
   }
+  sql.exec('DELETE FROM relay_outbox_recoveries WHERE NOT EXISTS(SELECT 1 FROM relay_outbox o WHERE o.subscription_id=relay_outbox_recoveries.subscription_id AND o.event_seq=relay_outbox_recoveries.event_seq)');
   sql.exec('DELETE FROM relay_verified WHERE verified_until<=?', now);
   sql.exec('DELETE FROM relay_activations WHERE expires_ms<=?',now);
   const expired = rows(ctx, 'SELECT COALESCE(MAX(seq),0) AS n FROM relay_events WHERE created_ms<=?', now - EVENT_RETENTION_MS)[0].n;
   if (expired) {
     sql.exec("INSERT OR REPLACE INTO relay_event_meta VALUES('floor',?)", expired);
     sql.exec('DELETE FROM relay_owner_event_bodies WHERE event_id IN (SELECT event_id FROM relay_events WHERE seq<=?)', expired);
+    sql.exec('DELETE FROM relay_delivery_receipts WHERE event_seq<=?', expired);
+    sql.exec('DELETE FROM relay_outbox WHERE event_seq<=?',expired);
     sql.exec('DELETE FROM relay_events WHERE seq<=?', expired);
   }
   if (fetcher) {
@@ -287,6 +307,7 @@ export async function drainRelayOutbox(ctx, env, fetcher = webhookTransport(env)
         ctx.storage.transactionSync(() => {
           sql.exec("UPDATE relay_outbox SET status='delivered',attempts=attempts+1,last_error=NULL WHERE subscription_id=? AND event_seq=?", sub.id, item.event_seq);
           sql.exec('UPDATE relay_subscriptions SET ack_seq=? WHERE id=?', item.event_seq, sub.id);
+          sql.exec('INSERT OR IGNORE INTO relay_delivery_receipts VALUES(?,?)',item.event_seq,Math.max(now,Date.now()));
         });
       } else if (status === 410) stop(sub.id);
       else {
@@ -303,3 +324,51 @@ export async function drainRelayOutbox(ctx, env, fetcher = webhookTransport(env)
   await scheduleRelayAlarm(ctx, now,fetcher?0:60000);
 }
 
+
+
+// Internal-only private delivery evidence. Callers must authenticate the owner
+// and verify the requested ID belongs to a private user message before using it.
+// A callback 2xx is transport acceptance, never a claim that dot is working.
+export function relayOwnerDelivery(ctx,env,messageId,replied=false,now=Date.now()) {
+  relayEventSchema(ctx);
+  const event=rows(ctx,'SELECT seq FROM relay_events WHERE message_id=?','owner:'+messageId)[0];
+  let pending=0,failed=0,accepted=false,acceptedAt=null,retryable=false,retryAfter=null;
+  if(event){
+    const receipt=rows(ctx,'SELECT accepted_ms FROM relay_delivery_receipts WHERE event_seq=?',event.seq)[0];
+    if(receipt){accepted=true;if(receipt.accepted_ms>0)acceptedAt=new Date(receipt.accepted_ms).toISOString();}
+    for(const sub of rows(ctx,'SELECT s.*,o.status,o.event_seq,r.recoveries,r.last_recovery_ms FROM relay_subscriptions s JOIN relay_outbox o ON o.subscription_id=s.id LEFT JOIN relay_outbox_recoveries r ON r.subscription_id=o.subscription_id AND r.event_seq=o.event_seq WHERE s.name=? AND o.event_seq=?',RELAY_OWNER_EVENT,event.seq)){
+      if(sub.expires_ms<=now||!subscriptionActive(ctx,env,sub))continue;
+      if(sub.status==='delivered')accepted=true;
+      if(sub.status==='pending')pending++;
+      if(sub.status==='failed'){
+        failed++;
+        const oldest=rows(ctx,"SELECT event_seq FROM relay_outbox WHERE subscription_id=? AND status IN ('pending','failed') ORDER BY event_seq LIMIT 1",sub.id)[0];
+        if(oldest?.event_seq===event.seq&&(sub.recoveries||0)<MAX_RECOVERIES){
+          const at=(sub.last_recovery_ms||0)+RECOVERY_COOLDOWN_MS;
+          if(at<=now)retryable=true;
+          else if(!retryAfter||at<Date.parse(retryAfter))retryAfter=new Date(at).toISOString();
+        }
+      }
+    }
+  }
+  return {state:replied?'reply_saved':failed?'delivery_failed':pending?'queued':accepted?'callback_accepted':'saved',
+    pending,failed,callbackAcceptedAt:acceptedAt,retryable:!replied&&retryable,retryAfter:replied?null:retryAfter};
+}
+export function recoverRelayOwnerDelivery(ctx,env,messageId,now=Date.now()) {
+  relayEventSchema(ctx);
+  const event=rows(ctx,'SELECT seq FROM relay_events WHERE message_id=?','owner:'+messageId)[0];
+  let retried=0;
+  if(event)for(const sub of rows(ctx,"SELECT * FROM relay_subscriptions WHERE name=? AND state='delivery_failed' AND expires_ms>?",RELAY_OWNER_EVENT,now)){
+    if(!subscriptionActive(ctx,env,sub))continue;
+    const first=rows(ctx,"SELECT * FROM relay_outbox WHERE subscription_id=? AND status IN ('pending','failed') ORDER BY event_seq LIMIT 1",sub.id)[0];
+    if(!first||first.status!=='failed'||first.event_seq!==event.seq)continue;
+    const recovery=rows(ctx,'SELECT * FROM relay_outbox_recoveries WHERE subscription_id=? AND event_seq=?',sub.id,event.seq)[0];
+    if((recovery?.recoveries||0)>=MAX_RECOVERIES||recovery&&recovery.last_recovery_ms+RECOVERY_COOLDOWN_MS>now)continue;
+    ctx.storage.sql.exec('INSERT OR REPLACE INTO relay_outbox_recoveries VALUES(?,?,?,?)',sub.id,event.seq,(recovery?.recoveries||0)+1,now);
+    ctx.storage.sql.exec("UPDATE relay_outbox SET status='pending',attempts=0,next_attempt_ms=?,last_error=NULL WHERE subscription_id=? AND event_seq=?",now,sub.id,event.seq);
+    // Restore only this still-live subscription. Its grant, generation, expiry,
+    // callback and secret are unchanged, and older occurrences cannot be skipped.
+    ctx.storage.sql.exec("UPDATE relay_subscriptions SET state='active' WHERE id=?",sub.id);retried++;
+  }
+  return {retried};
+}

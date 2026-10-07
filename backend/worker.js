@@ -45,7 +45,8 @@ export default {
         try{const b=JSON.parse(new TextDecoder().decode(bytes));data={id:b.id,body:b.body};}catch{return reply({error:'Invalid JSON'},400);}
       }
       try {
-        await syncShared(env);
+        // Legacy migration must not gate current writes or erase current reads.
+        if(request.method==='GET')try{await syncShared(env);}catch{}
         const suffix=path==='/shared/state'?'/state'+new URL(request.url).search:'/message';
         const response=await sharedInternal(env,suffix,data);
         return new Response(response.body,{status:response.status,headers:{...headers,'Content-Type':'application/json'}});
@@ -109,9 +110,10 @@ export class Hub {
         sharedStore(this.ctx,'/internal/shared/state');
         // Persist wake before the atomic message/event insertion; failed requests
         // are cleaned up by the ordinary scheduler without a busy loop.
-        if(body?.op==='message'&&this.ctx.storage.setAlarm)await this.ctx.storage.setAlarm(Date.now()+100);
+        if(['message','delivery_retry'].includes(body?.op)&&this.ctx.storage.setAlarm)await this.ctx.storage.setAlarm(Date.now()+100);
         const response=await relayOwnerStore(this.ctx,this.env,body,enqueueRelayOwnerMessage);
-        if(body?.op==='message')await scheduleRelayAlarm(this.ctx);
+        // The pre-commit wake is durable even if rescheduling fails after a save.
+        if(['message','delivery_retry'].includes(body?.op))try{await scheduleRelayAlarm(this.ctx);}catch{}
         return response;
       } catch { return json({error:'Owner Relay storage unavailable'},503); }
     }
@@ -130,7 +132,7 @@ export class Hub {
         await this.publicationSync;
       }
       const response=sharedStore(this.ctx,path,request.method==='POST'?await request.json():{},new URL(request.url).searchParams);
-      if(path==='/internal/shared/message')await scheduleRelayAlarm(this.ctx);
+      if(path==='/internal/shared/message')try{await scheduleRelayAlarm(this.ctx);}catch{}
       return response;
     }
     if(path==='/internal/oauth-store')return oauthStore(this.ctx.storage,await request.json());
