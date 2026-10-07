@@ -41,14 +41,14 @@ test('workflows retain full coverage, serial performance gates and fast OAuth br
   assert.equal(auditWorkflows(source, owner), true);
 });
 
-test('workflow audit rejects duplicated, omitted and browser-optional executions', () => {
-  const command = 'node tests/helpers/ci-test-inventory.mjs run podcasts --require-browser';
-  assert.throws(() => auditWorkflows(source + '\n' + command, owner), /exactly once/);
-  assert.throws(() => auditWorkflows(source.replace(command, ''), owner), /exactly once/);
-  assert.throws(() => auditWorkflows(source.replace(command, command.replace(' --require-browser', '')), owner), /mandatory Chromium/);
-  assert.throws(() => auditWorkflows(source + '\n          npm test\n', owner), /duplicates/);
-  assert.throws(() => auditWorkflows(source.replace('node --test ' + performance[0], ''), owner), /serial performance gate/);
-  assert.throws(() => auditWorkflows(source.replace('if: ${{ !cancelled() }}', ''), owner), /ordinary failures/);
+test('workflow audit rejects incomplete, browser-optional and weakened qualification', () => {
+  const command = 'node scripts/qualification-proof.mjs plan';
+  assert.throws(() => auditWorkflows(source + '\n' + command, owner), /exactly one/);
+  assert.throws(() => auditWorkflows(source.replace(command, ''), owner), /exactly one/);
+  assert.throws(() => auditWorkflows(source.replace('test -x "$JARVIS_CHROME"', ''), owner), /mandatory Chromium/);
+  assert.throws(() => auditWorkflows(source.replace('fail-fast: false', 'fail-fast: true'), owner), /non-cancelling/);
+  assert.throws(() => auditWorkflows(source.replace('test "$COMPONENT_RESULT" = success', ''), owner), /every gate/);
+  assert.throws(() => auditWorkflows(source + '\ncontinue-on-error: true', owner), /every gate/);
   assert.throws(() => auditWorkflows(source.replace('retention-days: 14', ''), owner), /retention/);
   assert.throws(() => auditWorkflows(source, owner.replace("cancel-in-progress: ${{ github.event_name == 'pull_request' }}", 'cancel-in-progress: true')), /pull-request/);
   assert.throws(() => auditWorkflows(source, owner.replace("REQUIRE_RELAY_OWNER_BROWSER: '1'", '')), /mandatory/);

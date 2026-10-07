@@ -8,127 +8,114 @@ on:
 permissions:
   contents: read
 
-# Superseded PR validation can stop. Main runs have unique groups and never
-# cancel one another; deployment concurrency is unchanged in its own workflows.
 concurrency:
   group: r2-validation-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      digest: ${{ steps.plan.outputs.digest }}
+      node22: ${{ steps.plan.outputs.node22 }}
+      node24: ${{ steps.plan.outputs.node24 }}
     steps:
       - uses: actions/checkout@v4
         with:
+          persist-credentials: false
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
+          node-version: '24'
+      - name: Bind the exact owner runtime
+        run: printf 'QUALIFICATION_NODE24=%s\n' "$(node --version)" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@v4
+        with:
           node-version: '22'
-      - name: Install pinned test dependencies
-        run: npm ci
-      - name: Verify complete test inventory and mandatory Chromium
+      - name: Compute complete coverage and verified unchanged-input reuse
+        id: plan
         run: |
+          export QUALIFICATION_NODE22="$(node --version)"
           export JARVIS_CHROME="$(command -v google-chrome || command -v chromium)"
           test -n "$JARVIS_CHROME"
-          printf 'JARVIS_CHROME=%s\n' "$JARVIS_CHROME" >> "$GITHUB_ENV"
-          node tests/helpers/ci-test-inventory.mjs check > "$RUNNER_TEMP/ci-test-inventory.json"
-          cat "$RUNNER_TEMP/ci-test-inventory.json"
-          node --input-type=module -e 'import {requireBrowser} from "./tests/helpers/ci-test-inventory.mjs"; requireBrowser()'
-      - name: Run fast Relay contracts and real OAuth consent browser
-        run: node tests/helpers/ci-test-inventory.mjs run relay --require-browser
+          test -x "$JARVIS_CHROME"
+          node scripts/qualification-proof.mjs plan
+      - name: Preserve the immutable qualification plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: qualification-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: qualification-plan.json
+          if-no-files-found: error
+          retention-days: 14
+
+  component:
+    needs: plan
+    # A name alone never proves a pass. Consumers verify the completed main
+    # run, exact attempt, immutable recipe bytes, and every required outcome.
+    name: qualified-${{ matrix.component }}-${{ matrix.digest }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      QUALIFICATION_NODE22: v${{ needs.plan.outputs.node22 }}
+      QUALIFICATION_NODE24: v${{ needs.plan.outputs.node24 }}
+      QUALIFICATION_COMPONENT_DIGEST: ${{ matrix.digest }}
+      QUALIFICATION_REUSE: ${{ matrix.reuse }}
+      QUALIFICATION_PROVENANCE: ${{ toJSON(matrix.provenance) }}
+      POWERAMP_EVIDENCE_DIR: ${{ runner.temp }}/poweramp-browser
+      JARVIS_SCREENSHOT_DIR: ${{ runner.temp }}/podcast-browser
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - name: Install locked test dependencies when current execution is required
+        if: ${{ matrix.reuse != true }}
+        run: npm ci
       - uses: actions/setup-python@v5
+        if: ${{ matrix.component == 'migration' && matrix.reuse != true }}
         with:
           python-version: '3.12'
-      - name: Check migration syntax and integrity tests
-        run: |
-          python -m py_compile scripts/migrate-drive-to-r2.py
-          test -f tests/test_r2_migration.py
-          python -m unittest discover -s tests -p 'test_r2*.py' -v
-      - name: Trace isolated unchanged Poweramp rendering
-        if: ${{ !cancelled() }}
-        env:
-          POWERAMP_EVIDENCE_DIR: ${{ runner.temp }}/poweramp-browser
+      - name: Require the exact planned browser and execute or verify this component
+        # Independent groups use distinct runners. All three Poweramp
+        # measurements stay serial on this isolated performance runner.
         run: |
           export JARVIS_CHROME="$(command -v google-chrome || command -v chromium)"
           test -n "$JARVIS_CHROME"
-          node --check tests/poweramp-render-trace-browser.mjs
-          node --test tests/poweramp-render-trace-browser.mjs
-      - name: Preserve isolated Poweramp render traces
+          test -x "$JARVIS_CHROME"
+          node scripts/qualification-proof.mjs run "${{ matrix.component }}"
+      - name: Preserve browser evidence and execution provenance
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: poweramp-render-trace-${{ github.run_id }}
+          name: qualification-${{ matrix.component }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/poweramp-browser/render-trace-summary.json
-            ${{ runner.temp }}/poweramp-browser/render-trace-*-report.json
-            ${{ runner.temp }}/poweramp-browser/render-trace-*-timings.json
-            ${{ runner.temp }}/poweramp-browser/render-trace-*-events.json.gz
-            ${{ runner.temp }}/poweramp-browser/render-visual-*.png
-            ${{ runner.temp }}/poweramp-browser/render-baked-backdrop-*.png
-            ${{ runner.temp }}/poweramp-browser/render-layer-pictures-*.json
+            qualification-${{ matrix.component }}.json
+            ${{ runner.temp }}/poweramp-browser
+            ${{ runner.temp }}/podcast-browser
           if-no-files-found: warn
           retention-days: 14
-      - name: Measure persistent live-node Poweramp prototype
-        if: ${{ !cancelled() }}
+
+  qualification:
+    needs: [plan, component]
+    if: ${{ always() && !cancelled() }}
+    name: qualified-source-${{ needs.plan.outputs.digest }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require every planned qualification lane
         env:
-          POWERAMP_EVIDENCE_DIR: ${{ runner.temp }}/poweramp-browser
-          POWERAMP_BASELINE_REF: 8aa7fce4dd83d5417614ae112134631dd98df7b6
+          PLAN_RESULT: ${{ needs.plan.result }}
+          COMPONENT_RESULT: ${{ needs.component.result }}
         run: |
-          export JARVIS_CHROME="$(command -v google-chrome || command -v chromium)"
-          test -n "$JARVIS_CHROME"
-          node --test tests/poweramp-persistent-prototype-browser.mjs
-      - name: Verify actual library visibility after mini round trips
-        if: ${{ !cancelled() }}
-        env:
-          POWERAMP_EVIDENCE_DIR: ${{ runner.temp }}/poweramp-browser
-        run: |
-          export JARVIS_CHROME="$(command -v google-chrome || command -v chromium)"
-          test -n "$JARVIS_CHROME"
-          node tests/helpers/ci-test-inventory.mjs run blankLibrary --require-browser
-      - name: Run frontend regression tests
-        if: ${{ !cancelled() }}
-        env:
-          POWERAMP_EVIDENCE_DIR: ${{ runner.temp }}/poweramp-browser
-        run: |
-          export JARVIS_CHROME="$(command -v google-chrome || command -v chromium)"
-          test -n "$JARVIS_CHROME"
-          node tests/helpers/ci-test-inventory.mjs run regressions --require-browser
-      - name: Measure isolated cold and playing Poweramp input setup
-        if: ${{ !cancelled() }}
-        env:
-          POWERAMP_EVIDENCE_DIR: ${{ runner.temp }}/poweramp-browser
-        run: |
-          export JARVIS_CHROME="$(command -v google-chrome || command -v chromium)"
-          test -n "$JARVIS_CHROME"
-          node --test tests/poweramp-preview-setup-browser.mjs
-      - name: Preserve Poweramp trusted-input evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: poweramp-browser-${{ github.run_id }}
-          path: ${{ runner.temp }}/poweramp-browser
-          if-no-files-found: warn
-          retention-days: 14
-      - name: Verify podcast listening and offline playback in Chromium
-        run: |
-          export JARVIS_CHROME="$(command -v google-chrome || command -v chromium)"
-          test -n "$JARVIS_CHROME"
-          export JARVIS_SCREENSHOT_DIR="$RUNNER_TEMP/podcast-screenshots"
-          node tests/helpers/ci-test-inventory.mjs run podcasts --require-browser
-      - name: Preserve podcast browser evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: podcast-browser-${{ github.run_id }}
-          path: ${{ runner.temp }}/podcast-screenshots
-          if-no-files-found: ignore
-          retention-days: 14
-      - name: Preserve exact test coverage inventory
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ci-test-inventory-${{ github.run_id }}
-          path: ${{ runner.temp }}/ci-test-inventory.json
-          if-no-files-found: warn
-          retention-days: 14
+          test "$PLAN_RESULT" = success
+          test "$COMPONENT_RESULT" = success
