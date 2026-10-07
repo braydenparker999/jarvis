@@ -13,7 +13,9 @@ import {chromium} from 'playwright-core';
 import {buildPreview} from '../scripts/build-poweramp-preview.mjs';
 
 const sourceHash='a6d0fb71df79ca8cc3d80627fb911e5894bb9fff465818ada78feb81b2688759';
-const expectedCandidateHash='2de70f44087e9cb31de0f1d10783b822c49dafacbccccf824c7889c2c23f7833';
+// The transport-only repair changes the full-source fingerprint. The frozen
+// v8 baseline, measured UI cases, and geometry/pixel gates stay unchanged.
+const expectedCandidateHash='0db705bc7da47f571b51efbb2531d4f6cef1b312bcd5cf4ff06c4b0055b8f2ac';
 const baselineRef='04ef034738e6a3ccc2c03391ea9b00e0fc98ae66';
 const profile={viewport:{width:519,height:988},deviceScaleFactor:2.0818214416503906,isMobile:true,hasTouch:true};
 const executablePath=[process.env.JARVIS_CHROME,'/usr/bin/chromium','/usr/bin/google-chrome',chromium.executablePath()].find(p=>p&&existsSync(p));
@@ -148,4 +150,3 @@ test('serial pinned-v8 versus isolated dim-layer candidate, reverse-order repeat
     await save('render-trace-summary.json',report);
   }finally{await save('render-trace-summary.json',report);await browser?.close();await rm(directory,{recursive:true,force:true});}
 });
-
