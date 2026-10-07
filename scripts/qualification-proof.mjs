@@ -20,9 +20,12 @@ const heavyTest = path => /^tests\/(?:poweramp|drawercast|audio-fidelity|r2-play
 // Unknown/new top-level inputs invalidate every component. Components also
 // include the complete inventory and recipe, so added/deleted/renamed tests,
 // dependencies or qualification changes cannot quietly reuse older coverage.
+// The Worker bundles modules and data from public/drawercast and public/content.
+// Keep those whole directories, backend code, and shared fixtures closed over
+// every lane, including future files; a named-file allowlist would go stale.
 export function inputOwners(path, coverage) {
   if (path.startsWith('tests/')) {
-    if (path.startsWith('tests/helpers/poweramp-')) return ['poweramp', 'blankLibrary', 'performance'];
+    if (path.startsWith('tests/helpers/')) return COMPONENTS;
     if (performance.includes(path)) return ['performance'];
     if (coverage.groups.relay.includes(path) || path === 'tests/relay-fixture.js') return ['relay', 'owner24'];
     if (coverage.groups.blankLibrary.includes(path)) return ['blankLibrary'];
@@ -31,13 +34,11 @@ export function inputOwners(path, coverage) {
     if (/^tests\/test_r2.*\.py$/.test(path)) return ['migration'];
     return COMPONENTS;
   }
-  if (path.startsWith('public/drawercast/')) return ['poweramp', 'blankLibrary', 'performance', 'frontend'];
-  if (/^public\/assets\/(?:r2-config\.json|drive-config\.json|pip-diagnostics\.js)$/.test(path)) return ['poweramp', 'blankLibrary', 'frontend', 'relay', 'owner24'];
+  if (path.startsWith('public/drawercast/') || path.startsWith('public/content/')) return COMPONENTS;
+  if (/^public\/assets\/(?:r2-config\.json|drive-config\.json|pip-diagnostics\.js)$/.test(path)) return COMPONENTS;
   if (path === 'public/staticwebapp.config.json') return COMPONENTS;
-  if (path.startsWith('public/podcasts/')) return ['podcasts', 'frontend'];
-  if (path.startsWith('public/assets/')) return ['frontend', 'relay', 'owner24', 'podcasts'];
-  if (path.startsWith('public/')) return ['frontend', 'relay', 'owner24'];
-  if (path.startsWith('backend/')) return ['relay', 'owner24', 'frontend', 'podcasts'];
+  if (path.startsWith('public/')) return ['frontend', 'relay', 'owner24', 'podcasts'];
+  if (path.startsWith('backend/')) return COMPONENTS;
   if (path.startsWith('relay-egress/') || path.startsWith('deploy/relay-egress-vercel/')) return ['relay', 'owner24'];
   if (path === 'scripts/build-poweramp-preview.mjs') return ['poweramp', 'blankLibrary', 'performance'];
   if (/^scripts\/(?:migrate-drive-to-r2\.py|publish-r2-partial\.py)$/.test(path)) return ['migration', 'frontend'];
@@ -74,7 +75,7 @@ export function checkedRun(run, {sourceSha, workflowId} = {}) {
 }
 
 export function checkedJobs(jobs, run, names) {
-  if (!Array.isArray(jobs) || jobs.some(j => j.run_id !== run.id || j.run_attempt !== run.run_attempt)) throw Error('Mixed or missing qualification run attempt');
+  if (!Array.isArray(jobs) || jobs.some(j => j.run_id !== run.id || j.run_attempt !== run.run_attempt || j.head_sha !== run.head_sha)) throw Error('Mixed or missing qualification run attempt or source SHA');
   for (const name of names) {
     const found = jobs.filter(job => job.name === name);
     if (found.length !== 1 || found[0].status !== 'completed' || found[0].conclusion !== 'success') throw Error('Missing, duplicated, failed or skipped qualification job: ' + name);
