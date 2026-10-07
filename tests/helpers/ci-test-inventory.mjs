@@ -40,28 +40,18 @@ export function requireBrowser(env = process.env) {
 
 export function auditWorkflows(source, owner) {
   const count = (text, value) => text.split(value).length - 1;
-  for (const group of ['relay', 'regressions', 'blankLibrary', 'podcasts']) {
-    if (count(source, `node tests/helpers/ci-test-inventory.mjs run ${group} --require-browser`) !== 1)
-      throw Error('Aggregate workflow must execute ' + group + ' exactly once with mandatory Chromium');
-  }
-  if (/^\s*(?:npm test|node --test tests\/(?:poweramp-blank-library-browser\.test\.js|podcasts-browser\.test\.js))\s*$/m.test(source))
-    throw Error('Legacy aggregate or dedicated command duplicates inventoried tests');
-  for (const path of performance) {
-    if (count(source, 'node --test ' + path) !== 1) throw Error('Preserve one serial performance gate: ' + path);
-  }
-  const positions = performance.map(path => source.indexOf('node --test ' + path));
-  if (positions.some((position, index) => index > 0 && position <= positions[index - 1]))
-    throw Error('Preserve serial performance measurement order');
-  if (count(source, 'if: ${{ !cancelled() }}') !== 5)
-    throw Error('Preserve media/performance evidence after ordinary failures');
-  for (const name of ['poweramp-render-trace', 'poweramp-browser', 'podcast-browser', 'ci-test-inventory']) {
-    if (count(source, 'name: ' + name + '-${{ github.run_id }}') !== 1)
-      throw Error('Preserve browser and coverage evidence artifact: ' + name);
-  }
-  if (count(source, 'if: always()') !== 4 || count(source, 'retention-days: 14') !== 4)
-    throw Error('Preserve always-uploaded browser/coverage artifacts and retention');
-  if (!source.includes('python -m unittest discover -s tests -p \'test_r2*.py\' -v'))
-    throw Error('Preserve migration integrity coverage');
+  if (count(source, 'node scripts/qualification-proof.mjs plan') !== 1 ||
+      count(source, 'node scripts/qualification-proof.mjs run "${{ matrix.component }}"') !== 1)
+    throw Error('Preserve exactly one complete qualification planner and component execution owner');
+  if (!source.includes('include: ${{ fromJSON(needs.plan.outputs.matrix) }}') ||
+      !source.includes('fail-fast: false')) throw Error('Every inventoried component must have an independent non-cancelling lane');
+  if (!source.includes('needs: [plan, component]') || !source.includes('test "$PLAN_RESULT" = success') ||
+      !source.includes('test "$COMPONENT_RESULT" = success') || /continue-on-error/.test(source))
+    throw Error('Full qualification requires every gate, including rejected/failed/skipped outcomes');
+  if (count(source, 'test -x "$JARVIS_CHROME"') !== 2 || source.includes('POWERAMP_LAYER_PICTURES_ONLY'))
+    throw Error('Preserve mandatory Chromium and the full serial performance plan');
+  if (count(source, 'if: always()') !== 1 || count(source, 'retention-days: 14') !== 2)
+    throw Error('Preserve always-uploaded component browser/provenance artifacts and retention');
   if (!owner.includes("- 'tests/oauth-consent-browser.test.js'"))
     throw Error('OAuth browser changes must trigger fast Relay validation');
   if (!owner.includes('node tests/helpers/ci-test-inventory.mjs run relay --require-browser'))
