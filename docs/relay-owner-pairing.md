@@ -258,7 +258,6 @@ pre-write wake remains fail-closed. No existing scheduled tasks are changed.
 Host batching, host wake behavior and host source/tool instructions remain
 outside Relay's transport control.
 
-Rollout requires a supported catalog rescan/refresh so installed strict MCP
-schemas recognize the added optional owner-entry `delivery` property. A catalog
-update must not expand scopes, renew consent or create credentials. Verify the
-actual installed schema after refresh rather than inferring it from source.
+Delivery enrichment is restricted to the authenticated phone API. Existing MCP
+message-entry output shapes remain unchanged, so this phone feature does not
+depend on a tool catalog refresh or additional OAuth consent.

@@ -190,3 +190,12 @@ test('ordinary renewal still reactivates an exhausted transient failure with the
   assert.equal(after.status,'pending');assert.equal(after.attempts,0);assert.equal(after.body,before.body);assert.equal(after.event_seq,before.event_seq);
   assert.equal(s.rows('SELECT state FROM relay_subscriptions WHERE id=?',sub.id)[0].state,'active');
 });
+
+test('phone delivery evidence does not change deployed MCP private message-entry wire shapes',async t=>{
+  const s=await setup(t),message=await s.send();assert.equal(message.delivery.state,'saved');
+  const pending=await relayOwnerRpc(s.ctx,s.env,s.auth,'relay_owner_list_pending',{inbox_id:RELAY_OWNER_INBOX});
+  assert.equal(pending.messages.length,1);assert.equal(Object.hasOwn(pending.messages[0],'delivery'),false);
+  const conversation=await relayOwnerRpc(s.ctx,s.env,s.auth,'relay_owner_read_conversation',{inbox_id:RELAY_OWNER_INBOX,message_id:message.id});
+  assert.equal(Object.hasOwn(conversation.message,'delivery'),false);assert.ok(conversation.context.every(entry=>!Object.hasOwn(entry,'delivery')));
+  assert.equal((await s.delivery(message.id)).state,'saved');
+});

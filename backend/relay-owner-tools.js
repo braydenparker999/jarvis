@@ -6,11 +6,10 @@ const timestamp = {type:'string',format:'date-time'};
 const visibility = {type:'string',const:'private'};
 const inbox = {inbox_id:{type:'string',const:RELAY_OWNER_INBOX}};
 const nextCursor = {type:['string','null']};
-const delivery=object({state:{type:'string',enum:['saved','queued','callback_accepted','delivery_failed','reply_saved']},pending:{type:'integer',minimum:0},failed:{type:'integer',minimum:0},callbackAcceptedAt:{type:['string','null']},retryable:{type:'boolean'},retryAfter:{type:['string','null']}});
 const entry = object({id,sequence:{type:'integer',minimum:1},body:{type:'string'},role:{type:'string',enum:['user','assistant']},createdAt:timestamp,
   author_authenticated:{type:'boolean',const:true},principal:{type:'string',const:RELAY_OWNER},device_id:id,
   authentication_source:{type:'string',enum:['owner-device-session','owner-password-session','owner-oauth-mcp']},visibility,
-  delivery,kind:{type:'string',const:'reply'},replyTo:id},
+  kind:{type:'string',const:'reply'},replyTo:id},
   ['id','body','role','createdAt','author_authenticated','principal','device_id','authentication_source','visibility']);
 const device = object({id,label:{type:'string'},label_verified:{type:'boolean',const:false},principal:{type:'string',const:RELAY_OWNER},expiresAt:timestamp,
   authentication_source:{type:'string',enum:['owner-device-session','owner-password-session']},

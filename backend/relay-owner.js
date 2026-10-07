@@ -284,8 +284,8 @@ export async function relayOwnerRpc(ctx, env, principal, name, args, enqueueOwne
     }
     if (name === 'relay_owner_devices_list') return {devices: rows(ctx, 'SELECT * FROM relay_owner_sessions WHERE principal=? ORDER BY created_ms,device_id', RELAY_OWNER).map(row => device(sessionAudit(ctx, row)))};
     if (name === 'relay_owner_device_revoke') return revokeDevice(ctx, args.device_id, now);
-    if (name === 'relay_owner_list_pending') return {inbox_id: RELAY_OWNER_INBOX, ...listMessages(ctx, args.cursor, args.limit, true,env), visibility: 'private'};
-    const data = conversation(ctx, args.message_id,env);
+    if (name === 'relay_owner_list_pending') return {inbox_id: RELAY_OWNER_INBOX, ...listMessages(ctx, args.cursor, args.limit, true), visibility: 'private'};
+    const data = conversation(ctx, args.message_id);
     if (name === 'relay_owner_read_conversation') return {inbox_id: RELAY_OWNER_INBOX, ...data, visibility: 'private'};
     const content = text(args.body, 6000);
     if (data.reply) {
