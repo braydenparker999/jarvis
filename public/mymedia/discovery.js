@@ -1,3 +1,4 @@
+import {youtubeDate} from './metadata.js';
 // Stable daily sampling with round-robin collection diversity.
 export function hash(value){let n=2166136261;for(const c of String(value)){n^=c.charCodeAt(0);n=Math.imul(n,16777619);}return n>>>0;}
 export function discover(videos,progress={},limit=12,seed=new Date().toISOString().slice(0,10)){
@@ -15,5 +16,6 @@ export function enrichVideos(videos,manifest){
     creator:typeof row.creator==='string'?row.creator.slice(0,160):'',
     description:typeof row.description==='string'?row.description.slice(0,2000):'',
     topics:Array.isArray(row.topics)?row.topics.filter(x=>typeof x==='string').slice(0,12).map(x=>x.slice(0,80)):[],
-    addedAt:Number.isFinite(row.addedAt)&&row.addedAt>0?row.addedAt:v.addedAt||0};});
+    addedAt:Number.isFinite(row.addedAt)&&row.addedAt>0?row.addedAt:v.addedAt||0,
+    ...youtubeDate(row)};});
 }

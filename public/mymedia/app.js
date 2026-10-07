@@ -5,7 +5,7 @@ import {createVideoApi, folderId, mediaURL, thumbnails, parseLibrary, parseProgr
   continueWatching, searchVideos, groupByFolder, formatDuration, srtToVtt,
   PROGRESS_KEY, LIBRARY_KEY} from './library.js';
 import {play} from './player.js';
-import {knownCreators, videoPresentation, sortDisplayedVideos} from './presentation.js';
+import {knownCreators, creatorGroups, videoPresentation, sortDisplayedVideos} from './presentation.js';
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
@@ -19,10 +19,13 @@ let creatorNames = knownCreators(library);
 let progress = parseProgress(read(PROGRESS_KEY));
 let query = '', sort = read(SORT_KEY) || 'newest';
 let current = null, libraryScroll = 0, depth = 0, ready = false;
-let view='explore', collection='', browseKind='', minutes=0, onlyUnwatched=false, pageLimit=60;
+let view='explore', collection='', creator='', browseKind='', minutes=0, onlyUnwatched=false, pageLimit=60;
+let renderedHash='', watchBackHash='#explore', restoring=false;
+const browseStates=new Map();
 const savedRaw=readLocal('mymedia.saved.v1',[]),queueRaw=readLocal('mymedia.queue.v1',[]);
 let saved=new Set(Array.isArray(savedRaw)?savedRaw:[]), queue=Array.isArray(queueRaw)?queueRaw:[];
 document.querySelectorAll('[data-icon]').forEach(n=>n.innerHTML=icon(n.dataset.icon));
+document.querySelector('[data-icon="people"]').innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 21v-3a6 6 0 0 1 12 0v3M16 5a3 3 0 0 1 0 6M18 15a5 5 0 0 1 3 4v2"/></svg>';
 let openFolders = (() => {
   try {
     const paths = JSON.parse(read(OPEN_FOLDERS_KEY) || '[]');
@@ -46,15 +49,16 @@ function card(video) {
   const percent = p && !p.done && duration ? Math.min(100, p.t / duration * 100) : 0;
   const left = resumeTime(p) && duration ? formatDuration(duration - p.t) + ' left' : '';
   const added = video.addedAt || video.modified;
-  const date = added ? (video.addedAt ? 'Added ' : 'Updated ') + new Date(added).toLocaleDateString(undefined, {month:'short', day:'numeric', year:'numeric'}) : '';
+  const dateOptions={month:'short', day:'numeric', year:'numeric'};
+  const date = video.youtubeAt ? 'YouTube · ' + new Date(video.youtubeAt).toLocaleDateString(undefined,{...dateOptions,timeZone:'UTC'}) : sort.startsWith('youtube-') ? 'YouTube date unknown' : added ? (video.addedAt ? 'Added ' : 'Updated ') + new Date(added).toLocaleDateString(undefined,dateOptions) : '';
   const detail = p?.done ? '<span class="watched-mark">✓ Watched</span>' : esc(left || date);
   const creator = display.creator || (display.collection ? display.collection + ' collection' : '');
-  return `<div class="video-tile"><a class="video-card" href="#v=${esc(video.id)}"><div class="thumb">` +
+  return `<article class="video-tile"><a class="video-card" href="#v=${esc(video.id)}"><div class="thumb">` +
     `<span class="placeholder" aria-hidden="true">▶</span>` +
     (images.length ? `<img alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" src="${esc(images[0])}" data-fallbacks="${esc(JSON.stringify(images.slice(1)))}">` : '') +
     (duration ? `<span class="length">${formatDuration(duration)}</span>` : '') +
     (percent ? `<span class="bar"><span data-progress="${percent.toFixed(1)}"></span></span>` : '') +
-    `</div><span class="card-text"><strong>${esc(display.title)}</strong>${creator ? `<small class="card-creator">${esc(creator)}</small>` : ''}${detail ? `<small class="card-status">${detail}</small>` : ''}</span></a><button class="video-menu" type="button" data-video-menu="${esc(video.id)}" aria-label="Actions for ${esc(video.title)}">${icon('more')}</button></div>`;
+    `</div><span class="card-text"><strong>${esc(display.title)}</strong></span></a><div class="card-details">${creator ? display.creator ? `<a class="card-creator" href="#creator=${encodeURIComponent(display.creator)}">${esc(creator)}</a>` : `<span class="card-creator">${esc(creator)}</span>` : ''}${detail ? `<small class="card-status">${detail}</small>` : ''}</div><button class="video-menu" type="button" data-video-menu="${esc(video.id)}" aria-label="Actions for ${esc(video.title)}">${icon('more')}</button></article>`;
 }
 
 // Thumbnail candidates fall through in order; the placeholder shows if all fail.
@@ -76,23 +80,35 @@ function renderLibrary() {
   renderShelves();
   paintBars($('library-view'));
 }
-function filteredVideos(){let videos=library?.videos||[];if(view==='saved')videos=videos.filter(v=>saved.has(v.id));if(collection)videos=videos.filter(v=>v.folder===collection||videoPresentation(v,creatorNames).creator===collection);if(onlyUnwatched||browseKind==='unwatched')videos=videos.filter(v=>!progress[v.id]?.done);videos=withinTime(videos,minutes|| (browseKind==='quick'?20:0));return sortDisplayedVideos(searchVideos(videos,query),sort,creatorNames);}
+function filteredVideos(){let videos=library?.videos||[];if(view==='saved'&&!creator&&!collection)videos=videos.filter(v=>saved.has(v.id));if(creator)videos=videos.filter(v=>videoPresentation(v,creatorNames).creator===creator);if(collection)videos=videos.filter(v=>v.folder===collection||videoPresentation(v,creatorNames).creator===collection);if(onlyUnwatched||browseKind==='unwatched')videos=videos.filter(v=>!progress[v.id]?.done);videos=withinTime(videos,minutes|| (browseKind==='quick'?20:0));return sortDisplayedVideos(searchVideos(videos,query),sort,creatorNames);}
+function initials(name){return name.split(/\s+/).filter(Boolean).slice(0,2).map(s=>Array.from(s)[0]).join('').toLocaleUpperCase();}
+function creatorLink(group, compact=false){return `<a class="creator-link${compact?' compact':''}" href="#creator=${encodeURIComponent(group.name)}"><span class="creator-monogram" aria-hidden="true">${esc(initials(group.name))}</span><span><strong>${esc(group.name)}</strong><small>${group.items.length} video${group.items.length===1?'':'s'}</small></span>${compact?'':icon('chevron')}</a>`;}
 function renderShelves(){
   $('continue').hidden=true;$('folder-actions').hidden=true;$('load-more').hidden=true;
   $('media-nav').hidden=!!current;
-  for(const tab of document.querySelectorAll('[data-view]')){if(tab.dataset.view===view)tab.setAttribute('aria-current','page');else tab.removeAttribute('aria-current');}
-  $('view-title').textContent=collection?collection.split('/').at(-1):browseKind==='fresh'?'Fresh additions':browseKind==='quick'?'Quick watches':browseKind==='unwatched'?'Worth exploring':view==='explore'?'Explore':view==='saved'?'Saved':'Library';
+  for(const tab of document.querySelectorAll('[data-view]')){if(tab.dataset.view===(creator?'creators':view))tab.setAttribute('aria-current','page');else tab.removeAttribute('aria-current');}
+  $('view-title').textContent=creator|| (collection?collection.split('/').at(-1):browseKind==='fresh'?'Fresh additions':browseKind==='quick'?'Quick watches':browseKind==='unwatched'?'Worth exploring':view==='explore'?'Explore':view==='saved'?'Saved':view==='creators'?'Creators':'Library');
+  const creators=creatorGroups(library,creatorNames),group=creators.find(g=>g.name===creator);
+  $('creator-header').hidden=!creator;$('library-title').hidden=!!creator;
+  $('creator-title').textContent=creator;$('creator-monogram').textContent=initials(creator);
+  $('creator-summary').textContent=group?group.items.length+' videos in your library':'No videos from this creator';
+  const directory=view==='creators'&&!creator&&!collection;
+  $('sort').hidden=directory;$('browse-filters').hidden=directory;$('surprise').hidden=directory;
+  $('search').placeholder=creator?'Search '+creator:directory?'Search creators':'Search your videos';
+  $('creator-strip').hidden=!!(creator||collection||query||browseKind||minutes||onlyUnwatched||view!=='explore'||!creators.length);
+  if(!$('creator-strip').hidden)$('creator-strip').innerHTML='<div class="creator-strip-heading"><h2>Creators</h2><a href="#creators">View all</a></div><div class="creator-strip-links">'+creators.slice(0,6).map(g=>creatorLink(g,true)).join('')+'</div>';
   $('browse-all').hidden=!collection&&!browseKind;
   $('all-videos').setAttribute('aria-pressed',String(!collection&&!browseKind&&!minutes&&!onlyUnwatched));
-  const presentCreators=new Set((library?.videos||[]).map(v=>videoPresentation(v,creatorNames).creator).filter(Boolean));
-  const names=creatorNames.filter(name=>presentCreators.has(name));
-  const chips=names.length?names.map(name=>({label:name,value:name})):groupByFolder(library?.videos||[],library?.name||'').filter(g=>g.path!==library?.name).map(g=>({label:g.label,value:g.path}));
-  $('creator-filters').innerHTML=chips.map(c=>`<button type="button" data-collection-filter="${esc(c.value)}" aria-pressed="${collection===c.value}">${esc(c.label)}</button>`).join('');
+  $('creator-filters').replaceChildren();
   $('time-filter').textContent=minutes?'Under '+minutes+' min':'Any length';$('time-filter').setAttribute('aria-pressed',String(minutes>0));$('unwatched-filter').setAttribute('aria-pressed',String(onlyUnwatched));
   if(!library){$('sections').innerHTML='<div class="media-empty"><h2>Your library is loading</h2><p>Your collections will appear here.</p></div>';return;}
-  const videos=filteredVideos(),focused=query||collection||browseKind||minutes||onlyUnwatched||view==='saved';
+  const videos=filteredVideos(),focused=query||creator||collection||browseKind||minutes||onlyUnwatched||view==='saved';
+  const unknown=videos.filter(v=>!v.youtubeAt).length;
+  $('sort-note').hidden=directory||!sort.startsWith('youtube-')||!unknown;
+  $('sort-note').textContent=unknown===videos.length?'Original YouTube dates aren’t in this library’s metadata yet. All videos are still shown.':`${unknown} video${unknown===1?'':'s'} have no YouTube date. They appear after dated videos.`;
+  if(directory){const matches=creators.filter(g=>g.name.toLocaleLowerCase().includes(query.toLocaleLowerCase()));$('sections').innerHTML=matches.length?'<div class="creator-directory">'+matches.map(g=>creatorLink(g)).join('')+'</div>':'<div class="media-empty"><h2>No matching creators</h2><p>Creator names come from metadata or recognizable filename prefixes. Your folder collections are in Library.</p></div>';return;}
   if(focused){
-    const items=browseKind==='unwatched'?discover(videos,progress,videos.length):videos;
+    const items=videos;
     $('sections').innerHTML=items.length?`<p class="browse-count">${items.length} video${items.length===1?'':'s'}</p><div class="video-grid">${items.slice(0,pageLimit).map(card).join('')}</div>`:`<div class="media-empty"><h2>${view==='saved'?'Save something for later':'No matching videos'}</h2><p>${view==='saved'?'Use a video’s menu to add it here.':'Try a different filter or search.'}</p></div>`;
     $('load-more').hidden=items.length<=pageLimit;return;
   }
@@ -109,10 +125,11 @@ function renderShelves(){
 function persistSaved(){if(!writeLocal('mymedia.saved.v1',[...saved]))status('Could not save your list on this device.',true);}
 function persistQueue(){if(!writeLocal('mymedia.queue.v1',queue))status('Could not save your queue on this device.',true);if(current)renderNext(current.video);}
 function videoMenu(id){const item=library?.videos.find(v=>v.id===id);if(!item)return;sheet(item.title,[
-  {label:resumeTime(progress[id])?'Resume video':'Play video',icon:'play',action:()=>{location.hash='v='+id;}},
+  {label:resumeTime(progress[id])?'Resume video':'Play video',icon:'play',action:()=>{saveBrowseState();location.hash='v='+id;}},
   {label:saved.has(id)?'Remove from Saved':'Save for later',icon:'bookmark',action:()=>{saved.has(id)?saved.delete(id):saved.add(id);persistSaved();if(current?.video.id===id)$('save-video').textContent=saved.has(id)?'Saved':'Save for later';renderLibrary();}},
   {label:queue.includes(id)?'Remove from queue':'Add to queue',icon:'plus',action:()=>{queue.includes(id)?queue=queue.filter(x=>x!==id):queue.push(id);persistQueue();}},
   {label:progress[id]?.done?'Mark unwatched':'Mark watched',icon:'check',action:()=>{progress[id]={...(progress[id]||{}),done:!progress[id]?.done,at:Date.now()};saveProgress();renderLibrary();if(current?.video.id===id)paintWatched();}},
+  ...(videoPresentation(item,creatorNames).creator?[{label:'Browse this creator',icon:'library',action:()=>{location.hash='creator='+encodeURIComponent(videoPresentation(item,creatorNames).creator);}}]:[]),
   {label:'Browse this collection',icon:'library',action:()=>{location.hash='collection='+encodeURIComponent(item.folder);}},
   {label:'Video details',icon:'info',action:()=>{const d=sheet(item.title,[]);d.append(el('p',[item.creator||item.folder,item.duration?formatDuration(item.duration):'Duration unavailable',item.height?item.height+'p':''].filter(Boolean).join(' · ')));if(item.description)d.append(el('p',item.description));}}
 ]);}
@@ -197,18 +214,20 @@ function openVideo(item) {
   current = {video:item, controller, urls:[], handle:null};
   if(queue.includes(item.id)){queue=queue.filter(id=>id!==item.id);writeLocal('mymedia.queue.v1',queue);}
   $('library-view').hidden = true; $('player-view').hidden = false;
-  $('back').innerHTML=icon('back'); $('back').href = '#'; $('back').setAttribute('aria-label', 'Back to library');
+  $('back').innerHTML=icon('back'); $('back').href = watchBackHash; $('back').setAttribute('aria-label', 'Back to videos');
   $('refresh').hidden = true;$('search-toggle').hidden=true;$('media-nav').hidden=true;
   $('save-video').textContent=saved.has(item.id)?'Saved':'Save for later';
   document.title = item.title + ' · My Media';
   const display = videoPresentation(item, creatorNames);
   $('video-title').textContent = display.title;
   $('video-creator').textContent = display.creator || (display.collection ? display.collection + ' collection' : '');
+  if(display.creator)$('video-creator').href='#creator='+encodeURIComponent(display.creator);else $('video-creator').removeAttribute('href');
   $('video-creator').hidden = !$('video-creator').textContent;
   $('video-description').textContent = item.description || '';
   $('video-details').hidden = !item.description;
   $('video-details').open = false;
-  const bits = [item.duration ? formatDuration(item.duration) : '', item.folder, item.height ? item.height + 'p' : '', item.size ? (item.size / 1048576).toFixed(0) + ' MB' : ''];
+  const youtubeDate=item.youtubeAt?(item.youtubeDateKind==='upload'?'Uploaded to YouTube ':'Published on YouTube ')+new Date(item.youtubeAt).toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric',timeZone:'UTC'}):'';
+  const bits = [youtubeDate,item.duration ? formatDuration(item.duration) : '', item.height ? item.height + 'p' : '', item.size ? (item.size / 1048576).toFixed(0) + ' MB' : ''];
   $('video-meta').textContent = bits.filter(Boolean).join(' · ');
   status('', false, $('player-status'));
   paintWatched();
@@ -248,7 +267,8 @@ function closeVideo() {
 }
 
 function renderNext(item) {
-  const siblings = sortDisplayedVideos(library.videos.filter(v => v.folder === item.folder), sort,creatorNames);
+  const name=videoPresentation(item,creatorNames).creator;
+  const siblings = sortDisplayedVideos(library.videos.filter(v => name?videoPresentation(v,creatorNames).creator===name:v.folder === item.folder), sort,creatorNames);
   const at = siblings.findIndex(v => v.id === item.id);
   const next = [...queue.map(id=>library.videos.find(v=>v.id===id)).filter(v=>v&&v.id!==item.id), ...siblings.slice(at + 1), ...siblings.slice(0, Math.max(0, at))].filter((v,i,all)=>v.id!==item.id&&all.findIndex(x=>x.id===v.id)===i).slice(0,12);
   $('queue-video').textContent='Queue'+(queue.length?' ('+queue.length+')':'');
@@ -355,42 +375,71 @@ document.addEventListener('keydown', event => {
 
 // #v=<Drive file ID> is the player; anything else is the library. Real links
 // keep Android Back working.
+function saveBrowseState() {
+  if(current||restoring||location.hash!==renderedHash)return;
+  const state={hash:renderedHash,query,sort,minutes,onlyUnwatched,pageLimit,scroll:scrollY};
+  browseStates.set(renderedHash,state);
+  history.replaceState({...history.state,mymedia:state},'');
+}
+let scrollFrame=0;
+addEventListener('scroll',()=>{if(!scrollFrame)scrollFrame=requestAnimationFrame(()=>{scrollFrame=0;saveBrowseState();});},{passive:true});
 function route(event) {
   const id = /^#v=([A-Za-z0-9_-]{10,200})$/.exec(location.hash)?.[1];
   const item = id && library?.videos.find(v => v.id === id);
   if (id && !ready) return; // opened once the Drive key has loaded
-  if (item && api) { if (current?.video.id !== id) { if (!current) libraryScroll = scrollY; openVideo(item); } return; }
+  if (item && api) {
+    if (current?.video.id !== id) {
+      const previous=history.state?.mymediaWatch;
+      if(previous){watchBackHash=previous.backHash;depth=previous.depth;}
+      else if(!current){libraryScroll=scrollY;watchBackHash=renderedHash||'#explore';depth=event?.type==='hashchange'?1:0;}
+      else depth++;
+      history.replaceState({...history.state,mymediaWatch:{backHash:watchBackHash,depth}},'');
+      openVideo(item);
+    }
+    return;
+  }
   if (id && api && (loading || !library)) return; // shown once the list arrives
   const returning=!!current;
   if(current){closeVideo();}
-  if(!returning&&event?.type==='hashchange'){libraryScroll=0;pageLimit=60;}
+  const state=history.state?.mymedia;
+  const restore=state?.hash===location.hash?state:browseStates.get(location.hash);
+  if(event?.type==='hashchange'||renderedHash!==location.hash){
+    pageLimit=restore?.pageLimit||60;query=restore?.query||'';minutes=restore?.minutes||0;onlyUnwatched=!!restore?.onlyUnwatched;
+    libraryScroll=restore?.scroll||0;
+    $('search').value=query;
+  }
   depth = 0;
   const hash=location.hash.slice(1);
-  collection='';browseKind='';
+  collection='';creator='';browseKind='';
   if(hash.startsWith('collection=')){try{collection=decodeURIComponent(hash.slice(11));}catch{collection='';}}
+  else if(hash.startsWith('creator=')){try{creator=decodeURIComponent(hash.slice(8));}catch{creator='';}}
   else if(hash.startsWith('browse='))browseKind=hash.slice(7);
-  else if(['explore','library','saved'].includes(hash))view=hash;
+  else if(['explore','creators','library','saved'].includes(hash))view=hash;
+  if(event?.type==='hashchange'||renderedHash!==location.hash)sort=restore?.sort||read(SORT_KEY+'.'+(creator||view))||read(SORT_KEY)||'newest';
+  if(![...$('sort').options].some(o=>o.value===sort))sort='newest';
+  $('sort').value=sort;
   writeLocal('mymedia.view.v1',view);
   $('player-view').hidden = true; $('library-view').hidden = false;
-  $('back').innerHTML=icon('back'); $('back').href = '/'; $('back').setAttribute('aria-label', 'Back to Jarvis');
+  $('back').innerHTML=icon('back'); $('back').href = creator?'#creators':collection?'#library':'/'; $('back').setAttribute('aria-label', creator?'Back to creators':collection?'Back to collections':'Back to Jarvis');
   $('refresh').hidden = false;$('search-toggle').hidden=false;$('media-nav').hidden=false;
-  document.title = 'My Media · Jarvis';
+  document.title = creator?creator+' · My Media':'My Media · Jarvis';
   if (id) status(api ? 'That video is no longer in the folder.' : 'Videos cannot play until the Drive settings load.', true);
   renderLibrary();
-  requestAnimationFrame(() => window.scrollTo(0, libraryScroll));
+  renderedHash=location.hash;restoring=true;
+  requestAnimationFrame(() => {window.scrollTo(0,libraryScroll);restoring=false;saveBrowseState();});
 }
 addEventListener('hashchange', route);
 document.addEventListener('click', event => {
   const link = event.target.closest?.('a[href^="#"]');
   if (!link) return;
+  saveBrowseState();
   // Back to the list in one step, however many Up next videos were opened.
-  if (link.getAttribute('href').startsWith('#v=')) depth++;
-  else if (link.id === 'back' && depth) { event.preventDefault(); history.go(-depth); }
+  if (link.id === 'back' && current && depth) { event.preventDefault(); history.go(-depth); }
 });
 
-$('search').addEventListener('input', () => { query = $('search').value.trim(); pageLimit=60; renderLibrary(); });
-$('sort').value = ['newest', 'title', 'longest'].includes(sort) ? sort : 'newest';
-$('sort').addEventListener('change', () => { sort = $('sort').value; write(SORT_KEY, sort); renderLibrary(); });
+$('search').addEventListener('input', () => { query = $('search').value.trim(); pageLimit=60; renderLibrary();saveBrowseState(); });
+$('sort').value = [...$('sort').options].some(o=>o.value===sort) ? sort : 'newest';
+$('sort').addEventListener('change', () => { sort = $('sort').value; write(SORT_KEY, sort);write(SORT_KEY+'.'+(creator||view),sort);pageLimit=60; renderLibrary();saveBrowseState(); });
 $('refresh').addEventListener('click', refresh);
 $('sections').addEventListener('toggle', event => {
   const details = event.target;
@@ -432,15 +481,15 @@ async function start() {
   refresh();
 }
 $('search-toggle').onclick=()=>{ $('search').focus(); $('library-search').scrollIntoView({block:'nearest'}); };
-$('all-videos').onclick=()=>{minutes=0;onlyUnwatched=false;collection='';browseKind='';pageLimit=60;location.hash=view;renderLibrary();};
+$('all-videos').onclick=()=>{minutes=0;onlyUnwatched=false;query='';$('search').value='';browseKind='';pageLimit=60;renderLibrary();saveBrowseState();};
 $('creator-filters').onclick=e=>{const chip=e.target.closest('[data-collection-filter]');if(chip){pageLimit=60;location.hash='collection='+encodeURIComponent(chip.dataset.collectionFilter);}};
-$('time-filter').onclick=()=>sheet('How much time do you have?',[0,10,20,40].map(n=>({label:n?'Under '+n+' minutes':'Any length',icon:'clock',action:()=>{minutes=n;pageLimit=60;renderLibrary();}})));
-$('unwatched-filter').onclick=()=>{onlyUnwatched=!onlyUnwatched;pageLimit=60;renderLibrary();};
+$('time-filter').onclick=()=>sheet('How much time do you have?',[0,10,20,40].map(n=>({label:n?'Under '+n+' minutes':'Any length',icon:'clock',action:()=>{minutes=n;pageLimit=60;renderLibrary();saveBrowseState();}})));
+$('unwatched-filter').onclick=()=>{onlyUnwatched=!onlyUnwatched;pageLimit=60;renderLibrary();saveBrowseState();};
 $('browse-all').onclick=()=>{location.hash=view;};
-$('load-more').onclick=()=>{pageLimit+=60;renderLibrary();};
+$('load-more').onclick=()=>{pageLimit+=60;renderLibrary();saveBrowseState();};
 $('surprise').onclick=()=>{const picks=discover(filteredVideos(),progress,100,new Date().toISOString().slice(0,10)+Math.random());if(!picks.length){status('No unwatched videos match these filters.');return;}videoMenu(picks[0].id);};
 document.addEventListener('click',e=>{const b=e.target.closest('[data-video-menu]');if(b)videoMenu(b.dataset.videoMenu);});
 $('save-video').onclick=()=>{if(!current)return;const id=current.video.id;saved.has(id)?saved.delete(id):saved.add(id);persistSaved();$('save-video').textContent=saved.has(id)?'Saved':'Save for later';};
 $('queue-video').onclick=()=>sheet('Viewing queue',[{label:queue.includes(current.video.id)?'Remove current video':'Add current video',icon:'plus',action:()=>{const id=current.video.id;queue.includes(id)?queue=queue.filter(x=>x!==id):queue.push(id);persistQueue();}},...queue.map(id=>({label:library.videos.find(v=>v.id===id)?.title||'Unavailable video',icon:'play',action:()=>sheet('Queue item',[{label:'Play next',action:()=>{queue=[id,...queue.filter(x=>x!==id)];persistQueue();}},{label:'Remove from queue',action:()=>{queue=queue.filter(x=>x!==id);persistQueue();}}])}))]);
-view=readLocal('mymedia.view.v1','explore');if(!['explore','library','saved'].includes(view))view='explore';
+view=readLocal('mymedia.view.v1','explore');if(!['explore','creators','library','saved'].includes(view))view='explore';
 start();

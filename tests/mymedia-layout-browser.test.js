@@ -51,7 +51,7 @@ test('My Media video-feed layout and preserved browsing/playback flows',
   try { browser = await chromium.launch({executablePath:chrome,headless:true,args:['--no-sandbox']}); }
   catch (error) { await new Promise(done=>server.close(done));throw error; }
 
-  async function session(width=390, seeded=false, archivePreview=false) {
+  async function session(width=390, seeded=false, archivePreview=false, dated=false) {
     const activeFiles=archivePreview?files.map((file,i)=>({...file,name:archiveSamples[i%archiveSamples.length][0]+' - '+archiveSamples[i%archiveSamples.length][1]+' ['+archiveSamples[i%archiveSamples.length][2]+'].webm'})):files;
     const context = await browser.newContext({viewport:{width,height:844},isMobile:width<600,hasTouch:width<600});
     if (seeded) await context.addInitScript(({id})=>localStorage.setItem('mymedia.progress.v1',JSON.stringify({[id]:{t:120,d:600,done:false,at:10}})), {id:videoId(1)});
@@ -64,7 +64,7 @@ test('My Media video-feed layout and preserved browsing/playback flows',
       }
       if (url.hostname === 'www.googleapis.com') {
         if (url.searchParams.get('alt') === 'media') {
-          if(url.pathname.endsWith('/metadata0000000'))return json({videos:activeFiles.map((file,i)=>({id:file.id,creator:archiveSamples[i%archiveSamples.length][0]}))});
+          if(url.pathname.endsWith('/metadata0000000'))return json({videos:activeFiles.map((file,i)=>({id:file.id,creator:archivePreview?archiveSamples[i%archiveSamples.length][0]:'Preview channel',...(dated&&i<3?{youtubeUploadDate:['2010-02-03','2024-01-02','2018-05-06'][i]}:{})}))});
           if(url.pathname.endsWith('/subtitle0000000'))return route.fulfill({contentType:'text/vtt',body:'WEBVTT\n\n00:00.000 --> 00:29.000\nPreview caption\n'});
           const range = request.headers().range;
           const match = /bytes=(\d+)-(\d*)/.exec(range || '');
@@ -73,7 +73,7 @@ test('My Media video-feed layout and preserved browsing/playback flows',
         }
         if (url.pathname.endsWith('/'+folder)) return json({id:folder,name:archivePreview?'Archive layout preview':'Preview library',mimeType:'application/vnd.google-apps.folder'});
         const q = url.searchParams.get('q') || '';
-        if (q.includes(folder)) return json({files:[{id:channel,name:'Preview channel',mimeType:'application/vnd.google-apps.folder'},activeFiles[0],activeFiles[1],...(archivePreview?[{id:'metadata0000000',name:'jarvis-video-metadata.json',mimeType:'application/json',size:'10000'}]:[]),{id:'subtitle0000000',name:activeFiles[0].name.replace(/\.webm$/,'.en.vtt'),mimeType:'text/vtt'}]});
+        if (q.includes(folder)) return json({files:[{id:channel,name:'Preview channel',mimeType:'application/vnd.google-apps.folder'},activeFiles[0],activeFiles[1],...(archivePreview||dated?[{id:'metadata0000000',name:'jarvis-video-metadata.json',mimeType:'application/json',size:'10000'}]:[]),{id:'subtitle0000000',name:activeFiles[0].name.replace(/\.webm$/,'.en.vtt'),mimeType:'text/vtt'}]});
         return json({files:activeFiles.slice(2)});
       }
       if(archivePreview && url.hostname==='i.ytimg.com')return route.continue();
@@ -106,6 +106,7 @@ test('My Media video-feed layout and preserved browsing/playback flows',
         assert.equal(await page.locator('.feed-grid .video-tile').count(),60);
         assert.equal(await page.locator('.feed-grid').evaluate(n=>getComputedStyle(n).gridTemplateColumns.split(' ').length),columns);
         assert.equal(await page.locator('#continue-grid .video-tile').count(),1);
+        if(width<600)assert.ok(await page.locator('.feed-grid .thumb').first().evaluate(n=>n.getBoundingClientRect().bottom)<775,'the first complete video thumbnail fits above mobile navigation even with watch progress');
         assert.equal(await page.locator('.feed-grid .card-creator').first().textContent(),'Preview channel');
         assert.ok(!(await page.locator('.feed-grid strong').first().textContent()).startsWith('Preview channel - '));
         assert.equal(await page.locator('body').evaluate(n=>getComputedStyle(n).getPropertyValue('--accent').trim()),'#efbc78');
@@ -116,10 +117,12 @@ test('My Media video-feed layout and preserved browsing/playback flows',
         assert.deepEqual(errors,[]);await context.close();
       });
     }
-    await t.test('search, chips, save, queue, folder controls and navigation are retained',async()=>{
+    await t.test('search, creator screens, save, queue, folder controls and navigation are retained',async()=>{
       const {page,context,errors}=await session();
-      await page.locator('#creator-filters button').first().click();await page.waitForURL('**/#collection=*');
-      await page.waitForFunction(()=>document.querySelector('#view-title').textContent==='Preview channel');
+      await page.locator('#creator-strip .creator-link').first().click();await page.waitForURL('**/#creator=*');
+      await page.waitForFunction(()=>document.querySelector('#creator-title').textContent==='Preview channel');
+      assert.equal(await page.locator('#creator-header').isVisible(),true);
+      assert.equal(await page.locator('#creator-summary').textContent(),'72 videos in your library');
       assert.equal(await page.locator('#sections .video-tile').count(),60,'channel includes matching root files');
       await page.locator('#search').fill('quiet');assert.equal(await page.locator('#sections .video-tile').count(),18);
       await page.locator('#time-filter').click();await page.getByRole('button',{name:'Under 10 minutes',exact:true}).click();
@@ -136,6 +139,42 @@ test('My Media video-feed layout and preserved browsing/playback flows',
       await page.locator('#toggle-folders').click();assert.equal(await page.locator('.folder-shelf[open]').count(),0);
       await page.goBack();await page.waitForURL('**/#explore');await page.locator('.feed-grid').waitFor();assert.equal(await page.locator('.feed-grid .video-tile').count(),60);
       await page.locator('#search').fill('no possible match');assert.equal(await page.getByRole('heading',{name:'No matching videos'}).count(),1);
+      await layout(page);assert.deepEqual(errors,[]);await context.close();
+    });
+    await t.test('creator directory and per-screen state survive menu playback, Back, Forward and reload',async()=>{
+      const {page,context,errors}=await session();
+      await page.locator('[data-view="creators"]').click();await page.waitForURL('**/#creators');
+      assert.equal(await page.locator('.creator-directory .creator-link').count(),1);
+      assert.equal(await page.locator('#sort').isVisible(),false);await screenshot(page,'my-media-creators-390');
+      await page.locator('#search').fill('Preview');
+      await page.locator('.creator-directory .creator-link').click();await page.waitForURL('**/#creator=*');
+      await page.locator('#sort').selectOption('title');
+      await page.locator('#search').fill('quiet');
+      assert.equal(await page.locator('#sections .video-tile').count(),18);await screenshot(page,'my-media-creator-390');
+      await page.locator('.video-menu').first().click();await page.getByRole('button',{name:'Play video',exact:true}).click();
+      await page.waitForURL('**/#v=*');await page.locator('#next-list .video-card').first().click();
+      await page.locator('#back').click();await page.waitForURL('**/#creator=*');
+      assert.equal(await page.locator('#search').inputValue(),'quiet');assert.equal(await page.locator('#sort').inputValue(),'title');
+      assert.equal(await page.locator('#sections .video-tile').count(),18);
+      await page.locator('#back').click();await page.waitForURL('**/#creators');
+      assert.equal(await page.locator('#search').inputValue(),'Preview');
+      await page.goBack();await page.waitForURL('**/#creator=*');assert.equal(await page.locator('#search').inputValue(),'quiet');
+      await page.goForward();await page.waitForURL('**/#creators');
+      await page.goBack();await page.waitForURL('**/#creator=*');await page.reload();await page.locator('#creator-header').waitFor();
+      assert.equal(await page.locator('#search').inputValue(),'quiet');assert.equal(await page.locator('#sort').inputValue(),'title');
+      await layout(page);assert.deepEqual(errors,[]);await context.close();
+    });
+    await t.test('original YouTube dates sort separately from archive additions; undated videos stay last',async()=>{
+      const {page,context,errors}=await session(390,false,false,true);
+      await page.locator('#sort').selectOption('youtube-newest');
+      assert.equal(await page.locator('#sections .video-card').first().getAttribute('href'),'#v='+videoId(1));
+      assert.match(await page.locator('#sort-note').textContent(),/69 videos have no YouTube date/);
+      await page.locator('#sort').selectOption('youtube-oldest');
+      assert.equal(await page.locator('#sections .video-card').first().getAttribute('href'),'#v='+videoId(0));
+      await page.locator('#load-more').click();assert.equal(await page.locator('#sections .video-tile').count(),72);
+      assert.equal(await page.locator('#sections .card-status').last().textContent(),'YouTube date unknown');
+      await page.locator('#sort').selectOption('newest');
+      assert.equal(await page.locator('#sort-note').isVisible(),false);
       await layout(page);assert.deepEqual(errors,[]);await context.close();
     });
     for (const width of [390,1200]) await t.test('watch layout, native playback, progress and back at '+width+'px',async()=>{

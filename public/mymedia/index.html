@@ -4,13 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#101113">
-  <meta name="mymedia-release" content="0.37.1">
+  <meta name="mymedia-release" content="0.38.0">
   <title>My Media · Jarvis</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/assets/shell.css">
-  <link rel="stylesheet" href="/mymedia/mymedia.css?v=0.37.1">
+  <link rel="stylesheet" href="/mymedia/mymedia.css?v=0.38.0">
   <link rel="stylesheet" href="/assets/premium.css?v=20261003">
-  <script type="module" src="/mymedia/app.js?v=0.37.1"></script>
+  <script type="module" src="/mymedia/app.js?v=0.38.0"></script>
 </head>
 <body class="module-page media-page">
   <div class="workspace mymedia">
@@ -22,29 +22,36 @@
     </header>
 
     <main id="library-view">
-      <div class="library-title"><h1 id="view-title">Explore</h1><button id="surprise" class="text-button" type="button">Surprise me</button></div>
+      <div class="creator-header" id="creator-header" hidden><span id="creator-monogram" class="creator-monogram" aria-hidden="true"></span><div><p class="creator-kicker">Creator</p><h1 id="creator-title"></h1><p id="creator-summary"></p></div></div>
+      <div class="library-title" id="library-title"><h1 id="view-title">Explore</h1><button id="surprise" class="text-button" type="button">Surprise me</button></div>
       <div class="library-tools" id="library-search" role="search">
         <label class="sr-only" for="search">Search videos</label>
         <input id="search" type="search" placeholder="Search your videos" autocomplete="off">
         <label class="sr-only" for="sort">Sort videos</label>
         <select id="sort">
-          <option value="newest">Newest</option>
+          <option value="newest">Added recently</option>
+          <option value="oldest">Added earliest</option>
+          <option value="youtube-newest">YouTube: latest</option>
+          <option value="youtube-oldest">YouTube: oldest</option>
           <option value="title">Title</option>
+          <option value="shortest">Shortest</option>
           <option value="longest">Longest</option>
         </select>
       </div>
-      <div class="discovery-filters" aria-label="Browse filters"><button id="all-videos" type="button" aria-pressed="true">All</button><button id="time-filter" type="button">Any length</button><button id="unwatched-filter" type="button" aria-pressed="false">Unwatched</button><span id="creator-filters" class="creator-filters"></span><button id="browse-all" type="button" hidden>Clear collection</button></div>
+      <div class="discovery-filters" id="browse-filters" aria-label="Browse filters"><button id="all-videos" type="button" aria-pressed="true">All videos</button><button id="time-filter" type="button">Any length</button><button id="unwatched-filter" type="button" aria-pressed="false">Unwatched</button><span id="creator-filters" class="creator-filters" hidden></span><button id="browse-all" type="button" hidden>Clear collection</button></div>
+      <p class="sort-note" id="sort-note" role="status" hidden></p>
+      <section class="creator-strip" id="creator-strip" aria-label="Browse creators" hidden></section>
       <p id="status" class="status" role="status">Loading your videos…</p>
       <div id="folder-actions" class="folder-actions" hidden>
         <span id="folder-count"></span>
         <button id="toggle-folders" type="button">Open all folders</button>
       </div>
+      <div id="sections"></div>
+      <button id="load-more" class="secondary" type="button" hidden>Show more</button>
       <section id="continue" class="shelf continue-shelf" aria-labelledby="continue-label" hidden>
         <div class="section-heading"><h2 id="continue-label">Continue watching</h2></div>
         <div class="video-grid" id="continue-grid"></div>
       </section>
-      <div id="sections"></div>
-      <button id="load-more" class="secondary" type="button" hidden>Show more</button>
     </main>
 
     <main id="player-view" hidden>
@@ -54,7 +61,7 @@
       </div>
       <div class="watch-body">
         <h1 id="video-title"></h1>
-        <p class="watch-creator" id="video-creator" hidden></p>
+        <a class="watch-creator" id="video-creator" hidden></a>
         <p class="watch-meta" id="video-meta"></p>
         <details id="video-details" class="video-details" hidden><summary>Video details</summary><p id="video-description"></p></details>
         <p id="player-status" class="status" role="status" hidden></p>
@@ -85,7 +92,7 @@
           <div class="next-list" id="next-list"></div>
         </section>
     </main>
-    <nav class="media-nav" id="media-nav" aria-label="Media navigation"><a href="#explore" data-view="explore" aria-current="page"><span data-icon="search"></span><span>Explore</span></a><a href="#library" data-view="library"><span data-icon="library"></span><span>Library</span></a><a href="#saved" data-view="saved"><span data-icon="bookmark"></span><span>Saved</span></a></nav>
+    <nav class="media-nav" id="media-nav" aria-label="Media navigation"><a href="#explore" data-view="explore" aria-current="page"><span data-icon="search"></span><span>Explore</span></a><a href="#creators" data-view="creators"><span data-icon="people"></span><span>Creators</span></a><a href="#library" data-view="library"><span data-icon="library"></span><span>Library</span></a><a href="#saved" data-view="saved"><span data-icon="bookmark"></span><span>Saved</span></a></nav>
   </div>
   <noscript><p>Enable JavaScript to use My Media.</p></noscript>
 </body>
