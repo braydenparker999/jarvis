@@ -45,9 +45,11 @@ test('fixed-comment hint delivers through durable import, separate signed notifi
   await page.getByRole('dialog').getByRole('button',{name:'Refresh inbox',exact:true}).click();
   const report=page.locator(`[data-message-id="coordination:${publication.eventId}"]`);await report.waitFor();
   const renderedMs=performance.now()-started;assert.equal(await report.getByRole('link',{name:'Fictional reviewed source · revision 1'}).getAttribute('href'),publication.artifacts[0].url);
+  assert.equal(await report.getByText('Public report · private execution unverified.',{exact:true}).isVisible(),true);
   assert.match(await page.locator(`[data-message-id="${holdId}"]`).textContent(),/Fictional stale hold/);
   assert.equal(githubFetches,1);assert.equal(h.rows("SELECT value FROM shared_meta WHERE key='publisher-next-attempt'")[0].value,cooldown);
   await page.reload();await report.waitFor();assert.equal(await report.count(),1);
+  assert.equal(await report.getByText('Public report · private execution unverified.',{exact:true}).isVisible(),true);
   const retry=await page.evaluate(async origin=>{const response=await fetch(origin+'/shared/import-hint',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"commentId":9001}'});return response.status;},WORKER);
   assert.equal(retry,200);assert.equal(githubFetches,1);await drainRelayOutbox(h.ctx,h.fixture.env,receiver);assert.equal(notifications.length,1);
   assert.equal(phone.records.filter(record=>record.path==='/shared/messages'&&record.method==='POST').length,0);
