@@ -79,10 +79,10 @@ test('actual private renderer labels callback acceptance separately and exposes 
   const controller=createRelayOwnerController({api:a}),fixture=documentFixture();await controller.refresh();
   const ui=createRelayOwnerUI({controller,document:fixture.doc});ui.mount(fixture.root);
   try{
-    assert.ok(fixture.all().some(node=>node.textContent==='Queued for callback delivery'));
-    current='callback_accepted';await controller.refresh();assert.ok(fixture.all().some(node=>node.textContent==='Callback accepted · waiting for a reply'));
+    assert.ok(fixture.all().some(node=>node.textContent?.includes('Saved · awaiting assistant')));
+    current='callback_accepted';await controller.refresh();assert.ok(fixture.all().some(node=>node.textContent?.includes('Sent · awaiting reply')));
     assert.ok(!fixture.all().some(node=>/working|Retry callback delivery/.test(node.textContent||'')));
     current='delivery_failed';await controller.refresh();const button=fixture.all().find(node=>node.textContent==='Retry callback delivery');assert.ok(button);assert.equal(button.disabled,false);
-    button.onclick();await new Promise(resolve=>setImmediate(resolve));assert.equal(retryCount,1);assert.ok(fixture.all().some(node=>node.textContent==='Queued for callback delivery'));
+    button.onclick();await new Promise(resolve=>setImmediate(resolve));assert.equal(retryCount,1);assert.ok(fixture.all().some(node=>node.textContent?.includes('Saved · awaiting assistant')));
   }finally{ui.dispose();}
 });

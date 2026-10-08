@@ -9,7 +9,7 @@ import {relayOwnerSchema} from '../backend/relay-owner.js';
 import {RELAY_OWNER, hash, random} from '../backend/relay-common.js';
 import {SHARED_OBJECT} from '../backend/shared.js';
 import {COMMENTS_URL} from '../backend/publications.js';
-import {createRelayOwnerApi, OWNER_SESSION_KEY} from '../public/assets/relay-owner-api.js';
+import {createRelayOwnerApi, OWNER_SESSION_KEY, OWNER_MODE_KEY} from '../public/assets/relay-owner-api.js';
 import {createRelayOwnerController} from '../public/assets/relay-owner-ui.js';
 
 // All passwords, sessions and accounts in this file belong only to ephemeral
@@ -121,7 +121,9 @@ test('routed frontend recovers at ten active device sessions only with fresh cre
     return h.fixture.request(new URL(url).pathname, {...options, headers: {...options.headers, Origin: SITE}});
   }}), controller = createRelayOwnerController({api}); controller.connect();
   await controller.login(USERNAME, PASSWORD, 'Recovered full-registry browser', true);
-  assert.equal(controller.status, 'none'); assert.equal(controller.hasCredential, false); assert.equal(store.values.size, 0);
+  assert.equal(controller.status, 'none'); assert.equal(controller.hasCredential, false);
+  assert.deepEqual([...store.values], [[OWNER_MODE_KEY, 'owner']], 'Failed sign-in may retain only the explicitly selected owner view');
+  assert.equal(store.getItem(OWNER_SESSION_KEY), null);
   assert.equal(controller.snapshot().loginDevices.length, 10);
   assert.equal([...h.ctx.storage.sql.exec('SELECT device_id FROM relay_owner_sessions WHERE revoked_ms IS NOT NULL')].length, 0);
   await controller.login(USERNAME, PASSWORD, 'Recovered full-registry browser', true, {deviceId: h.id, confirmed: false});
@@ -140,18 +142,20 @@ test('routed frontend recovers at ten active device sessions only with fresh cre
 async function openBrowser(browser, h) {
   const context = await browser.newContext({viewport: {width: 360, height: 844}, isMobile: true, hasTouch: true, serviceWorkers: 'block', offline: true});
   const page = await context.newPage(); page.setDefaultTimeout(10000);
-  const cdp = await context.newCDPSession(page), records = [], navigations = [], errors = [], unexpected = [], pending = new Set();
+  const cdp = await context.newCDPSession(page), records = [], navigations = [], errors = [], unexpected = [], pending = new Set(), cancelledRequests = new Set();
   const controls = {delayLogin: false, releaseLogin: null, failLogin: false};
   page.on('pageerror', error => errors.push(error.message));
   page.on('console', message => { for (const secret of secrets) if (message.text().includes(secret)) errors.push('Sensitive fixture text reached browser console'); });
   page.on('framenavigated', frame => {if (frame === page.mainFrame()) navigations.push(frame.url());});
   await cdp.send('Network.enable'); await cdp.send('Network.setCacheDisabled', {cacheDisabled: true});
+  cdp.on('Network.loadingFailed', event => {if (event.canceled === true) cancelledRequests.add(event.requestId);});
   async function bridge(event) {
     const request = event.request, url = new URL(request.url);
     const headers = Object.fromEntries(Object.entries(request.headers).map(([key, value]) => [key.toLowerCase(), String(value)]));
     const record = {url: url.href, path: url.pathname, method: request.method, headers}; records.push(record);
     async function fulfill(status, responseHeaders, body = '') {
       record.status = status; record.responseHeaders = responseHeaders;
+      if (event.networkId && cancelledRequests.has(event.networkId)) {record.cancelledByBrowser = true; return;}
       await cdp.send('Fetch.fulfillRequest', {requestId: event.requestId, responseCode: status,
         responseHeaders: Object.entries(responseHeaders).map(([name, value]) => ({name, value: String(value)})),
         body: (Buffer.isBuffer(body) ? body : Buffer.from(body)).toString('base64')});
@@ -182,6 +186,9 @@ async function openBrowser(browser, h) {
       throw Error('Unexpected browser request; live network is blocked');
     } catch (error) {
       if (controls.closing && error.message.includes('Target page, context or browser has been closed')) return;
+      if (error.message.includes('Invalid InterceptionId') && (controls.closing || event.networkId && cancelledRequests.has(event.networkId))) {
+        record.cancelledByBrowser = true; return;
+      }
       unexpected.push({url: url.href, error: error.message});
       await cdp.send('Fetch.failRequest', {requestId: event.requestId, errorReason: 'BlockedByClient'}).catch(() => {});
     }
@@ -200,7 +207,7 @@ async function menu(page, label) {
   assert.equal(page.url(), RELAY_URL);
 }
 async function ownerReady(page) {await page.locator('#relay-owner-message-text').waitFor(); assert.equal(page.url(), RELAY_URL);}
-async function accountForm(page) {await page.getByRole('button', {name: 'Account sign-in', exact: true}).click(); await page.locator('#relay-owner-credentials-form').waitFor();}
+async function accountForm(page) {await menu(page, 'Account sign-in'); await page.locator('#relay-owner-credentials-form').waitFor();}
 async function typeCredentials(page, password, {currentPassword} = {}) {
   await page.locator('#relay-owner-account-username').fill(USERNAME);
   if (currentPassword !== undefined) await page.locator('#relay-owner-current-password').fill(currentPassword);
@@ -279,7 +286,16 @@ test('real browser configures, clears site data, signs in and changes password e
   await phone.cdp.send('Storage.clearDataForOrigin', {origin: SITE, storageTypes: 'all'}); await phone.context.clearCookies(); await page.reload(); await page.locator('#message-text').waitFor();
   await menu(page, 'Connect this phone'); await typeLogin(page, NEXT_PASSWORD); await page.getByRole('button', {name: 'Sign in', exact: true}).click(); await ownerReady(page);
   assert.equal(await session(page), null, 'Unchecked remember gives only a page session');
-  await page.reload(); await page.locator('#message-text').waitFor(); assert.equal(await session(page), null);
+  await page.reload(); await page.getByRole('heading', {name: 'Owner chat', exact: true}).waitFor();
+  assert.equal(await session(page), null);
+  assert.equal(await page.locator('#message-text').count(), 0, 'A page-only owner session reload stays in private sign-in-required scope');
+  assert.equal(await page.locator('#relay-owner-message-text').count(), 0);
+  assert.equal(await page.evaluate(key => localStorage.getItem(key), OWNER_MODE_KEY), 'owner');
+  assert.equal(await page.getByText(PRIVATE_BODY, {exact: true}).count(), 0);
+  await assertIsolation(phone);
+  assert.deepEqual(phone.records.filter(record => record.method === 'POST' && ['/shared/messages', '/v1/messages'].includes(record.path)), []);
+  await menu(page, 'Public chat'); await page.locator('#message-text').waitFor();
+  assert.equal(await page.evaluate(key => localStorage.getItem(key), OWNER_MODE_KEY), 'public');
   // Advance the server fixture past the independent 15-minute IP throttle,
   // then exercise repeated site-data recovery with a full device registry.
   const realNow = Date.now; t.mock.method(Date, 'now', () => realNow() + 16 * 60000);

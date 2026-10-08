@@ -1,8 +1,8 @@
 import {el, icon, richText, sheet, copyText, readLocal, writeLocal, autosize} from './ui.js';
 
 // Keep existing nodes and their scroll anchors across inbox refreshes.
-export function conversation({panel, composer, channel, author, body=m=>m.body, notify=()=>{}, draftChanged=()=>{}}){
-  let messages=[], query='', savedOnly=false, first=true, timer, start;
+export function conversation({panel, composer, channel, author, body=m=>m.body, notify=()=>{}, draftChanged=()=>{}, emptyTitle='What’s on your mind?', emptyDescription='Write a message to '+author+'.', scope=''} ){
+  let messages=[], query='', savedOnly=false, first=true, timer, start, deliveryBusy=false, deliveryError=false;
   const key='jarvis.'+channel+'.bookmarks.v1';
   const raw=readLocal(key,[]), bookmarks=new Set(Array.isArray(raw)?raw:[]);
   const formatter=new Intl.DateTimeFormat(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
@@ -38,13 +38,15 @@ export function conversation({panel, composer, channel, author, body=m=>m.body, 
       row.classList.toggle('bookmarked',bookmarks.has(m.id));
       const content=body(m);if(row._body!==content){richText(row.querySelector('.bubble'),content);row._body=content;}
       const stamp=formatter.format(new Date(m.createdAt));
-      const statusText=stamp+(m.role==='user'?' · '+(!m.saved?'Sending':answered.has(m.id)?'Saved':'Awaiting reply'):'')+(bookmarks.has(m.id)?' · Bookmarked':'');
+      const sendLabels={rejected:'Send rejected · text saved on this device',conflict:'ID conflict · original text saved',unknown:'Send unconfirmed · queued on this device'};
+      const statusText=stamp+(m.localOnly?' · Local history · on this device':m.role==='user'?' · '+(!m.saved?sendLabels[m.sendState]||(deliveryError?'Send unconfirmed · queued on this device':deliveryBusy?'Sending to public inbox':'Queued on this device'):answered.has(m.id)?'Saved':'Awaiting reply'):'')+(bookmarks.has(m.id)?' · Bookmarked':'');
       if(row._stamp!==statusText){row.querySelector('.message-time').textContent=statusText;row._stamp=statusText;}
+      row.querySelector('.message-time').dataset.pending=String(!m.localOnly&&m.role==='user'&&(!m.saved||!answered.has(m.id)));
       if(panel.children[i]!==row)panel.insertBefore(row,panel.children[i]||null);
     }
-    if(!selected.length){const empty=el('div','','chat-empty');empty.append(el('h2',query?'No matching messages':savedOnly?'No bookmarks yet':'What’s on your mind?'),el('p',query?'Try a different phrase.':savedOnly?'Bookmark a message from its menu.':'Write a message to '+author+'.'));panel.append(empty);}
+    if(!selected.length){const empty=el('div','','chat-empty');if(scope&&!query&&!savedOnly)empty.append(el('p',scope,'empty-label'));empty.append(el('h2',query?'No matching messages':savedOnly?'No bookmarks yet':deliveryBusy&&!messages.length?'Opening your conversation…':emptyTitle),el('p',query?'Try a different phrase.':savedOnly?'Bookmark a message from its menu.':deliveryError&&!messages.length?'The inbox is unavailable. Your draft stays on this device; use Retry sync to try again.':deliveryBusy&&!messages.length?'Checking the shared inbox.':emptyDescription));panel.append(empty);}
     if(first){first=false;if(savedPosition?.id){const row=[...panel.children].find(n=>n.dataset.messageId===savedPosition.id);if(row)panel.scrollTop+=row.getBoundingClientRect().top-panel.getBoundingClientRect().top-savedPosition.offset;else panel.scrollTop=panel.scrollHeight;}else panel.scrollTop=panel.scrollHeight;}
     else if(!query&&!savedOnly){if(anchor.bottom){panel.scrollTop=panel.scrollHeight;jump.hidden=true;}else{const row=[...panel.children].find(n=>n.dataset.messageId===anchor.id);if(row)panel.scrollTop+=row.getBoundingClientRect().top-panel.getBoundingClientRect().top-anchor.offset;if(next.some(m=>!oldIds.has(m.id)))jump.hidden=false;}}
   }
-  return {update,search(value){query=value.trim().toLowerCase();savedOnly=false;update(messages);panel.scrollTop=0;},bookmarks(){savedOnly=!savedOnly;query='';update(messages);panel.scrollTop=0;return savedOnly;},latest(){query='';savedOnly=false;update(messages);panel.scrollTop=panel.scrollHeight;},savePosition(){writeLocal('jarvis.'+channel+'.reading.v1',position());},actions:showActions};
+  return {update,setDelivery({busy=false,error=false}={}){deliveryBusy=busy;deliveryError=error;update(messages);},search(value){query=value.trim().toLowerCase();savedOnly=false;update(messages);panel.scrollTop=0;},bookmarks(){savedOnly=!savedOnly;query='';update(messages);panel.scrollTop=0;return savedOnly;},latest(){query='';savedOnly=false;update(messages);panel.scrollTop=panel.scrollHeight;},savePosition(){writeLocal('jarvis.'+channel+'.reading.v1',position());},actions:showActions};
 }

@@ -81,13 +81,22 @@ export async function relayRpc(ctx, env, principal, rpc) {
   if (scopeFor[name] === RELAY_OWNER_SCOPE) {
     const result = toolResult(await relayOwnerRpc(ctx, env, principal, name, args));
     if (name === 'relay_owner_read_conversation') {
-      // Cached catalogs still accept this existing structured output exactly.
-      // Delivery evidence is a separate MCP text block, never a synthetic
+      // Preserve the existing structured shape and actual stored provenance.
+      // A cached host schema must accept password-session values; never relabel
+      // them. Delivery evidence remains a separate text block, never a synthetic
       // conversation entry or a claim that a callback started host execution.
       const diagnostics = await relayOwnerRpc(ctx, env, principal, 'relay_owner_delivery_status', {inbox_id: args.inbox_id, message_ids: [args.message_id]});
       result.content.push({type: 'text', text: 'Private delivery diagnostics (callback acceptance is transport evidence only): ' + JSON.stringify(diagnostics)});
       const subscriptions = await relayOwnerRpc(ctx, env, principal, 'relay_owner_subscription_status', {inbox_id: args.inbox_id});
       result.content.push({type: 'text', text: 'Private subscription diagnostics (current subscription evidence only; no host execution proof): ' + JSON.stringify(subscriptions)});
+      // Keep cached structured conversation schemas unchanged. Corrections
+      // remain explicit plain-text data, never invocation or approval markers.
+      const {job} = await relayOwnerRpc(ctx, env, principal, 'relay_owner_job_read', {inbox_id: args.inbox_id, job_id: args.message_id});
+      const lifecycle = {job_id: job.id, stage: job.stage, actionKind: job.actionKind, cancelRequested: job.cancelRequested,
+        parentJobId: job.parentJobId, rootJobId: job.rootJobId, attempt: job.attempt, execution: job.execution, retryJobId: job.retryJobId,
+        resultVersion: job.resultVersion, ...(job.resultVersion > 1 ? {latestResult: job.latestResult,
+          resultLabel: 'Authenticated correction; submission provenance does not certify factual accuracy.'} : {})};
+      result.content.push({type: 'text', text: 'Private job lifecycle (authenticated server evidence; callback acceptance never establishes execution): ' + JSON.stringify(lifecycle)});
     }
     return result;
   }

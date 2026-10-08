@@ -12,7 +12,7 @@ export const glyphs = {
 };
 export const icon = name => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${glyphs[name] || glyphs.more}</svg>`;
 export function el(tag, content = '', cls = '') { const node = document.createElement(tag); node.textContent = content; if(cls) node.className = cls; return node; }
-export function safeURL(value) { try {const url = new URL(value); return ['http:','https:'].includes(url.protocol) ? url.href : ''; } catch { return ''; } }
+export function safeURL(value) { try {const url = new URL(value); return ['http:','https:'].includes(url.protocol) && !url.username && !url.password ? url.href : ''; } catch { return ''; } }
 function inline(node, value, sources = []) {
   const re = /(\*\*([^*\n]+)\*\*|`([^`\n]+)`|\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>]+)|\[(\d+)\])/g;
   let end=0, m;

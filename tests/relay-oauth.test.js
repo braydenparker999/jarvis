@@ -4,6 +4,7 @@ import {createRelayFixture} from './relay-fixture.js';
 import {relayAuthenticate, relayGrantActive, relayOAuthStore} from '../backend/relay-oauth.js';
 import {RELAY_CALLBACK, RELAY_OWNER, RELAY_SCOPES, RELAY_PUBLIC_SCOPES, RELAY_OWNER_SCOPE, RELAY_EVENT, RELAY_OWNER_EVENT, RELAY_VERSION, challenge, hash} from '../backend/relay-common.js';
 import {PUBLIC_KEY} from '../backend/shared.js';
+import {relayOwnerTools} from '../backend/relay-owner-tools.js';
 
 const REGISTRY = 'jarvis-shared-v2';
 const VERIFIER = 'fixture-S256-verifier-'.repeat(3);
@@ -191,7 +192,7 @@ test('omitted authorization scope and refresh stay public; explicit owner recons
   await expectError(await refresh(s, publicTokens.refresh_token, {scope: FULL_SCOPE}), 'invalid_grant');
   const rotated = await (await refresh(s, publicTokens.refresh_token)).json();
   assert.equal(rotated.scope, RELAY_PUBLIC_SCOPES.join(' '));
-  assert.equal((await rpc(rotated.access_token, 'tools/list')).result.tools.length, 13);
+  assert.equal((await rpc(rotated.access_token, 'tools/list')).result.tools.length, 4 + relayOwnerTools.length);
   const stepUp = await rpc(rotated.access_token, 'tools/call', {name: 'relay_owner_devices_list', arguments: {}});
   assert.equal(stepUp.result.isError, true);
   const requestedScope = stepUp.result._meta['mcp/www_authenticate'][0].match(/scope="([^"]+)"/)[1];
@@ -203,7 +204,7 @@ test('omitted authorization scope and refresh stay public; explicit owner recons
   const ownerTokens = await (await exchangeCode(s, ownerCode)).json();
   assert.equal(ownerTokens.scope, FULL_SCOPE);
   assert.deepEqual((await authenticate(s, ownerTokens.access_token)).scopes, RELAY_SCOPES);
-  assert.equal((await rpc(ownerTokens.access_token, 'tools/list')).result.tools.length, 13);
+  assert.equal((await rpc(ownerTokens.access_token, 'tools/list')).result.tools.length, 4 + relayOwnerTools.length);
   const devices = await rpc(ownerTokens.access_token, 'tools/call', {name: 'relay_owner_devices_list', arguments: {}});
   assert.equal(devices.result.isError, false); assert.deepEqual(devices.result.structuredContent, {devices: []});
   assert.deepEqual((await authenticate(s, rotated.access_token)).scopes, RELAY_PUBLIC_SCOPES, 'new consent never silently expands the old token');

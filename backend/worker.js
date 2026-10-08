@@ -110,10 +110,10 @@ export class Hub {
         sharedStore(this.ctx,'/internal/shared/state');
         // Persist wake before the atomic message/event insertion; failed requests
         // are cleaned up by the ordinary scheduler without a busy loop.
-        if(['message','delivery_retry'].includes(body?.op)&&this.ctx.storage.setAlarm)await this.ctx.storage.setAlarm(Date.now()+100);
+        if(['message','job_create','job_retry','delivery_retry'].includes(body?.op)&&this.ctx.storage.setAlarm)await this.ctx.storage.setAlarm(Date.now()+100);
         const response=await relayOwnerStore(this.ctx,this.env,body,enqueueRelayOwnerMessage);
         // The pre-commit wake is durable even if rescheduling fails after a save.
-        if(['message','delivery_retry'].includes(body?.op))try{await scheduleRelayAlarm(this.ctx);}catch{}
+        if(['message','job_create','job_retry','delivery_retry'].includes(body?.op))try{await scheduleRelayAlarm(this.ctx);}catch{}
         return response;
       } catch { return json({error:'Owner Relay storage unavailable'},503); }
     }

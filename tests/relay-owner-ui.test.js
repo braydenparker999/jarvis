@@ -6,7 +6,7 @@ import { existsSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createRelayOwnerApi, OWNER_SESSION_KEY, OwnerApiError } from '../public/assets/relay-owner-api.js';
+import { createRelayOwnerApi, OWNER_SESSION_KEY, OWNER_MODE_KEY, OwnerApiError } from '../public/assets/relay-owner-api.js';
 import { createRelayOwnerController, createRelayOwnerUI } from '../public/assets/relay-owner-ui.js';
 import { API_ORIGIN } from '../public/assets/config.js';
 
@@ -35,6 +35,16 @@ const browserFixtureCors = origin => ({
 function storage(initial = {}) {
   const values = new Map(Object.entries(initial)), writes = [];
   return { values, writes, getItem: key => values.get(key) || null, setItem: (key, value) => { writes.push([key, value]); values.set(key, value); }, removeItem: key => { values.delete(key); } };
+}
+function assertSafeScopeWrites(store, modes) {
+  assert.deepEqual(store.writes.filter(([key]) => key === OWNER_MODE_KEY).map(([, value]) => value), modes);
+  assert.equal(store.getItem(OWNER_MODE_KEY), modes.at(-1));
+  for (const [key, value] of store.writes) {
+    assert.ok([OWNER_SESSION_KEY, OWNER_MODE_KEY].includes(key), 'No private body, draft, history or account key may be persisted');
+    assert.equal(value.includes(mockedPassword), false);
+    assert.equal(value.includes(privateMessage.body), false);
+    if (key === OWNER_MODE_KEY) assert.ok(['owner', 'public'].includes(value), 'Scope preference contains only an exact safe channel name');
+  }
 }
 function fixture({ store = storage(), token = tokenA, deviceId = idA, remember = false } = {}) {
   const calls = [], state = { pairing: 'pending', error: null, sent: [], messages: [], revoked: false, account: null, accountWrites: [], consentSequence: 0 };
@@ -560,7 +570,9 @@ test('actual login renderer clears secrets and cancellation blocks a late rememb
     assert.equal(username.value, ''); assert.equal(password.value, '');
     controller.showPublic(); release({ status: 'approved', device });
     await new Promise(resolve => setImmediate(resolve));
-    assert.equal(controller.mode, 'public'); assert.equal(controller.hasCredential, false); assert.equal(f.store.writes.length, 0);
+    assert.equal(controller.mode, 'public'); assert.equal(controller.hasCredential, false);
+    assert.equal(f.store.writes.filter(([key]) => key === OWNER_SESSION_KEY).length, 0);
+    assertSafeScopeWrites(f.store, ['owner', 'public']);
   } finally { ui.dispose(); }
 });
 
@@ -593,7 +605,9 @@ test('device-cap recovery displays only sanitized verified metadata and requires
     assert.equal(requests.length, 2); assert.equal(requests[1].password, mockedPassword);
     assert.equal(requests[1].replace_device_id, idA); assert.equal(requests[1].confirm_replacement, true);
     assert.equal(JSON.stringify(controller.snapshot()).includes('First-password-not-retained'), false);
-    assert.equal(f.store.writes.length, 1); assert.equal(f.store.writes[0][1].includes(mockedPassword), false);
+    const credentials = f.store.writes.filter(([key]) => key === OWNER_SESSION_KEY);
+    assert.equal(credentials.length, 1); assert.deepEqual(JSON.parse(credentials[0][1]), {device_token: tokenA, device_id: idA});
+    assertSafeScopeWrites(f.store, ['owner']);
   } finally { ui.dispose(); }
 });
 
@@ -607,6 +621,8 @@ test('cancel or hidden-page dismissal forgets a device-cap replacement list with
     doc.hidden = true; doc.dispatch('visibilitychange');
     assert.equal(password.value, ''); assert.deepEqual(controller.snapshot().loginDevices, []); assert.equal(f.state.revoked, false);
     doc.hidden = false; await controller.login('fixture.owner', mockedPassword, 'Phone'); controller.showPublic();
-    assert.deepEqual(controller.snapshot().loginDevices, []); assert.equal(f.state.revoked, false); assert.equal(f.store.writes.length, 0);
+    assert.deepEqual(controller.snapshot().loginDevices, []); assert.equal(f.state.revoked, false);
+    assert.equal(f.store.writes.filter(([key]) => key === OWNER_SESSION_KEY).length, 0);
+    assertSafeScopeWrites(f.store, ['owner', 'public']);
   } finally { ui.dispose(); }
 });
