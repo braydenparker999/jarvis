@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createConversationFixture, launchQualifiedBrowser, openConversationPage, closeConversationHarness,
-  assertBrowserContained, writeSyntheticEvidence, SITE, RELAY_URL} from './helpers/relay-conversation-browser-fixture.js';
+  assertBrowserContained, writeSyntheticEvidence, deferred, SITE, RELAY_URL} from './helpers/relay-conversation-browser-fixture.js';
 import {STORAGE_KEY, LEGACY_KEY} from '../public/assets/shared-store.js';
 import {sharedStore} from '../backend/shared.js';
 
@@ -17,15 +17,17 @@ async function journey(t) {
   const h = createConversationFixture(t), pages = [];
   assert.equal(sharedStore(h.ctx, '/internal/shared/state').status, 200, 'Initialize the empty real shared schema before offline no-write assertions');
   t.after(() => closeConversationHarness(browser, h, pages));
-  const open = async (legacy, cached, {measureWrites = false} = {}) => {
+  const open = async (legacy, cached, {measureWrites = false, journal = null, tabDraft = null} = {}) => {
     const phone = await openConversationPage(browser, h,
       process.env.RELAY_QA_PUBLIC_ROOT ? {root: process.env.RELAY_QA_PUBLIC_ROOT} : {});
     pages.push(phone);
     const original = JSON.stringify(legacy);
-    await phone.context.addInitScript(({oldKey, key, original, cached, measureWrites}) => {
+    await phone.context.addInitScript(({oldKey, key, original, cached, measureWrites, journal, tabDraft}) => {
       // Seed once. Reload exercises the actual persisted migration and cache.
       if (localStorage.getItem(oldKey) === null) {
         localStorage.setItem(oldKey, original); localStorage.setItem(key, cached);
+        if (journal) localStorage.setItem(key + '.pending.' + journal.id, JSON.stringify(journal));
+        if (tabDraft !== null) sessionStorage.setItem(key + '.composer.v1', tabDraft);
       }
       if (measureWrites) {
         globalThis.__legacyPersistenceWrites = [];
@@ -40,7 +42,7 @@ async function journey(t) {
           return remove.call(this, name);
         };
       }
-    }, {oldKey: LEGACY_KEY, key: STORAGE_KEY, original, cached: JSON.stringify(cached), measureWrites});
+    }, {oldKey: LEGACY_KEY, key: STORAGE_KEY, original, cached: JSON.stringify(cached), measureWrites, journal, tabDraft});
     let readMode = 'offline';
     phone.rule(record => record.path === '/shared/state' && record.method === 'GET', async ({forward}) => {
       if (readMode === 'offline') return Response.json({error: 'Offline fictional fixture'}, {status: 503, headers: {'Access-Control-Allow-Origin': SITE}});
@@ -261,4 +263,111 @@ test('initial raw/cache UUID conflicts show an accurate retention error before a
     assert.equal(phone.records.some(record => record.path.startsWith('/v1/') || record.path === '/shared/migrate'), false);
     assertBrowserContained(phone);
   }
+});
+
+test('legacy queue overlap: exact unproved intents survive offline reload and an empty shared read until their original POST receipt', {timeout: 120000}, async t => {
+  for (const flag of [true, false]) for (const placement of ['aggregate', 'journal', 'both']) await t.test(`${flag}/${placement}`, async child => {
+    const j = await journey(child); if (!j) return;
+    const original = row(`Fictional existing exact overlapping public intent ${flag} ${placement}`), queued = {...original, saved: false, type: 'message', sendState: 'queued'};
+    const cached = cache([{...original, saved: true}], flag); cached.outbox = placement === 'journal' ? [] : [queued];
+    const session = await j.open(old([original]), cached, {journal: placement === 'aggregate' ? null : queued}), {phone} = session;
+    const observe = async () => {
+      const stored = await state(phone.page), actual = stored.messages.find(message => message.id === original.id);
+      assert.equal(actual?.id, queued.id); assert.equal(actual?.body, queued.body); assert.equal(actual?.saved, false); assert.equal(actual?.sharedAcceptance, undefined);
+      assert.deepEqual(stored.outbox.map(message => [message.id, message.body]), [[queued.id, queued.body]], 'Inherited saved flags cannot consume an explicit current intent');
+      assert.equal(await phone.page.locator(`[data-message-id="${queued.id}"]`).getByText(queued.body, {exact: true}).count(), 1);
+      assert.doesNotMatch(await phone.page.locator(`[data-message-id="${queued.id}"] .message-time`).textContent(), /Awaiting reply|Saved/i);
+      const journal = await phone.page.evaluate(key => JSON.parse(localStorage.getItem(key)), STORAGE_KEY + '.pending.' + queued.id);
+      assert.equal(journal?.id, queued.id); assert.equal(journal?.body, queued.body);
+      assert.equal(await phone.page.locator('#message-text').inputValue(), draft);
+      assert.equal(await phone.page.evaluate(key => localStorage.getItem(key), LEGACY_KEY), session.original);
+      assertBrowserContained(phone);
+    };
+    await load(phone); await observe(); assert.deepEqual(mutations(phone), []);
+    await load(phone, true); await observe(); assert.deepEqual(mutations(phone), []);
+    const entered = deferred(), release = deferred(); child.after(() => release.resolve());
+    phone.rule(record => record.method === 'POST' && record.path === '/shared/messages', async ({record, forward}) => {
+      entered.resolve(record); await release.promise; return forward();
+    });
+    session.online(); const refreshed = refresh(phone); await entered.promise;
+    await observe();
+    assert.equal(j.h.rows('SELECT COUNT(*) AS n FROM shared_entries WHERE id=?', original.id)[0].n, 0, 'The complete empty GET cannot establish acceptance before the queued POST reaches storage');
+    assert.ok(phone.records.some(record => record.path === '/shared/state' && record.method === 'GET' && record.status === 200));
+    assert.deepEqual(mutations(phone).map(record => JSON.parse(record.body)), [{id: queued.id, body: queued.body}]);
+    release.resolve(); await refreshed;
+    const accepted = await state(phone.page), actual = accepted.messages.find(message => message.id === original.id);
+    assert.equal(actual?.saved, true); assert.deepEqual(actual.sharedAcceptance, {version: 1, id: original.id, role: 'user', body: original.body, replyTo: null});
+    assert.deepEqual(accepted.outbox, []);
+    assert.equal(await phone.page.evaluate(key => localStorage.getItem(key), STORAGE_KEY + '.pending.' + queued.id), null);
+    assert.equal(j.h.rows('SELECT COUNT(*) AS n FROM shared_entries WHERE id=?', original.id)[0].n, 1);
+    await refresh(phone); await load(phone, true);
+    assert.deepEqual(mutations(phone).map(record => [record.method, record.path, JSON.parse(record.body)]), [['POST', '/shared/messages', {id: queued.id, body: queued.body}]], 'Acceptance and reload never allocate or send a replacement UUID');
+    assert.equal(await phone.page.evaluate(key => localStorage.getItem(key), LEGACY_KEY), session.original);
+    assert.equal(await phone.page.locator('#message-text').inputValue(), draft);
+    assertBrowserContained(phone);
+    if (flag && placement === 'both') await writeSyntheticEvidence(phone, 'current-legacy-exact-queue-overlap-390x844', {originalUuidAcceptedOnce: true, receiptRequired: true, rawAndDraftRetained: true});
+  });
+});
+
+test('legacy queue overlap: actual prior shared proof drains redundant same-UUID aggregate and journal intents without another POST', {timeout: 120000}, async t => {
+  for (const flag of [true, false]) for (const placement of ['aggregate', 'journal', 'both']) await t.test(`${flag}/${placement}`, async child => {
+    const j = await journey(child); if (!j) return;
+    const original = row(`Fictional actually received public overlap ${flag} ${placement}`), queued = {...original, saved: false, type: 'message'};
+    assert.equal(sharedStore(j.h.ctx, '/internal/shared/import', {messages: [original]}).status, 200);
+    const session = await j.open(old([original]), cache([{...original, saved: true}], flag)), {phone} = session;
+    session.online(); await load(phone);
+    const proved = await state(phone.page), genuine = proved.messages.find(message => message.id === original.id);
+    assert.equal(genuine?.saved, true); assert.deepEqual(genuine.sharedAcceptance, {version: 1, id: original.id, role: 'user', body: original.body, replyTo: null});
+    await phone.page.evaluate(({key, id, queued, placement, flag}) => {
+      const stored = JSON.parse(localStorage.getItem(key)); stored.legacyPending = flag; stored.outbox = placement === 'journal' ? [] : [queued];
+      localStorage.setItem(key, JSON.stringify(stored));
+      if (placement !== 'aggregate') localStorage.setItem(key + '.pending.' + id, JSON.stringify(queued));
+    }, {key: STORAGE_KEY, id: queued.id, queued, placement, flag});
+    session.offline(); await load(phone, true);
+    const observe = async () => {
+      const stored = await state(phone.page), accepted = stored.messages.find(message => message.id === queued.id);
+      assert.deepEqual(stored.outbox, []); assert.equal(accepted?.id, original.id); assert.equal(accepted?.body, original.body); assert.equal(accepted?.saved, true);
+      assert.deepEqual(accepted.sharedAcceptance, genuine.sharedAcceptance);
+      assert.equal(await phone.page.evaluate(key => localStorage.getItem(key), STORAGE_KEY + '.pending.' + queued.id), null);
+      assert.deepEqual(mutations(phone), [], 'A genuine prior exact receipt finishes the redundant intent without another public write');
+      assert.equal(await phone.page.evaluate(key => localStorage.getItem(key), LEGACY_KEY), session.original);
+      assert.equal(await phone.page.locator('#message-text').inputValue(), draft);
+      assertBrowserContained(phone);
+    };
+    await observe(); session.stale(); await refresh(phone); await observe(); await load(phone, true); await observe();
+  });
+});
+
+test('legacy queue overlap: conflicting aggregate or journal text cannot overwrite proved or unproved history during initial restore', {timeout: 120000}, async t => {
+  for (const proven of [false, true]) for (const placement of ['aggregate', 'journal']) await t.test(`${proven}/${placement}`, async child => {
+    const j = await journey(child); if (!j) return;
+    const original = row(`Fictional protected original before pending collision ${proven} ${placement}`), queued = {...original, body: 'Fictional different pending body with the same UUID', saved: false, type: 'message'};
+    const cached = cache([{...original, saved: true}], false);
+    if (!proven && placement === 'aggregate') cached.outbox = [queued];
+    if (proven) assert.equal(sharedStore(j.h.ctx, '/internal/shared/import', {messages: [original]}).status, 200);
+    const session = await j.open(old([original]), cached, {measureWrites: true, journal: !proven && placement === 'journal' ? queued : null, tabDraft: draft}), {phone} = session;
+    let beforeShared = JSON.stringify(cached), beforeJournal = placement === 'journal' ? JSON.stringify(queued) : null;
+    if (proven) {
+      session.online(); await load(phone);
+      const received = (await state(phone.page)).messages.find(message => message.id === original.id);
+      assert.equal(received?.saved, true); assert.deepEqual(received.sharedAcceptance, {version: 1, id: original.id, role: 'user', body: original.body, replyTo: null});
+      beforeShared = await phone.page.evaluate(({key, queued, placement}) => {
+        const stored = JSON.parse(localStorage.getItem(key)); stored.outbox = placement === 'aggregate' ? [queued] : [];
+        const raw = JSON.stringify(stored); localStorage.setItem(key, raw);
+        if (placement === 'journal') localStorage.setItem(key + '.pending.' + queued.id, JSON.stringify(queued));
+        return raw;
+      }, {key: STORAGE_KEY, queued, placement});
+      session.offline(); await phone.page.reload();
+    } else await phone.page.goto(RELAY_URL);
+    await phone.page.waitForFunction(() => document.getElementById('message-text') || document.querySelector('#content h1'));
+    assert.equal(await phone.page.getByRole('heading', {name: 'Unable to save on this device', exact: true}).count(), 1, 'The association fails before the conflicting queue replaces the original history');
+    assert.match(await phone.page.locator('#content').textContent(), /different|conflict|mismatch/i);
+    assert.match(await phone.page.locator('#content').textContent(), /not.*overwritten|not.*changed|unchanged|preserved/i);
+    assert.equal(await phone.page.evaluate(key => localStorage.getItem(key), STORAGE_KEY), beforeShared);
+    assert.equal(await phone.page.evaluate(key => localStorage.getItem(key), LEGACY_KEY), session.original);
+    assert.equal(await phone.page.evaluate(key => localStorage.getItem(key), STORAGE_KEY + '.pending.' + queued.id), beforeJournal);
+    assert.equal(await phone.page.evaluate(key => sessionStorage.getItem(key), STORAGE_KEY + '.composer.v1'), draft);
+    assert.deepEqual(await phone.page.evaluate(() => globalThis.__legacyPersistenceWrites), []);
+    assert.deepEqual(mutations(phone), []); assertBrowserContained(phone);
+  });
 });

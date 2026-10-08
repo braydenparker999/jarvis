@@ -146,3 +146,69 @@ test('initial raw/cache UUID conflicts fail before restoring independent queues 
     assert.deepEqual(JSON.parse(sharedRaw).outbox.map(message => [message.id, message.body]), [[queued.id, queued.body]]);
   }
 });
+
+test('legacy queue overlap: inherited saved flags do not consume an exact explicit queued intent without shared evidence', () => {
+  for (const flag of [true, false]) for (const placement of ['aggregate', 'journal', 'both']) {
+    const original = row(`Fictional overlapping public intent ${flag} ${placement}`), queued = {...original, saved: false, type: 'message'};
+    const cached = state([{...original, saved: true}], flag, placement === 'journal' ? [] : [queued]);
+    const {storage, raw} = seed([original], cached), delivery = adapter(storage);
+    if (placement !== 'aggregate') storage.setItem(delivery.prefix + queued.id, JSON.stringify(queued));
+    const restored = delivery.restore(), committed = delivery.commit(restored);
+    const empty = delivery.commit(mergeState(committed, {messages: [], posts: []})), reloaded = adapter(storage).restore();
+    for (const observed of [restored, committed, empty, reloaded]) {
+      assert.deepEqual(observed.outbox.map(message => [message.id, message.body]), [[queued.id, queued.body]], `${flag}/${placement}: Only an actual receipt may finish this exact intent`);
+      const message = observed.messages.find(message => message.id === original.id);
+      assert.equal(message?.body, original.body); assert.equal(message?.saved, false); assert.equal(message?.sharedAcceptance, undefined);
+      assert.equal(observed.composer, cached.composer);
+    }
+    assert.deepEqual(journals(storage), [delivery.prefix + queued.id]);
+    assert.equal(storage.getItem(LEGACY_KEY), raw);
+    const proved = delivery.commit(mergeState(reloaded, {messages: [original], posts: []}));
+    assert.deepEqual(proved.outbox, []); assert.deepEqual(journals(storage), []);
+    assert.deepEqual(proved.messages[0].sharedAcceptance, evidence(original));
+    assert.equal(proved.messages[0].saved, true); assert.equal(proved.messages[0].id, queued.id);
+  }
+});
+
+test('legacy queue overlap: a genuine prior exact receipt can finish a redundant aggregate or journal intent', () => {
+  for (const flag of [true, false]) for (const placement of ['aggregate', 'journal', 'both']) {
+    const original = row(`Fictional genuinely accepted overlapping intent ${flag} ${placement}`), queued = {...original, saved: false, type: 'message'};
+    const received = mergeState(state([], false), {messages: [original], posts: []}).messages[0];
+    const {storage, raw} = seed([original], state([received], flag, placement === 'journal' ? [] : [queued])), delivery = adapter(storage);
+    if (placement !== 'aggregate') storage.setItem(delivery.prefix + queued.id, JSON.stringify(queued));
+    const current = delivery.commit(delivery.restore()), stale = delivery.commit(mergeState(current, {messages: [], posts: []})), reload = adapter(storage).restore();
+    for (const observed of [current, stale, reload]) {
+      assert.deepEqual(observed.outbox, []); assert.equal(observed.messages[0].id, queued.id); assert.equal(observed.messages[0].body, queued.body);
+      assert.equal(observed.messages[0].saved, true); assert.deepEqual(observed.messages[0].sharedAcceptance, evidence(original));
+    }
+    assert.deepEqual(journals(storage), []); assert.equal(storage.getItem(LEGACY_KEY), raw);
+  }
+});
+
+test('legacy queue overlap: a conflicting queued tuple fails before restore, commit or external persistence and preserves genuine proof', () => {
+  for (const proven of [false, true]) for (const placement of ['aggregate', 'journal']) for (const difference of placement === 'aggregate' ? ['body', 'role', 'replyTo', 'missingTarget'] : ['body', 'replyTo', 'missingTarget']) {
+    const original = row(`Fictional original protected queued association ${proven} ${placement} ${difference}`);
+    if (difference === 'missingTarget') original.replyTo = crypto.randomUUID();
+    const queued = {...original, saved: false, type: 'message'};
+    if (difference === 'body') queued.body = 'Fictional conflicting intent with the same UUID';
+    else if (difference === 'role') queued.role = 'assistant';
+    else if (difference === 'replyTo') queued.replyTo = crypto.randomUUID();
+    else delete queued.replyTo;
+    const known = proven ? mergeState(state([], false), {messages: [original], posts: []}).messages[0] : {...original, saved: true};
+    const {storage, raw} = seed([original], state([known], false)), tabStorage = new Storage(), delivery = adapter(storage, tabStorage);
+    tabStorage.setItem(STORAGE_KEY + '.composer.v1', 'Fictional existing independent tab draft');
+    const current = delivery.restore();
+    if (placement === 'aggregate') storage.setItem(STORAGE_KEY, JSON.stringify(state([known], false, [queued])));
+    else storage.setItem(delivery.prefix + queued.id, JSON.stringify(queued));
+    const beforeLocal = new Map(storage.values), beforeTab = new Map(tabStorage.values); storage.writes = []; tabStorage.writes = [];
+    const conflict = error => /different|conflict|mismatch/i.test(error.message) && /history|legacy|earlier|old|queued/i.test(error.message);
+    assert.throws(() => adapter(storage, tabStorage).restore(), conflict);
+    assert.throws(() => delivery.external(current), conflict);
+    assert.throws(() => delivery.commit({...current, composer: 'Fictional edited draft after the collision'}), conflict);
+    assert.deepEqual(storage.writes, []); assert.deepEqual(tabStorage.writes, []);
+    assert.deepEqual(storage.values, beforeLocal); assert.deepEqual(tabStorage.values, beforeTab);
+    assert.equal(storage.getItem(LEGACY_KEY), raw);
+    assert.equal(current.messages[0].body, original.body);
+    if (proven) assert.deepEqual(current.messages[0].sharedAcceptance, evidence(original), 'A conflicting queue cannot replace a genuine immutable receipt');
+  }
+});
