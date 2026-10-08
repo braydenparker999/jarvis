@@ -159,3 +159,57 @@ test('corrections cannot reset omitted artifact revisions and identical conflict
   assert.equal(retry.status,409);assert.equal((await retry.json()).errorCode,'artifact_revision_conflict');
   assert.equal(eventCount(h),3);assert.equal(h.rows("SELECT COUNT(*) AS n FROM public_coordination_events WHERE disposition='accepted'")[0].n,2);
 });
+
+test('Worker legacy hint receipts match the exact accepted payload/request and preserve precise conflicts across lost-response retries',async t=>{
+  for(const variation of ['changed payload','changed request'])await t.test(variation,async sub=>{
+    const {h,requestId}=fixture(sub),otherId=uuid();
+    sharedStore(h.ctx,'/internal/shared/reply',{id:uuid(),replyTo:requestId,body:'Fictional immutable original hold'});
+    sharedStore(h.ctx,'/internal/shared/message',{id:otherId,body:MUSE_PREFIX+'Fictional other held request'});
+    sharedStore(h.ctx,'/internal/shared/reply',{id:uuid(),replyTo:otherId,body:'Fictional other immutable hold'});
+    const original=(await sharedStore(h.ctx,'/internal/shared/result',{},new URLSearchParams({requestId})).json()).reply;
+    const a={schema:'jarvis-publication-v1',id:uuid(),type:'reply',replyTo:requestId,body:'Fictional immutable later final A'};
+    const b={...a,...(variation==='changed payload'?{body:'Fictional rejected later final B'}:{replyTo:otherId})};
+    const comments=new Map([[1701,comment(a,1701)],[1702,comment(b,1702)]]);let fetches=0;
+    sub.mock.method(globalThis,'fetch',async(url,init)=>{
+      const id=Number(url.slice(COMMENT_URL.length));assert.equal(url,COMMENT_URL+id);assert.ok(comments.has(id));
+      assert.equal(init.redirect,'manual');fetches++;return Response.json(comments.get(id));
+    });
+    const accepted=await hintRequest(h,{commentId:1701});assert.equal(accepted.status,200);
+    const receipt=await accepted.json();assert.equal(receipt.status,'update-imported');
+    const saved=h.rows('SELECT * FROM public_coordination_events WHERE event_id=?',a.id)[0];
+    const exactRetry=await hintRequest(h,{commentId:1701});assert.equal(exactRetry.status,200);assert.deepEqual(await exactRetry.json(),receipt);
+    const rejected=await hintRequest(h,{commentId:1702});assert.equal(rejected.status,409);
+    const conflict=await rejected.json();assert.equal(conflict.status,'conflict');assert.equal(conflict.errorCode,'event_id_conflict');
+    const lostResponseRetry=await hintRequest(h,{commentId:1702});assert.equal(lostResponseRetry.status,409);
+    assert.deepEqual(await lostResponseRetry.json(),conflict);
+    assert.equal(h.rows('SELECT error FROM imported_comments WHERE comment_id=1702')[0].error,'event_id_conflict');
+    // A pre-repair rejected row also recovers the precise conflict from durable
+    // payload evidence, without another GET or rewriting its original diagnostic.
+    h.ctx.storage.sql.exec("UPDATE imported_comments SET error='Conflicting publication; original kept' WHERE comment_id=1702");
+    const historicalRetry=await hintRequest(h,{commentId:1702});assert.equal(historicalRetry.status,409);
+    assert.deepEqual(await historicalRetry.json(),conflict);assert.equal(fetches,2);
+    assert.deepEqual(h.rows('SELECT * FROM public_coordination_events WHERE event_id=?',a.id)[0],saved);
+    const result=await sharedStore(h.ctx,'/internal/shared/result',{},new URLSearchParams({requestId})).json();
+    assert.deepEqual(result.reply,original);assert.equal(result.events.length,1);assert.equal(result.events[0].body,a.body);
+    assert.equal((await sharedStore(h.ctx,'/internal/shared/result',{},new URLSearchParams({requestId:otherId})).json()).events.length,0);
+    assert.equal(h.rows("SELECT COUNT(*) AS n FROM relay_events WHERE message_id LIKE 'public-result:%'")[0].n,1);
+  });
+});
+
+test('Worker legacy hint does not report a journaled conflicting disposition as an accepted later update',async t=>{
+  const {h,requestId}=fixture(t),otherId=uuid(),publicationId=uuid();
+  sharedStore(h.ctx,'/internal/shared/reply',{id:uuid(),replyTo:requestId,body:'Fictional immutable held reply'});
+  sharedStore(h.ctx,'/internal/shared/message',{id:otherId,body:'Fictional independent public request'});
+  const reserved=payload(otherId,{attemptId:publicationId});
+  sharedStore(h.ctx,'/internal/shared/coordination',{payload:reserved,provenance:{source:'github-issue',repository:'braydenparker999/jarvis',issue:2,
+    commentId:1800,authorId:183016859,publishedAt:stamp}});
+  const legacy={schema:'jarvis-publication-v1',id:publicationId,type:'reply',replyTo:requestId,body:'Fictional rejected cross-request attempt'};
+  let fetches=0;t.mock.method(globalThis,'fetch',async url=>{assert.equal(url,COMMENT_URL+1801);fetches++;return Response.json(comment(legacy,1801));});
+  const first=await hintRequest(h,{commentId:1801});assert.equal(first.status,409);
+  const conflict=await first.json();assert.equal(conflict.status,'conflict');assert.equal(conflict.errorCode,'attempt_request_conflict');
+  const retry=await hintRequest(h,{commentId:1801});assert.equal(retry.status,409);assert.deepEqual(await retry.json(),conflict);assert.equal(fetches,1);
+  assert.equal(h.rows('SELECT disposition FROM public_coordination_events WHERE event_id=?',publicationId)[0].disposition,'conflict');
+  assert.equal(h.rows("SELECT COUNT(*) AS n FROM public_coordination_events WHERE disposition='accepted'")[0].n,1);
+  assert.equal(h.rows('SELECT body FROM shared_entries WHERE reply_to=?',requestId)[0].body,'Fictional immutable held reply');
+  assert.equal(h.rows("SELECT COUNT(*) AS n FROM relay_events WHERE message_id LIKE 'public-result:%'")[0].n,1);
+});

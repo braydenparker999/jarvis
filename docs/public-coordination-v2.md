@@ -188,6 +188,14 @@ and retries through ordinary reads. Confirm actual artifacts/versions using the
 exact-result reader. A lost hint response can be retried with the same comment
 ID, without republishing or allocating a new event ID.
 
+For a legacy later reply, `update-imported` requires an accepted event matching
+the exact request and canonical payload. An existing event ID alone is not a
+receipt: a changed body, changed request or rejected disposition returns 409
+with the precise conflict code, including duplicate/lost-response retries.
+Older generic conflict diagnostics remain intact; the stored event payload and
+disposition recover the precise receipt without another GitHub GET. The accepted
+earlier report and immutable reply are never changed.
+
 The hint bypasses only the existing five-minute *read-triggered* attempt throttle;
 it does not change that cadence, schedule, subscription or fallback scanner.
 If hints are absent, unsupported, rate limited, malformed or unavailable, the

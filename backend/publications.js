@@ -1,5 +1,6 @@
 import {sharedStore} from './shared.js';
 import {decodeCoordination} from './public-coordination.js';
+import {canonical} from './relay-common.js';
 export const COMMENTS_URL='https://api.github.com/repos/braydenparker999/jarvis/issues/2/comments';
 export const ISSUE_URL='https://api.github.com/repos/braydenparker999/jarvis/issues/2';
 export const COMMENT_URL='https://api.github.com/repos/braydenparker999/jarvis/issues/comments/';
@@ -75,8 +76,11 @@ export async function applyPendingPublications(ctx) {
       const r=sharedStore(ctx,p.type==='coordination'?'/internal/shared/coordination':p.type==='reply'?'/internal/shared/reply':'/internal/shared/briefing',p);
       if(r.ok){sql.exec('UPDATE imported_comments SET imported=1,error=NULL WHERE comment_id=?',item.comment_id);progressed=true;}
       else if(r.status===409){
-        if(p.type==='reply')sharedStore(ctx,'/internal/shared/coordination',legacyUpdate(p,item.comment_id));
-        const failure=p.type==='coordination'?await r.json():null;
+        let failure=p.type==='coordination'?await r.json():null;
+        if(p.type==='reply'){
+          const update=sharedStore(ctx,'/internal/shared/coordination',legacyUpdate(p,item.comment_id));
+          if(!update.ok)failure=await update.json();
+        }
         sql.exec('UPDATE imported_comments SET imported=2,error=? WHERE comment_id=?',failure?.code||'Conflicting publication; original kept',item.comment_id);progressed=true;
       } else if(![404,425].includes(r.status))throw Error('Publication could not be saved');
     }
@@ -151,9 +155,14 @@ function hintReceipt(ctx,commentId) {
   const item=[...ctx.storage.sql.exec('SELECT * FROM imported_comments WHERE comment_id=?',commentId)][0];
   if(!item)return null;
   const publication=JSON.parse(item.publication),id=publication.type==='coordination'?publication.payload.eventId:publication.id;
-  const update=publication.type==='reply'&&item.imported===2&&[...ctx.storage.sql.exec('SELECT event_id FROM public_coordination_events WHERE event_id=?',id)].length>0;
+  const event=publication.type==='reply'&&item.imported===2?[...ctx.storage.sql.exec('SELECT request_id,payload,disposition,error_code FROM public_coordination_events WHERE event_id=?',id)][0]:null;
+  const matches=event&&event.request_id===publication.replyTo&&event.payload===canonical(legacyUpdate(publication,commentId).payload);
+  const update=matches&&event.disposition==='accepted';
+  // Older rejected legacy rows kept only a generic conflict diagnostic. Their
+  // durable event proves a precise ID/payload conflict without changing history.
+  const errorCode=event&&!matches?'event_id_conflict':event?.error_code||item.error;
   return Response.json({commentId,publicationId:id,status:!item.imported?'pending':update?'update-imported':item.imported===1?'imported':'conflict',
-    ...(item.imported===2&&!update?{errorCode:item.error}:{}),public_inbox:true,execution_authorized:false},
+    ...(item.imported===2&&!update?{errorCode}:{}),public_inbox:true,execution_authorized:false},
     {status:!item.imported?202:item.imported===2&&!update?409:200});
 }
 export async function importPublicationHint(ctx,input,fetcher=fetch,now=Date.now()) {
