@@ -230,11 +230,12 @@ const assertFreshRetry = async (h, kind) => {
   assert.equal(h.Engine.playing, false, 'retry is not reported as audible output');
   assert.equal(h.Engine[state.id], h.Engine.current.id);
   assert.notEqual(h.Engine[state.error], h.Engine.current.id, 'historical terminal error does not suppress the new retry');
+  await h.clock.advance(state.delay);
   assert.ok(recoveryLoads(a, before), 'new selection gets an actual transport reload');
   if (kind.includes('r2')) assert.equal(a.src, source, 'R2 retries preserve the validated URL exactly');
   if (kind === 'drive') assert.match(a.src, /&retry=1$/, 'Drive keeps its own URL refresh path');
   if (kind === 'server') assert.match(a.src, /&retry=\d+$/, 'server keeps its own cache-refresh path');
-  await h.clock.advance(state.delay); assert.ok(a.attempts.length > before.attempts);
+  assert.ok(a.attempts.length > before.attempts);
   a.metadata(200); a.playing(); await flush();
   assert.equal(h.Engine.playing, true); assert.equal(h.Engine.wantsPlayback(), true);
 };

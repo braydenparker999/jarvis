@@ -15,7 +15,7 @@ import {buildPreview} from '../scripts/build-poweramp-preview.mjs';
 const sourceHash='a6d0fb71df79ca8cc3d80627fb911e5894bb9fff465818ada78feb81b2688759';
 // The transport-only repair changes the full-source fingerprint. The frozen
 // v8 baseline, measured UI cases, and geometry/pixel gates stay unchanged.
-const expectedCandidateHash='459fa013badc4bed54746278083bdc56db618842b6331d7232b0d2fd6acd027c';
+const expectedCandidateHash='7f91c594c6a2651333121a34692b33cdeb0e2d6a197d00411c777918560ad1ff';
 const baselineRef='04ef034738e6a3ccc2c03391ea9b00e0fc98ae66';
 const profile={viewport:{width:519,height:988},deviceScaleFactor:2.0818214416503906,isMobile:true,hasTouch:true};
 const executablePath=[process.env.JARVIS_CHROME,'/usr/bin/chromium','/usr/bin/google-chrome',chromium.executablePath()].find(p=>p&&existsSync(p));

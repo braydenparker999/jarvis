@@ -2406,7 +2406,7 @@ const R2Source={
   },
   async connect(quiet=false){
     if(this.busy||!SourceLibrary.enabled('r2')||!this.helper||(!this.native&&!this.catalog))return false;
-    if(Engine.current?.source==='r2'&&Engine.playing){this.status='R2 update pending · pause playback to sync';this.schedule();return false;}
+    if(Engine.current?.source==='r2'&&Engine.wantsPlayback()){this.status='R2 update pending · pause playback to sync';this.schedule();return false;}
     this.busy=true;this.error='';this.status='Checking verified R2 library…';MusicSources.refresh();
     const root=this.root,url=this.manifestURL,controller=new AbortController();this.controller=controller;
     const timeout=setTimeout(()=>controller.abort(),30000);
@@ -2421,18 +2421,20 @@ const R2Source={
         mapping=await this.helper.readR2Manifest({url,root,tracks,signal:controller.signal});
       }
       if(controller.signal.aborted||!SourceLibrary.enabled('r2')||root!==this.root||url!==this.manifestURL)return false;
-      if(Engine.current?.source==='r2'&&Engine.playing){this.status='R2 update pending · pause playback to sync';return false;}
+      if(Engine.current?.source==='r2'&&Engine.wantsPlayback()){this.status='R2 update pending · pause playback to sync';return false;}
       const {fresh,gone}=await IDB.r2Catalog(this.helper,mapping,tracks);
+      if(controller.signal.aborted||!SourceLibrary.enabled('r2')||root!==this.root||url!==this.manifestURL)return false;
+      if(Engine.current?.source==='r2'&&Engine.wantsPlayback()){this.status='R2 update pending · pause playback to sync';return false;}
       for(const id of gone){LIB.map.delete(id);FILES.delete(id);const i=LIB.ids.indexOf(id);if(i>=0)LIB.ids.splice(i,1);}
       fresh.forEach(libAdd);
       this.mapping=mapping;this.status='Verified R2 library ready';this.error='';
       const selected=Engine.current?.id;
       if(selected&&gone.includes(selected))Engine.stop();
-      const order=Engine.order.map(i=>Engine.queue[i]?.id),currentOrder=Engine.order[Engine.pos];
-      const position=Engine.queue[currentOrder]?.id;
-      Engine.queue=Engine.queue.filter(t=>!gone.includes(t.id)).map(t=>LIB.map.get(t.id)||t);
-      Engine.order=order.map(id=>Engine.queue.findIndex(t=>t.id===id)).filter(i=>i>=0);
-      Engine.pos=Math.max(0,Engine.order.findIndex(i=>Engine.queue[i]?.id===position));
+      const order=Engine.order.slice(),currentOrder=Engine.order[Engine.pos],remap=new Map(),queue=[],removed=new Set(gone);
+      Engine.queue.forEach((t,i)=>{if(!removed.has(t.id)){remap.set(i,queue.length);queue.push(LIB.map.get(t.id)||t);}});
+      Engine.queue=queue;
+      Engine.order=order.filter(i=>remap.has(i)).map(i=>remap.get(i));
+      Engine.pos=Math.max(0,Engine.order.indexOf(remap.get(currentOrder)));
       if(Engine.current?.source==='r2')Engine.current=LIB.map.get(selected)||null;
       if(!Engine.current&&allTracks().length){Engine.queue=allTracks();Engine.buildOrder();Engine.pos=0;Engine.current=Engine.queue[Engine.order[0]];}
       Engine.saveState();UI.renderNowPlaying(Engine.current);UI.renderPlayState();Views.refreshAll();
@@ -2466,18 +2468,25 @@ const R2Source={
 
 // RAM-only, bounded playback evidence. Never retain URLs, track identifiers,
 // artwork, credentials, arbitrary error strings, or a browser fingerprint.
-const PlaybackDiagnostics={limit:80,entries:[],
+const PlaybackDiagnostics={limit:80,maxBytes:31000,entries:[],sizes:[],bytes:0,
   record(event,engine,detail={}){
     const a=engine.els?.[engine.cur],t=engine.current;
     const kind=engine.transportCapabilities(t).kind,state=engine.ctx?.state;
-    const reason=['user','interrupted','context-interrupted','context-failed','transport','play','selection','screen-off','media-session','stall','initial','NetworkError','NotSupportedError','NotAllowedError','AbortError'].includes(detail.reason)?detail.reason:null;
+    const eventSlot=[0,1].includes(detail.slot)?detail.slot:engine.cur||0,eventAudio=engine.els?.[eventSlot];
+    const bufferingMs=Number.isFinite(engine._bufferToken?.at)?Math.min(3600000,Math.max(0,Date.now()-engine._bufferToken.at)):0;
+    const reason=['user','interrupted','context-interrupted','context-failed','transport','play','selection','screen-off','media-session','stall','initial','seek','offline-timeout','NetworkError','NotSupportedError','NotAllowedError','AbortError'].includes(detail.reason)?detail.reason:null;
     const error=['AbortError','NotAllowedError','NotSupportedError','NetworkError','InvalidStateError','SecurityError'].includes(detail.error)?detail.error:detail.error?'OtherError':null;
-    this.entries.push({at:Date.now(),event,source:kind,request:engine._playRequest||0,attempt:engine._playAttempt||0,slot:engine.cur||0,
+    const entry={at:Date.now(),event,source:kind,request:engine._playRequest||0,attempt:engine._playAttempt||0,slot:engine.cur||0,
       intent:engine.wantsPlayback(),playing:!!engine.playing,paused:a?!!a.paused:true,ended:a?!!a.ended:false,
       time:Number.isFinite(a?.currentTime)?Math.round(a.currentTime*1000)/1000:0,
       readyState:a?.readyState??0,networkState:a?.networkState??0,mediaError:a?.error?.code??0,
-      context:['running','suspended','interrupted','closed'].includes(state)?state:'none',visibility:typeof document==='undefined'?'unknown':document.visibilityState,reason,error});
-    if(this.entries.length>this.limit)this.entries.splice(0,this.entries.length-this.limit);
+      context:['running','suspended','interrupted','closed'].includes(state)?state:'none',visibility:typeof document==='undefined'?'unknown':document.visibilityState,
+      online:typeof navigator==='undefined'?null:navigator.onLine!==false,mode:['transparent','custom'].includes(SET.audioMode)?SET.audioMode:'unknown',gapless:!!SET.gapless,crossfade:!!SET.crossfade,
+      recovery:engine._r2Recovery?.phase==='offline'?'waiting-online':engine._r2Recovery?'pending':'none',
+      ...(bufferingMs>0?{bufferingMs}:{}),screenOffPause:typeof nativeValues==='function'?!!nativeValues().pause_on_screen_off:false,
+      ...([0,1].includes(detail.slot)?{eventSlot,eventReadyState:eventAudio?.readyState??0,eventMediaError:eventAudio?.error?.code??0}:{}),reason,error};
+    const size=JSON.stringify(entry).length+1;this.entries.push(entry);this.sizes.push(size);this.bytes+=size;
+    while(this.entries.length>this.limit||this.bytes>this.maxBytes){this.entries.shift();this.bytes-=this.sizes.shift();}
   },
   report(){return {schema:'poweramp-playback-v1',events:this.entries.map(entry=>({...entry}))};}
 };
@@ -2498,7 +2507,7 @@ const Engine = {
       a.hidden=true;document.body.appendChild(a);
       this.els.push(a);
       a.addEventListener('ended', this.onEnded.bind(this,i));
-      a.addEventListener('error',()=>{if(a.error)this.onError(i);});
+      a.addEventListener('error',()=>{if(a.error){if(i!==this.cur)this.tracePlayback('preload-media-error',{slot:i});this.onError(i);}});
       a.addEventListener('loadedmetadata', this.onMeta.bind(this,i));
       a.addEventListener('durationchange', this.onMeta.bind(this,i));
       a.addEventListener('timeupdate', this.onTime.bind(this,i));
@@ -2523,10 +2532,41 @@ const Engine = {
     this._driveRetryId=this._driveErrorReportedId=null;
     this._serverRetryId=this._serverErrorReportedId=null;
     this._r2RetryId=this._r2ErrorReportedId=null;
-    clearTimeout(this._driveRetryTimer);clearTimeout(this._serverRetryTimer);clearTimeout(this._r2RetryTimer);
+    clearTimeout(this._driveRetryTimer);clearTimeout(this._serverRetryTimer);this.clearR2Recovery();
     this._driveRetryTimer=this._serverRetryTimer=this._r2RetryTimer=null;
     this.clearBuffering();this._mediaStarted=null;
     if(track?.source==='drive')DriveSource.playbackRetry.delete(track.id);
+  },
+  clearR2Recovery:function(){clearTimeout(this._r2RetryTimer);this._r2RetryTimer=null;this._r2Recovery=null;},
+  r2RecoveryValid:function(token){
+    return !!token&&this._r2Recovery===token&&this._playRequest===token.request&&this.el()===token.audio&&token.audio.src===token.source&&this.current?.id===token.track.id&&this.wantsPlayback()&&this._r2ErrorReportedId!==token.track.id;
+  },
+  beginR2Recovery:function(){
+    const token=this._r2Recovery;
+    if(!this.r2RecoveryValid(token)){if(token)this.clearR2Recovery();return;}
+    if(navigator.onLine===false)return;
+    if(this.ctx&&this.ctx.state!=='running'){this.pause('context-interrupted');return;}
+    const a=token.audio,position=this.time(),at=Number.isFinite(position)?Math.max(0,position):token.position;
+    clearTimeout(this._r2RetryTimer);this._r2RetryTimer=null;token.phase='reload';
+    // Delay the one clean-URL reload until it can use the network. Keep any
+    // seek made while recovery was waiting instead of restoring an old time.
+    a.src=token.source;a.load();this.seekWhenReady(at);
+    this.tracePlayback('r2-retry-start');this.startElement(a);
+    if(this._r2Recovery===token)this._r2Recovery=null;
+  },
+  reconcilePlaybackLifecycle:function(){
+    if(!this.wantsPlayback()||this._loadingRequest)return;
+    if(this.ctx&&this.ctx.state!=='running'){
+      if(this.ctx.state==='suspended'&&this._contextResume?.context===this.ctx&&this._contextResume.request===this._playRequest)return;
+      this.pause('context-interrupted');return;
+    }
+    const a=this.el();if(!a)return;
+    // Read native state after a renderer freeze. Reuse the ordinary end
+    // handler's request fence, silence setting, repeat and queue policy.
+    if(a.ended){this.tracePlayback('lifecycle-ended');this.onEnded(this.cur);return;}
+    if(this._r2Recovery?.phase==='offline'&&navigator.onLine!==false){this.beginR2Recovery();return;}
+    // A missing pause event is still an interruption, never a reason to play.
+    if(a.paused)this.onPause(this.cur);
   },
   cancelTransitionForFailure:function(){
     if(typeof PlaybackTransitions!=='undefined'&&(PlaybackTransitions.pending||this.xfading))PlaybackTransitions.cancel();
@@ -2547,7 +2587,7 @@ const Engine = {
     if(i!==this.cur||this._loadingRequest||!this.wantsPlayback()||!a.paused||a.ended||a.error||!a.src)return;
     // A recovery deliberately pauses the current element until its bounded
     // retry fires. No suppression flag survives load() cancelling old tasks.
-    if(this._r2RetryTimer||this._driveRetryTimer||this._serverRetryTimer)return;
+    if(this.r2RecoveryValid(this._r2Recovery)||this._r2RetryTimer||this._driveRetryTimer||this._serverRetryTimer)return;
     // Audio-focus pauses can arrive while play() is pending. Do not restart
     // over calls/other apps, or turn that interruption into a network retry.
     this.pause('interrupted');
@@ -2874,7 +2914,7 @@ const Engine = {
   play:function(){
     if(this.ctx?.state==='closed'){this.pause('context-failed');toast('Audio output was closed. Reload this page to play again.',6000);return;}
     this._playIntent=true;this.ensureCtx('play');
-    clearTimeout(this._driveRetryTimer);clearTimeout(this._serverRetryTimer);clearTimeout(this._r2RetryTimer);
+    clearTimeout(this._driveRetryTimer);clearTimeout(this._serverRetryTimer);this.clearR2Recovery();
     this._driveRetryTimer=this._serverRetryTimer=this._r2RetryTimer=null;
     const a=this.el(),kind=this.transportCapabilities().kind;
     if(a.ended)this._endedRequest=null;
@@ -2892,7 +2932,7 @@ const Engine = {
     this.clearBuffering();
     clearTimeout(this._driveRetryTimer);
     clearTimeout(this._serverRetryTimer);
-    clearTimeout(this._r2RetryTimer);this._r2RetryTimer=null;
+    this.clearR2Recovery();
     this.playing=false;
     DriveSource.pumpTags();
     if(DriveSource.status.includes('catalog update pending'))DriveSource.scheduleManifestCheck(0);
@@ -2912,7 +2952,7 @@ const Engine = {
     this.clearBuffering();
     clearTimeout(this._driveRetryTimer);
     clearTimeout(this._serverRetryTimer);
-    clearTimeout(this._r2RetryTimer);this._r2RetryTimer=null;
+    this.clearR2Recovery();
     this.playing=false;
     DriveSource.pumpTags();
     if(DriveSource.status.includes('catalog update pending'))DriveSource.scheduleManifestCheck(0);
@@ -2926,7 +2966,7 @@ const Engine = {
     if(!this.queue.length) return;
     const previousPos=this.pos;
     UI.artDir=1;
-    if(SET_repeat()==='one' && auto){ this._endedRequest=null;this.el().currentTime=0; this.play(); return; }
+    if(SET_repeat()==='one' && auto){ if(this.el().ended)this.resetSelectionRecovery(this.current);this._endedRequest=null;this.el().currentTime=0; this.play(); return; }
     if(this.pos+1 >= this.order.length){
       if(SET_repeat()==='all' || !auto){ this.pos=-1; }
       else { this.pause(); this.el().currentTime=0; UI.renderProgress(); return; }
@@ -2950,7 +2990,12 @@ const Engine = {
     const p=this._pendingSeek;if(!p)return;
     if(p.request!==this._playRequest||p.a!==this.el()||p.source!==p.a.src){this._pendingSeek=null;return;}
     if(!(p.a.readyState>=1)||!Number.isFinite(p.a.duration)||p.a.duration<=0)return;
-    try{p.a.currentTime=clamp(p.time,0,Math.max(0,p.a.duration-.15));this._pendingSeek=null;}catch(e){}
+    try{
+      p.a.currentTime=clamp(p.time,0,Math.max(0,p.a.duration-.15));this._pendingSeek=null;
+      // Metadata and seeks can jump the playhead while output is still
+      // stalled. They must not masquerade as playback progress.
+      if(this._bufferToken?.request===this._playRequest&&this._bufferToken.source===p.source)this._bufferAt=p.a.currentTime;
+    }catch(e){}
   },
   seek:function(sec){
     if(!Number.isFinite(sec))return;
@@ -3011,22 +3056,30 @@ const Engine = {
     }
     if(t?.source==='r2'){
       const a=this.el(),retryable=cause==='stall'||cause==='NetworkError'||a.error?.code===2;
+      if(retryable&&this.r2RecoveryValid(this._r2Recovery)&&this._r2Recovery.phase!=='reload'){this.tracePlayback('r2-retry-already-pending');return;}
       if(retryable&&this._r2RetryId!==t.id){
         this._r2RetryId=t.id;this._playIntent=true;this.playing=false;this._mediaStarted=null;UI.renderPlayState();
         const position=this.time(),at=Number.isFinite(position)?Math.max(0,position):0,source=a.src,request=this._playRequest;
         // Same-URL reload aborts old pending play promises. Retire that attempt,
         // but keep this selection's one-retry budget and original clean URL.
         this._playAttempt=(this._playAttempt||0)+1;
-        this.pauseElement(a);a.src=source;a.load();this.seekWhenReady(at);
+        this.pauseElement(a);
+        const token=this._r2Recovery={request,source,audio:a,track:t,position:at,phase:'delay'};
         this.tracePlayback('r2-retry-scheduled',{reason:cause});
         this._r2RetryTimer=setTimeout(()=>{
           this._r2RetryTimer=null;
-          if(this.current?.id!==t.id||this._playRequest!==request||this.el()!==a||a.src!==source||!this.wantsPlayback()||this._r2ErrorReportedId===t.id)return;
-          this.tracePlayback('r2-retry-start');this.startElement(a);
+          if(!this.r2RecoveryValid(token)){if(this._r2Recovery===token)this.clearR2Recovery();return;}
+          if(navigator.onLine===false){
+            token.phase='offline';this.tracePlayback('r2-retry-waits-online');
+            this._r2RetryTimer=setTimeout(()=>{
+              this._r2RetryTimer=null;if(!this.r2RecoveryValid(token)){if(this._r2Recovery===token)this.clearR2Recovery();return;}
+              this._r2Recovery=null;this.onError(this.cur,'offline-timeout');
+            },30000);
+          }else this.beginR2Recovery();
         },800);return;
       }
       if(this._r2ErrorReportedId===t.id)return;
-      this._r2ErrorReportedId=t.id;clearTimeout(this._r2RetryTimer);this._r2RetryTimer=null;
+      this._r2ErrorReportedId=t.id;this.clearR2Recovery();
       this._playIntent=false;this.playing=false;this.cancelTransitionForFailure();this.pauseElement(a);UI.renderPlayState();
       this.tracePlayback('r2-terminal-error',{reason:cause});
       toast('R2 audio could not play. Check internet or refresh Cloudflare R2 in Music Sources, then try again.',7000);return;
@@ -3094,7 +3147,7 @@ const Engine = {
   onTime:function(i){
     if(i!==this.cur||this._loadingRequest) return;
     if(this.playing&&Date.now()-(this._lastCheckpoint||0)>=10000)this.checkpoint();
-    if(this._bufferAt!=null&&this.el().currentTime>this._bufferAt+0.05)this.clearBuffering();
+    if(this.playing&&this._bufferAt!=null&&this.el().currentTime>this._bufferAt+0.05)this.clearBuffering();
     if(SET.gapless && !SET.crossfade && this.playing) this.preloadNext();
     if(SET.crossfade && this.playing){
       const a=this.els[i], d=this.duration();
@@ -3109,13 +3162,13 @@ const Engine = {
     const previous=this._bufferToken;
     if(this._stallTimer&&previous?.request===request&&previous.source===source&&previous.slot===i&&(a.currentTime||0)<=this._bufferAt+0.05)return;
     this.clearBuffering();
-    const token=this._bufferToken={request,source,slot:i};
+    const token=this._bufferToken={request,source,slot:i,at:Date.now()};
     this.tracePlayback('buffering',{reason});
     this._bufferAt=a.currentTime||0;
     this._stallTimer=setTimeout(()=>{
       if(this._bufferToken!==token||this._playRequest!==request||this.el()!==a||a.src!==source||this.current?.id!==track||!this.wantsPlayback()||a.ended)return;
       if(this.ctx&&this.ctx.state!=='running'){this.pause('context-interrupted');return;}
-      if((a.currentTime||0)<=this._bufferAt+0.05)this.onError(i,'stall');
+      if(!this.playing||(a.currentTime||0)<=this._bufferAt+0.05)this.onError(i,'stall');
     },12000);
   },
   async preloadNext(){
@@ -3139,6 +3192,7 @@ const Engine = {
         try{ o.load(); }catch(e){}
         if(old && old.indexOf('blob:')===0) setTimeout(function(){ URL.revokeObjectURL(old); },1000);
         this.preloadId=nt.id;
+        this.tracePlayback('preload-assigned',{slot:1-this.cur});
       }
     }catch(e){}
     this._preloading=false;
@@ -3240,7 +3294,7 @@ const Engine = {
       UI.renderNowPlaying(t);
       UI.renderPlayState();
       const self=this;
-      if(t.remote){ this.dur=t.dur||0;this._resumePosition={id:t.id,time:Number.isFinite(s.time)?Math.max(0,s.time):0}; UI.renderProgress(); return true; } // Restore UI/queue without fetching audio until Play is tapped.
+      if(this.transportCapabilities(t).network){ this.dur=t.dur||0;this._resumePosition={id:t.id,time:Number.isFinite(s.time)?Math.max(0,s.time):0}; UI.renderProgress(); return true; } // Restore UI/queue without fetching audio until Play is tapped.
       const f = await getFileFor(t);
       if(request!==this._playRequest||this.current?.id!==t.id)return true;
       if(f){
@@ -8971,10 +9025,12 @@ function setupRework(){
   const item=PAGES.skin.items.find(i=>i.key==='skin_seekbar');if(item)item.desc='Waveform scrolls beneath a fixed center marker. Drag left to seek forward, right to go back. Static mode shows the whole track.';
   const nav=Nav.go;Nav.go=function(...args){nav.apply(Nav,args);NativeSettings.syncNavigation();wakeLock(SET.keepScreenOn||Nav.cur==='lyrics'&&nativeValues().lyrics_keep_screen);};
   window.addEventListener('pagehide',()=>{Engine.tracePlayback('pagehide');Engine.checkpoint();});
-  window.addEventListener('pageshow',()=>Engine.tracePlayback('pageshow'));
+  window.addEventListener('pageshow',()=>{Engine.tracePlayback('pageshow');Engine.reconcilePlaybackLifecycle();});
   document.addEventListener('freeze',()=>{Engine.tracePlayback('freeze');Engine.checkpoint();});
-  document.addEventListener('resume',()=>Engine.tracePlayback('page-resume'));
-  document.addEventListener('visibilitychange',()=>{Engine.tracePlayback('visibility');if(document.visibilityState==='hidden'){if(nativeValues().pause_on_screen_off&&Engine.wantsPlayback())Engine.pause('screen-off');Engine.checkpoint();}});
+  document.addEventListener('resume',()=>{Engine.tracePlayback('page-resume');Engine.reconcilePlaybackLifecycle();});
+  window.addEventListener('offline',()=>Engine.tracePlayback('offline'));
+  window.addEventListener('online',()=>{Engine.tracePlayback('online');if(Engine._r2Recovery?.phase==='offline')Engine.beginR2Recovery();});
+  document.addEventListener('visibilitychange',()=>{Engine.tracePlayback('visibility');if(document.visibilityState==='hidden'){if(nativeValues().pause_on_screen_off&&Engine.wantsPlayback())Engine.pause('screen-off');Engine.checkpoint();}else Engine.reconcilePlaybackLifecycle();});
   installPlaybackRework();installLyricsRework();installSearchPlayback();installSettingsShortcuts();NativeSettings.apply();measurePlayerLabels();
 }
 
