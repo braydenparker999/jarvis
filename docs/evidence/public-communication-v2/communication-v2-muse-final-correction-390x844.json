@@ -8,8 +8,8 @@
     "height": 844
   },
   "scope": "Synthetic local Worker/SQLite/browser; not production latency",
-  "importedMs": 2.963056999999935,
-  "renderedMs": 48.53327800000011,
+  "importedMs": 2.2694249999999556,
+  "renderedMs": 30.12948899999992,
   "acceptedReplyUnchanged": true,
   "revision1Visible": true,
   "revision2Visible": true,
