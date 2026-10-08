@@ -79,7 +79,15 @@ export async function relayRpc(ctx, env, principal, rpc) {
     throw new RelayError(-32012, 'Tool scope required');
   }
   if (scopeFor[name] === RELAY_OWNER_SCOPE) {
-    return toolResult(await relayOwnerRpc(ctx, env, principal, name, args));
+    const result = toolResult(await relayOwnerRpc(ctx, env, principal, name, args));
+    if (name === 'relay_owner_read_conversation') {
+      // Cached catalogs still accept this existing structured output exactly.
+      // Delivery evidence is a separate MCP text block, never a synthetic
+      // conversation entry or a claim that a callback started host execution.
+      const diagnostics = await relayOwnerRpc(ctx, env, principal, 'relay_owner_delivery_status', {inbox_id: args.inbox_id, message_ids: [args.message_id]});
+      result.content.push({type: 'text', text: 'Private delivery diagnostics (callback acceptance is transport evidence only): ' + JSON.stringify(diagnostics)});
+    }
+    return result;
   }
   if (name === eventAccessTool) {
     fields(args, []);

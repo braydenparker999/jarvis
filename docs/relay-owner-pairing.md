@@ -217,6 +217,36 @@ redacted evidence is available to an authenticated phone through POST
 never returns callback URLs, signing keys, payloads, device bearers, grant IDs or
 raw transport errors. Public inbox APIs never include this metadata.
 
+The read-only MCP tool `relay_owner_delivery_status` accepts
+`inbox_id: "brayden-owner"` and 1–50 unique, exact private user `message_ids`.
+It uses the existing `relay:owner` capability and verifies the live token and
+grant again inside the synchronous read transaction. Malformed, duplicate,
+missing, public, foreign-principal and reply IDs fail closed; a mixed batch never
+returns partial private results. Results preserve request order and contain only
+the private inbox ID, visibility and bounded `deliveries` metadata.
+
+Each result includes `message_id`, the existing state/count/retry fields,
+`callbackAcceptedAt`, and independent `callbackAccepted` and `replySaved`
+booleans. `callbackAccepted` means retained callback-acceptance evidence exists,
+including migrated receipts whose acceptance time is unknown. `replySaved`
+means a private reply exists. Either may be true without the other. A persisted
+reply does not conceal an earlier callback receipt, and a pending or failed
+replacement delivery does not erase acceptance by an earlier callback.
+False acceptance means no retained evidence, not proof a callback never ran:
+receipts expire with the existing event journal. No field claims that a model
+started, read the message or is currently working.
+
+For hosts with a cached tool catalog, `relay_owner_read_conversation` also adds
+one separate MCP text content block labeled **Private delivery diagnostics** for
+that exact target, through the same authenticated delivery-status RPC. Its
+structured output, first serialized content block and all conversation-entry
+schemas remain unchanged. The supplemental block contains no private message
+or reply body and never masquerades as a conversation entry or saved reply.
+Neither diagnostic path retries callbacks, changes subscriptions or credentials,
+renews phone sessions, or writes messages, replies or events. It reuses existing
+schema initialization, including the one-time historical receipt backfill; it
+does not introduce a new migration or change delivery behavior.
+
 States distinguish the evidence actually persisted:
 
 - `saved`: the private message was stored, without current queued or accepted delivery evidence

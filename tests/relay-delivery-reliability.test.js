@@ -4,7 +4,7 @@ import {createRelayFixture} from './relay-fixture.js';
 import {Hub} from '../backend/worker.js';
 import {relayOAuthStore} from '../backend/relay-oauth.js';
 import {relayOwnerRpc} from '../backend/relay-owner.js';
-import {relaySubscribe,drainRelayOutbox,relayOwnerDelivery,recoverRelayOwnerDelivery,EVENT_RETENTION_MS} from '../backend/relay-events.js';
+import {relaySubscribe,relayUnsubscribe,drainRelayOutbox,relayOwnerDelivery,recoverRelayOwnerDelivery,EVENT_RETENTION_MS} from '../backend/relay-events.js';
 import {SHARED_OBJECT,PUBLIC_KEY} from '../backend/shared.js';
 import {PRIMARY_SITE} from '../backend/origins.js';
 import {RELAY_OWNER,RELAY_CALLBACK,RELAY_OWNER_SCOPE,RELAY_OWNER_INBOX,RELAY_OWNER_EVENT,random,hash,challenge} from '../backend/relay-common.js';
@@ -30,6 +30,42 @@ async function setup(t){
   return s;
 }
 const status = code=>async()=>new Response([204,205].includes(code)?null:'',{status:code});
+
+test('a late overlapping callback failure cannot roll back delivered state or cursor',async t=>{
+  const s=await setup(t),sub=await s.subscribe(),message=await s.send();
+  let received,finish;
+  const started=new Promise(resolve=>received=resolve),response=new Promise(resolve=>finish=resolve);
+  const first=drainRelayOutbox(s.ctx,s.env,async()=>{received();return response;});
+  await started;await drainRelayOutbox(s.ctx,s.env,status(204));
+  const completed=s.rows('SELECT * FROM relay_outbox WHERE subscription_id=?',sub.id)[0];
+  const cursor=s.rows('SELECT ack_seq FROM relay_subscriptions WHERE id=?',sub.id)[0].ack_seq;
+  finish(new Response('',{status:503}));await first;
+  assert.deepEqual(s.rows('SELECT * FROM relay_outbox WHERE subscription_id=?',sub.id)[0],completed);
+  assert.equal(s.rows('SELECT ack_seq FROM relay_subscriptions WHERE id=?',sub.id)[0].ack_seq,cursor);
+  assert.equal(relayOwnerDelivery(s.ctx,s.env,message.id).state,'callback_accepted');
+});
+
+test('actual callback acceptance survives concurrent renewal or unsubscribe without settling a replacement queue',async t=>{
+  for(const mode of ['renew','unsubscribe']){
+    const s=await setup(t),sub=await s.subscribe(),message=await s.send();
+    let received,finish;
+    const started=new Promise(resolve=>received=resolve),response=new Promise(resolve=>finish=resolve);
+    const draining=drainRelayOutbox(s.ctx,s.env,async()=>{received();return response;});
+    await started;
+    if(mode==='renew')await s.subscribe();
+    else await relayUnsubscribe(s.ctx,s.auth,{name:RELAY_OWNER_EVENT,arguments:{inbox_id:RELAY_OWNER_INBOX},delivery:{mode:'webhook',url:'https://receiver.example/private-secret-path'}},Date.now(),s.env);
+    finish(new Response(null,{status:204}));await draining;
+    assert.ok(Date.parse(relayOwnerDelivery(s.ctx,s.env,message.id).callbackAcceptedAt));
+    if(mode==='renew'){
+      assert.equal(s.rows('SELECT status FROM relay_outbox WHERE subscription_id=?',sub.id)[0].status,'pending');
+      assert.equal(s.rows('SELECT ack_seq FROM relay_subscriptions WHERE id=?',sub.id)[0].ack_seq,0);
+    }else{
+      assert.equal(s.rows('SELECT COUNT(*) AS n FROM relay_subscriptions')[0].n,0);
+      assert.equal(s.rows('SELECT COUNT(*) AS n FROM relay_outbox')[0].n,0);
+    }
+    assert.equal(s.rows("SELECT COUNT(*) AS n FROM relay_owner_entries WHERE kind='reply'")[0].n,0);
+  }
+});
 async function exhaust(s,code=503,now=Date.now()){
   for(const delay of [0,1000,3000,7000,15000,31000])await drainRelayOutbox(s.ctx,s.env,status(code),now+delay);
 }
