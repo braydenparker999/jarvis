@@ -12,10 +12,49 @@ The approved toolchain is Node 22.23.3 or 24.21.0 and Google Chrome for Testing
 another browser or change security settings. Release qualification requires the
 browser and includes every `tests/relay-*.test.js` file automatically.
 
+## Reply availability and explicit completion correction
+
+The 2026-10-08 correction separates immutable reply availability from work
+completion. The exact released `e63fa716cf3e90522b6d6b1f1bcf36e67a67d186`
+archive falsely reports an acknowledgement, a blocker and a report as completed.
+The new independent semantic suite records 44 expected failures and 15 passing
+controls on that archive. Its corrected run passes 66/66 on both Node 22.23.3 and
+24.21.0, with zero failures, cancellations or skips. Seven corruption subtests
+require a valid typed completion setup absent from the old implementation;
+the literal baseline therefore counts 59 tests rather than 66.
+
+The final mandatory Relay inventory passes **884/884**, with zero failures,
+cancellations or skips, on Node 24.21.0 and Chrome 154.0.8037.97 in 57.612 seconds.
+The Worker also bundles successfully with the locked esbuild dependency.
+The final focused UI/browser run passes 60/60, with a subsequent strict
+event/reply-ID identity check passing after the last guard was added. These
+fixture checks establish local behavior; published-head CI is the separate
+qualification proof.
+
+Tests cover unchanged replies and journals during legacy reads, typed waiting
+and failure after reply arrival, concurrent responders, active-claim retry
+denial, revoked/public authorization, lost and conflicting event responses,
+result-version races and corrections. Only a live authorized grant with an
+actual matching recorded claim can report completion, bound to the exact saved
+reply and current version. An expired execution lease may record that terminal
+known outcome under its original still-live grant/run; it cannot renew or
+reclaim execution. Failed or cancelled jobs cannot later complete. A pending
+cancellation remains visible even when the owning execution reports completed
+work. Body wording is never parsed into stage or permission.
+
+The [correction evidence manifest](conversation-evidence/owner-completion-manifest.json)
+records frozen source/log hashes and three fictional phone captures. The
+390×520 inspector scrolls without horizontal overflow; these captures do not
+prove physical phone keyboard behavior or live optional-tool discovery.
+Existing plain reply clients remain usable, with completion unverified until a
+supported host can call the explicit progress tool. No authentication, scope,
+credential, callback or responder schedule is changed.
+
 | QA deliverable | Behavior exercised |
 | --- | --- |
 | `tests/relay-conversation-adversarial-browser.test.js` | Scope switches, expiry, reload, late responses, separate drafts, Back, keyboard, reading anchors, inert attacker text, save uncertainty, actual cancellation acknowledgement, callback versus linked retry, corrected private results and offline execution evidence. |
 | `tests/relay-owner-jobs-adversarial.test.js` | Public/Muse authority denial, grant-bound execution, duplicate callbacks and events, expiry, cancellation, duplicate-risk retry limits, racing attempts and immutable public publication. |
+| `tests/relay-owner-completion-semantics.test.js` | Baseline-failing reply/completion distinction, typed grant/run and exact result/version association, unchanged legacy reads, competing writers, cancellation/retry safety, replay and malformed durable evidence. |
 | `tests/relay-owner-jobs-ui-adversarial.test.js` | Strict private provenance, bounded associated correction history, stale-response rejection, retained send UUIDs, mutable job refresh, network failures and local validation. |
 | `tests/relay-public-delivery-adversarial-browser.test.js` | Held initial reads, lost accepted/unreceived POST receipts, rejection, stale paginated history, more than 250 online rows, exact UUID collisions, independent tabs, blocked draft storage and partial enqueue recovery. |
 | `tests/relay-public-store-adversarial.test.js` | Full board history across tab writes, failed independent draft persistence, a deterministic 49-to-51 queue admission race and exact-acceptance journal draining. |
@@ -69,7 +108,7 @@ requested until the matching authenticated assistant acknowledgement. Retrying
 delivery keeps the request UUID, while an allowed work retry creates one distinct
 linked child and preserves duplicate-risk restrictions.
 
-Final mandatory Relay validation passed **805/805 tests**, with no failures, cancellations or
+The preceding queue-overlap release validation passed **805/805 tests**, with no failures, cancellations or
 skips, using Node 24.21.0 and Chrome 154.0.8037.97. This includes the existing
 owner/password browser journeys and all final recovery/security regressions,
 including the inherited-acceptance correction, same-UUID queue overlap and

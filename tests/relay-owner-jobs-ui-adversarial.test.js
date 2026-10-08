@@ -25,6 +25,111 @@ async function job(f, options = {}) {
   assert.equal(response.status, 201); return (await response.json()).job;
 }
 
+test('old reply-only completed responses remain completion unverified for acknowledgements, blockers and reports', async t => {
+  for (const body of [
+    'Fictional acknowledgement: I received this request.',
+    'Fictional blocker: I need the source file before continuing.',
+    'Fictional report excerpt without a work-completion attestation.'
+  ]) await t.test(body, async t => {
+    const f = await client(t, async (request, response) => {
+      if (!request.path.endsWith('/jobs/detail')) return response;
+      const value = await response.json();
+      if (value.job.result) {
+        delete value.job.completion;
+        value.job.stage = 'completed'; value.job.finishedAt = value.job.result.createdAt;
+        value.job.failure = null; value.job.retryAllowed = true; value.job.retryRequiresConfirmation = false;
+      }
+      return Response.json(value);
+    });
+    const saved = await job(f);
+    await f.h.rpc(f.owner, 'relay_owner_reply', {inbox_id: RELAY_OWNER_INBOX, message_id: saved.id, body});
+    const detail = await f.api.jobDetail(saved.id);
+    assert.equal(detail.job.stage, 'outcome_unknown');
+    assert.equal(detail.job.completion, null); assert.equal(detail.job.finishedAt, null);
+    assert.equal(detail.job.failure.code, 'completion_unverified'); assert.equal(detail.job.failure.outcome, 'unknown');
+    assert.equal(detail.job.retryAllowed, false, 'Legacy completed flags cannot infer safe permission to repeat work');
+    assert.equal(detail.job.result.body, body); assert.equal(detail.job.latestResult.body, body);
+    assert.equal(detail.resultHistory[0].body, body);
+  });
+});
+
+test('typed private completion binds the authenticated run, immutable reply and bounded version without replacing corrections', async t => {
+  let mutation = value => value;
+  const f = await client(t, async (request, response) => request.path.endsWith('/jobs/detail') ? Response.json(mutation(await response.json())) : response);
+  const saved = await job(f), runId = crypto.randomUUID();
+  await f.h.rpc(f.owner, 'relay_owner_job_claim', {inbox_id: RELAY_OWNER_INBOX, job_id: saved.id, run_id: runId, event_id: crypto.randomUUID()});
+  const reply = await f.h.rpc(f.owner, 'relay_owner_reply', {inbox_id: RELAY_OWNER_INBOX, message_id: saved.id, body: 'Fictional immutable available report'});
+  const eventId = crypto.randomUUID(), summary = 'Fictional completion attestation for the prepared report; factual claims still need checking.';
+  await f.h.rpc(f.owner, 'relay_owner_job_update', {inbox_id: RELAY_OWNER_INBOX, job_id: saved.id, run_id: runId, event_id: eventId,
+    stage: 'completed', outcome: 'known', expected_reply_id: reply.entry.id, expected_version: 1, summary});
+  await f.h.rpc(f.owner, 'relay_owner_job_result_correct', {inbox_id: RELAY_OWNER_INBOX, job_id: saved.id, event_id: crypto.randomUUID(),
+    expected_reply_id: reply.entry.id, expected_version: 1, body: 'Fictional corrected report available after the earlier completion attestation.', correction_summary: 'Checked the fictional source and corrected the reply text.'});
+  const genuine = await f.api.jobDetail(saved.id);
+  assert.equal(genuine.job.stage, 'completed'); assert.equal(genuine.job.completion.eventId, eventId);
+  assert.equal(genuine.job.completion.runId, runId); assert.equal(genuine.job.completion.replyId, reply.entry.id);
+  assert.equal(genuine.job.completion.resultVersion, 1); assert.equal(genuine.job.resultVersion, 2);
+  assert.equal(genuine.job.completion.summary, summary); assert.equal(genuine.job.finishedAt, genuine.job.completion.createdAt);
+  assert.equal(genuine.job.result.body, 'Fictional immutable available report'); assert.match(genuine.job.latestResult.body, /corrected report/);
+  for (const [label, alter] of [
+    ['invalid completion event identity', value => {value.job.completion.eventId = 'fictional-unreadable-event';}],
+    ['completion reuses the immutable reply identity', value => {value.job.completion.eventId = value.job.result.replyId;}],
+    ['completion from another run', value => {value.job.completion.runId = crypto.randomUUID();}],
+    ['completion of another immutable reply', value => {value.job.completion.replyId = crypto.randomUUID();}],
+    ['zero completion version', value => {value.job.completion.resultVersion = 0;}],
+    ['completion version beyond current correction', value => {value.job.completion.resultVersion = 3;}],
+    ['unbounded completion version', value => {value.job.completion.resultVersion = 6;}],
+    ['public completion evidence', value => {value.job.completion.visibility = 'public';}],
+    ['unauthenticated completion evidence', value => {value.job.completion.author_authenticated = false;}],
+    ['device-supplied completion evidence', value => {value.job.completion.authentication_source = 'owner-device-session';}],
+    ['empty completion summary', value => {value.job.completion.summary = ' ';}],
+    ['oversized completion summary', value => {value.job.completion.summary = 'x'.repeat(1001);}],
+    ['invalid completion date', value => {value.job.completion.createdAt = 'fictional invalid date';}],
+    ['completion time differs from terminal time', value => {value.job.finishedAt = null;}],
+    ['completion lacks execution evidence', value => {value.job.execution = null;}],
+    ['completion conflicts with waiting state', value => {value.job.stage = 'waiting_for_owner';}],
+    ['completion conflicts with failure state', value => {value.job.stage = 'failed';}]
+  ]) {
+    mutation = value => {alter(value); return value;};
+    await assert.rejects(() => f.api.jobDetail(saved.id), error => error.kind === 'invalid', label);
+    assert.equal(f.api.hasCredential, true, 'Invalid completion evidence cannot masquerade as session expiry');
+  }
+  const unexpected = 'FICTIONAL-UNEXPECTED-COMPLETION-FIELD';
+  mutation = value => ({...value, job: {...value.job, completion: {...value.job.completion, unexpected}}});
+  assert.equal(JSON.stringify(await f.api.jobDetail(saved.id)).includes(unexpected), false, 'Only inert bounded contract fields reach the inspector');
+  mutation = value => {delete value.job.completion; return value;};
+  const legacy = await f.api.jobDetail(saved.id);
+  assert.equal(legacy.job.stage, 'outcome_unknown'); assert.equal(legacy.job.finishedAt, null); assert.equal(legacy.job.retryAllowed, false);
+  assert.equal(legacy.job.result.body, genuine.job.result.body); assert.deepEqual(legacy.job.latestResult, genuine.job.latestResult);
+  assert.deepEqual(legacy.resultHistory, genuine.resultHistory, 'Legacy completion normalization never drops available original or corrected text');
+});
+
+test('controller API stubs cannot upgrade a saved reply to completed work or infer a safe retry', async t => {
+  const f = await client(t), saved = await job(f);
+  await f.h.rpc(f.owner, 'relay_owner_reply', {inbox_id: RELAY_OWNER_INBOX, message_id: saved.id, body: 'Fictional controller reply without typed completion'});
+  const raw = await (await f.h.phone('/jobs/detail?job_id=' + saved.id, undefined, f.phone.device_token)).json();
+  delete raw.job.completion; raw.job.stage = 'completed'; raw.job.finishedAt = raw.job.result.createdAt;
+  raw.job.failure = null; raw.job.retryAllowed = true;
+  const c = createRelayOwnerController({api: {...f.api, jobs: async () => ({jobs: [structuredClone(raw.job)], nextCursor: null}), jobDetail: async () => structuredClone(raw)}});
+  await c.refresh(); c.setDraft('Fictional separate controller draft');
+  await c.inspectJob(saved.id);
+  for (const observed of [c.snapshot().jobs[0], c.snapshot().jobDetail.job]) {
+    assert.equal(observed.stage, 'outcome_unknown'); assert.equal(observed.finishedAt, null); assert.equal(observed.completion, null);
+    assert.equal(observed.retryAllowed, false); assert.equal(observed.result.body, raw.job.result.body);
+  }
+  assert.equal(c.snapshot().draft, 'Fictional separate controller draft');
+});
+
+test('typed waiting-for-owner evidence keeps its blocker state when an immutable reply becomes available', async t => {
+  const f = await client(t), saved = await job(f), runId = crypto.randomUUID();
+  await f.h.rpc(f.owner, 'relay_owner_job_claim', {inbox_id: RELAY_OWNER_INBOX, job_id: saved.id, run_id: runId, event_id: crypto.randomUUID()});
+  await f.h.rpc(f.owner, 'relay_owner_job_update', {inbox_id: RELAY_OWNER_INBOX, job_id: saved.id, run_id: runId, event_id: crypto.randomUUID(),
+    stage: 'waiting_for_owner', outcome: 'unknown', summary: 'Fictional typed blocker: please supply the source file.'});
+  await f.h.rpc(f.owner, 'relay_owner_reply', {inbox_id: RELAY_OWNER_INBOX, message_id: saved.id, body: 'Fictional available reply with a separately attested waiting state.'});
+  const detail = await f.api.jobDetail(saved.id);
+  assert.equal(detail.job.stage, 'waiting_for_owner'); assert.equal(detail.job.completion, null); assert.equal(detail.job.finishedAt, null);
+  assert.match(detail.job.result.body, /separately attested waiting state/); assert.equal(detail.job.retryAllowed, false);
+});
+
 test('private job client rejects forged provenance and executable result formats while dropping unexpected nested secrets', async t => {
   let mutation = value => value;
   const f = await client(t, async (request, response) => request.path.endsWith('/jobs/detail') ? Response.json(mutation(await response.json())) : response);
@@ -151,7 +256,8 @@ test('uncertain request receipt preserves its original UUID and mutable lifecycl
   await c.refresh(); assert.equal(c.snapshot().jobs[0].stage, 'running', 'Mutable progress remains visible after the message cursor advances');
   await f.h.rpc(f.owner, 'relay_owner_reply', {inbox_id: RELAY_OWNER_INBOX, message_id: id, body: 'Fictional immutable final answer'});
   await c.refresh();
-  assert.equal(c.snapshot().jobs[0].stage, 'completed'); assert.equal(c.snapshot().jobs[0].result.body, 'Fictional immutable final answer');
+  assert.equal(c.snapshot().jobs[0].stage, 'outcome_unknown'); assert.equal(c.snapshot().jobs[0].completion, null);
+  assert.equal(c.snapshot().jobs[0].result.body, 'Fictional immutable final answer');
   assert.equal(JSON.stringify([...f.values.values()]).includes('PRIVATE-UNCERTAIN-JOB-BODY-6874'), false);
 });
 

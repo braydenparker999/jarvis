@@ -237,7 +237,8 @@ test('existing private conversation tool retains exact structured output and add
   const jobBlock=response.result.content[3],jobLabel='Private job lifecycle (authenticated server evidence; callback acceptance never establishes execution): ';
   assert.equal(jobBlock.type,'text');assert.ok(jobBlock.text.startsWith(jobLabel));
   const lifecycle=JSON.parse(jobBlock.text.slice(jobLabel.length));
-  assert.equal(lifecycle.job_id,id);assert.equal(lifecycle.stage,'completed');assert.equal(lifecycle.actionKind,'unclassified');assert.equal(lifecycle.execution,null);
+  assert.equal(lifecycle.job_id,id);assert.equal(lifecycle.stage,'outcome_unknown');assert.equal(lifecycle.actionKind,'unclassified');assert.equal(lifecycle.execution,null);
+  assert.equal(lifecycle.completion,null);assert.equal(lifecycle.finishedAt,null);assert.equal(lifecycle.failure.code,'completion_unverified');
   for(const secret of [body,'Secret private reply text',phone.device_token,phone.device.id,owner.grantId,owner.access,owner.accessHash,'receiver.example','whsec_'])assert.ok(!jobBlock.text.includes(secret));
   assert.equal(Object.hasOwn(response.result.structuredContent.message,'delivery'),false);
   assert.equal(Object.hasOwn(response.result.structuredContent.reply,'delivery'),false);
