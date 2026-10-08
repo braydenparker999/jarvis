@@ -23,6 +23,27 @@ const jobIdentifier=value=>typeof value==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-[a
 const validDate=value=>typeof value==='string'&&Number.isFinite(Date.parse(value));
 const jobStages=['queued','running','waiting_for_owner','completed','failed','cancelled','outcome_unknown'];
 const jobKinds=['unclassified','read_only','draft','consequential'];
+function completionRecord(value,job){
+  if(!value||job.stage!=='completed'||!jobIdentifier(value.eventId)||!jobIdentifier(value.runId)||!jobIdentifier(value.replyId)
+    ||value.runId!==job.execution?.runId||value.replyId!==job.result?.replyId||value.eventId===value.replyId
+    ||!Number.isInteger(value.resultVersion)||value.resultVersion<1||value.resultVersion>5||value.resultVersion>(job.resultVersion??(job.result?1:0))
+    ||typeof value.summary!=='string'||!value.summary.trim()||value.summary.length>1000||!validDate(value.createdAt)||job.finishedAt!==value.createdAt
+    ||value.authentication_source!=='owner-oauth-mcp'||value.author_authenticated!==true||value.visibility!=='private')throw new OwnerApiError('invalid');
+  return {eventId:value.eventId,runId:value.runId,replyId:value.replyId,resultVersion:value.resultVersion,summary:value.summary,createdAt:value.createdAt,
+    authentication_source:'owner-oauth-mcp',author_authenticated:true,visibility:'private'};
+}
+// A saved reply is data, including when an older service called it completed.
+// Shared by the parser and controller so API stubs cannot infer work completion.
+export function normalizeOwnerJobCompletion(job){
+  const completion=job.completion==null?null:completionRecord(job.completion,job);
+  if(!completion&&job.result&&!['waiting_for_owner','failed','cancelled'].includes(job.stage)){
+    const inferred=!Object.hasOwn(job,'completion')||job.stage!=='outcome_unknown'||job.failure?.code!=='completion_unverified';
+    return {...job,stage:'outcome_unknown',finishedAt:null,completion:null,
+      failure:inferred?{code:'completion_unverified',message:'A private reply is available; work completion has not been explicitly acknowledged.',outcome:'unknown'}:job.failure,
+      retryAllowed:inferred?false:job.retryAllowed,retryRequiresConfirmation:inferred?false:job.retryRequiresConfirmation};
+  }
+  return {...job,completion};
+}
 function resultRecord(value,original){
   if(!value||!original||!jobIdentifier(value.id)||!Number.isInteger(value.version)||value.version<1||value.version>5
     ||value.format!=='plain_text'||typeof value.body!=='string'||!value.body.trim()||value.body.length>6000
@@ -57,15 +78,15 @@ function privateJob(value){
   else if(revisionFields&&value.latestResult!==null)throw new OwnerApiError('invalid');
   // Project the contract: unexpected credential, HTML or transport fields never
   // enter the controller or the private request inspector.
-  return {id:value.id,sequence:value.sequence,messageId:value.messageId,title:value.title,body:value.body,actionKind:value.actionKind,stage:value.stage,
+  return normalizeOwnerJobCompletion({id:value.id,sequence:value.sequence,messageId:value.messageId,title:value.title,body:value.body,actionKind:value.actionKind,stage:value.stage,
     createdAt:value.createdAt,updatedAt:value.updatedAt,finishedAt:value.finishedAt,visibility:'private',author_authenticated:true,principal:value.principal,
     device_id:value.device_id,authentication_source:value.authentication_source,parentJobId:value.parentJobId,rootJobId:value.rootJobId,attempt:value.attempt,
     cancelRequested:value.cancelRequested,cancelRequestedAt:value.cancelRequestedAt,execution:execution?{runId:execution.runId,acknowledgedAt:execution.acknowledgedAt,leaseExpiresAt:execution.leaseExpiresAt}:null,
     result:result?{format:'plain_text',body:result.body,replyId:result.replyId,createdAt:result.createdAt}:null,
-    resultVersion,latestResult,
+    resultVersion,latestResult,...('completion' in value?{completion:value.completion}:{}),
     failure:failure?{code:failure.code,message:failure.message,outcome:failure.outcome}:null,
     retryAllowed:value.retryAllowed,retryRequiresConfirmation:value.retryRequiresConfirmation,retryJobId:value.retryJobId,
-    delivery:{state:value.delivery.state,pending:value.delivery.pending,failed:value.delivery.failed,callbackAcceptedAt:value.delivery.callbackAcceptedAt,retryable:value.delivery.retryable,retryAfter:value.delivery.retryAfter}};
+    delivery:{state:value.delivery.state,pending:value.delivery.pending,failed:value.delivery.failed,callbackAcceptedAt:value.delivery.callbackAcceptedAt,retryable:value.delivery.retryable,retryAfter:value.delivery.retryAfter}});
 }
 
 export class OwnerApiError extends Error {

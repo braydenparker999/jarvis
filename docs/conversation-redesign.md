@@ -34,11 +34,13 @@ Remembered owner access still requires the existing explicit checkbox and stores
 
 ## Honest request behavior
 
-An ordinary private message is still the existing authenticated owner request, and its immutable authenticated owner reply remains sufficient to save the job result. Explicit **Work request** mode adds a title and requested scope. Its default is **Needs review**; **Read-only report** and **Draft only** are explicit alternatives. Scope describes requested work and never grants permission for external actions.
+An ordinary private message is still the existing authenticated owner request, and its immutable authenticated owner reply saves an available reply. It does not establish work completion. Explicit **Work request** mode adds a title and requested scope. Its default is **Needs review**; **Read-only report** and **Draft only** are explicit alternatives. Scope describes requested work and never grants permission for external actions.
 
 The UI loads request features only when the approved owner service advertises `jobs_enabled: true`. An older service keeps private messaging available and omits request creation/filtering. Connection details explain the missing capability. There is no private-to-public fallback.
 
-Job creation sequence is immutable while progress changes. Every owner refresh therefore consumes all bounded job pages from zero; an open inspector also reads its exact detail. A callback receipt says delivery was accepted, never that work started. **Working** requires authenticated execution acknowledgement. **Needs your input** reflects the waiting stage and directs the owner to the actual question or blocker; it does not invent an approval/resume protocol. **Result saved** describes the saved reply without asserting that every external action succeeded.
+Job creation sequence is immutable while progress changes. Every owner refresh therefore consumes all bounded job pages from zero; an open inspector also reads its exact detail. A callback receipt says delivery was accepted, never that work started. **Working** requires authenticated execution acknowledgement. **Needs your input** reflects the typed waiting stage; reply wording cannot invent that stage or an approval/resume protocol. **Reply received · completion unverified** preserves an acknowledgement, blocker or report without claiming the requested work finished. **Work reported complete** requires a separate typed authenticated completion from the matching claimed execution, bound to the exact accepted reply and result version. The inspector separates this completion evidence from the immutable reply and preserves the checking summary and time. Authentication establishes provenance, not independent factual certification.
+
+Old server responses and old stored `completed` rows without explicit completion evidence also show the reply-received state, retain their replies/corrections and suppress inferred completion times. The compatibility projection never parses reply text or rewrites old history. A current execution claim cannot become eligible for retry merely because a reply arrived. Optional progress/completion tools must actually be callable; a cached host with only the original reply tool can deliver immutable private information while work completion remains unverified.
 
 Failed private sync or request-detail reads mark retained status as **Last known**. An elapsed recorded execution window is shown as **Acknowledgement expired · outcome unconfirmed**. The client clock never changes a job's server stage or grants retry permission. Local title or consent validation does not mark all jobs stale.
 
@@ -89,6 +91,9 @@ Representative synthetic screenshots:
 | Public sync error | [390×844](conversation-evidence/real-public-error-390x844.png) |
 | Private loading state | [390×844](conversation-evidence/real-owner-loading-390x844.png) |
 | Private session expiry | [390×844](conversation-evidence/real-owner-expired-390x844.png) |
+| Saved reply with completion unverified | [390×844](conversation-evidence/synthetic-owner-reply-unverified-390x844.png) |
+| Separate authenticated completion report | [390×844](conversation-evidence/synthetic-owner-work-reported-complete-390x844.png) |
+| Completion inspector at short height | [390×520](conversation-evidence/synthetic-owner-work-reported-complete-390x520.png) |
 
 The real render [manifest](conversation-evidence/real-render-manifest.json) records runtime, browser, viewport, overflow and fully opaque sheet geometry. [capture.mjs](conversation-evidence/capture.mjs) reproduces the real Worker/SQLite screenshots with the pinned toolchain:
 
@@ -100,3 +105,14 @@ node docs/conversation-evidence/capture.mjs
 ```
 
 The focused owner UI, delivery, Muse and request-client regression checks use Node 22.23.3 and Chrome 154.0.8037.97. The independent browser suite owns the adversarial release checks. Fixture execution and screenshots demonstrate the interface and real request/reply implementation; they do not establish a live assistant schedule, tool availability or production deployment.
+
+The reply/completion correction has its own [source and evidence manifest](conversation-evidence/owner-completion-manifest.json).
+Its clean fictional captures use the same real Worker/SQLite browser fixture and
+can be reproduced from the repository root:
+
+```sh
+PATH=/tmp/jarvis-tools/node-v22.23.3-linux-x64/bin:$PATH \
+JARVIS_CHROME=/tmp/jarvis-tools/jarvis-qualification-browser/installed/chrome-linux64/chrome \
+REQUIRE_RELAY_OWNER_BROWSER=1 RELAY_QA_EVIDENCE_DIR=/tmp/jarvis-owner-completion-capture \
+node docs/conversation-evidence/owner-completion-capture.mjs
+```

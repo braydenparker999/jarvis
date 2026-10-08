@@ -300,7 +300,7 @@ export async function relayOwnerRpc(ctx, env, principal, name, args, enqueueOwne
     fields(args, name === 'relay_owner_device_revoke' ? ['device_id'] : [], name === 'relay_owner_device_revoke' ? ['device_id'] : []);
   } else {
     const allowed = {relay_owner_list_pending: ['inbox_id', 'cursor', 'limit'], relay_owner_read_conversation: ['inbox_id', 'message_id'], relay_owner_delivery_status: ['inbox_id', 'message_ids'], relay_owner_subscription_status: ['inbox_id'], relay_owner_reply: ['inbox_id', 'message_id', 'body'],
-      relay_owner_jobs_list: ['inbox_id', 'cursor', 'limit'], relay_owner_job_read: ['inbox_id', 'job_id'], relay_owner_job_claim: ['inbox_id', 'job_id', 'run_id', 'event_id'], relay_owner_job_update: ['inbox_id', 'job_id', 'event_id', 'run_id', 'stage', 'summary', 'outcome'],
+      relay_owner_jobs_list: ['inbox_id', 'cursor', 'limit'], relay_owner_job_read: ['inbox_id', 'job_id'], relay_owner_job_claim: ['inbox_id', 'job_id', 'run_id', 'event_id'], relay_owner_job_update: ['inbox_id', 'job_id', 'event_id', 'run_id', 'stage', 'summary', 'outcome', 'expected_reply_id', 'expected_version'],
       relay_owner_job_result_correct: ['inbox_id', 'job_id', 'event_id', 'expected_reply_id', 'expected_version', 'body', 'correction_summary']};
     if (!Object.hasOwn(allowed, name)) fail(400, 'Unknown owner tool');
     const required = ['relay_owner_list_pending', 'relay_owner_jobs_list'].includes(name) ? ['inbox_id'] : name === 'relay_owner_job_update' ? ['inbox_id', 'job_id', 'event_id', 'stage'] : allowed[name];

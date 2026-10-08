@@ -19,7 +19,12 @@ async function fixture(t) {
   };
   const reply = (job, body = 'Original immutable private answer') => h.rpc(owner, 'relay_owner_reply', {inbox_id: RELAY_OWNER_INBOX, message_id: job.id, body});
   const completed = async () => {
-    const job = await create(), saved = await reply(job); return {job, saved, data: await read(job.id)};
+    const job = await create(), runId = crypto.randomUUID();
+    await h.rpc(owner, 'relay_owner_job_claim', {inbox_id: RELAY_OWNER_INBOX, job_id: job.id, run_id: runId, event_id: crypto.randomUUID()});
+    const saved = await reply(job);
+    await h.rpc(owner, 'relay_owner_job_update', {inbox_id: RELAY_OWNER_INBOX, job_id: job.id, run_id: runId, event_id: crypto.randomUUID(),
+      stage: 'completed', expected_reply_id: saved.entry.id, expected_version: 1, summary: 'Fictional requested work completed by the claimed run.', outcome: 'known'});
+    return {job, saved, data: await read(job.id)};
   };
   const correction = (job, replyId, overrides = {}) => ({inbox_id: RELAY_OWNER_INBOX, job_id: job.id, event_id: crypto.randomUUID(),
     expected_reply_id: replyId, expected_version: 1, body: 'Updated plain-text answer', correction_summary: 'Checked the source and corrected the stated result.', ...overrides});
@@ -48,6 +53,7 @@ test('authenticated corrections append versions while the first private chat rep
   assert.equal(Object.hasOwn(corrected.acceptedResult, 'verified'), false, 'Authentication never certifies factual accuracy');
   const after = await s.read(job.id);
   assert.equal(after.job.stage, 'completed'); assert.equal(after.job.finishedAt, data.job.finishedAt);
+  assert.deepEqual(after.job.completion, data.job.completion); assert.equal(after.job.completion.resultVersion, 1);
   assert.equal(Date.parse(after.job.updatedAt), now); assert.ok(after.job.updatedAt > data.job.updatedAt);
   assert.deepEqual(after.job.result, data.job.result); assert.equal(after.job.result.body, saved.entry.body);
   assert.equal(after.job.resultVersion, 2); assert.deepEqual(after.job.latestResult, corrected.acceptedResult);
@@ -67,6 +73,21 @@ test('authenticated corrections append versions while the first private chat rep
   assert.deepEqual(s.h.fixture.object('jarvis-shared-v2').alarms, alarmsBefore, 'Correction creates no callback wake or execution');
 });
 
+test('an available reply can be corrected without attesting completion and explicit completion must pin the current correction version', async t => {
+  const s = await fixture(t), job = await s.create(), runId = crypto.randomUUID();
+  await s.h.rpc(s.owner, 'relay_owner_job_claim', {inbox_id: RELAY_OWNER_INBOX, job_id: job.id, run_id: runId, event_id: crypto.randomUUID()});
+  const saved = await s.reply(job, 'Fictional preliminary saved report'), corrected = await s.h.rpc(s.owner, tool, s.correction(job, saved.entry.id));
+  assert.equal(corrected.job.stage, 'outcome_unknown'); assert.equal(corrected.job.completion, null); assert.equal(corrected.job.finishedAt, null);
+  assert.equal(corrected.job.resultVersion, 2); assert.equal(corrected.job.result.body, saved.entry.body);
+  const input = {inbox_id: RELAY_OWNER_INBOX, job_id: job.id, run_id: runId, event_id: crypto.randomUUID(), stage: 'completed', expected_reply_id: saved.entry.id,
+    expected_version: 1, summary: 'Fictional work completed with the current corrected result.', outcome: 'known'};
+  const rejected = await s.h.rpcResponse(s.owner, 'tools/call', {name: 'relay_owner_job_update', arguments: input});
+  assert.equal((await rejected.json()).error?.data?.status, 409);
+  const complete = await s.h.rpc(s.owner, 'relay_owner_job_update', {...input, expected_version: 2});
+  assert.equal(complete.job.stage, 'completed'); assert.equal(complete.job.completion.resultVersion, 2);
+  assert.equal(complete.job.resultVersion, 2); assert.equal(complete.job.result.replyId, saved.entry.id);
+});
+
 test('the existing cached conversation read exposes a separately labeled correction while retaining the immutable original structured reply', async t => {
   const s = await fixture(t), {job, saved} = await s.completed();
   const request = {name: 'relay_owner_read_conversation', arguments: {inbox_id: RELAY_OWNER_INBOX, message_id: job.id}};
@@ -74,6 +95,8 @@ test('the existing cached conversation read exposes a separately labeled correct
   const label = 'Private job lifecycle (authenticated server evidence; callback acceptance never establishes execution): ';
   const initialLifecycle = JSON.parse(original.result.content[3].text.slice(label.length));
   assert.equal(initialLifecycle.resultVersion, 1); assert.equal(Object.hasOwn(initialLifecycle, 'latestResult'), false);
+  assert.equal(initialLifecycle.stage, 'completed'); assert.equal(initialLifecycle.completion.replyId, saved.entry.id);
+  assert.equal(initialLifecycle.completion.resultVersion, 1); assert.equal(initialLifecycle.finishedAt, initialLifecycle.completion.createdAt);
   const args = s.correction(job, saved.entry.id, {body: '<?php corrected_plain_data(); ?> <script>inert correction</script>'});
   const correction = await s.h.rpc(s.owner, tool, args);
   const laterResponse = await s.h.rpcResponse(s.owner, 'tools/call', request), later = await laterResponse.json();
@@ -84,6 +107,7 @@ test('the existing cached conversation read exposes a separately labeled correct
   assert.ok(later.result.content[3].text.startsWith(label));
   const lifecycle = JSON.parse(later.result.content[3].text.slice(label.length));
   assert.equal(lifecycle.resultVersion, 2); assert.deepEqual(lifecycle.latestResult, correction.acceptedResult);
+  assert.deepEqual(lifecycle.completion, initialLifecycle.completion); assert.equal(lifecycle.finishedAt, initialLifecycle.finishedAt);
   assert.match(lifecycle.resultLabel, /Authenticated correction/); assert.match(lifecycle.resultLabel, /does not certify factual accuracy/);
   assert.equal(lifecycle.latestResult.format, 'plain_text'); assert.equal(lifecycle.latestResult.body, args.body);
   assert.equal(lifecycle.latestResult.correctionSummary, args.correction_summary);
@@ -128,7 +152,8 @@ test('password-origin requests preserve exact provenance through existing pendin
   assert.equal(final.reply.authentication_source, 'owner-oauth-mcp'); assert.equal(final.reply.id, saved.entry.id);
   const detail = await s.h.phone('/jobs/detail?job_id=' + id, undefined, signed.device_token), job = (await detail.json()).job;
   assert.equal(detail.status, 200); assert.equal(job.authentication_source, 'owner-password-session');
-  assert.equal(job.stage, 'completed'); assert.equal(job.result.replyId, saved.entry.id); assert.equal(job.resultVersion, 1);
+  assert.equal(job.stage, 'outcome_unknown'); assert.equal(job.finishedAt, null); assert.equal(job.completion, null);
+  assert.equal(job.result.replyId, saved.entry.id); assert.equal(job.resultVersion, 1);
   assert.deepEqual((await s.h.rpc(s.owner, 'relay_owner_list_pending', {inbox_id: RELAY_OWNER_INBOX})).messages, []);
 });
 
@@ -182,7 +207,7 @@ test('public OAuth, phone sessions, public claims and non-private target IDs can
   assert.deepEqual(s.h.rows('SELECT * FROM relay_owner_job_result_corrections'), before);
 });
 
-test('corrections require a genuine completed private reply and cannot finish, resume or revise failed or cancelled work', async t => {
+test('corrections require a genuine available private reply and cannot finish, resume or revise failed or cancelled work', async t => {
   const s = await fixture(t), queued = await s.create();
   const empty = await s.read(queued.id); assert.equal(empty.job.resultVersion, 0); assert.equal(empty.job.latestResult, null); assert.deepEqual(empty.resultHistory, []);
   await s.failure(s.owner, s.correction(queued, crypto.randomUUID()));

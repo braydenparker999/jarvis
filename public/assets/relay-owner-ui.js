@@ -1,4 +1,4 @@
-import { createRelayOwnerApi, OwnerApiError } from './relay-owner-api.js';
+import { createRelayOwnerApi, OwnerApiError, normalizeOwnerJobCompletion } from './relay-owner-api.js';
 import { icon, autosize, copyText, richText } from './ui.js';
 
 // Private history, drafts and failed sends exist only in this closure. In particular,
@@ -72,14 +72,14 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), uuid =
     try{
       do{
         const data=await api.jobs(after);if(epoch!==generation)return;
-        for(const job of data.jobs)jobs.set(job.id,job);
+        for(const job of data.jobs)jobs.set(job.id,normalizeOwnerJobCompletion(job));
         if(data.nextCursor!==null){const next=String(data.nextCursor);if(seen.has(next)||Number(next)<=Number(after))throw new OwnerApiError('invalid');seen.add(next);after=next;}else after=null;
       }while(after!==null);
       state.jobs=[...jobs.values()].sort((a,b)=>a.sequence-b.sequence);state.jobsError='';state.syncStale=false;
       if(state.jobDetailId)await controller.inspectJob(state.jobDetailId,{refresh:true});
     }catch(error){if(epoch!==generation)return;const safe=error instanceof OwnerApiError?error:new OwnerApiError('network');if(['expired','revoked','unauthorized'].includes(safe.kind))failure(safe);else state.jobsError=safe.message;}
   }
-  function mergeJob(job){const jobs=new Map(state.jobs.map(j=>[j.id,j]));jobs.set(job.id,job);state.jobs=[...jobs.values()].sort((a,b)=>a.sequence-b.sequence);}
+  function mergeJob(job){const jobs=new Map(state.jobs.map(j=>[j.id,j]));jobs.set(job.id,normalizeOwnerJobCompletion(job));state.jobs=[...jobs.values()].sort((a,b)=>a.sequence-b.sequence);}
   const controller = {
     get mode() { return state.mode; },
     get hasCredential() { return api.hasCredential; },
@@ -229,7 +229,7 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), uuid =
       state.jobDetailId=id;state.jobDetailError='';state.jobDetailBusy=true;
       if(!refresh){state.jobDetail=state.jobs.find(j=>j.id===id)?{job:state.jobs.find(j=>j.id===id),events:[]}:null;state.jobDetailStale=false;}
       emit();
-      try{const data=await api.jobDetail(id);if(epoch!==generation||detail!==detailEpoch||state.jobDetailId!==id)return;state.jobDetail=data;state.jobDetailStale=false;mergeJob(data.job);}
+      try{const data=await api.jobDetail(id);if(epoch!==generation||detail!==detailEpoch||state.jobDetailId!==id)return;const job=normalizeOwnerJobCompletion(data.job);state.jobDetail={...data,job};state.jobDetailStale=false;mergeJob(job);}
       catch(error){if(epoch===generation&&detail===detailEpoch){const safe=error instanceof OwnerApiError?error:new OwnerApiError('network');if(['expired','revoked','unauthorized'].includes(safe.kind))failure(safe);else{state.jobDetailError=safe.message;state.jobDetailStale=true;}}}
       finally{if(epoch===generation&&detail===detailEpoch){state.jobDetailBusy=false;emit();}}
     },
@@ -302,10 +302,10 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), uuid =
 const stamp = value => Number.isFinite(Date.parse(value)) ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) : 'Unknown';
 const messageStamp=value=>Number.isFinite(Date.parse(value))?new Intl.DateTimeFormat(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}).format(new Date(value)):'Unknown';
 const jobLabel=job=>{
+  if(job.result&&!job.completion&&!['waiting_for_owner','failed','cancelled'].includes(job.stage))return 'Reply received · completion unverified'+(job.cancelRequested?' · cancellation requested':'');
   if(job.stage==='running'&&job.execution&&Date.parse(job.execution.leaseExpiresAt)<=Date.now())return job.cancelRequested?'Cancellation requested · outcome unconfirmed':'Acknowledgement expired · outcome unconfirmed';
   if(job.cancelRequested&&!['completed','failed','cancelled'].includes(job.stage))return 'Cancellation requested · awaiting acknowledgement';
-  if(job.stage==='completed'&&job.resultVersion>1)return 'Correction saved · version '+job.resultVersion;
-  return {queued:'Queued · awaiting assistant',running:'Working · owner-connected assistant acknowledged',waiting_for_owner:'Needs your input',completed:'Result saved',failed:'Failed · review details',cancelled:'Cancelled · assistant acknowledged',outcome_unknown:'Outcome unconfirmed · review details'}[job.stage]||'Status unavailable';
+  return {queued:'Queued · awaiting assistant',running:'Working · owner-connected assistant acknowledged',waiting_for_owner:'Needs your input',completed:job.completion?'Work reported complete':'Completion unverified',failed:'Failed · review details',cancelled:'Cancelled · assistant acknowledged',outcome_unknown:'Outcome unconfirmed · review details'}[job.stage]||'Status unavailable';
 };
 
 export function createRelayOwnerUI({ controller = createRelayOwnerController(), document: doc = globalThis.document } = {}) {
@@ -402,11 +402,11 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
     const kinds={unclassified:'Ordinary owner message',read_only:'Research or inspection',draft:'Prepare a draft',consequential:'Action · review requested scope'};
     detailDialog.append(make('p',kinds[job.actionKind]+' · attempt '+job.attempt+' · saved '+stamp(job.createdAt),'request-meta'));
     if(job.execution)detailDialog.append(make('p','The owner-connected assistant acknowledged execution '+stamp(job.execution.acknowledgedAt)+'. '+(Date.parse(job.execution.leaseExpiresAt)<=Date.now()?'The recorded acknowledgement window ended ':'The acknowledgement expires ')+stamp(job.execution.leaseExpiresAt)+'.'+(job.stage==='running'&&Date.parse(job.execution.leaseExpiresAt)<=Date.now()?' Refresh to check the current outcome.':''),'request-meta'));
-    if(job.cancelRequested)detailDialog.append(make('p',job.stage==='cancelled'?'The assistant acknowledged cancellation.':job.stage==='completed'?'A reply was saved after you requested cancellation.':'Cancellation has been requested. The assistant has not confirmed that the work stopped.','request-meta'));
+    if(job.cancelRequested)detailDialog.append(make('p',job.stage==='cancelled'?'The assistant acknowledged cancellation.':job.completion?'The assistant reported work complete after cancellation was requested. This does not report that the work stopped.':'Cancellation has been requested. The assistant has not confirmed that the work stopped.','request-meta'));
     if(job.stage==='waiting_for_owner')detailDialog.append(make('p','Review the request history for the assistant’s question or blocker, then send the needed input or decision in your private conversation. Actions follow your existing explicit authorization.','request-meta'));
     if(job.result){
       const latest=job.latestResult||{version:1,...job.result};
-      detailDialog.append(make('h3',latest.version>1?'Authenticated correction':'Saved result'));
+      detailDialog.append(make('h3',latest.version>1?'Authenticated correction':'Saved reply'));
       if(latest.version>1){const rationale=make('p',latest.correctionSummary,'request-meta');rationale.id='relay-owner-result-rationale';detailDialog.append(rationale);}
       const result=make('div','','request-body rich-body');result.id='relay-owner-result-latest';result.dataset.readingAnchor='saved-result';result.dataset.resultVersion=String(latest.version);richText(result,latest.body);detailDialog.append(result);
       detailDialog.append(make('p',(latest.version>1?'Correction '+latest.version+' · ':'Immutable owner reply · ')+stamp(latest.createdAt),'request-meta'));
@@ -423,7 +423,12 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
         detailDialog.append(versionsDisclosure);
       }
     }
-    if(job.failure)detailDialog.append(make('h3','What needs attention'),make('p',job.failure.message,'request-body'),make('p',job.failure.outcome==='not_started'?'The assistant confirmed that the work did not start.':job.failure.outcome==='unknown'?'The earlier attempt may have done some or all of the work.':'Review what happened before another attempt.','request-meta'));
+    if(job.completion){
+      const report=make('section','','request-completion');report.id='relay-owner-completion';report.dataset.resultVersion=String(job.completion.resultVersion);
+      const summary=make('p',job.completion.summary,'request-body');summary.id='relay-owner-completion-summary';summary.dataset.readingAnchor='completion-summary';
+      report.append(make('h3','Completion report'),summary,make('p','Reported '+stamp(job.completion.createdAt)+' · reply version '+job.completion.resultVersion,'request-meta'),make('p','The authenticated owner-connected assistant reported work complete. This attestation does not certify factual claims or external outcomes.','request-meta'));detailDialog.append(report);
+    }
+    if(job.failure)detailDialog.append(make('h3',job.failure.code==='completion_unverified'?'Completion unverified':'What needs attention'),make('p',job.failure.message,'request-body'),make('p',job.failure.code==='completion_unverified'?'The reply may be an acknowledgement, a blocker or available information. Review it in your private conversation; it does not establish that the work finished.':job.failure.outcome==='not_started'?'The assistant confirmed that the work did not start.':job.failure.outcome==='unknown'?'The earlier attempt may have done some or all of the work.':'Review what happened before another attempt.','request-meta'));
     if(job.delivery){
       const deliveryLabels={saved:'Request saved privately.',queued:'Request saved; callback delivery is queued.',callback_accepted:'The callback accepted delivery. This does not confirm execution.',delivery_failed:'Callback delivery failed. The saved request remains private.',reply_saved:'An authenticated owner reply is saved.'};
       detailDialog.append(make('h3','Delivery'),make('p',deliveryLabels[job.delivery.state]||'Delivery evidence unavailable.','request-meta'));
@@ -474,7 +479,7 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
           retry.disabled=state.busy||state.sending;row.append(retry);
         }
       }else if(replyJob?.resultVersion>1){
-        const correction=make('div','','message-job');correction.dataset.state='completed';correction.append(make('span','A correction is saved · version '+replyJob.resultVersion,'job-state'),action('Inspect result',()=>controller.inspectJob(replyJob.id),'text-button'));row.append(correction);
+        const correction=make('div','','message-job');correction.dataset.state=replyJob.stage;correction.append(make('span','A correction is saved · version '+replyJob.resultVersion,'job-state'),action('Inspect result',()=>controller.inspectJob(replyJob.id),'text-button'));row.append(correction);
       }
       row.append(make('span',messageStamp(m.createdAt)+(status?' · '+status:''),'message-time'));nodes.push(row);
     }

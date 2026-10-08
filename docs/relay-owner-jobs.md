@@ -5,19 +5,21 @@ Object. The job ID and request ID are the same UUID. The request remains an
 ordinary private owner message, delivered by the existing owner event path.
 Existing event responders and hourly fallback tasks are unchanged.
 
-A normal authenticated `relay_owner_reply` saves the immutable plain-text result
-and completes the associated queued or active job in the same synchronous
-transaction. It requires no new tool catalog, execution claim, reply-body marker
-or callback receipt. The accepted reply is the completion evidence. An explicitly
-failed or cancelled job keeps that terminal state when a later explanatory reply
-is saved. Identical reply retries preserve the original reply, completion time
-and lifecycle event; conflicting replies return 409.
+A normal authenticated `relay_owner_reply` saves an immutable plain-text reply
+and its available result in the same synchronous transaction. It does **not**
+complete the requested work, report a known action outcome or infer a blocker
+from the reply's wording. An acknowledgement, a blocker and a useful report all
+establish reply availability only. Identical retries preserve the original reply,
+save time and lifecycle event; conflicting replies return 409. An explicitly
+failed or cancelled job retains that state when an explanatory reply is saved.
 
-Completion records that a final reply was accepted. Authentication proves its
-submission provenance, not factual correctness or successful external actions.
-Receipts and preliminary updates belong in explicit lifecycle progress events;
-`relay_owner_reply` always has final, immutable semantics. The server never
-guesses a receipt, approval or result type from message wording.
+Work completion requires a separate typed `relay_owner_job_update` operation
+from the actual authenticated execution that claimed the job. It binds a known
+outcome and checking summary to the exact accepted reply and current result
+version. Authentication establishes the submission and execution association;
+it does not independently certify factual correctness or external side effects.
+The chat reply stays immutable. No body marker, read operation, callback receipt
+or natural-language inference can claim or complete work.
 
 These records track the evidence Relay receives. They do not start an executor,
 create new schedules, forward private text to Muse or public services, or establish
@@ -59,9 +61,20 @@ Every newly saved ordinary private message also gets a job with title **Owner
 request** and kind `unclassified`. Its body is never parsed to infer intent,
 authorization, command markers, stage or safety. Historical private messages
 materialize only when selected in a job page or exact job read. Their existing
-immutable private replies project completed results using the actual saved reply
-time. This metadata projection does not replay events or claim execution. Replies
-accepted by a temporarily restored older Worker reconcile the same way.
+immutable private replies project available results using the actual saved reply
+time. Without explicit typed completion evidence they report `outcome_unknown`
+and `completion_unverified`, with `finishedAt: null`. Old stored `completed` rows
+created solely by accepted replies are projected the same way without rewriting
+their stored rows, journals, replies or correction history. This projection does
+not replay events or claim execution. Replies accepted by a restored older Worker
+retain their original identity and text.
+
+Reads of existing metadata also leave missing reply linkage untouched. They use
+the actual saved private reply for the returned projection. Only an explicit
+reply, correction or completion write may reconcile that linkage transactionally.
+The earlier lazy-materialization behavior remains limited to selected requests
+with entirely absent job metadata: it creates queued metadata and a `result_saved`
+event, never an execution claim or completion event.
 
 The job sequence is its immutable user-message sequence. Pages preserve strict
 creation order, with a default limit of 20 and maximum of 50. Status changes do
@@ -74,9 +87,9 @@ to observe completion, cancellation acknowledgement or failure.
 | --- | --- |
 | `queued` | The private request is saved; no authenticated execution claim exists. |
 | `running` | The owner-connected assistant explicitly claimed it, and its five-minute grant/run lease is current. |
-| `outcome_unknown` | A previously running lease expired without final evidence. This is a read projection; it does not assert execution stopped or failed. |
+| `outcome_unknown` | An execution lease expired, or a reply is available without typed work-completion evidence. The reason distinguishes these cases; neither asserts that execution stopped or failed. |
 | `waiting_for_owner` | The matching execution recorded a blocker and explicit outcome. |
-| `completed` | The normal immutable private reply was accepted and linked as the final result. |
+| `completed` | The matching authenticated claimed execution explicitly reported a known completed outcome associated with the accepted reply and result version. |
 | `failed` | The matching current execution recorded an explicit failure summary and outcome. |
 | `cancelled` | An authenticated execution acknowledged the owner's cancellation request with a known or not-started outcome. |
 
@@ -103,20 +116,40 @@ and explicit `outcome` (`not_started`, `known`, or `unknown`). A globally unique
 event UUID is bound to the exact normalized event payload and OAuth grant.
 Identical event retries succeed without renewing leases or duplicating events;
 different payloads, targets or grants fail with 409. Progress is bounded to 100
-events per job, with cancellation acknowledgement and final reply still allowed.
+events per job, with cancellation acknowledgement, reply saving and explicit
+completion still allowed.
+
+Typed completion uses the existing `relay_owner_job_update` tool with
+`stage: "completed"`, the matching `run_id`, a unique `event_id` distinct from the accepted reply ID,
+`expected_reply_id`, `expected_version` (1–5), a nonempty plain-text `summary`
+and `outcome: "known"`. The saved reply must exist and its current version must
+match atomically. A different grant, run, reply, version or reused event payload
+fails closed. An expired matching claim may settle a known completed outcome;
+this does not renew, resume or reclaim its execution. An identical lost-response
+retry preserves the original completion event and time.
+
+The append-only `work_completed` event is the completion evidence. `completion`
+is null without it; otherwise it contains its event/run IDs, accepted reply ID,
+bound result version, summary, save time and authenticated private provenance.
+Later information corrections retain that original completion association; they
+do not certify the factual accuracy of the original or corrected text. Historic
+reply-only `completed` events are not typed work-completion evidence.
 
 Expired claims cannot be silently reclaimed. An active lease also prevents a
 different grant from writing a competing normal final reply. The first accepted
 immutable reply remains authoritative. A waiting job has no automatic resumption
 or approval protocol in this slice: the owner can send a separate private message
-with a decision, and a final normal reply can finish the waiting request. Message
-or reply text is never interpreted as machine-readable permission.
+with a decision. A reply saves information; a matching typed completion operation
+can report the known finished outcome. Message or reply text is never interpreted
+as machine-readable permission. Once an immutable reply is available, a new claim
+or heartbeat cannot silently restart that request.
 
 For a cached host, the existing `relay_owner_read_conversation` retains its exact
 structured result and original serialized content. A fourth separately labeled
 **Private job lifecycle** text block supplies redacted server lifecycle evidence.
 The earlier private delivery and subscription diagnostic blocks remain intact.
-For the original result it contains no private body. It reports `resultVersion`
+For the original result it contains no private reply body. It reports the explicit
+`completion` association and `resultVersion`
 and, only after a correction, the explicitly labeled `latestResult` plain-text
 body, checking rationale and authenticated provenance. The original structured
 conversation and serialized first content block retain the immutable first
@@ -154,8 +187,9 @@ lease expiry; another host cannot assert the original execution stopped. A
 never-claimed job can be acknowledged by current owner OAuth only after verifying
 that the request will not execute. An unknown outcome cannot claim cancellation.
 The cancellation request remains historical evidence after acknowledgement.
-An ordinary final reply may instead complete a request while preserving its
-cancellation-request fact; it does not fabricate a cancellation acknowledgement.
+A typed completion from the owning execution may instead report known completed
+work while preserving the cancellation-request fact. Saving reply text cannot do
+so, and neither operation fabricates a cancellation acknowledgement.
 
 Retry creates a new private request with a distinct immutable UUID, linked parent
 and root job IDs and incremented attempt number. The original request, final
@@ -163,7 +197,9 @@ state and result stay intact. Each parent has at most one child; a logical linea
 has at most five attempts. Identical retry sends return the same child, while
 different child IDs or submitting devices fail with 409.
 
-Completed, queued, running and waiting requests cannot be retried. Failed,
+Explicitly completed, queued, running and waiting requests cannot be retried. A
+still-live execution claim also prevents retry when its saved reply projects an
+unverified outcome. Failed,
 cancelled, or outcome-unknown requests may be eligible, with these further guards:
 
 - Consequential or unclassified requests are unavailable for retry when their
@@ -184,7 +220,7 @@ automatic retries of consequential actions or an external action executor.
 
 ## Private results and verification
 
-Final results expose `format: "plain_text"`, body, immutable reply ID and saved
+Available replies expose `format: "plain_text"`, body, immutable reply ID and saved
 time. HTML-looking input is data. Render titles, progress, request and result
 bodies with text nodes, and allow only independently checked safe links. The API
 accepts no interactive HTML, iframe, credential-bearing artifact URL, browser
@@ -193,9 +229,10 @@ public inbox routes, publications and Muse integrations never read these jobs.
 
 ## Append-only private result corrections
 
-The original private chat reply and `job.result` remain immutable. An already
-completed private job can accept up to four separate authenticated plain-text
-corrections. Its original result is version 1; corrections are versions 2–5.
+The original private chat reply and `job.result` remain immutable. A saved reply
+with unverified completion, or an explicitly completed job, can accept up to four
+separate authenticated plain-text corrections. Failed and cancelled work remains
+excluded. Its original result is version 1; corrections are versions 2–5.
 This mechanism corrects saved information only. It cannot execute an action,
 change the execution stage, finish a queued job, resume failed or cancelled work,
 or alter cancellation or retry authority.
@@ -243,7 +280,7 @@ advances `updatedAt` monotonically to its save time. The original `result`, chat
 reply, `finishedAt`, stage and accepted earlier revisions stay intact. Job list
 and exact detail reads expose the latest information without appending another
 conversation entry. Refresh job pages or exact detail to see corrections to
-already completed jobs; the immutable message cursor does not advance for them.
+already answered jobs; the immutable message cursor does not advance for them.
 
 Display a later version as **Authenticated correction**, with its rationale and
 save time, while preserving access to the original reply and earlier versions.

@@ -113,6 +113,80 @@ async function refreshRequest(page) {
   await response; await waitRequestReady(page);
 }
 
+test('a legacy saved reply stays visible without claiming that blocked work completed', {timeout: 90000}, async t => {
+  const j = await journey(t); if (!j) return;
+  const {h, oauth, owner, open} = j;
+  const request = 'Fictional owner request for a report; do not infer completion from a reply.';
+  const body = 'Fictional blocker: I need the source file before continuing.';
+  const message = await savedMessage(h, owner, request);
+  await h.rpc(oauth, 'relay_owner_reply', {inbox_id: RELAY_OWNER_INBOX, message_id: message.id, body});
+  const phone = await open({owner, width: 390, height: 844}), {page} = phone;
+  phone.rule(record => record.method === 'GET' && ['/relay/owner/jobs', '/relay/owner/jobs/detail'].includes(record.path), async ({forward}) => {
+    const response = await forward(), data = await response.json();
+    for (const job of data.jobs || [data.job]) if (job?.result) {
+      delete job.completion; job.stage = 'completed'; job.finishedAt = job.result.createdAt; job.failure = null;
+    }
+    return Response.json(data, {status: response.status, headers: response.headers});
+  }, 20);
+  await page.goto(RELAY_URL); await ownerInput(page).waitFor();
+  await page.locator('.relay-owner-chat .messages').getByText(body, {exact: true}).waitFor();
+  await inspectRequest(page, message.id);
+  await writeSyntheticEvidence(phone, 'owner-reply-completion-unverified-390x844', {legacyServer: true, immutableReplyPreserved: true});
+  assert.equal(await jobDialog(page).locator('.request-state').textContent(), 'Reply received · completion unverified');
+  assert.equal(await jobDialog(page).getByRole('heading', {name: 'Saved reply', exact: true}).count(), 1);
+  assert.equal(await jobDialog(page).locator('#relay-owner-result-latest').textContent(), body);
+  assert.equal(await jobDialog(page).getByRole('button', {name: 'Try again', exact: true}).count(), 0);
+  assert.equal(await jobDialog(page).getByText('Work reported complete', {exact: true}).count(), 0);
+  await assertNoPrivatePersistence(page, [request, body]); assert.deepEqual(publicWrites(phone), []); assertBrowserContained(phone);
+});
+
+test('typed completion is a distinct inert authenticated report tied to an immutable private reply', {timeout: 120000}, async t => {
+  const j = await journey(t); if (!j) return;
+  const {h, oauth, owner, open} = j;
+  const request = 'Fictional request to prepare an inspection report.', original = 'Fictional available inspection report with source notes.';
+  const message = await savedMessage(h, owner, request), runId = crypto.randomUUID();
+  await h.rpc(oauth, 'relay_owner_job_claim', {inbox_id: RELAY_OWNER_INBOX, job_id: message.id, run_id: runId, event_id: crypto.randomUUID()});
+  const accepted = await h.rpc(oauth, 'relay_owner_reply', {inbox_id: RELAY_OWNER_INBOX, message_id: message.id, body: original});
+  const phone = await open({owner, width: 390, height: 844}), {page} = phone;
+  await page.goto(RELAY_URL); await ownerInput(page).waitFor(); await inspectRequest(page, message.id);
+  assert.equal(await jobDialog(page).locator('.request-state').textContent(), 'Reply received · completion unverified');
+  assert.equal(await jobDialog(page).locator('#relay-owner-completion').count(), 0);
+  const summary = 'Fictional attestation: the report preparation is complete. <img id="fictional-completion-xss" src=x onerror="window.__completionUnsafe=1"> [inert link](javascript:window.__completionUnsafe=2)';
+  await h.rpc(oauth, 'relay_owner_job_update', {inbox_id: RELAY_OWNER_INBOX, job_id: message.id, run_id: runId, event_id: crypto.randomUUID(),
+    stage: 'completed', outcome: 'known', expected_reply_id: accepted.entry.id, expected_version: 1, summary});
+  await refreshRequest(page);
+  assert.equal(await jobDialog(page).locator('.request-state').textContent(), 'Work reported complete');
+  assert.equal(await jobDialog(page).locator('#relay-owner-completion-summary').textContent(), summary);
+  assert.equal(await jobDialog(page).locator('#relay-owner-completion').getAttribute('data-result-version'), '1');
+  assert.equal(await jobDialog(page).locator('#relay-owner-result-latest').textContent(), original);
+  assert.equal(await jobDialog(page).locator('#fictional-completion-xss,script,iframe,a[href^="javascript:"]').count(), 0);
+  assert.equal(await page.evaluate(() => window.__completionUnsafe), undefined);
+  assert.match(await jobDialog(page).locator('#relay-owner-completion').textContent(), /does not certify factual claims or external outcomes/);
+  assert.equal(await jobDialog(page).getByRole('button', {name: 'Try again', exact: true}).count(), 0);
+  assert.equal(await jobDialog(page).getByRole('button', {name: 'Request cancellation', exact: true}).count(), 0);
+  await jobDialog(page).evaluate(dialog => {dialog.scrollTop = 0;});
+  await writeSyntheticEvidence(phone, 'owner-work-reported-complete-390x844', {typedCompletion: true, resultVersion: 1, immutableReplyPreserved: true});
+  await h.rpc(oauth, 'relay_owner_job_result_correct', {inbox_id: RELAY_OWNER_INBOX, job_id: message.id, event_id: crypto.randomUUID(),
+    expected_reply_id: accepted.entry.id, expected_version: 1, body: 'Fictional corrected inspection report after the version-one attestation.', correction_summary: 'Checked the fictional source and corrected one note.'});
+  await refreshRequest(page);
+  assert.equal(await jobDialog(page).locator('.request-state').textContent(), 'Work reported complete');
+  assert.equal(await jobDialog(page).locator('#relay-owner-completion').getAttribute('data-result-version'), '1');
+  assert.equal(await jobDialog(page).locator('#relay-owner-result-latest').getAttribute('data-result-version'), '2');
+  assert.equal(await page.locator('.relay-owner-chat .messages').getByText(original, {exact: true}).count(), 1);
+  await page.setViewportSize({width: 390, height: 520});
+  await jobDialog(page).evaluate(dialog => {dialog.scrollTop = 0;});
+  const geometry = await jobDialog(page).evaluate(dialog => {
+    const rect = dialog.getBoundingClientRect(), close = dialog.querySelector('[aria-label="Close private request"]').getBoundingClientRect();
+    return {width: rect.width, height: rect.height, top: rect.top, scrollable: dialog.scrollHeight > dialog.clientHeight, closeWidth: close.width, closeHeight: close.height, overflow: document.documentElement.scrollWidth > innerWidth};
+  });
+  assert.equal(geometry.overflow, false); assert.ok(geometry.width <= 390 && geometry.height <= 520 && geometry.top >= 0);
+  assert.equal(geometry.scrollable, true); assert.ok(geometry.closeWidth >= 48 && geometry.closeHeight >= 48);
+  await writeSyntheticEvidence(phone, 'owner-work-reported-complete-390x520', {typedCompletion: true, geometry, completionVersion: 1, availableReplyVersion: 2});
+  await assertNoPrivatePersistence(page, [request, original, summary]); assert.deepEqual(publicWrites(phone), []);
+  assert.equal(phone.records.some(record => record.method === 'POST' && /(?:job_update|completion)/.test(record.path)), false, 'The browser never writes completion evidence');
+  assertBrowserContained(phone);
+});
+
 test('private request UI distinguishes saving, callback receipt, execution, requested cancellation and a linked new attempt', {timeout: 120000}, async t => {
   const j = await journey(t); if (!j) return;
   const {h, oauth, owner, open} = j;
@@ -157,7 +231,7 @@ test('private request UI distinguishes saving, callback receipt, execution, requ
   const attack = 'Fictional saved result <img id="result-xss-probe" src=x onerror="window.__jobXss=1">\n[unsafe](javascript:window.__jobXss=2)\n[Credential link](https://synthetic-reader:fictional-pass@safe.invalid/private)\n[safe](https://safe.invalid/result)';
   await h.rpc(oauth, 'relay_owner_reply', {inbox_id: RELAY_OWNER_INBOX, message_id: child.id, body: attack});
   await refreshRequest(page);
-  assert.match(await jobDialog(page).locator('.request-state').textContent(), /Result saved/);
+  assert.match(await jobDialog(page).locator('.request-state').textContent(), /Reply received · completion unverified/);
   await jobDialog(page).getByText(/Fictional saved result/).waitFor();
   assert.equal(await page.locator('#result-xss-probe, #relay-owner-request-dialog script').count(), 0);
   assert.equal(await page.evaluate(() => window.__jobXss), undefined);
@@ -250,7 +324,7 @@ test('authenticated private corrections preserve the accepted chat reply, ration
   assert.equal(await messages.getByText(original, {exact: true}).count(), 1);
   await inspectRequest(page, message.id);
   const detail = jobDialog(page);
-  await detail.getByRole('heading', {name: 'Saved result', exact: true}).waitFor();
+  await detail.getByRole('heading', {name: 'Saved reply', exact: true}).waitFor();
   const corrected = Array.from({length: 26}, (_, index) => `Fictional corrected paragraph ${index + 1}. This synthetic follow-up reports a checked interpretation and remains subject to further checking.`).join('\n\n');
   const rationale = 'The initial fictional receipt lacked the result. I checked the synthetic source and added the corrected interpretation.';
   const correction = {inbox_id: RELAY_OWNER_INBOX, job_id: message.id, event_id: crypto.randomUUID(), expected_reply_id: accepted.entry.id,
@@ -300,7 +374,8 @@ test('authenticated private corrections preserve the accepted chat reply, ration
   assert.equal(await detail.locator('a').filter({hasText: 'Credential source'}).count(), 0, 'A corrected result cannot turn credential-bearing text into a link');
   assert.equal(await detail.getByText(/verified (?:result|facts|truth)|fact.checked/i).count(), 0);
   const truth = await h.rpc(oauth, 'relay_owner_job_read', {inbox_id: RELAY_OWNER_INBOX, job_id: message.id});
-  assert.equal(truth.job.result.body, original); assert.equal(truth.job.resultVersion, 3); assert.equal(truth.job.stage, 'completed');
+  assert.equal(truth.job.result.body, original); assert.equal(truth.job.resultVersion, 3); assert.equal(truth.job.stage, 'outcome_unknown');
+  assert.equal(truth.job.completion, null, 'Correcting available reply text never attests that the task finished');
   assert.equal(h.rows("SELECT COUNT(*) AS n FROM relay_owner_entries WHERE kind='reply' AND reply_to=?", message.id)[0].n, 1);
   await writeSyntheticEvidence(phone, 'current-owner-authenticated-correction-390x844', {before, after, resultVersion: 3, immutableChatPreserved: true});
   await detail.evaluate(dialog => {dialog.scrollTop = 0;});

@@ -94,7 +94,8 @@ export async function relayRpc(ctx, env, principal, rpc) {
       const {job} = await relayOwnerRpc(ctx, env, principal, 'relay_owner_job_read', {inbox_id: args.inbox_id, job_id: args.message_id});
       const lifecycle = {job_id: job.id, stage: job.stage, actionKind: job.actionKind, cancelRequested: job.cancelRequested,
         parentJobId: job.parentJobId, rootJobId: job.rootJobId, attempt: job.attempt, execution: job.execution, retryJobId: job.retryJobId,
-        resultVersion: job.resultVersion, ...(job.resultVersion > 1 ? {latestResult: job.latestResult,
+        resultVersion: job.resultVersion, completion: job.completion, finishedAt: job.finishedAt, failure: job.failure,
+        ...(job.resultVersion > 1 ? {latestResult: job.latestResult,
           resultLabel: 'Authenticated correction; submission provenance does not certify factual accuracy.'} : {})};
       result.content.push({type: 'text', text: 'Private job lifecycle (authenticated server evidence; callback acceptance never establishes execution): ' + JSON.stringify(lifecycle)});
     }

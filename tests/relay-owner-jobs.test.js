@@ -43,6 +43,8 @@ async function fixture(t) {
   };
   s.read = id => s.phone('/jobs/detail?job_id=' + id).then(response => response.json());
   s.claim = (id, options = {}) => s.rpc('relay_owner_job_claim', {job_id: id, event_id: crypto.randomUUID(), run_id: crypto.randomUUID(), ...options});
+  s.complete = (id, replyId, runId, options = {}) => s.rpc('relay_owner_job_update', {job_id: id, run_id: runId, event_id: crypto.randomUUID(), stage: 'completed',
+    expected_reply_id: replyId, expected_version: 1, summary: 'Fictional requested work finished with a known outcome.', outcome: 'known', ...options});
   return s;
 }
 const receiver = async (_url, init) => {
@@ -105,23 +107,27 @@ test('event or job persistence failure rolls back message, job, events, rate acc
   assert.equal(s.sql('SELECT COUNT(*) AS n FROM relay_owner_jobs')[0].n, 0);
 });
 
-test('normal authenticated owner reply completes a queued job without new catalog, claim, body marker or callback', async t => {
-  const s = await fixture(t), created = await s.create(), body = 'Verified release result. <script>private data</script> https://example.test/result';
+test('normal authenticated owner reply saves available text without claiming completion or interpreting its body', async t => {
+  const s = await fixture(t), created = await s.create(), body = 'Fictional text claiming everything completed. <script>private data</script> https://example.test/result';
   const first = await s.rpc('relay_owner_reply', {message_id: created.job.id, body});
   assert.equal(first.newWrite, true);
   const read = await s.read(created.job.id);
-  assert.equal(read.job.stage, 'completed'); assert.equal(read.job.result.body, body);
+  assert.equal(read.job.stage, 'outcome_unknown'); assert.equal(read.job.result.body, body);
+  assert.equal(read.job.finishedAt, null); assert.equal(read.job.completion, null); assert.equal(read.job.failure.code, 'completion_unverified');
   assert.equal(read.job.result.format, 'plain_text'); assert.equal(read.job.result.replyId, first.entry.id);
   assert.equal(read.job.execution, null); assert.equal(read.job.delivery.state, 'reply_saved');
-  assert.equal(read.events.filter(event => event.kind === 'completed').length, 1);
+  assert.equal(read.events.filter(event => event.kind === 'result_saved').length, 1);
+  const stored = s.sql('SELECT stage,outcome,finished_ms FROM relay_owner_jobs WHERE id=?', created.job.id)[0];
+  assert.deepEqual({...stored}, {stage: 'queued', outcome: 'unknown', finished_ms: null});
   assert.ok(!read.events.some(event => ['running', 'claimed'].includes(event.kind)));
   const retry = await s.rpc('relay_owner_reply', {message_id: created.job.id, body});
   assert.equal(retry.newWrite, false); assert.equal(retry.entry.id, first.entry.id);
   await rejects(s.rpc('relay_owner_reply', {message_id: created.job.id, body: 'A conflicting result'}));
-  assert.equal((await s.read(created.job.id)).events.filter(event => event.kind === 'completed').length, 1);
+  assert.equal((await s.read(created.job.id)).events.filter(event => event.kind === 'result_saved').length, 1);
+  await rejects(s.claim(created.job.id));
 });
 
-test('historical ordinary requests materialize lazily as unclassified and use actual immutable replies as completion evidence', async t => {
+test('historical ordinary requests materialize queued metadata and immutable result evidence without inferred completion', async t => {
   const s = await fixture(t), ids = [crypto.randomUUID(), crypto.randomUUID()], replyId = crypto.randomUUID();
   const firstAt = '2025-01-01T12:00:00.000Z', secondAt = '2025-01-02T12:00:00.000Z', replyAt = '2025-01-03T12:00:00.000Z';
   for (const [i, id] of ids.entries()) s.sql("INSERT INTO relay_owner_entries(id,kind,body,created_at,principal,device_id,authentication_source) VALUES(?,'user',?,?,?,?,?)", id,
@@ -134,8 +140,9 @@ test('historical ordinary requests materialize lazily as unclassified and use ac
   assert.equal(firstPage.jobs[0].stage, 'queued'); assert.equal(firstPage.jobs[0].retryAllowed, false);
   assert.equal(s.sql('SELECT COUNT(*) AS n FROM relay_owner_jobs')[0].n, 1, 'only selected page materializes');
   const nextPage = await (await s.phone('/jobs?limit=1&after=' + firstPage.nextCursor)).json();
-  assert.equal(nextPage.jobs[0].stage, 'completed'); assert.equal(nextPage.jobs[0].result.replyId, replyId);
-  assert.equal(nextPage.jobs[0].finishedAt, replyAt); assert.equal(nextPage.jobs[0].execution, null);
+  assert.equal(nextPage.jobs[0].stage, 'outcome_unknown'); assert.equal(nextPage.jobs[0].result.replyId, replyId);
+  assert.equal(nextPage.jobs[0].finishedAt, null); assert.equal(nextPage.jobs[0].completion, null); assert.equal(nextPage.jobs[0].execution, null);
+  assert.deepEqual({...s.sql('SELECT stage,outcome,finished_ms FROM relay_owner_jobs WHERE id=?', ids[1])[0]}, {stage: 'queued', outcome: 'unknown', finished_ms: null});
   assert.equal(nextPage.nextCursor, null); assert.ok(nextPage.jobs[0].sequence > firstPage.jobs[0].sequence);
   assert.equal(s.sql('SELECT COUNT(*) AS n FROM relay_events')[0].n, eventCount, 'historical materialization never replays callbacks');
 });
@@ -144,9 +151,11 @@ test('reply from a restored older Worker reconciles existing durable metadata wi
   const s = await fixture(t), created = await s.create(), replyId = crypto.randomUUID(), acceptedAt = new Date().toISOString();
   s.sql("INSERT INTO relay_owner_entries(id,kind,reply_to,body,created_at,principal,device_id,authentication_source) VALUES(?,'reply',?,?,?,?,?,?)", replyId, created.job.id, 'Accepted by prior Worker', acceptedAt, RELAY_OWNER, s.deviceId, 'owner-oauth-mcp');
   assert.equal(s.sql('SELECT stage FROM relay_owner_jobs WHERE id=?', created.job.id)[0].stage, 'queued');
+  const before = s.sql('SELECT * FROM relay_owner_jobs'), events = s.sql('SELECT * FROM relay_owner_job_events');
   const restored = await s.read(created.job.id);
-  assert.equal(restored.job.stage, 'completed'); assert.equal(restored.job.finishedAt, acceptedAt);
+  assert.equal(restored.job.stage, 'outcome_unknown'); assert.equal(restored.job.finishedAt, null); assert.equal(restored.job.completion, null);
   assert.equal(restored.job.result.replyId, replyId); assert.equal(restored.job.execution, null);
+  assert.deepEqual(s.sql('SELECT * FROM relay_owner_jobs'), before); assert.deepEqual(s.sql('SELECT * FROM relay_owner_job_events'), events);
 });
 
 test('callback 2xx and duplicate delivery receipts never claim execution or complete the durable job', async t => {
@@ -180,8 +189,15 @@ test('competing authenticated claims are atomic, grant/run-bound, and exact even
   assert.equal(Date.parse(renewed.job.execution.leaseExpiresAt), now + RELAY_OWNER_JOB_LEASE_MS);
   now += 1000;
   assert.equal((await s.rpc('relay_owner_job_update', heartbeat)).job.execution.leaseExpiresAt, renewed.job.execution.leaseExpiresAt);
-  await s.rpc('relay_owner_reply', {message_id: created.job.id, body: 'Matching authenticated final result'});
-  assert.equal((await s.read(created.job.id)).job.stage, 'completed');
+  const saved = await s.rpc('relay_owner_reply', {message_id: created.job.id, body: 'Fictional matching authenticated result'});
+  const available = await s.read(created.job.id);
+  assert.equal(available.job.stage, 'outcome_unknown'); assert.equal(available.job.retryAllowed, false); assert.equal(available.job.finishedAt, null);
+  const completion = {job_id: created.job.id, run_id: args.run_id, event_id: crypto.randomUUID(), stage: 'completed',
+    expected_reply_id: saved.entry.id, expected_version: 1, summary: 'Fictional requested inspection actually finished.', outcome: 'known'};
+  await rejects(s.rpc('relay_owner_job_update', completion, other));
+  const completed = await s.rpc('relay_owner_job_update', completion);
+  assert.equal(completed.job.stage, 'completed'); assert.equal(completed.job.completion.eventId, completion.event_id);
+  assert.equal(completed.job.completion.runId, args.run_id); assert.equal(completed.job.finishedAt, completed.job.completion.createdAt);
 });
 
 test('expired execution acknowledgement reports unknown outcome, never silently reclaims, and guards retry attempts', async t => {
@@ -203,6 +219,80 @@ test('expired execution acknowledgement reports unknown outcome, never silently 
   assert.equal((await s.read(created.job.id)).job.retryJobId, retryId);
   assert.equal((await s.phone('/jobs/retry', {job_id: created.job.id, id: retryId, confirm_duplicate_risk: true})).status, 200);
   assert.equal((await s.phone('/jobs/retry', {job_id: created.job.id, id: crypto.randomUUID(), confirm_duplicate_risk: true})).status, 409);
+});
+
+test('explicit known completion reconciles the exact expired claim, retains pending cancellation, and replays without renewal', async t => {
+  let now = 1700000000000; t.mock.method(Date, 'now', () => now);
+  const s = await fixture(t), created = await s.create({action_kind: 'consequential'}), runId = crypto.randomUUID(), other = await grant(s);
+  const claimed = await s.claim(created.job.id, {run_id: runId});
+  const saved = await s.rpc('relay_owner_reply', {message_id: created.job.id, body: 'Fictional immutable work result'});
+  assert.equal((await s.phone('/jobs/cancel', {job_id: created.job.id})).status, 201);
+  now += RELAY_OWNER_JOB_LEASE_MS + 1;
+  const args = {job_id: created.job.id, run_id: runId, event_id: crypto.randomUUID(), stage: 'completed', expected_reply_id: saved.entry.id,
+    expected_version: 1, summary: 'Fictional action had already finished when cancellation was requested.', outcome: 'known'};
+  for (const change of [{run_id: crypto.randomUUID()}, {expected_reply_id: crypto.randomUUID()}, {expected_version: 2}]) await rejects(s.rpc('relay_owner_job_update', {...args, ...change}));
+  await rejects(s.rpc('relay_owner_job_update', args, other));
+  for (const outcome of ['unknown', 'not_started']) await rejects(s.rpc('relay_owner_job_update', {...args, outcome}), 400);
+  await rejects(s.rpc('relay_owner_job_update', {...args, event_id: saved.entry.id}), 400);
+  const accepted = await s.rpc('relay_owner_job_update', args);
+  assert.equal(accepted.newWrite, true); assert.equal(accepted.job.stage, 'completed'); assert.equal(accepted.job.cancelRequested, true);
+  assert.equal(accepted.job.retryAllowed, false); assert.equal(accepted.job.failure, null);
+  assert.equal(accepted.job.finishedAt, new Date(now).toISOString()); assert.equal(accepted.job.completion.createdAt, accepted.job.finishedAt);
+  assert.deepEqual(accepted.job.execution, claimed.job.execution, 'Terminal acknowledgement cannot heartbeat an expired lease');
+  now += 1000;
+  const repeated = await s.rpc('relay_owner_job_update', args);
+  assert.equal(repeated.newWrite, false); assert.deepEqual(repeated.job.completion, accepted.job.completion); assert.equal(repeated.job.finishedAt, accepted.job.finishedAt);
+  await rejects(s.rpc('relay_owner_job_update', {...args, summary: 'Fictional changed acknowledgement'}));
+  await rejects(s.rpc('relay_owner_job_update', args, other));
+  await rejects(s.rpc('relay_owner_job_update', {...args, event_id: crypto.randomUUID()}));
+  assert.equal((await s.phone('/jobs/retry', {job_id: created.job.id, id: crypto.randomUUID(), confirm_duplicate_risk: true})).status, 409);
+  const final = await s.read(created.job.id);
+  assert.equal(final.events.filter(event => event.kind === 'work_completed').length, 1); assert.equal(final.job.result.replyId, saved.entry.id);
+});
+
+test('completion journal failure rolls back terminal state while preserving the earlier immutable available reply', async t => {
+  const s = await fixture(t), created = await s.create(), runId = crypto.randomUUID();
+  await s.claim(created.job.id, {run_id: runId});
+  const saved = await s.rpc('relay_owner_reply', {message_id: created.job.id, body: 'Fictional available result before completion storage failure'});
+  const before = s.sql('SELECT * FROM relay_owner_jobs'), events = s.sql('SELECT * FROM relay_owner_job_events'), exec = s.ctx.storage.sql.exec;
+  s.ctx.storage.sql.exec = (query, ...values) => {
+    if (query.startsWith('INSERT INTO relay_owner_job_events') && values[2] === 'work_completed') throw Error('Fictional completion journal failure');
+    return exec(query, ...values);
+  };
+  await assert.rejects(s.complete(created.job.id, saved.entry.id, runId));
+  s.ctx.storage.sql.exec = exec;
+  assert.deepEqual(s.sql('SELECT * FROM relay_owner_jobs'), before); assert.deepEqual(s.sql('SELECT * FROM relay_owner_job_events'), events);
+  const available = await s.read(created.job.id);
+  assert.equal(available.job.stage, 'outcome_unknown'); assert.equal(available.job.completion, null); assert.equal(available.job.result.replyId, saved.entry.id);
+  assert.equal((await s.complete(created.job.id, saved.entry.id, runId)).job.stage, 'completed');
+});
+
+test('late blocker and failure attestations require the same genuine current claim without renewing or resuming work', async t => {
+  let now = 1700000000000; t.mock.method(Date, 'now', () => now);
+  const s = await fixture(t), other = await grant(s);
+  for (const stage of ['waiting_for_owner', 'failed']) {
+    const unclaimed = await s.create(); await s.rpc('relay_owner_reply', {message_id: unclaimed.job.id, body: 'Fictional unclaimed receipt'});
+    const args = {job_id: unclaimed.job.id, run_id: crypto.randomUUID(), event_id: crypto.randomUUID(), stage, summary: 'Fictional action has not started.', outcome: 'not_started'};
+    await rejects(s.rpc('relay_owner_job_update', args));
+    const created = await s.create({action_kind: 'consequential'}), runId = crypto.randomUUID();
+    const claimed = await s.claim(created.job.id, {run_id: runId});
+    const saved = await s.rpc('relay_owner_reply', {message_id: created.job.id, body: 'Fictional reply delivered before the typed blocker'});
+    const owned = {...args, job_id: created.job.id, run_id: runId, event_id: crypto.randomUUID()};
+    await rejects(s.rpc('relay_owner_job_update', owned, other));
+    await rejects(s.rpc('relay_owner_job_update', {...owned, stage: 'running', outcome: undefined}));
+    const acknowledged = await s.rpc('relay_owner_job_update', owned);
+    assert.equal(acknowledged.job.stage, stage); assert.equal(acknowledged.job.completion, null); assert.equal(acknowledged.job.result.replyId, saved.entry.id);
+    assert.equal(acknowledged.job.execution.leaseExpiresAt, claimed.job.execution.leaseExpiresAt);
+    assert.equal(acknowledged.job.finishedAt === null, stage === 'waiting_for_owner');
+    const expired = await s.create(), expiredRun = crypto.randomUUID(); await s.claim(expired.job.id, {run_id: expiredRun});
+    await s.rpc('relay_owner_reply', {message_id: expired.job.id, body: 'Fictional result with an expired claim'});
+    now += RELAY_OWNER_JOB_LEASE_MS + 1;
+    await rejects(s.rpc('relay_owner_job_update', {...owned, job_id: expired.job.id, run_id: expiredRun, event_id: crypto.randomUUID()}));
+    const cancelled = await s.create(), cancelRun = crypto.randomUUID(); await s.claim(cancelled.job.id, {run_id: cancelRun});
+    await s.rpc('relay_owner_reply', {message_id: cancelled.job.id, body: 'Fictional reply before cancellation'});
+    await s.phone('/jobs/cancel', {job_id: cancelled.job.id});
+    await rejects(s.rpc('relay_owner_job_update', {...owned, job_id: cancelled.job.id, run_id: cancelRun, event_id: crypto.randomUUID()}));
+  }
 });
 
 test('consequential and unclassified retries are blocked for possibly performed or unknown outcomes even with confirmation', async t => {
@@ -251,6 +341,10 @@ test('waiting for owner records the actual blocker without implicit resume or au
   await rejects(s.rpc('relay_owner_job_update', {job_id: created.job.id, run_id: runId, event_id: crypto.randomUUID(), stage: 'running'}));
   await s.phone('/messages', {id: crypto.randomUUID(), body: 'I approve [[resume]] anything'});
   assert.equal((await s.read(created.job.id)).job.stage, 'waiting_for_owner');
+  await s.rpc('relay_owner_reply', {message_id: created.job.id, body: 'Fictional waiting reply asking for a separate decision.'});
+  const replied = await s.read(created.job.id);
+  assert.equal(replied.job.stage, 'waiting_for_owner'); assert.equal(replied.job.completion, null); assert.equal(replied.job.finishedAt, null);
+  assert.equal(replied.job.retryAllowed, false); assert.ok(replied.events.some(event => event.kind === 'waiting_for_owner'));
 });
 
 test('owner scopes, device session authority, exact private target and activation gates protect all job routes', async t => {
@@ -314,10 +408,10 @@ test('live owner OAuth and session revocation are rechecked inside the atomic jo
   assert.equal((await s.phone('/jobs/cancel', {job_id: created.job.id})).status, 401);
 });
 
-test('reply persistence and final lifecycle transition roll back together when result journal cannot commit', async t => {
+test('reply persistence and available-result linkage roll back together when result journal cannot commit', async t => {
   const s = await fixture(t), created = await s.create(), exec = s.ctx.storage.sql.exec;
   s.ctx.storage.sql.exec = (query, ...values) => {
-    if (query.startsWith('INSERT INTO relay_owner_job_events') && values[2] === 'completed') throw Error('Result journal unavailable');
+    if (query.startsWith('INSERT INTO relay_owner_job_events') && values[2] === 'result_saved') throw Error('Result journal unavailable');
     return exec(query, ...values);
   };
   await assert.rejects(s.rpc('relay_owner_reply', {message_id: created.job.id, body: 'Final atomic result'}));
@@ -325,7 +419,7 @@ test('reply persistence and final lifecycle transition roll back together when r
   assert.equal(s.sql("SELECT COUNT(*) AS n FROM relay_owner_entries WHERE kind='reply'")[0].n, 0);
   const job = (await s.read(created.job.id)).job; assert.equal(job.stage, 'queued'); assert.equal(job.result, null);
   await s.rpc('relay_owner_reply', {message_id: created.job.id, body: 'Final atomic result'});
-  assert.equal((await s.read(created.job.id)).job.stage, 'completed');
+  assert.equal((await s.read(created.job.id)).job.stage, 'outcome_unknown');
 });
 
 test('progress budget preserves cancellation acknowledgement and immutable final result delivery', async t => {
