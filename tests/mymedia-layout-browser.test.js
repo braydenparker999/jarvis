@@ -51,9 +51,10 @@ test('My Media video-feed layout and preserved browsing/playback flows',
   try { browser = await chromium.launch({executablePath:chrome,headless:true,args:['--no-sandbox']}); }
   catch (error) { await new Promise(done=>server.close(done));throw error; }
 
-  async function session(width=390, seeded=false, archivePreview=false, dated=false) {
+  async function session(width=390, seeded=false, archivePreview=false, dated=false, beforeLoad=null) {
     const activeFiles=archivePreview?files.map((file,i)=>({...file,name:archiveSamples[i%archiveSamples.length][0]+' - '+archiveSamples[i%archiveSamples.length][1]+' ['+archiveSamples[i%archiveSamples.length][2]+'].webm'})):files;
     const context = await browser.newContext({viewport:{width,height:844},isMobile:width<600,hasTouch:width<600});
+    if(beforeLoad)await context.addInitScript(beforeLoad);
     if (seeded) await context.addInitScript(({id})=>localStorage.setItem('mymedia.progress.v1',JSON.stringify({[id]:{t:120,d:600,done:false,at:10}})), {id:videoId(1)});
     await context.route('**/*', async route => {
       const request = route.request(), url = new URL(request.url());
@@ -98,6 +99,13 @@ test('My Media video-feed layout and preserved browsing/playback flows',
     const dimensions = await page.evaluate(()=>({width:innerWidth,scroll:document.documentElement.scrollWidth}));
     assert.ok(dimensions.scroll<=dimensions.width+1,'no document-level horizontal overflow');
   }
+  async function waitForBrowseScreen(page,url,title,timeout=5000) {
+    await page.waitForURL(url);
+    // Native fragment navigation changes the URL before the hashchange route
+    // restores the screen. Search/sort assertions need the destination render.
+    await page.waitForFunction(title=>!document.querySelector('#library-view').hidden &&
+      document.querySelector('#view-title').textContent===title,title,{timeout});
+  }
   try {
     for (const [width,columns] of [[360,1],[390,1],[430,1],[768,2],[1200,4]]) {
       await t.test('feed fits '+width+'px with '+columns+' columns',async()=>{
@@ -141,28 +149,67 @@ test('My Media video-feed layout and preserved browsing/playback flows',
       await page.locator('#search').fill('no possible match');assert.equal(await page.getByRole('heading',{name:'No matching videos'}).count(),1);
       await layout(page);assert.deepEqual(errors,[]);await context.close();
     });
-    await t.test('creator directory and per-screen state survive menu playback, Back, Forward and reload',async()=>{
-      const {page,context,errors}=await session();
-      await page.locator('[data-view="creators"]').click();await page.waitForURL('**/#creators');
-      assert.equal(await page.locator('.creator-directory .creator-link').count(),1);
-      assert.equal(await page.locator('#sort').isVisible(),false);await screenshot(page,'my-media-creators-390');
-      await page.locator('#search').fill('Preview');
-      await page.locator('.creator-directory .creator-link').click();await page.waitForURL('**/#creator=*');
-      await page.locator('#sort').selectOption('title');
-      await page.locator('#search').fill('quiet');
-      assert.equal(await page.locator('#sections .video-tile').count(),18);await screenshot(page,'my-media-creator-390');
-      await page.locator('.video-menu').first().click();await page.getByRole('button',{name:'Play video',exact:true}).click();
-      await page.waitForURL('**/#v=*');await page.locator('#next-list .video-card').first().click();
-      await page.locator('#back').click();await page.waitForURL('**/#creator=*');
-      assert.equal(await page.locator('#search').inputValue(),'quiet');assert.equal(await page.locator('#sort').inputValue(),'title');
-      assert.equal(await page.locator('#sections .video-tile').count(),18);
-      await page.locator('#back').click();await page.waitForURL('**/#creators');
-      assert.equal(await page.locator('#search').inputValue(),'Preview');
-      await page.goBack();await page.waitForURL('**/#creator=*');assert.equal(await page.locator('#search').inputValue(),'quiet');
-      await page.goForward();await page.waitForURL('**/#creators');
-      await page.goBack();await page.waitForURL('**/#creator=*');await page.reload();await page.locator('#creator-header').waitFor();
-      assert.equal(await page.locator('#search').inputValue(),'quiet');assert.equal(await page.locator('#sort').inputValue(),'title');
-      await layout(page);assert.deepEqual(errors,[]);await context.close();
+    for (const width of [360,390,430,1200]) await t.test('creator directory and per-screen state survive menu playback, Back, Forward and reload at '+width+'px',async()=>{
+      const {page,context,errors}=await session(width);
+      try {
+        await page.locator('[data-view="creators"]').click();await waitForBrowseScreen(page,'**/#creators','Creators');
+        assert.equal(await page.locator('.creator-directory .creator-link').count(),1);
+        assert.equal(await page.locator('#sort').isVisible(),false);await screenshot(page,'my-media-creators-'+width);
+        await page.locator('#search').fill('Preview');
+        await page.locator('.creator-directory .creator-link').click();await waitForBrowseScreen(page,'**/#creator=*','Preview channel');
+        await page.locator('#sort').selectOption('title');
+        await page.locator('#search').fill('quiet');
+        assert.equal(await page.locator('#sections .video-tile').count(),18);await screenshot(page,'my-media-creator-'+width);
+        await page.locator('.video-menu').first().click();await page.getByRole('button',{name:'Play video',exact:true}).click();
+        await page.waitForURL('**/#v=*');await page.locator('#next-list .video-card').first().click();
+        await page.locator('#back').click();await waitForBrowseScreen(page,'**/#creator=*','Preview channel');
+        assert.equal(await page.locator('#search').inputValue(),'quiet');assert.equal(await page.locator('#sort').inputValue(),'title');
+        assert.equal(await page.locator('#sections .video-tile').count(),18);
+        await page.locator('#back').click();await waitForBrowseScreen(page,'**/#creators','Creators');
+        assert.equal(await page.locator('#search').inputValue(),'Preview');
+        await screenshot(page,'my-media-back-'+width);
+        await page.goBack();await waitForBrowseScreen(page,'**/#creator=*','Preview channel');assert.equal(await page.locator('#search').inputValue(),'quiet');
+        await page.goForward();await waitForBrowseScreen(page,'**/#creators','Creators');
+        assert.equal(await page.locator('#search').inputValue(),'Preview');
+        assert.equal(await page.locator('.creator-directory .creator-link').count(),1);
+        await page.goBack();await waitForBrowseScreen(page,'**/#creator=*','Preview channel');await page.reload();await page.locator('#creator-header').waitFor();
+        assert.equal(await page.locator('#search').inputValue(),'quiet');assert.equal(await page.locator('#sort').inputValue(),'title');
+        await layout(page);assert.deepEqual(errors,[]);
+      } finally { await context.close(); }
+    });
+    await t.test('browse readiness waits for the destination render after a native Back URL change',async()=>{
+      const {page,context,errors}=await session(390,false,false,false,()=>{
+        addEventListener('hashchange',event=>{
+          if(!window.__holdBrowseChange)return;
+          window.__holdBrowseChange=false;
+          event.stopImmediatePropagation();
+          window.__heldBrowseChange={oldURL:event.oldURL,newURL:event.newURL};
+        },{capture:true});
+      });
+      try {
+        await page.locator('[data-view="creators"]').click();await waitForBrowseScreen(page,'**/#creators','Creators');
+        await page.locator('#search').fill('Preview');
+        await page.locator('.creator-directory .creator-link').click();await waitForBrowseScreen(page,'**/#creator=*','Preview channel');
+        await page.locator('#search').fill('quiet');
+        // Hold one event's delivery after real fragment navigation. This makes
+        // the observed URL-before-render interval deterministic without changing
+        // the app's route or history operations.
+        await page.evaluate(()=>{window.__holdBrowseChange=true;});
+        await page.locator('#back').click();await page.waitForURL('**/#creators');
+        await page.waitForFunction(()=>!!window.__heldBrowseChange);
+        assert.equal(await page.locator('#view-title').textContent(),'Preview channel');
+        assert.equal(await page.locator('#search').inputValue(),'quiet');
+        await assert.rejects(waitForBrowseScreen(page,'**/#creators','Creators',150),
+          error=>error.name==='TimeoutError' && error.message.includes('waitForFunction'));
+        await page.evaluate(()=>{
+          const change=window.__heldBrowseChange;delete window.__heldBrowseChange;
+          dispatchEvent(new HashChangeEvent('hashchange',change));
+        });
+        await waitForBrowseScreen(page,'**/#creators','Creators');
+        assert.equal(await page.locator('#search').inputValue(),'Preview');
+        assert.equal(await page.locator('.creator-directory .creator-link').count(),1);
+        assert.deepEqual(errors,[]);
+      } finally { await context.close(); }
     });
     await t.test('original YouTube dates sort separately from archive additions; undated videos stay last',async()=>{
       const {page,context,errors}=await session(390,false,false,true);
