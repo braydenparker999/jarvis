@@ -46,6 +46,12 @@ supports independent revocable sessions with a 365-day sliding inactivity expiry
 The public visitor inbox and existing response tasks are unchanged. See
 [owner pairing, privacy, and rollout](docs/relay-owner-pairing.md).
 
+Private owner requests also have durable job records in the same storage. Their
+identity survives reload and device changes; authenticated immutable replies
+save the result. Callback acceptance remains delivery evidence. Optional
+execution claims, cancellation acknowledgements and guarded linked attempts use
+the existing owner capability. See [the private job contract and verification](docs/relay-owner-jobs.md).
+
 ## Deployment and costs
 
 GitHub main is the source. `public/` is published to the Azure Storage static website `missionarytube` by the existing pinned-release workflow in the Missionarytube repository, which validates the public Quick AI configuration and injects the unrelated Drive key and backs up current blobs before upload. There is no frontend build or Azure API deployment. The former Static Web App (`gray-meadow-09216fd10`) is retired: its deploy workflow was removed and the Worker no longer accepts its origin. `public/staticwebapp.config.json` is ignored by Storage hosting, so its per-route security headers do not apply there. Keep large media and data outside Azure.

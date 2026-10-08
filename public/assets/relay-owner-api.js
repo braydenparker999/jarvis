@@ -2,6 +2,7 @@ import { API_ORIGIN } from './config.js';
 
 // This key is deliberately unrelated to public inbox, drafts, transfers or module state.
 export const OWNER_SESSION_KEY = 'jarvis.relay.owner-session.v1';
+export const OWNER_MODE_KEY = 'jarvis.relay.owner-mode.v1';
 const opaque = value => typeof value === 'string' && /^[A-Za-z0-9_-]{32,512}$/.test(value);
 const identifier = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value);
 const deviceFrom = data => {
@@ -17,6 +18,54 @@ function validDelivery(value){
     &&(value.callbackAcceptedAt===null||typeof value.callbackAcceptedAt==='string'&&Number.isFinite(Date.parse(value.callbackAcceptedAt)))
     &&(value.retryAfter===null||typeof value.retryAfter==='string'&&Number.isFinite(Date.parse(value.retryAfter)))
     &&!(value.retryable&&value.state!=='delivery_failed');
+}
+const jobIdentifier=value=>typeof value==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(value);
+const validDate=value=>typeof value==='string'&&Number.isFinite(Date.parse(value));
+const jobStages=['queued','running','waiting_for_owner','completed','failed','cancelled','outcome_unknown'];
+const jobKinds=['unclassified','read_only','draft','consequential'];
+function resultRecord(value,original){
+  if(!value||!original||!jobIdentifier(value.id)||!Number.isInteger(value.version)||value.version<1||value.version>5
+    ||value.format!=='plain_text'||typeof value.body!=='string'||!value.body.trim()||value.body.length>6000
+    ||value.replyId!==original.replyId||!validDate(value.createdAt)||value.authentication_source!=='owner-oauth-mcp'
+    ||value.author_authenticated!==true||value.visibility!=='private'
+    ||(value.version===1?(value.id!==original.replyId||value.body!==original.body||value.createdAt!==original.createdAt||value.correctionSummary!==null)
+      :typeof value.correctionSummary!=='string'||!value.correctionSummary.trim()||value.correctionSummary.length>1000))throw new OwnerApiError('invalid');
+  return {id:value.id,version:value.version,format:'plain_text',body:value.body,replyId:value.replyId,createdAt:value.createdAt,
+    correctionSummary:value.correctionSummary,authentication_source:'owner-oauth-mcp',author_authenticated:true,visibility:'private'};
+}
+function privateJob(value){
+  if(!value||!jobIdentifier(value.id)||value.messageId!==value.id||!Number.isSafeInteger(value.sequence)||value.sequence<1
+    ||typeof value.title!=='string'||!value.title.trim()||value.title.length>120||typeof value.body!=='string'||!value.body.trim()||value.body.length>4000
+    ||!jobStages.includes(value.stage)||!jobKinds.includes(value.actionKind)||!validDate(value.createdAt)||!validDate(value.updatedAt)
+    ||!(value.finishedAt===null||validDate(value.finishedAt))||value.visibility!=='private'||value.author_authenticated!==true
+    ||value.principal!=='github:183016859'||!identifier(value.device_id)||!['owner-device-session','owner-password-session'].includes(value.authentication_source)
+    ||!(value.parentJobId===null||jobIdentifier(value.parentJobId))||!jobIdentifier(value.rootJobId)||!Number.isInteger(value.attempt)||value.attempt<1||value.attempt>5
+    ||typeof value.cancelRequested!=='boolean'||!(value.cancelRequestedAt===null||validDate(value.cancelRequestedAt))
+    ||typeof value.retryAllowed!=='boolean'||typeof value.retryRequiresConfirmation!=='boolean'||!(value.retryJobId===null||jobIdentifier(value.retryJobId))
+    ||!validDelivery(value.delivery))throw new OwnerApiError('invalid');
+  const execution=value.execution,result=value.result,failure=value.failure;
+  if(!(execution===null||execution&&jobIdentifier(execution.runId)&&validDate(execution.acknowledgedAt)&&validDate(execution.leaseExpiresAt))
+    ||value.stage==='running'&&!execution
+    ||!(result===null||result&&result.format==='plain_text'&&typeof result.body==='string'&&result.body.length<=6000&&identifier(result.replyId)&&validDate(result.createdAt))
+    ||value.stage==='completed'&&!result
+    ||!(failure===null||failure&&typeof failure.code==='string'&&failure.code.length<=120&&typeof failure.message==='string'&&failure.message.length<=1000&&['unknown','known','not_started'].includes(failure.outcome)))throw new OwnerApiError('invalid');
+  const revisionFields='resultVersion' in value||'latestResult' in value;
+  const resultVersion=revisionFields?value.resultVersion:result?1:0;
+  if(!Number.isInteger(resultVersion)||resultVersion<0||resultVersion>5||Boolean(result)!==Boolean(resultVersion))throw new OwnerApiError('invalid');
+  let latestResult=null;
+  if(resultVersion){latestResult=resultRecord(revisionFields?value.latestResult:{id:result.replyId,version:1,...result,correctionSummary:null,authentication_source:'owner-oauth-mcp',author_authenticated:true,visibility:'private'},result);if(latestResult.version!==resultVersion)throw new OwnerApiError('invalid');}
+  else if(revisionFields&&value.latestResult!==null)throw new OwnerApiError('invalid');
+  // Project the contract: unexpected credential, HTML or transport fields never
+  // enter the controller or the private request inspector.
+  return {id:value.id,sequence:value.sequence,messageId:value.messageId,title:value.title,body:value.body,actionKind:value.actionKind,stage:value.stage,
+    createdAt:value.createdAt,updatedAt:value.updatedAt,finishedAt:value.finishedAt,visibility:'private',author_authenticated:true,principal:value.principal,
+    device_id:value.device_id,authentication_source:value.authentication_source,parentJobId:value.parentJobId,rootJobId:value.rootJobId,attempt:value.attempt,
+    cancelRequested:value.cancelRequested,cancelRequestedAt:value.cancelRequestedAt,execution:execution?{runId:execution.runId,acknowledgedAt:execution.acknowledgedAt,leaseExpiresAt:execution.leaseExpiresAt}:null,
+    result:result?{format:'plain_text',body:result.body,replyId:result.replyId,createdAt:result.createdAt}:null,
+    resultVersion,latestResult,
+    failure:failure?{code:failure.code,message:failure.message,outcome:failure.outcome}:null,
+    retryAllowed:value.retryAllowed,retryRequiresConfirmation:value.retryRequiresConfirmation,retryJobId:value.retryJobId,
+    delivery:{state:value.delivery.state,pending:value.delivery.pending,failed:value.delivery.failed,callbackAcceptedAt:value.delivery.callbackAcceptedAt,retryable:value.delivery.retryable,retryAfter:value.delivery.retryAfter}};
 }
 
 export class OwnerApiError extends Error {
@@ -37,7 +86,8 @@ export class OwnerApiError extends Error {
       consent_required: 'This account sign-in form has expired. Open a fresh form and confirm again.',
       cancelled: 'This sign-in attempt was closed.',
       device_unavailable: 'The selected device session is no longer available. Sign in again to refresh the choices.',
-      device_limit: 'Ten device sessions are already active. Re-enter your account credentials and explicitly choose one session to replace.'
+      device_limit: 'Ten device sessions are already active. Re-enter your account credentials and explicitly choose one session to replace.',
+      duplicate_risk: 'The previous outcome is uncertain. Review and confirm the risk before creating another attempt.'
     };
     super(messages[kind] || messages.rejected);
     this.name = 'OwnerApiError';
@@ -48,7 +98,8 @@ export class OwnerApiError extends Error {
 
 export function createRelayOwnerApi({ fetcher = globalThis.fetch, origin = API_ORIGIN, storage } = {}) {
   if (storage === undefined) { try { storage = globalThis.localStorage; } catch {} }
-  let credential = null, pending = null, remember = false, storageWarning = '', authenticationEpoch = 0;
+  let credential = null, pending = null, remember = false, storageWarning = '', authenticationEpoch = 0, selectedMode=null;
+  try{const mode=storage?.getItem(OWNER_MODE_KEY);if(['owner','public'].includes(mode))selectedMode=mode;}catch{}
   function readStored() {
     try {
       const saved = JSON.parse(storage?.getItem(OWNER_SESSION_KEY) || 'null');
@@ -59,6 +110,9 @@ export function createRelayOwnerApi({ fetcher = globalThis.fetch, origin = API_O
   credential = readStored();
   function clearCredential(token) {
     if (credential?.device_token !== token) return;
+    // A previously remembered owner session may predate the scope preference.
+    // Keep its owner view on expiry; only an explicit public choice changes it.
+    if(selectedMode===null){selectedMode='owner';try{storage?.setItem(OWNER_MODE_KEY,'owner');}catch{}}
     credential = null;
     try {
       // Do not remove a replacement session written by another tab.
@@ -106,6 +160,7 @@ export function createRelayOwnerApi({ fetcher = globalThis.fetch, origin = API_O
         : reported === 'device_unavailable' ? 'device_unavailable'
         : reported === 'credential_conflict' ? 'credential_conflict'
         : reported === 'consent_required' ? 'consent_required'
+        : reported === 'duplicate_risk_confirmation_required' ? 'duplicate_risk'
         : unauthenticated
         ? reported === 'session_expired' ? 'expired' : reported === 'session_revoked' ? 'revoked' : 'unauthorized'
         : reported === 'owner_not_enabled' ? 'disabled' : response.status >= 500 ? 'unavailable' : response.status === 409 ? 'conflict' : 'rejected';
@@ -131,6 +186,8 @@ export function createRelayOwnerApi({ fetcher = globalThis.fetch, origin = API_O
     get hasCredential() { return !!credential; },
     get deviceId() { return credential?.device_id || null; },
     get storageWarning() { return storageWarning; },
+    get selectedMode(){return selectedMode||(credential?'owner':'public');},
+    selectMode(mode){if(!['owner','public'].includes(mode))return;selectedMode=mode;try{storage?.setItem(OWNER_MODE_KEY,mode);}catch{}},
     refreshStoredCredential() { ++authenticationEpoch; pending = null; credential = readStored(); return !!credential; },
     cancelAuthentication() { ++authenticationEpoch; },
     async login(username, password, label, { remember: approvedPersistence = false, replaceDeviceId, confirmReplacement } = {}) {
@@ -146,7 +203,7 @@ export function createRelayOwnerApi({ fetcher = globalThis.fetch, origin = API_O
       if (previousToken) clearCredential(previousToken);
       credential = { device_token: data.device_token, device_id: device.id };
       persist();
-      return { status: data.status, device, access_days: data.access_days };
+      return { status: data.status, device, access_days: data.access_days, ...(data.jobs_enabled===true?{jobs_enabled:true}:{}) };
     },
     async credentials() {
       const data = await authenticated('/relay/owner/credentials');
@@ -231,6 +288,48 @@ export function createRelayOwnerApi({ fetcher = globalThis.fetch, origin = API_O
         ||entry.author_authenticated!==true||!Number.isFinite(Date.parse(entry.createdAt))||typeof data.newWrite!=='boolean'
         ||entry.delivery!==undefined&&!validDelivery(entry.delivery))throw new OwnerApiError('invalid');
       return data;
+    },
+    async jobs(after='0'){
+      if(!/^\d{1,15}$/.test(String(after)))throw new OwnerApiError('invalid');
+      const data=await authenticated('/relay/owner/jobs?after='+encodeURIComponent(after)+'&limit=50');
+      if(!Array.isArray(data.jobs)||data.jobs.length>50||!(data.nextCursor===null||/^\d{1,15}$/.test(String(data.nextCursor))))throw new OwnerApiError('invalid');
+      const jobs=data.jobs.map(privateJob);
+      if(jobs.some((job,i)=>job.sequence<=Number(after)||(i>0&&job.sequence<=jobs[i-1].sequence))||new Set(jobs.map(j=>j.id)).size!==jobs.length)throw new OwnerApiError('invalid');
+      if(data.nextCursor!==null&&(!jobs.length||Number(data.nextCursor)!==jobs.at(-1).sequence))throw new OwnerApiError('invalid');
+      return {jobs,nextCursor:data.nextCursor};
+    },
+    async jobDetail(id){
+      if(!jobIdentifier(id))throw new OwnerApiError('invalid');
+      const data=await authenticated('/relay/owner/jobs/detail?job_id='+encodeURIComponent(id));
+      const job=privateJob(data.job);
+      if(job.id!==id||!Array.isArray(data.events)||data.events.length>110||data.events.some(e=>!e||typeof e.id!=='string'||e.id.length>256||e.jobId!==id||typeof e.kind!=='string'||e.kind.length>80||typeof e.summary!=='string'||e.summary.length>1000||!validDate(e.createdAt)||!['owner-device-session','owner-password-session','owner-oauth-mcp'].includes(e.authentication_source)))throw new OwnerApiError('invalid');
+      const hasRevisionFields='resultVersion' in data.job||'latestResult' in data.job;
+      const history=data.resultHistory===undefined&&!hasRevisionFields?(job.latestResult?[job.latestResult]:[]):data.resultHistory;
+      if(!Array.isArray(history)||history.length!==job.resultVersion||history.length>5)throw new OwnerApiError('invalid');
+      const resultHistory=history.map((value,i)=>{const record=resultRecord(value,job.result);if(record.version!==i+1)throw new OwnerApiError('invalid');return record;});
+      if(resultHistory.length&&JSON.stringify(resultHistory.at(-1))!==JSON.stringify(job.latestResult))throw new OwnerApiError('invalid');
+      return {job,resultHistory,events:data.events.map(e=>({id:e.id,jobId:e.jobId,kind:e.kind,summary:e.summary,createdAt:e.createdAt,authentication_source:e.authentication_source}))};
+    },
+    async createJob({id,title,body,actionKind}){
+      if(!jobIdentifier(id)||typeof title!=='string'||!title.trim()||title.length>120||typeof body!=='string'||!body.trim()||body.length>4000||!['read_only','draft','consequential'].includes(actionKind))throw new OwnerApiError('invalid');
+      const data=await authenticated('/relay/owner/jobs',{id,title,body,action_kind:actionKind});
+      const job=privateJob(data.job);
+      if(job.id!==id||job.body!==body.trim()||job.title!==title.trim()||job.actionKind!==actionKind||typeof data.newWrite!=='boolean')throw new OwnerApiError('invalid');
+      return {job,newWrite:data.newWrite};
+    },
+    async cancelJob(id){
+      if(!jobIdentifier(id))throw new OwnerApiError('invalid');
+      const data=await authenticated('/relay/owner/jobs/cancel',{job_id:id});
+      const job=privateJob(data.job);
+      if(job.id!==id||typeof data.newWrite!=='boolean')throw new OwnerApiError('invalid');
+      return {job,newWrite:data.newWrite};
+    },
+    async retryJob(jobId,id,confirmDuplicateRisk=false){
+      if(!jobIdentifier(jobId)||!jobIdentifier(id)||id===jobId||typeof confirmDuplicateRisk!=='boolean')throw new OwnerApiError('invalid');
+      const data=await authenticated('/relay/owner/jobs/retry',{job_id:jobId,id,...(confirmDuplicateRisk?{confirm_duplicate_risk:true}:{})});
+      const job=privateJob(data.job);
+      if(job.id!==id||job.parentJobId!==jobId||typeof data.newWrite!=='boolean')throw new OwnerApiError('invalid');
+      return {job,newWrite:data.newWrite};
     },
     async devices() {
       const data = await authenticated('/relay/owner/devices');

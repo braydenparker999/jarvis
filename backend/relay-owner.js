@@ -5,6 +5,7 @@ import {relayTokenActiveInStore} from './relay-oauth.js';
 import {relayOwnerDelivery,recoverRelayOwnerDelivery,relayOwnerSubscriptionStatus} from './relay-events.js';
 import {FRONTEND_ORIGINS} from './origins.js';
 import {relayOwnerPasswordSchema, relayOwnerPasswordStore} from './relay-owner-password.js';
+import {relayOwnerJobSchema, relayOwnerJobEnsure, relayOwnerJobSpecification, relayOwnerJobSpecify, relayOwnerJobRead, relayOwnerJobsList, relayOwnerJobCancel, relayOwnerJobRetryPrepare, relayOwnerJobRetryLink, relayOwnerJobReplyCheck, relayOwnerJobReplySaved, relayOwnerJobValidateRpc, relayOwnerJobRpc} from './relay-owner-jobs.js';
 
 export {RELAY_OWNER_SCOPE, RELAY_OWNER_INBOX};
 export const RELAY_OWNER_SESSION_MS = 365 * 86400000;
@@ -41,6 +42,7 @@ export function relayOwnerSchema(ctx) {
   sql.exec('CREATE TABLE IF NOT EXISTS relay_owner_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
   sql.exec('CREATE TABLE IF NOT EXISTS relay_owner_pair_rates (identity TEXT PRIMARY KEY, count INTEGER NOT NULL, expires_ms INTEGER NOT NULL)');
   relayOwnerPasswordSchema(ctx);
+  relayOwnerJobSchema(ctx);
 }
 function entry(row,ctx,env) {
   return {id: row.id, sequence: row.seq, body: row.body, role: row.kind === 'user' ? 'user' : 'assistant', createdAt: row.created_at,
@@ -53,7 +55,7 @@ function entry(row,ctx,env) {
 // this helper through a public/shared API or use it without event grant checks.
 export function relayOwnerMessage(ctx, id) {
   relayOwnerSchema(ctx);
-  const row = rows(ctx, "SELECT * FROM relay_owner_entries WHERE id=? AND kind='user'", id)[0];
+  const row = rows(ctx, "SELECT * FROM relay_owner_entries WHERE id=? AND kind='user' AND principal=?", id, RELAY_OWNER)[0];
   return row ? entry(row) : null;
 }
 function device(row, current) {
@@ -104,15 +106,15 @@ function text(value, limit) {
 }
 function listMessages(ctx, after, limit, pending = false,env) {
   const p = pageArgs(after, limit);
-  const selected = rows(ctx, `SELECT u.* FROM relay_owner_entries u WHERE u.seq>? ${pending ? "AND u.kind='user' AND NOT EXISTS(SELECT 1 FROM relay_owner_entries r WHERE r.reply_to=u.id)" : ''} ORDER BY u.seq LIMIT ?`, p.after, p.limit + 1);
+  const selected = rows(ctx, `SELECT u.* FROM relay_owner_entries u WHERE u.seq>? AND u.principal=? ${pending ? "AND u.kind='user' AND NOT EXISTS(SELECT 1 FROM relay_owner_entries r WHERE r.reply_to=u.id AND r.principal=u.principal)" : ''} ORDER BY u.seq LIMIT ?`, p.after, RELAY_OWNER, p.limit + 1);
   return {messages: selected.slice(0, p.limit).map(row=>entry(row,ctx,env)), nextCursor: selected.length > p.limit ? String(selected[p.limit - 1].seq) : null};
 }
 function conversation(ctx, messageId,env) {
   if (!uuid(messageId)) fail(400, 'Invalid message ID');
-  const message = rows(ctx, "SELECT * FROM relay_owner_entries WHERE id=? AND kind='user'", messageId)[0];
+  const message = rows(ctx, "SELECT * FROM relay_owner_entries WHERE id=? AND kind='user' AND principal=?", messageId, RELAY_OWNER)[0];
   if (!message) fail(404, 'Original private message not found');
-  const reply = rows(ctx, "SELECT * FROM relay_owner_entries WHERE reply_to=? AND kind='reply'", messageId)[0];
-  const context = rows(ctx, 'SELECT * FROM relay_owner_entries WHERE seq<? ORDER BY seq DESC LIMIT 25', message.seq).reverse().map(row=>entry(row,ctx,env));
+  const reply = rows(ctx, "SELECT * FROM relay_owner_entries WHERE reply_to=? AND kind='reply' AND principal=?", messageId, RELAY_OWNER)[0];
+  const context = rows(ctx, 'SELECT * FROM relay_owner_entries WHERE seq<? AND principal=? ORDER BY seq DESC LIMIT 25', message.seq, RELAY_OWNER).reverse().map(row=>entry(row,ctx,env));
   return {message: entry(message,ctx,env), reply: reply ? entry(reply) : null, context};
 }
 function deliveryMessageIds(ids) {
@@ -134,12 +136,14 @@ function deliveryStatus(ctx, env, ids, now) {
     return {message_id: id, ...delivery, callbackAccepted: !!receipt || delivery.state === 'callback_accepted' || delivery.callbackAcceptedAt !== null, replySaved};
   });
 }
-function insertMessage(ctx, session, body, enqueue, now,env) {
+function insertMessage(ctx, session, body, enqueue, now,env, specification) {
   if (!uuid(body.id)) fail(400, 'Invalid message ID');
   const content = text(body.body, 4000);
   const previous = rows(ctx, 'SELECT * FROM relay_owner_entries WHERE id=?', body.id)[0];
   if (previous) {
-    if (previous.kind !== 'user' || previous.body !== content || previous.device_id !== session.device_id) fail(409, 'Private message ID conflict');
+    if (previous.kind !== 'user' || previous.principal !== RELAY_OWNER || previous.body !== content || previous.device_id !== session.device_id) fail(409, 'Private message ID conflict');
+    if (specification) relayOwnerJobSpecify(ctx, previous, specification, now);
+    else relayOwnerJobEnsure(ctx, previous);
     return {entry: entry(previous,ctx,env), newWrite: false};
   }
   const today = iso(now).slice(0, 10), key = 'messages:' + today;
@@ -148,7 +152,10 @@ function insertMessage(ctx, session, body, enqueue, now,env) {
   ctx.storage.sql.exec("DELETE FROM relay_owner_meta WHERE key LIKE 'messages:%' AND key<>?", key);
   ctx.storage.sql.exec('INSERT OR REPLACE INTO relay_owner_meta VALUES(?,?)', key, String(count + 1));
   ctx.storage.sql.exec("INSERT INTO relay_owner_entries(id,kind,body,created_at,principal,device_id,authentication_source) VALUES(?,'user',?,?,?,?,?)", body.id, content, iso(now), RELAY_OWNER, session.device_id, session.authentication_source);
-  const value = entry(rows(ctx, 'SELECT * FROM relay_owner_entries WHERE id=?', body.id)[0]);
+  const saved = rows(ctx, 'SELECT * FROM relay_owner_entries WHERE id=?', body.id)[0];
+  if (specification) relayOwnerJobSpecify(ctx, saved, specification, now);
+  else relayOwnerJobEnsure(ctx, saved);
+  const value = entry(saved);
   // This seam must enqueue synchronously in this very transaction. An event
   // failure rolls the message and rate accounting back rather than losing it.
   if (enqueue(ctx, value)?.then) throw Error('Owner message enqueue must be synchronous');
@@ -171,9 +178,14 @@ export async function relayOwnerStore(ctx, env, body, enqueueOwnerMessage = () =
   try {
     relayOwnerSchema(ctx);
     if (passwordOperation) {
-      return await relayOwnerPasswordStore(ctx, body, {requireSession, renew,
+      const response = await relayOwnerPasswordStore(ctx, body, {requireSession, renew,
         shortDevice: row => shortDevice(sessionAudit(ctx, row)), device: row => device(sessionAudit(ctx, row)), label,
         sessionMs: RELAY_OWNER_SESSION_MS, maxDevices: MAX_DEVICES});
+      // Advertise this service version only after the existing login succeeds.
+      // Password/session configuration and the credential implementation stay
+      // unchanged; older services do not need speculative job requests.
+      if (body.op === 'password_login' && response.ok) return json({...await response.json(), jobs_enabled: true}, response.status, Object.fromEntries(response.headers));
+      return response;
     }
     if (body?.op === 'pair_start') {
       fields(body, ['op', 'label', 'rate_hash'], ['op', 'label', 'rate_hash']);
@@ -196,9 +208,12 @@ export async function relayOwnerStore(ctx, env, body, enqueueOwnerMessage = () =
     const allowed = {
       pair_status: ['request_id'], session: [], messages_list: ['after', 'limit'], message: ['id', 'body'],
       conversation: ['message_id'], delivery_list: ['message_ids'], delivery_retry: ['message_id'], devices_list: [], device_revoke: ['device_id'],
+      jobs_list: ['after', 'limit'], job_read: ['job_id'], job_create: ['id', 'title', 'body', 'action_kind'], job_cancel: ['job_id'], job_retry: ['job_id', 'id', 'confirm_duplicate_risk'],
     };
     if (!body || !Object.hasOwn(allowed, body.op)) fail(400, 'Invalid owner operation');
-    fields(body, ['op', 'token_hash', ...allowed[body.op]], ['op', 'token_hash', ...(['pair_status', 'message', 'conversation', 'device_revoke','delivery_list','delivery_retry'].includes(body.op) ? allowed[body.op] : [])]);
+    const required = ['pair_status', 'message', 'conversation', 'device_revoke', 'delivery_list', 'delivery_retry', 'job_read', 'job_create', 'job_cancel', 'job_retry'].includes(body.op)
+      ? allowed[body.op].filter(key => key !== 'confirm_duplicate_risk') : [];
+    fields(body, ['op', 'token_hash', ...allowed[body.op]], ['op', 'token_hash', ...required]);
     if (!hex(body.token_hash)) fail(401, 'Owner device authentication required');
     return ctx.storage.transactionSync(() => {
       const now = Date.now();
@@ -212,18 +227,35 @@ export async function relayOwnerStore(ctx, env, body, enqueueOwnerMessage = () =
         if (!session || session.revoked_ms !== null) return json({status: 'revoked'});
         if (session.expires_ms <= now) return json({status: 'expired'});
         const active = requireSession(ctx, body.token_hash, now);
-        return json({status: 'approved', device: shortDevice(renew(ctx, active, now))});
+        return json({status: 'approved', device: shortDevice(renew(ctx, active, now)), jobs_enabled: true});
       }
       const session = requireSession(ctx, body.token_hash, now);
       let result;
-      if (body.op === 'session') result = {status: 'approved', device: shortDevice({...session, expires_ms: now + RELAY_OWNER_SESSION_MS})};
+      if (body.op === 'session') result = {status: 'approved', device: shortDevice({...session, expires_ms: now + RELAY_OWNER_SESSION_MS}), jobs_enabled: true};
       if (body.op === 'messages_list') result = listMessages(ctx, body.after, body.limit,false,env);
       if (body.op === 'conversation') result = conversation(ctx, body.message_id,env);
       if (body.op === 'message') result = insertMessage(ctx, session, body, enqueueOwnerMessage, now,env);
+      if (body.op === 'jobs_list') result = relayOwnerJobsList(ctx, env, body.after, body.limit, now);
+      if (body.op === 'job_read') result = relayOwnerJobRead(ctx, env, body.job_id, now);
+      if (body.op === 'job_create') {
+        const specification = relayOwnerJobSpecification(body);
+        result = insertMessage(ctx, session, body, enqueueOwnerMessage, now, env, specification);
+        result.job = relayOwnerJobRead(ctx, env, body.id, now).job;
+      }
+      if (body.op === 'job_cancel') result = relayOwnerJobCancel(ctx, env, body.job_id, session, now);
+      if (body.op === 'job_retry') {
+        const prepared = relayOwnerJobRetryPrepare(ctx, env, body, session, now);
+        if (prepared.existing) result = {entry: entry(rows(ctx, 'SELECT * FROM relay_owner_entries WHERE id=?', body.id)[0], ctx, env), newWrite: false};
+        else {
+          result = insertMessage(ctx, session, {id: body.id, body: prepared.request.body}, enqueueOwnerMessage, now, env);
+          relayOwnerJobRetryLink(ctx, prepared.parent, rows(ctx, 'SELECT * FROM relay_owner_entries WHERE id=?', body.id)[0], session, body.confirm_duplicate_risk, now);
+        }
+        result.job = relayOwnerJobRead(ctx, env, body.id, now).job;
+      }
       if(body.op==='delivery_list'){
         if(!Array.isArray(body.message_ids)||body.message_ids.length>50||body.message_ids.some(id=>!uuid(id))||new Set(body.message_ids).size!==body.message_ids.length)fail(400,'Invalid delivery message IDs');
         result={deliveries:body.message_ids.map(id=>{
-          if(!rows(ctx,"SELECT id FROM relay_owner_entries WHERE id=? AND kind='user'",id).length)fail(404,'Original private message not found');
+          if(!rows(ctx,"SELECT id FROM relay_owner_entries WHERE id=? AND kind='user' AND principal=?",id,RELAY_OWNER).length)fail(404,'Original private message not found');
           const replied=!!rows(ctx,"SELECT id FROM relay_owner_entries WHERE kind='reply' AND reply_to=?",id).length;
           return {message_id:id,...relayOwnerDelivery(ctx,env,id,replied,now)};
         })};
@@ -267,11 +299,15 @@ export async function relayOwnerRpc(ctx, env, principal, name, args, enqueueOwne
   } else if (controls) {
     fields(args, name === 'relay_owner_device_revoke' ? ['device_id'] : [], name === 'relay_owner_device_revoke' ? ['device_id'] : []);
   } else {
-    const allowed = {relay_owner_list_pending: ['inbox_id', 'cursor', 'limit'], relay_owner_read_conversation: ['inbox_id', 'message_id'], relay_owner_delivery_status: ['inbox_id', 'message_ids'], relay_owner_subscription_status: ['inbox_id'], relay_owner_reply: ['inbox_id', 'message_id', 'body']};
+    const allowed = {relay_owner_list_pending: ['inbox_id', 'cursor', 'limit'], relay_owner_read_conversation: ['inbox_id', 'message_id'], relay_owner_delivery_status: ['inbox_id', 'message_ids'], relay_owner_subscription_status: ['inbox_id'], relay_owner_reply: ['inbox_id', 'message_id', 'body'],
+      relay_owner_jobs_list: ['inbox_id', 'cursor', 'limit'], relay_owner_job_read: ['inbox_id', 'job_id'], relay_owner_job_claim: ['inbox_id', 'job_id', 'run_id', 'event_id'], relay_owner_job_update: ['inbox_id', 'job_id', 'event_id', 'run_id', 'stage', 'summary', 'outcome'],
+      relay_owner_job_result_correct: ['inbox_id', 'job_id', 'event_id', 'expected_reply_id', 'expected_version', 'body', 'correction_summary']};
     if (!Object.hasOwn(allowed, name)) fail(400, 'Unknown owner tool');
-    fields(args, allowed[name], name === 'relay_owner_list_pending' ? ['inbox_id'] : allowed[name]);
+    const required = ['relay_owner_list_pending', 'relay_owner_jobs_list'].includes(name) ? ['inbox_id'] : name === 'relay_owner_job_update' ? ['inbox_id', 'job_id', 'event_id', 'stage'] : allowed[name];
+    fields(args, allowed[name], required);
     if (args.inbox_id !== RELAY_OWNER_INBOX) fail(403, 'Forbidden private inbox');
-    if (name === 'relay_owner_list_pending') pageArgs(args.cursor, args.limit);
+    if (name.startsWith('relay_owner_job')) relayOwnerJobValidateRpc(name, args);
+    else if (name === 'relay_owner_list_pending') pageArgs(args.cursor, args.limit);
     else if (name === 'relay_owner_delivery_status') deliveryMessageIds(args.message_ids);
     else if (name !== 'relay_owner_subscription_status' && !uuid(args.message_id)) fail(400, 'Invalid message ID');
     if (name === 'relay_owner_reply') text(args.body, 6000);
@@ -307,14 +343,18 @@ export async function relayOwnerRpc(ctx, env, principal, name, args, enqueueOwne
     if (name === 'relay_owner_list_pending') return {inbox_id: RELAY_OWNER_INBOX, ...listMessages(ctx, args.cursor, args.limit, true), visibility: 'private'};
     if (name === 'relay_owner_delivery_status') return {inbox_id: RELAY_OWNER_INBOX, deliveries: deliveryStatus(ctx, env, args.message_ids, now), visibility: 'private'};
     if (name === 'relay_owner_subscription_status') return {inbox_id: RELAY_OWNER_INBOX, ...relayOwnerSubscriptionStatus(ctx, env, now), visibility: 'private'};
+    if (name.startsWith('relay_owner_job')) return {inbox_id: RELAY_OWNER_INBOX, ...relayOwnerJobRpc(ctx, env, principal, name, args, now), visibility: 'private'};
     const data = conversation(ctx, args.message_id);
     if (name === 'relay_owner_read_conversation') return {inbox_id: RELAY_OWNER_INBOX, ...data, visibility: 'private'};
     const content = text(args.body, 6000);
     if (data.reply) {
       if (data.reply.body !== content) fail(409, 'Private message already has a different reply');
+      relayOwnerJobReplySaved(ctx, rows(ctx, 'SELECT * FROM relay_owner_entries WHERE id=?', data.reply.id)[0]);
       return {inbox_id: RELAY_OWNER_INBOX, entry: data.reply, newWrite: false, visibility: 'private'};
     }
+    relayOwnerJobReplyCheck(ctx, args.message_id, principal, now);
     ctx.storage.sql.exec("INSERT INTO relay_owner_entries(id,kind,reply_to,body,created_at,principal,device_id,authentication_source) VALUES(?,'reply',?,?,?,?,?,?)", replyId, args.message_id, content, iso(now), RELAY_OWNER, data.message.device_id, 'owner-oauth-mcp');
+    relayOwnerJobReplySaved(ctx, rows(ctx, 'SELECT * FROM relay_owner_entries WHERE id=?', replyId)[0]);
     return {inbox_id: RELAY_OWNER_INBOX, entry: entry(rows(ctx, 'SELECT * FROM relay_owner_entries WHERE id=?', replyId)[0]), newWrite: true, visibility: 'private'};
   });
 }
@@ -335,11 +375,12 @@ export async function relayOwnerPublic(request, env) {
   if (request.method === 'OPTIONS') return wrap(new Response(null, {status: 204, headers: {'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Access-Control-Allow-Headers': 'Authorization, Content-Type', 'Access-Control-Max-Age': '600', 'Cache-Control': 'no-store'}}));
   try {
     const routes = {'/pair/start': ['POST', 'pair_start'], '/pair/status': ['POST', 'pair_status'], '/session': ['GET', 'session'], '/messages': [request.method === 'POST' ? 'POST' : 'GET', request.method === 'POST' ? 'message' : 'messages_list'], '/conversation': ['GET', 'conversation'], '/devices': ['GET', 'devices_list'], '/devices/revoke': ['POST', 'device_revoke'], '/delivery': ['POST','delivery_list'], '/delivery/retry': ['POST','delivery_retry'],
-      '/credentials': [request.method === 'POST' ? 'POST' : 'GET', request.method === 'POST' ? 'credentials_save' : 'credentials_status'], '/credentials/prepare': ['POST', 'credentials_prepare'], '/login': ['POST', 'password_login']};
+      '/credentials': [request.method === 'POST' ? 'POST' : 'GET', request.method === 'POST' ? 'credentials_save' : 'credentials_status'], '/credentials/prepare': ['POST', 'credentials_prepare'], '/login': ['POST', 'password_login'],
+      '/jobs': [request.method === 'POST' ? 'POST' : 'GET', request.method === 'POST' ? 'job_create' : 'jobs_list'], '/jobs/detail': ['GET', 'job_read'], '/jobs/cancel': ['POST', 'job_cancel'], '/jobs/retry': ['POST', 'job_retry']};
     const suffix = path.slice('/relay/owner'.length), route = Object.hasOwn(routes, suffix) ? routes[suffix] : null;
     if (!route) return wrap(json({error: 'Not found'}, 404));
     if (request.method !== route[0]) return wrap(json({error: 'Method not allowed'}, 405, {Allow: route[0] + ', OPTIONS'}));
-    const queryFields = route[1] === 'messages_list' ? ['after', 'limit'] : route[1] === 'conversation' ? ['message_id'] : [];
+    const queryFields = ['messages_list', 'jobs_list'].includes(route[1]) ? ['after', 'limit'] : route[1] === 'conversation' ? ['message_id'] : route[1] === 'job_read' ? ['job_id'] : [];
     if ([...url.searchParams.keys()].some(k => !queryFields.includes(k) || url.searchParams.getAll(k).length !== 1)) fail(400, 'Invalid owner query');
     let body = {};
     if (request.method === 'POST') {
@@ -348,8 +389,9 @@ export async function relayOwnerPublic(request, env) {
       try { body = JSON.parse(await boundedText(request, 16000)); } catch { fail(400, 'Invalid owner JSON'); }
     }
     const inputFields = {pair_start: ['label'], pair_status: ['request_id'], message: ['id', 'body'], delivery_list:['message_ids'], delivery_retry:['message_id'], device_revoke: ['device_id'],
-      credentials_prepare: ['purpose'], credentials_save: ['username', 'password', 'password_confirmation', 'current_password', 'consent_token', 'confirm', 'access_days', 'preserve_existing_sessions'], password_login: ['username', 'password', 'label', 'replace_device_id', 'confirm_replacement']};
-    fields(body, inputFields[route[1]] || [], (inputFields[route[1]] || []).filter(k => !['current_password', 'replace_device_id', 'confirm_replacement'].includes(k)));
+      credentials_prepare: ['purpose'], credentials_save: ['username', 'password', 'password_confirmation', 'current_password', 'consent_token', 'confirm', 'access_days', 'preserve_existing_sessions'], password_login: ['username', 'password', 'label', 'replace_device_id', 'confirm_replacement'],
+      job_create: ['id', 'title', 'body', 'action_kind'], job_cancel: ['job_id'], job_retry: ['job_id', 'id', 'confirm_duplicate_risk']};
+    fields(body, inputFields[route[1]] || [], (inputFields[route[1]] || []).filter(k => !['current_password', 'replace_device_id', 'confirm_replacement', 'confirm_duplicate_risk'].includes(k)));
     const input = {op: route[1], ...body};
     if (['pair_start', 'password_login'].includes(route[1])) input.rate_hash = await hash('owner-' + route[1] + '-ip:' + (request.headers.get('CF-Connecting-IP') || 'unknown'));
     else {
@@ -357,7 +399,7 @@ export async function relayOwnerPublic(request, env) {
       if (!token) fail(401, 'Owner device bearer required');
       input.token_hash = await hash(token);
     }
-    if (route[1] === 'messages_list') {
+    if (['messages_list', 'jobs_list'].includes(route[1])) {
       if (url.searchParams.has('after')) input.after = url.searchParams.get('after');
       if (url.searchParams.has('limit')) {
         const limit = url.searchParams.get('limit');
@@ -366,6 +408,7 @@ export async function relayOwnerPublic(request, env) {
       }
     }
     if (route[1] === 'conversation') input.message_id = url.searchParams.get('message_id');
+    if (route[1] === 'job_read') input.job_id = url.searchParams.get('job_id');
     const response = await env.HUBS.get(env.HUBS.idFromName(RELAY_OAUTH_OBJECT)).fetch(new Request('https://internal/internal/relay/owner', {method: 'POST', body: JSON.stringify(input)}));
     return wrap(response);
   } catch (error) {

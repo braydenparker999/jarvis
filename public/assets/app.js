@@ -25,6 +25,7 @@ catch (e) { storageError = e.message || 'Device storage is unavailable.'; }
 let route = getRoute(), chatUI;
 const ownerController = createRelayOwnerController({onModeChange:()=>{if(route==='chat')drawShell();}});
 const ownerUI = createRelayOwnerUI({controller:ownerController});
+ownerController.subscribe(updateConversationIdentity);
 appViewport();
 addEventListener('pagehide',()=>chatUI?.savePosition());
 const paths = { home: '/', chat: '/jarvis/', board: '/daily-board/', favorites: '/favorites/', settings: '/settings/', notes: '/notes/', tools: '/tools/', server: '/server/' };
@@ -72,6 +73,8 @@ function drawShell() {
   ownerUI.unmount();
   chatUI?.savePosition(); chatUI=null;
   for(const cls of ['module-page','conversation-page','relay-page'])document.body.classList.toggle(cls,route==='chat');
+  if(route==='chat'&&!document.querySelector('link[href^="/assets/conversation.css"]')){const css=document.createElement('link');css.rel='stylesheet';css.href='/assets/conversation.css?v=20261008';document.head.append(css);}
+  document.body.dataset.conversationMode=route==='chat'&&ownerUI.mode!=='public'?'owner':'public';
   const hub = ['home','favorites','settings'].includes(route);
   const launcher = ['home','favorites'].includes(route);
   clearTimeout(clockTimer);
@@ -80,7 +83,7 @@ function drawShell() {
   document.title = `${labels[route]} · Jarvis`;
   const header = launcher
     ? `<header class="topbar launcher-topbar"><a class="brand" href="/" data-route="home">Jarvis</a><nav class="toolbar-actions" aria-label="Launcher tools"><button class="icon-button" id="search-button" aria-label="Search apps" aria-expanded="${route==='home'&&searchOpen}" ${route==='home'?'aria-controls="launcher-search"':''}>${icon('search')}</button><a class="icon-button" href="/favorites/" data-route="favorites" aria-label="Favorites" ${route==='favorites'?'aria-current="page"':''}>${icon('favorites')}</a><button class="icon-button" id="connection-button" aria-label="Connection details">${icon('more')}<span class="sr-only">${connection()}</span></button></nav></header>`
-    : `<header class="topbar">${hub?`<button class="icon-button" id="menu-button" aria-label="Open navigation">${icon('menu')}</button>`:`<a class="icon-button" href="/" data-route="home" aria-label="Back to Home">${icon('back')}</a>`}<span class="brand" ${route==='chat'?'role="heading" aria-level="1"':''}>${route==='chat'?'Relay':'Jarvis'}</span><div class="toolbar-actions">${route==='chat'?`<button class="icon-button" id="chat-search-toggle" aria-label="Search messages">${uiIcon('search')}</button><button class="icon-button" id="chat-menu" aria-label="Conversation menu">${uiIcon('more')}</button>`:''}${hub?`<button class="icon-button" id="search-button" aria-label="Search apps">${icon('search')}</button>`:''}<button class="icon-button" id="connection-button" aria-label="Connection details">${icon('more')}<span class="sr-only">${connection()}</span></button></div></header>`;
+    : `<header class="topbar">${hub?`<button class="icon-button" id="menu-button" aria-label="Open navigation">${icon('menu')}</button>`:`<a class="icon-button" href="/" data-route="home" aria-label="Back to Home">${icon('back')}</a>`}${route==='chat'?`<div class="conversation-identity"><span class="brand" role="heading" aria-level="1">Relay</span><span class="conversation-visibility" id="conversation-visibility"></span></div>`:`<span class="brand">Jarvis</span>`}<div class="toolbar-actions">${route==='chat'?`<button class="icon-button" id="chat-search-toggle" aria-label="Search messages" hidden>${uiIcon('search')}</button><button class="icon-button" id="chat-menu" aria-label="Conversation menu">${uiIcon('more')}</button>`:''}${hub?`<button class="icon-button" id="search-button" aria-label="Search apps">${icon('search')}</button>`:''}<button class="icon-button" id="connection-button" aria-label="Connection details">${icon('more')}<span class="sr-only">${connection()}</span></button></div></header>`;
   $('app').innerHTML = `<div class="workspace${launcher?' launcher':''}">${header}<main id="content" tabindex="-1"></main>${hub&&!launcher?`<nav class="bottom-nav" aria-label="Hub navigation">${['home','favorites','settings'].map(key=>`<a href="${paths[key]}" data-route="${key}" ${key===route?'aria-current="page"':''}>${icon(key)}<span>${labels[key]}</span></a>`).join('')}</nav>`:''}</div>`;
   $('connection-button').onclick = showConnection;
   if ($('menu-button')) $('menu-button').onclick = showNavigation;
@@ -93,6 +96,7 @@ function drawShell() {
   };
   drawPage();
   if(route==='chat') {
+    updateConversationIdentity();
     $('connection-button').hidden=true;
     $('chat-search-toggle').onclick=()=>{
       if(ownerUI.mode!=='public'){ownerUI.toggleSearch();return;}
@@ -101,16 +105,26 @@ function drawShell() {
     $('chat-menu').onclick=()=>{
       const privateView=ownerUI.mode!=='public';
       const ownerActions=[
+        {label:'Public chat',icon:'chat',action:()=>ownerController.showPublic(),section:'Conversation'},
         {label:ownerController.hasCredential?'Owner chat':ownerController.status==='pending'?'Pairing status':'Connect this phone',icon:'chat',action:()=>ownerController.showOwner()},
-        ...(privateView?[{label:'Public chat',icon:'chat',action:()=>ownerController.showPublic()}]:[]),
-        ...(ownerController.hasCredential?[{label:'Devices',icon:'info',action:()=>ownerController.showDevices()},{label:'Disconnect this phone',icon:'close',action:()=>ownerController.disconnect()}]:[])
+        {label:'Muse · public',icon:'chat',href:'/muse/',action:()=>{}},
       ];
       const conversationActions=privateView
-        ? [{label:'Latest private messages',icon:'chat',action:()=>ownerUI.latest()},{label:'Refresh private inbox',icon:'refresh',action:()=>ownerUI.refresh()}]
-        : [{label:'Bookmarks',icon:'bookmark',action:()=>chatUI?.bookmarks()},{label:'Latest messages',icon:'chat',action:()=>chatUI?.latest()},{label:'Refresh inbox',icon:'refresh',action:sync},{label:'Connection details',icon:'info',action:showConnection}];
-      sheet(privateView?'Owner Relay':'Public Relay',[...ownerActions,...conversationActions]);
+        ? [...(ownerController.status==='approved'?[{label:'Search private messages',icon:'search',action:()=>ownerUI.toggleSearch(),section:'This conversation'},...(ownerController.snapshot().jobsEnabled?[{label:'Requests',icon:'clock',action:()=>ownerUI.requests()}]:[]),{label:'Latest private messages',icon:'chat',action:()=>ownerUI.latest()}]:[]),{label:'Refresh private inbox',icon:'refresh',action:()=>ownerUI.refresh(),disabled:!ownerController.hasCredential&&ownerController.status!=='pending',...(ownerController.status==='approved'?{}:{section:'This conversation'})},{label:'Connection details',icon:'info',action:()=>ownerUI.connection()}]
+        : [{label:'Search messages',icon:'search',action:()=>$('chat-search-toggle').click(),section:'This conversation'},{label:'Bookmarks',icon:'bookmark',action:()=>chatUI?.bookmarks()},{label:'Latest messages',icon:'chat',action:()=>chatUI?.latest()},{label:'Refresh inbox',icon:'refresh',action:sync},{label:'Connection details',icon:'info',action:showConnection}];
+      const accountActions=ownerController.hasCredential?[{label:'Account sign-in',icon:'info',action:()=>ownerController.showAccount(),section:'Owner access'},{label:'Devices',icon:'info',action:()=>ownerController.showDevices()},{label:'Disconnect this phone',icon:'close',action:()=>ownerController.disconnect()}]:[];
+      const entries=[...ownerActions,...conversationActions,...accountActions];
+      const dialog=sheet(privateView?'Private owner Relay':'Public Relay',entries);dialog.classList.add('conversation-sheet');
+      const context=document.createElement('p');context.className='sheet-context';context.textContent=privateView?'Your owner conversation stays private. Public Relay and Muse are separate inboxes.':'Anyone with this website address can read and post to this shared inbox.';dialog.querySelector('.dialog-heading').after(context);
+      const actions=[...dialog.querySelectorAll('.sheet-action')];
+      entries.forEach((entry,i)=>{if(entry.section){const label=document.createElement('p');label.className='sheet-section';label.textContent=entry.section;actions[i].before(label);}if((entry.label==='Public chat'&&!privateView)||(entry.label==='Owner chat'&&ownerUI.mode==='owner'))actions[i].classList.add('is-current');if(entry.href){const link=document.createElement('a');link.href=entry.href;link.className=actions[i].className;link.innerHTML=actions[i].innerHTML;actions[i].replaceWith(link);}});
     };
   }
+}
+function updateConversationIdentity(){
+  const node=$('conversation-visibility');if(!node||route!=='chat')return;
+  const privateView=ownerUI.mode!=='public';document.body.dataset.conversationMode=privateView?'owner':'public';
+  node.textContent=privateView?ownerController.status==='approved'?'Private owner · this phone':ownerController.status==='checking'?'Private owner · verifying access':ownerController.status==='expired'?'Private owner · session expired':ownerController.status==='revoked'?'Private owner · access revoked':'Private owner · sign-in required':'Public · shared conversation';
 }
 function drawPage() {
   if (route === 'home' || route === 'favorites') { drawHome(); return; }
@@ -163,18 +177,27 @@ function drawSettings() {
   $('settings-favorites').onclick=editFavorites;
 }
 function drawChat() {
-  $('content').innerHTML = `<div class="conversation-search" id="chat-search-bar" hidden><label class="sr-only" for="conversation-search">Search messages</label><input id="conversation-search" type="search" placeholder="Search this conversation" autocomplete="off"></div><section class="chat-panel"><div class="messages" id="messages" aria-label="Conversation"></div><form class="composer" id="message-form"><label class="sr-only" for="message-text">Message Relay</label><textarea id="message-text" rows="1" maxlength="4000" placeholder="Message Relay…" required>${escape(state.composer || '')}</textarea><div class="composer-bottom"><span id="relay-status" role="status">${API_ORIGIN?'Replies arrive after an inbox check':'Draft mode · saved on this device'}</span><button class="primary send-icon" type="submit" id="send-message" aria-label="Send message">${uiIcon('send')}</button></div></form></section>`;
+  $('content').innerHTML = `<div class="conversation-search" id="chat-search-bar" hidden><label class="sr-only" for="conversation-search">Search messages</label><input id="conversation-search" type="search" placeholder="Search this conversation" autocomplete="off"><button class="icon-button" id="chat-search-close" type="button" aria-label="Close search">${uiIcon('close')}</button></div><section class="chat-panel"><div class="messages" id="messages" aria-label="Public Relay conversation"></div><div class="conversation-notice" id="relay-sync-notice" hidden><p id="relay-sync-error" role="status"></p><button class="text-button" type="button" id="relay-retry">Retry sync</button></div><form class="composer" id="message-form"><div class="composer-input"><label class="sr-only" for="message-text">Message Relay publicly</label><textarea id="message-text" rows="1" maxlength="4000" placeholder="Message Relay publicly…" required>${escape(state.composer || '')}</textarea><button class="primary send-icon" type="submit" id="send-message" aria-label="Send message">${uiIcon('send')}</button></div><div class="composer-bottom"><span id="relay-status" role="status">${API_ORIGIN?'Opening public inbox…':'Draft mode · saved on this device'}</span></div></form></section>`;
   const input=$('message-text');
   const saveDraft=value=>{try{commit({...state,composer:value});}catch{notify('Could not save your draft. Copy your text before leaving.');}};
   input.oninput=()=>{saveDraft(input.value);autosize(input);};
   input.onkeydown=e=>{if(e.key==='Enter' && (e.ctrlKey||e.metaKey) && !e.isComposing){e.preventDefault();$('message-form').requestSubmit();}};
   $('message-form').onsubmit=e=>{e.preventDefault();submitMessage();};
-  chatUI=conversation({panel:$('messages'),composer:input,channel:'relay',author:'Jarvis',notify,draftChanged:saveDraft});
+  chatUI=conversation({panel:$('messages'),composer:input,channel:'relay',author:'Jarvis',notify,draftChanged:saveDraft,emptyTitle:'A little room to think.',emptyDescription:'Ask Jarvis a question or leave a thought. Replies arrive after the next inbox check.',scope:'Public conversation'});
   chatUI.update(channelMessages(state.messages));
   $('conversation-search').oninput=e=>chatUI.search(e.target.value);
+  $('chat-search-close').onclick=()=>$('chat-search-toggle').click();
+  $('relay-retry').onclick=sync;
   const transferred=sessionStorage.getItem('jarvis.relay.transfer.v1');
   if(transferred){input.value=(input.value?input.value+'\n\n':'')+transferred;input.value=input.value.slice(0,4000);saveDraft(input.value);sessionStorage.removeItem('jarvis.relay.transfer.v1');}
   autosize(input);
+  renderPublicStatus();
+}
+function renderPublicStatus(){
+  if(!chatUI||!$('relay-status'))return;
+  $('relay-status').textContent=syncError?state.outbox.length?'Send unconfirmed · queued safely on this device':'Inbox unavailable · draft saved':busy?state.outbox.length?'Sending to public inbox…':'Refreshing public inbox…':state.outbox.length?'Queued on this device':state.publisher?.ok===false?'Messages saved · replies delayed':'Public inbox · replies arrive after a check';
+  $('relay-sync-notice').hidden=!syncError;$('relay-sync-error').textContent=syncError?'Could not confirm the latest sync. Your draft and queued messages are saved.':'';$('relay-retry').disabled=busy;
+  chatUI.setDelivery?.({busy,error:!!syncError});
 }
 function messageMarkup(m) {
   return `<article data-message-id="${escape(m.id)}" class="message-row ${m.role==='user'?'outgoing':'incoming'}"><span class="message-author">${m.role==='user'?'YOU':m.kind==='reply'?'JARVIS':'JARVIS · AUTOMATIC RECEIPT'}</span><p class="bubble">${escape(m.body)}</p><span class="message-time">${time(m.createdAt)} · ${m.saved?'Cloud saved':'Not sent · on this device'}</span></article>`;
@@ -204,6 +227,7 @@ function showConnection() {
 async function sync() {
   if (!API_ORIGIN || busy || storageError) return;
   busy = true; syncError = '';
+  renderPublicStatus();
   $('connection-button').lastElementChild.textContent = connection();
   try {
     if(state.legacyPending){
@@ -212,6 +236,9 @@ async function sync() {
       const remote=await request('/shared/migrate',{}, {Authorization:'Bearer '+old.key});
       commit(mergeState({...state,legacyPending:false},remote));
     }
+    // A lost POST response may already have saved the UUID. Confirm first so a
+    // retry sends only entries still missing from the complete public history.
+    if(state.outbox.length)commit(mergeState(state,await request('/shared/state')));
     for (const item of [...state.outbox]) {
       const remote = await request('/shared/messages',{id:item.id,body:item.body});
       commit(mergeState({...state,outbox:state.outbox.filter(x=>x.id!==item.id)},remote));
@@ -222,7 +249,7 @@ async function sync() {
     busy = false;
     if(route==='chat' && chatUI){
       chatUI.update(channelMessages(state.messages));
-      $('relay-status').textContent=syncError?'Offline · draft and queued messages saved':state.outbox.length?'Sending…':'Replies arrive after an inbox check';
+      renderPublicStatus();
     } else if(route==='board') drawShell();
     if ($('connection-button')) $('connection-button').lastElementChild.textContent=connection();
     if ($('connection-dialog').open) { $('connection-state').textContent = connection(); $('sync-now').disabled=false; }

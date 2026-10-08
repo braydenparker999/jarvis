@@ -1,16 +1,19 @@
 import { createRelayOwnerApi, OwnerApiError } from './relay-owner-api.js';
-import { icon, autosize, copyText } from './ui.js';
+import { icon, autosize, copyText, richText } from './ui.js';
 
 // Private history, drafts and failed sends exist only in this closure. In particular,
 // never pass them to conversation(), public submitMessage(), transfer or shared sync.
 export function createRelayOwnerController({ api = createRelayOwnerApi(), uuid = () => crypto.randomUUID(), onModeChange = () => {} } = {}) {
   const listeners = new Set();
-  let generation = 0, reading = null, failedSend = null, cursor = '0', accountConsent = null;
-  let state = { mode: api.hasCredential ? 'owner' : 'public', status: api.hasCredential ? 'unknown' : 'none',
-    messages: [], draft: '', devices: [], device: null, pairing: null, error: '', warning: '', busy: false, sending: false, query: '', authenticating: false, account: null, accountReady: false, accountNotice: '', loginDevices: [] };
+  let generation = 0, reading = null, failedSend = null, cursor = '0', accountConsent = null, detailEpoch = 0;
+  const retryAttempts=new Map();
+  let state = { mode: api.selectedMode==='owner'||(api.selectedMode===undefined&&api.hasCredential)?'owner':'public', status: api.hasCredential ? 'unknown' : 'none',
+    messages: [], draft: '', devices: [], device: null, pairing: null, error: '', warning: '', busy: false, sending: false, query: '', authenticating: false, account: null, accountReady: false, accountNotice: '', loginDevices: [],
+    jobsEnabled:false,jobs:[],jobsError:'',jobMode:false,jobTitle:'',jobKind:'consequential',requestsOnly:false,sendUnconfirmed:false,sendNotice:'',jobDetailId:null,jobDetail:null,jobDetailBusy:false,jobDetailError:'',jobBusy:false };
   const emit = () => { for (const listener of listeners) listener(); };
   const mode = next => { if (next !== state.mode) { state.mode = next; onModeChange(next); } emit(); };
-  function clearPrivate() { state.loginDevices = []; accountConsent = null; state.account = null; state.accountReady = false; state.accountNotice = ''; state.messages = []; state.draft = ''; state.devices = []; state.device = null; failedSend = null; cursor = '0'; }
+  function clearPrivate() { state.loginDevices = []; accountConsent = null; state.account = null; state.accountReady = false; state.accountNotice = ''; state.messages = []; state.draft = ''; state.devices = []; state.device = null; failedSend = null; cursor = '0';
+    ++detailEpoch;retryAttempts.clear();state.jobsEnabled=false;state.jobs=[];state.jobsError='';state.jobMode=false;state.jobTitle='';state.jobKind='consequential';state.requestsOnly=false;state.sendUnconfirmed=false;state.sendNotice='';state.jobDetailId=null;state.jobDetail=null;state.jobDetailBusy=false;state.jobDetailError='';state.jobBusy=false; }
   function failure(error) {
     const safe = error instanceof OwnerApiError ? error : new OwnerApiError('network');
     state.error = safe.message;
@@ -60,6 +63,22 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), uuid =
       }
     }
   }
+  async function readJobs(epoch){
+    if(!state.jobsEnabled||!api.jobs)return;
+    // Job creation positions are immutable; progress is mutable. Start at zero
+    // on each refresh and consume every bounded page before replacing evidence.
+    let after='0';const seen=new Set([after]),jobs=new Map();
+    try{
+      do{
+        const data=await api.jobs(after);if(epoch!==generation)return;
+        for(const job of data.jobs)jobs.set(job.id,job);
+        if(data.nextCursor!==null){const next=String(data.nextCursor);if(seen.has(next)||Number(next)<=Number(after))throw new OwnerApiError('invalid');seen.add(next);after=next;}else after=null;
+      }while(after!==null);
+      state.jobs=[...jobs.values()].sort((a,b)=>a.sequence-b.sequence);state.jobsError='';
+      if(state.jobDetailId)await controller.inspectJob(state.jobDetailId,{refresh:true});
+    }catch(error){if(epoch!==generation)return;const safe=error instanceof OwnerApiError?error:new OwnerApiError('network');if(['expired','revoked','unauthorized'].includes(safe.kind))failure(safe);else state.jobsError=safe.message;}
+  }
+  function mergeJob(job){const jobs=new Map(state.jobs.map(j=>[j.id,j]));jobs.set(job.id,job);state.jobs=[...jobs.values()].sort((a,b)=>a.sequence-b.sequence);}
   const controller = {
     get mode() { return state.mode; },
     get hasCredential() { return api.hasCredential; },
@@ -67,8 +86,14 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), uuid =
     snapshot() { return structuredClone(state); },
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     setDraft(value) { state.draft = value.slice(0, 4000); },
-    setQuery(value) { state.query = value.trim().toLowerCase(); emit(); },
+    setQuery(value) { state.query = value.trim().toLowerCase();state.requestsOnly=false; emit(); },
+    setJobMode(value){if(!state.jobsEnabled||state.sending)return;state.jobMode=value===true;state.sendUnconfirmed=false;emit();},
+    setJobTitle(value){state.jobTitle=value.slice(0,120);},
+    setJobKind(value){if(['read_only','draft','consequential'].includes(value)){state.jobKind=value;emit();}},
+    toggleRequests(){state.requestsOnly=!state.requestsOnly;state.query='';emit();},
+    closeJobDetail(){++detailEpoch;state.jobDetailId=null;state.jobDetail=null;state.jobDetailBusy=false;state.jobDetailError='';emit();},
     connect() {
+      api.selectMode?.('owner');
       ++generation; reading = null; state.busy = false; state.sending = false; state.authenticating = false; state.loginDevices = []; accountConsent = null; state.accountReady = false; api.cancelAuthentication?.();
       state.error = ''; state.pairing = null; state.status = 'none'; api.cancelPairing(); mode('pairing');
     },
@@ -77,8 +102,8 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), uuid =
       ++generation; reading = null; accountConsent = null; state.accountReady = false;
       state.authenticating = false; state.loginDevices = []; state.busy = false; api.cancelAuthentication?.(); emit();
     },
-    showPublic() { controller.cancelSensitive(); mode('public'); },
-    showOwner() { controller.cancelSensitive(); mode(api.hasCredential ? 'owner' : 'pairing'); },
+    showPublic() { api.selectMode?.('public');controller.closeJobDetail();controller.cancelSensitive(); mode('public'); },
+    showOwner() { api.selectMode?.('owner');controller.closeJobDetail();controller.cancelSensitive(); mode(api.hasCredential ? 'owner' : 'pairing'); },
     async login(username, password, label, remember = false, replacement = {}) {
       if (state.busy || state.sending) return;
       if (replacement.deviceId !== undefined && (replacement.confirmed !== true || !state.loginDevices.some(d => d.id === replacement.deviceId))) { state.error = 'Choose an active device session and confirm its replacement.'; emit(); return; }
@@ -87,8 +112,8 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), uuid =
       try {
         const data = await api.login(username, password, label.trim().slice(0, 80) || 'This browser', { remember: remember === true, ...(replacement.deviceId === undefined ? {} : { replaceDeviceId: replacement.deviceId, confirmReplacement: true }) });
         if (epoch !== generation) return;
-        clearPrivate(); state.device = data.device; state.status = 'approved'; state.warning = api.storageWarning;
-        state.authenticating = false; mode('owner'); await readMessages(epoch);
+        clearPrivate(); state.device = data.device; state.status = 'approved'; state.warning = api.storageWarning;state.jobsEnabled=data.jobs_enabled===true;
+        state.authenticating = false; mode('owner'); await readMessages(epoch);await readJobs(epoch);
       } catch (error) { if (epoch === generation) { if (error instanceof OwnerApiError && error.kind === 'device_limit') state.loginDevices = error.devices;
           if (error instanceof OwnerApiError && error.kind === 'device_unavailable') state.loginDevices = []; failure(error); } }
       finally { if (epoch === generation) { state.busy = false; state.authenticating = false; emit(); } }
@@ -96,6 +121,7 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), uuid =
     async showAccount() {
       if (state.busy || state.sending) return;
       if (!api.hasCredential) { controller.connect(); return; }
+      controller.closeJobDetail();
       const epoch = ++generation;
       accountConsent = null; state.account = null; state.accountReady = false; state.accountNotice = ''; state.error = '';
       state.busy = true; mode('account');
@@ -146,9 +172,10 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), uuid =
         if (epoch !== generation) return;
         state.status = data.status;
         if (data.status === 'approved') {
-          state.device = data.device; state.pairing = null; state.warning = api.storageWarning;
+          state.device = data.device; state.pairing = null; state.warning = api.storageWarning;state.jobsEnabled=data.jobs_enabled===true;
           if (state.mode === 'pairing') mode('owner');
           await readMessages(epoch);
+          await readJobs(epoch);
         }
       } catch (error) { if (epoch === generation) failure(error); }
       finally { if (epoch === generation) { state.busy = false; emit(); } }
@@ -162,31 +189,66 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), uuid =
         try {
           const data = await api.session();
           if (epoch !== generation) return;
-          state.status = 'approved'; state.device = data.device; state.warning = api.storageWarning;
+          state.status = 'approved'; state.device = data.device; state.warning = api.storageWarning;state.jobsEnabled=data.jobs_enabled===true;
           await readMessages(epoch);
+          await readJobs(epoch);
         } catch (error) { if (epoch === generation) { failure(error); if (state.status === 'checking') state.status = 'unknown'; } }
         finally { if (epoch === generation) { state.busy = false; emit(); } }
       })();
       reading = task;
       try { await task; } finally { if (reading === task) reading = null; }
     },
-    async send() {
-      if (state.sending || state.status !== 'approved') return;
-      const body = state.draft.trim(); if (!body) return;
+    async send({retryOriginal=false}={}) {
+      if (state.sending || state.status !== 'approved'||state.mode!=='owner') return;
+      const draftBody=state.draft.trim();if(!draftBody&&!retryOriginal)return;
+      if(state.jobMode&&!state.jobTitle.trim()&&!retryOriginal){state.error='Give this private request a short title.';emit();return;}
       const epoch = generation;
-      const item = failedSend?.body === body ? failedSend : { id: uuid(), body };
-      failedSend = item; state.sending = true; state.error = ''; emit();
+      const specification=state.jobMode?{title:state.jobTitle.trim(),actionKind:state.jobKind}:{};
+      const unchanged=failedSend&&failedSend.body===draftBody&&failedSend.jobMode===state.jobMode&&failedSend.title===specification.title&&failedSend.actionKind===specification.actionKind;
+      if(failedSend&&!unchanged&&!retryOriginal){state.sendUnconfirmed=true;state.error='Your earlier request is unconfirmed. Retry its original details before sending an edited request.';emit();return;}
+      const item=failedSend||{id:uuid(),body:draftBody,jobMode:state.jobMode,...specification};
+      let accepted=false;
+      failedSend = item; state.sending = true; state.error = '';state.sendUnconfirmed=false;state.sendNotice=''; emit();
       try {
-        await api.sendMessage(item.id, item.body);
+        const data=item.jobMode?await api.createJob(item):await api.sendMessage(item.id, item.body);
         if (epoch !== generation) return;
-        if (state.draft.trim() === body) state.draft = '';
+        accepted=true;if(data.job)mergeJob(data.job);
+        const matches=state.draft.trim()===item.body&&state.jobMode===item.jobMode&&(!item.jobMode||state.jobTitle.trim()===item.title&&state.jobKind===item.actionKind);
+        if(matches){state.draft='';state.jobTitle='';state.jobMode=false;}else state.sendNotice='Earlier request confirmed · your edited draft is still here';
         failedSend = null;
         await readMessages(epoch);
-      } catch (error) { if (epoch === generation) failure(error); }
+        await readJobs(epoch);
+      } catch (error) { if (epoch === generation) {state.sendUnconfirmed=!accepted;failure(error);} }
       finally { if (epoch === generation) { state.sending = false; emit(); } }
     },
+    retryUnconfirmed(){if(failedSend)return controller.send({retryOriginal:true});},
+    async inspectJob(id,{refresh=false}={}){
+      if(state.status!=='approved'||state.mode!=='owner'||!state.jobsEnabled)return;
+      const epoch=generation,detail=++detailEpoch;
+      state.jobDetailId=id;state.jobDetailError='';state.jobDetailBusy=true;
+      if(!refresh)state.jobDetail=state.jobs.find(j=>j.id===id)?{job:state.jobs.find(j=>j.id===id),events:[]}:null;
+      emit();
+      try{const data=await api.jobDetail(id);if(epoch!==generation||detail!==detailEpoch||state.jobDetailId!==id)return;state.jobDetail=data;mergeJob(data.job);}
+      catch(error){if(epoch===generation&&detail===detailEpoch){const safe=error instanceof OwnerApiError?error:new OwnerApiError('network');if(['expired','revoked','unauthorized'].includes(safe.kind))failure(safe);else state.jobDetailError=safe.message;}}
+      finally{if(epoch===generation&&detail===detailEpoch){state.jobDetailBusy=false;emit();}}
+    },
+    async cancelJob(id){
+      const job=state.jobs.find(j=>j.id===id);if(state.jobBusy||state.status!=='approved'||state.mode!=='owner'||!job||job.cancelRequested||['completed','failed','cancelled'].includes(job.stage))return;
+      const epoch=generation;state.jobBusy=true;state.jobDetailError='';emit();
+      try{const data=await api.cancelJob(id);if(epoch!==generation)return;mergeJob(data.job);await controller.inspectJob(id,{refresh:true});}
+      catch(error){if(epoch===generation){const safe=failure(error);state.jobDetailError=safe.message;}}
+      finally{if(epoch===generation){state.jobBusy=false;emit();}}
+    },
+    async retryJob(id,confirmed=false){
+      const job=state.jobs.find(j=>j.id===id);if(state.jobBusy||state.status!=='approved'||state.mode!=='owner'||!job?.retryAllowed)return;
+      if(job.retryRequiresConfirmation&&confirmed!==true){state.jobDetailError='Confirm the risk of repeating work before creating another attempt.';emit();return;}
+      const epoch=generation,item=retryAttempts.get(id)||{id:uuid(),confirmed:confirmed===true};retryAttempts.set(id,item);state.jobBusy=true;state.jobDetailError='';emit();
+      try{const data=await api.retryJob(id,item.id,item.confirmed);if(epoch!==generation)return;mergeJob(data.job);retryAttempts.delete(id);await readMessages(epoch);await readJobs(epoch);}
+      catch(error){if(epoch===generation){const safe=failure(error);state.jobDetailError=safe.message;}}
+      finally{if(epoch===generation){state.jobBusy=false;emit();}}
+    },
     async retryDelivery(messageId){
-      if(state.busy||state.sending||state.status!=='approved'||!state.messages.some(m=>m.id===messageId&&m.delivery?.retryable))return;
+      if(state.busy||state.sending||state.status!=='approved'||state.mode!=='owner'||!state.messages.some(m=>m.id===messageId&&m.delivery?.retryable))return;
       const epoch=generation;state.busy=true;state.error='';emit();
       try{
         await api.retryDelivery(messageId);
@@ -199,7 +261,7 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), uuid =
       if (!api.hasCredential) { controller.showOwner(); return; }
       if (state.status !== 'approved') await controller.refresh();
       if (state.status !== 'approved') { controller.showOwner(); return; }
-      controller.cancelSensitive(); mode('devices');
+      controller.closeJobDetail();controller.cancelSensitive(); mode('devices');
       return controller.refreshDevices();
     },
     async refreshDevices() {
@@ -237,9 +299,14 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), uuid =
 }
 
 const stamp = value => Number.isFinite(Date.parse(value)) ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) : 'Unknown';
+const messageStamp=value=>Number.isFinite(Date.parse(value))?new Intl.DateTimeFormat(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}).format(new Date(value)):'Unknown';
+const jobLabel=job=>{
+  if(job.cancelRequested&&!['completed','failed','cancelled'].includes(job.stage))return 'Cancellation requested · awaiting acknowledgement';
+  return {queued:'Queued · awaiting assistant',running:'Working · owner-connected assistant acknowledged',waiting_for_owner:'Needs your input',completed:'Result saved',failed:'Failed · review details',cancelled:'Cancelled · assistant acknowledged',outcome_unknown:'Outcome unconfirmed · review details'}[job.stage]||'Status unavailable';
+};
 
 export function createRelayOwnerUI({ controller = createRelayOwnerController(), document: doc = globalThis.document } = {}) {
-  let root, timer, viewKey = '', chatNodes = null, pairLabel = '', pairRemember = false;
+  let root, timer, viewKey = '', chatNodes = null, pairLabel = '', pairRemember = false, readingAnchor=null, detailDialog=null, detailSignature='',detailFocus=null,connectionDialog=null;
   const sensitiveInputs = new Set();
   function clearSensitiveFields() {
     for (const input of sensitiveInputs) { input.value = ''; if (input.type === 'checkbox') input.checked = false; }
@@ -292,69 +359,159 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
     const warning = make('p', state.warning, 'relay-owner-note'); warning.hidden = !state.warning;
     container.append(error, warning);
   }
+  function position(panel){
+    if(!panel)return null;
+    const rect=panel.getBoundingClientRect?.();
+    const row=rect?[...panel.children].find(n=>n.dataset?.messageId&&n.getBoundingClientRect?.().bottom>=rect.top):null;
+    return {id:row?.dataset.messageId,offset:row?row.getBoundingClientRect().top-rect.top:0,scroll:panel.scrollTop,bottom:panel.scrollHeight-panel.scrollTop-panel.clientHeight<70};
+  }
+  function restorePosition(panel,anchor){
+    if(!anchor||anchor.bottom){panel.scrollTop=panel.scrollHeight;return;}
+    const row=[...panel.children].find(n=>n.dataset?.messageId===anchor.id);
+    if(row?.getBoundingClientRect&&panel.getBoundingClientRect)panel.scrollTop+=row.getBoundingClientRect().top-panel.getBoundingClientRect().top-anchor.offset;
+    else panel.scrollTop=anchor.scroll;
+  }
+  function closeInspector(){
+    if(!detailDialog)return;const dialog=detailDialog;detailDialog=null;detailSignature='';dialog.close?.();dialog.remove?.();
+    if(detailFocus?.isConnected)detailFocus.focus?.({preventScroll:true});detailFocus=null;
+  }
+  function renderInspector(state){
+    if(state.mode!=='owner'||state.status!=='approved'||!state.jobDetailId){closeInspector();return;}
+    if(!doc.body||!doc.createTextNode)return;
+    if(!detailDialog){
+      detailFocus=doc.activeElement;const dialog=make('dialog','','app-sheet conversation-sheet owner-request-detail');dialog.id='relay-owner-request-dialog';dialog.setAttribute('aria-label','Private request');detailDialog=dialog;
+      dialog.addEventListener('close',()=>{if(detailDialog!==dialog)return;detailDialog=null;detailSignature='';dialog.remove();controller.closeJobDetail();if(detailFocus?.isConnected)detailFocus.focus({preventScroll:true});detailFocus=null;});
+      dialog.addEventListener('click',event=>{if(event.target!==dialog)return;const r=dialog.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)controller.closeJobDetail();});
+      doc.body.append(dialog);dialog.showModal();
+    }
+    const currentRefresh=detailDialog.querySelector('#relay-owner-request-refresh');if(currentRefresh){currentRefresh.textContent=state.jobDetailBusy?'Refreshing…':'Refresh request';currentRefresh.disabled=state.jobDetailBusy||state.jobBusy;}
+    const signature=JSON.stringify([state.jobDetailId,state.jobDetail,state.jobDetailError,state.jobBusy]);if(signature===detailSignature)return;
+    const scroll=detailDialog.scrollTop,consent=detailDialog.querySelector('#relay-owner-retry-consent')?.checked===true,historyOpen=detailDialog.querySelector('#relay-owner-request-history')?.open===true;
+    const focused=detailDialog.contains(doc.activeElement)?{id:doc.activeElement.id,label:doc.activeElement.getAttribute('aria-label')||doc.activeElement.textContent}:null;
+    const bounds=detailDialog.getBoundingClientRect(),visible=[...detailDialog.querySelectorAll('[data-reading-anchor]')].find(n=>n.getBoundingClientRect().bottom>=bounds.top+24&&n.getBoundingClientRect().top<bounds.bottom);
+    const reading=visible?{id:visible.dataset.readingAnchor,offset:visible.getBoundingClientRect().top-bounds.top}:null;
+    detailSignature=signature;detailDialog.replaceChildren();
+    const heading=make('div','','dialog-heading'),title=make('h2','Private request'),close=action('',()=>controller.closeJobDetail(),'icon-button');close.innerHTML=icon('close');close.setAttribute('aria-label','Close private request');heading.append(title,close);detailDialog.append(heading);
+    const data=state.jobDetail,job=data?.job;
+    if(!job){detailDialog.append(make('p',state.jobDetailError||'Opening private request…','sheet-context'));const refresh=action('Retry request details',()=>controller.inspectJob(state.jobDetailId,{refresh:true}));refresh.disabled=state.jobDetailBusy;refresh.hidden=!state.jobDetailError;detailDialog.append(refresh);return;}
+    const requestBody=make('p',job.body,'request-body');requestBody.dataset.readingAnchor='request-body';const requestTitle=make('h3',job.title);requestTitle.dataset.readingAnchor='request-title';
+    detailDialog.append(make('p',jobLabel(job),'request-state'),requestTitle,requestBody);
+    const kinds={unclassified:'Ordinary owner message',read_only:'Research or inspection',draft:'Prepare a draft',consequential:'Action requiring separate approval'};
+    detailDialog.append(make('p',kinds[job.actionKind]+' · attempt '+job.attempt+' · saved '+stamp(job.createdAt),'request-meta'));
+    if(job.execution)detailDialog.append(make('p','The owner-connected assistant acknowledged execution '+stamp(job.execution.acknowledgedAt)+'. The acknowledgement expires '+stamp(job.execution.leaseExpiresAt)+'.','request-meta'));
+    if(job.cancelRequested)detailDialog.append(make('p',job.stage==='cancelled'?'The assistant acknowledged cancellation.':job.stage==='completed'?'A reply was saved after you requested cancellation.':'Cancellation has been requested. The assistant has not confirmed that the work stopped.','request-meta'));
+    if(job.stage==='waiting_for_owner')detailDialog.append(make('p','Review the request history for the assistant’s question or blocker, then send the needed input or decision in your private conversation. External changes require their own specific approval.','request-meta'));
+    if(job.result){
+      detailDialog.append(make('h3','Saved result'));const result=make('div','','request-body rich-body');result.dataset.readingAnchor='saved-result';richText(result,job.result.body);detailDialog.append(result,make('p','Immutable owner reply · '+stamp(job.result.createdAt),'request-meta'));
+    }
+    if(job.failure)detailDialog.append(make('h3','What needs attention'),make('p',job.failure.message,'request-body'),make('p',job.failure.outcome==='not_started'?'The assistant confirmed that the work did not start.':job.failure.outcome==='unknown'?'The earlier attempt may have done some or all of the work.':'Review what happened before another attempt.','request-meta'));
+    if(job.delivery){
+      const deliveryLabels={saved:'Request saved privately.',queued:'Request saved; callback delivery is queued.',callback_accepted:'The callback accepted delivery. This does not confirm execution.',delivery_failed:'Callback delivery failed. The saved request remains private.',reply_saved:'An authenticated owner reply is saved.'};
+      detailDialog.append(make('h3','Delivery'),make('p',deliveryLabels[job.delivery.state]||'Delivery evidence unavailable.','request-meta'));
+    }
+    if(data.events.length){
+      const details=make('details'),summary=make('summary','Request history');details.id='relay-owner-request-history';details.open=historyOpen;summary.id='relay-owner-request-history-toggle';details.append(summary);const list=make('ol','','request-events');
+      for(const event of data.events){const item=make('li',event.summary+' · '+stamp(event.createdAt)+(event.authentication_source==='owner-oauth-mcp'?' · authenticated owner assistant':' · authenticated owner device'));item.dataset.readingAnchor='event:'+event.id;list.append(item);}
+      details.append(list);detailDialog.append(details);
+    }
+    const actions=make('div','','request-actions');
+    const refresh=action(state.jobDetailBusy?'Refreshing…':'Refresh request',()=>controller.inspectJob(job.id,{refresh:true}));refresh.id='relay-owner-request-refresh';refresh.setAttribute('aria-label','Refresh request');refresh.disabled=state.jobDetailBusy||state.jobBusy;actions.append(refresh);
+    if(!job.cancelRequested&&!['completed','failed','cancelled'].includes(job.stage)){const cancel=action('Request cancellation',()=>controller.cancelJob(job.id));cancel.disabled=state.jobBusy;actions.append(cancel);}
+    if(job.delivery?.retryable){const retryDelivery=action('Retry callback delivery',()=>controller.retryDelivery(job.id));retryDelivery.disabled=state.busy||state.sending;actions.append(retryDelivery);}
+    if(job.retryAllowed){
+      let checkbox=null;
+      if(job.retryRequiresConfirmation){const label=make('label','','relay-owner-remember');checkbox=make('input');checkbox.type='checkbox';checkbox.id='relay-owner-retry-consent';checkbox.checked=consent;label.append(checkbox,make('span','I understand the earlier attempt may already have done the work. Create a separate attempt.'));detailDialog.append(label,make('p','This retries the saved request. External changes still require their own specific approval.','request-meta'));}
+      const retry=action('Try again',()=>controller.retryJob(job.id,checkbox?.checked===true),'primary');retry.disabled=state.jobBusy;actions.append(retry);
+    }else if(['failed','cancelled','outcome_unknown'].includes(job.stage)&&!job.retryJobId)detailDialog.append(make('p','Outcome needs review before another attempt.','request-meta'));
+    if(job.retryJobId)actions.append(action('View retry attempt',()=>controller.inspectJob(job.retryJobId)));
+    detailDialog.append(actions);
+    if(state.jobDetailError){const error=make('p',state.jobDetailError,'relay-owner-error');error.setAttribute('role','status');detailDialog.append(error);}
+    detailDialog.scrollTop=scroll;
+    if(reading&&scroll>0){const anchor=[...detailDialog.querySelectorAll('[data-reading-anchor]')].find(n=>n.dataset.readingAnchor===reading.id);if(anchor)detailDialog.scrollTop+=anchor.getBoundingClientRect().top-detailDialog.getBoundingClientRect().top-reading.offset;}
+    if(focused){const node=focused.id?detailDialog.querySelector('#'+focused.id):[...detailDialog.querySelectorAll('button,summary,input')].find(n=>(n.getAttribute('aria-label')||n.textContent)===focused.label);node?.focus({preventScroll:true});}
+  }
   function renderMessages(state) {
     if (!chatNodes) return;
-    const panel = chatNodes.messages, nearBottom = panel.scrollHeight - panel.scrollTop - panel.clientHeight < 70;
-    const scroll = panel.scrollTop;
-    panel.replaceChildren();
-    const selected = state.messages.filter(m => !state.query || m.body.toLowerCase().includes(state.query));
+    const panel=chatNodes.messages,anchor=chatNodes.first&&readingAnchor?readingAnchor:position(panel),jobs=new Map(state.jobs.map(j=>[j.messageId,j]));
+    const existing=new Map([...panel.children].filter(n=>n.dataset?.messageId).map(n=>[n.dataset.messageId,n])),nodes=[];
+    const selected = state.messages.filter(m => (!state.query || m.body.toLowerCase().includes(state.query))&&(!state.requestsOnly||jobs.has(m.id)));
     for (const m of selected) {
-      const row = make('article', '', 'message-row ' + (m.role === 'user' ? 'outgoing' : 'incoming'));
+      const job=jobs.get(m.id),signature=JSON.stringify([m,job,state.busy,state.sending,state.jobsError]);let row=existing.get(m.id);
+      if(row?._signature===signature){nodes.push(row);continue;}
+      row = make('article', '', 'message-row ' + (m.role === 'user' ? 'outgoing' : 'incoming'));row._signature=signature;
       row.dataset.messageId = m.id;
-      row.append(make('span', m.role === 'user' ? 'You · private' : 'dot · private', 'message-author'),
-        // Text only: no auth link, external navigation, iframe or public quote path.
-        make('p', m.body, 'bubble'), make('span', stamp(m.createdAt), 'message-time'));
+      const heading=make('div','','message-heading'),copy=action('',async()=>{copy.setAttribute('aria-label',await copyText(m.body)?'Private message copied':'Copy private message');},'message-actions');copy.innerHTML=icon('copy');copy.setAttribute('aria-label','Copy private message');heading.append(make('span',m.role==='user'?'You':'dot','message-author'),copy);row.append(heading);
+      if(job&&job.title!=='Owner request')row.append(make('p',job.title,'owner-request-title'));
+      // Request text is inert. The inspector alone formats the saved result.
+      row.append(make('p',m.body,'bubble'));
+      let status='';
       if(m.role==='user'){
-        const labels={saved:'Saved privately',queued:'Queued for callback delivery',callback_accepted:'Callback accepted · waiting for a reply',delivery_failed:'Callback delivery failed',reply_saved:'Reply saved'};
-        row.append(make('span',labels[m.delivery?.state]||'Saved privately','message-time relay-delivery-status'));
-        if(m.delivery?.retryable){
+        const labels={saved:'Saved privately · awaiting reply',queued:'Saved · awaiting assistant',callback_accepted:'Sent · awaiting reply',delivery_failed:'Delivery needs retry',reply_saved:'Reply saved'};
+        status=job?'':labels[m.delivery?.state]||'Saved privately';
+        if(job){
+          row.dataset.jobId=job.id;const info=make('div','','message-job');info.dataset.state=job.stage;info.append(make('span',(state.jobsError?'Last known: ':'')+jobLabel(job),'job-state'),action('Inspect request',()=>controller.inspectJob(job.id),'text-button'));row.append(info);
+        }else if(m.delivery?.retryable){
           const retry=action('Retry callback delivery',()=>controller.retryDelivery(m.id));
           retry.disabled=state.busy||state.sending;row.append(retry);
-        }else if(m.delivery?.state==='delivery_failed'&&m.delivery.retryAfter)row.append(make('span','Retry available after '+stamp(m.delivery.retryAfter),'message-time'));
+        }
       }
-      panel.append(row);
+      row.append(make('span',messageStamp(m.createdAt)+(status?' · '+status:''),'message-time'));nodes.push(row);
     }
-    if (!selected.length) panel.append(make('p', state.query ? 'No matching private messages.' : 'Your private conversation with dot appears here.', 'chat-empty'));
-    panel.scrollTop = nearBottom ? panel.scrollHeight : scroll;
+    if (!selected.length){const empty=make('div','','chat-empty');empty.append(make('p','Private owner conversation','empty-label'),make('h2',state.query?'No matching messages':state.requestsOnly?'No requests to show':state.busy?'Opening your conversation…':'What would you like to work on?'),make('p',state.query?'Try a different phrase.':state.requestsOnly?'Send a message or a work request. Both stay in your private conversation.':state.busy?'Checking your private inbox.':state.jobsEnabled?'Message dot or turn a thought into a work request. Saved replies and results appear here.':'Message dot privately. Replies appear here after the assistant checks the inbox.'));nodes.push(empty);}
+    if(panel.insertBefore){const wanted=new Set(nodes);for(const child of [...panel.children])if(!wanted.has(child))child.remove();for(let i=0;i<nodes.length;i++)if(panel.children[i]!==nodes[i])panel.insertBefore(nodes[i],panel.children[i]||null);}else panel.replaceChildren(...nodes);
+    restorePosition(panel,anchor);chatNodes.first=false;
     if (chatNodes.input.value !== state.draft) { chatNodes.input.value = state.draft; autosize(chatNodes.input); }
     chatNodes.send.disabled = state.sending || state.busy;
-    chatNodes.send.setAttribute('aria-label', state.sending ? 'Sending private message' : 'Send private message');
-    chatNodes.status.textContent = state.sending ? 'Sending privately…' : state.error ? 'Private sync unavailable · retry below' : state.busy ? 'Checking private inbox…' : 'Private owner chat · replies arrive after an inbox check';
+    chatNodes.send.setAttribute('aria-label',state.sending?'Sending privately':state.jobMode?'Send private request':'Send private message');
+    chatNodes.input.placeholder=state.jobMode?'Describe the work privately…':'Message dot privately…';
+    chatNodes.status.textContent=state.sending?'Saving privately…':state.sendUnconfirmed?'Send unconfirmed · your text is still here':state.error?'Private sync unavailable':state.busy?'Refreshing private inbox…':state.sendNotice|| (state.requestsOnly?'Private requests · all saved attempts':state.jobsEnabled?'Private · messages and work requests':'Private · replies arrive after an inbox check');
+    chatNodes.jobToggle.hidden=!state.jobsEnabled;chatNodes.jobToggle.disabled=state.sending;chatNodes.jobToggle.setAttribute('aria-pressed',String(state.jobMode));chatNodes.jobToggle.setAttribute('aria-label',state.jobMode?'Switch to private message':'Create work request');chatNodes.jobToggleLabel.textContent=state.jobMode?'Message instead':'Work request';
+    chatNodes.jobFields.hidden=!state.jobMode;
+    chatNodes.title.required=state.jobMode;if(chatNodes.title.value!==state.jobTitle)chatNodes.title.value=state.jobTitle;if(chatNodes.kind.value!==state.jobKind)chatNodes.kind.value=state.jobKind;
+    chatNodes.jobNote.textContent=state.jobKind==='read_only'?'Ask for a report without changing anything. The assistant reviews the request before starting.':state.jobKind==='draft'?'Ask for prepared work to review. Sending this request does not approve publishing or other changes.':'The assistant reviews the work first. External changes need separate approval.';
     chatNodes.error.textContent = state.error; chatNodes.error.hidden = !state.error;
     chatNodes.warning.textContent = state.warning; chatNodes.warning.hidden = !state.warning;
-    chatNodes.retry.hidden = !state.error; chatNodes.retry.disabled = state.busy || state.sending;
+    chatNodes.notice.hidden=!state.error;chatNodes.retry.textContent=state.sendUnconfirmed?'Retry private send':'Retry private sync';chatNodes.retry.disabled=state.busy||state.sending;
   }
   function render() {
     if (!root?.isConnected || controller.mode === 'public') { clearSensitiveFields(); return; }
     const state = controller.snapshot();
+    if(connectionDialog&&(state.status!=='approved'||state.mode!=='owner')){connectionDialog.close?.();connectionDialog.remove?.();connectionDialog=null;}
+    renderInspector(state);
     const key = state.mode === 'owner' && state.status === 'approved' ? 'chat' : state.mode + ':' + state.status;
-    const searchToggle = doc.getElementById('chat-search-toggle'); if (searchToggle) searchToggle.hidden = key !== 'chat';
+    const searchToggle = doc.getElementById('chat-search-toggle'); if (searchToggle) searchToggle.hidden = true;
     if (key === 'chat' && viewKey === key) { renderMessages(state); return; }
     const active = doc.activeElement;
     // Preserve unsent setup choices when a status repaint follows network work.
     if (root.contains(active) && active?.id === 'relay-owner-label') pairLabel = active.value;
+    if(chatNodes)readingAnchor=position(chatNodes.messages);
+    if(state.status!=='approved')readingAnchor=null;
     clearSensitiveFields(); root.classList.add('relay-owner-content'); root.replaceChildren(); viewKey = key; chatNodes = null;
     const section = make('section', '', 'relay-owner-panel'); root.append(section);
     if (key === 'chat') {
       section.classList.add('relay-owner-chat');
-      const heading = make('div', '', 'relay-owner-heading'); heading.append(make('h2', 'Owner chat'), action('Account sign-in', () => controller.showAccount()), make('span', 'Private', 'relay-owner-badge')); section.append(heading);
+      const heading = make('div', '', 'relay-owner-heading'); heading.append(make('h2', 'Owner chat')); section.append(heading);
       const search = make('div', '', 'conversation-search'); search.id = 'relay-owner-search-bar'; search.hidden = true;
       const searchLabel = make('label', 'Search private messages', 'sr-only'); searchLabel.htmlFor = 'relay-owner-search';
-      const searchInput = make('input'); searchInput.id = 'relay-owner-search'; searchInput.type = 'search'; searchInput.placeholder = 'Search private messages'; searchInput.autocomplete = 'off'; searchInput.oninput = () => controller.setQuery(searchInput.value); search.append(searchLabel, searchInput); section.append(search);
+      const searchInput = make('input'); searchInput.id = 'relay-owner-search'; searchInput.type = 'search'; searchInput.placeholder = 'Search private messages'; searchInput.autocomplete = 'off';searchInput.value=state.query;search.hidden=!state.query; searchInput.oninput = () => controller.setQuery(searchInput.value);const searchClose=action('',()=>ui.toggleSearch(),'icon-button');searchClose.innerHTML=icon('close');searchClose.setAttribute('aria-label','Close search');search.append(searchLabel,searchInput,searchClose); section.append(search);
       const messages = make('div', '', 'messages'); messages.setAttribute('aria-label', 'Private owner conversation'); messages.setAttribute('aria-live', 'polite'); section.append(messages);
       const form = make('form', '', 'composer'); form.id = 'relay-owner-message-form';
+      const fields=make('div','','owner-job-fields');fields.hidden=true;
+      const titleLabel=make('label','Request title');titleLabel.htmlFor='relay-owner-job-title';const title=make('input');title.id='relay-owner-job-title';title.maxLength=120;title.placeholder='A short description';title.autocomplete='off';title.oninput=()=>controller.setJobTitle(title.value);const titleField=make('div');titleField.append(titleLabel,title);
+      const kindLabel=make('label','Requested scope');kindLabel.htmlFor='relay-owner-job-kind';const kind=make('select');kind.id='relay-owner-job-kind';for(const [value,text] of [['consequential','Needs review'],['read_only','Read-only report'],['draft','Draft only']]){const option=make('option',text);option.value=value;kind.append(option);}kind.onchange=()=>controller.setJobKind(kind.value);const kindField=make('div');kindField.append(kindLabel,kind);const jobNote=make('p');fields.append(titleField,kindField,jobNote);form.append(fields);
       const label = make('label', 'Message dot privately', 'sr-only'); label.htmlFor = 'relay-owner-message-text';
       const input = make('textarea'); input.id = 'relay-owner-message-text'; input.rows = 1; input.maxLength = 4000; input.placeholder = 'Message dot privately…'; input.autocomplete = 'off'; input.required = true; input.value = state.draft;
       input.oninput = () => { controller.setDraft(input.value); autosize(input); };
       input.onkeydown = event => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.isComposing) { event.preventDefault(); form.requestSubmit(); } };
       const bottom = make('div', '', 'composer-bottom'), status = make('span'); status.setAttribute('role', 'status');
-      const send = action('', () => {}, 'primary send-icon'); send.type = 'submit'; send.innerHTML = icon('send'); bottom.append(status, send); form.append(label, input, bottom);
+      const toggle=action('',()=>controller.setJobMode(!controller.snapshot().jobMode),'composer-mode-button');toggle.id='relay-owner-job-toggle';toggle.innerHTML=icon('plus');const toggleLabel=make('span','Work request');toggle.append(toggleLabel);bottom.append(status,toggle);
+      const send = action('', () => {}, 'primary send-icon'); send.type = 'submit'; send.innerHTML = icon('send');const inputRow=make('div','','composer-input');inputRow.append(label,input,send);form.append(inputRow,bottom);
       form.onsubmit = event => { event.preventDefault(); controller.setDraft(input.value); controller.send(); };
       section.append(form);
       const error = make('p', '', 'relay-owner-error'); error.setAttribute('role', 'status');
-      const warning = make('p', '', 'relay-owner-note');
-      const retry = action('Retry private sync', () => controller.refresh()); section.append(error, warning, retry);
-      chatNodes = { messages, input, status, send, error, warning, retry }; renderMessages(state); autosize(input);
+      const warning = make('p', '', 'relay-owner-note owner-storage-warning');
+      const retry = action('Retry private sync', () => controller.snapshot().sendUnconfirmed?controller.retryUnconfirmed():controller.refresh(),'text-button'),notice=make('div','','conversation-notice');notice.append(error,retry);section.insertBefore?.(notice,form);if(!section.insertBefore)section.append(notice);section.append(warning);
+      chatNodes = { messages, input, status, send, error, warning, retry,notice,jobToggle:toggle,jobToggleLabel:toggleLabel,jobFields:fields,title,kind,jobNote,first:true }; renderMessages(state); autosize(input);
       return;
     }
     if (state.mode === 'account') {
@@ -434,7 +591,7 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
   doc.defaultView?.addEventListener('pagehide', leavePage);
   doc.defaultView?.addEventListener('beforeunload', leavePage);
   const unsubscribe = controller.subscribe(render);
-  return {
+  const ui={
     controller,
     get mode() { return controller.mode; },
     mount(node) {
@@ -447,10 +604,18 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
         else if (controller.mode === 'owner' && controller.hasCredential) controller.refresh();
       }, controller.status === 'pending' || controller.mode === 'pairing' ? 5000 : 30000);
     },
-    unmount() { clearSensitiveFields(); if (viewKey.startsWith('account:') || controller.snapshot().authenticating || controller.snapshot().loginDevices.length) controller.cancelSensitive(); root = null; chatNodes = null; viewKey = ''; clearInterval(timer); },
+    unmount() { if(chatNodes)readingAnchor=position(chatNodes.messages);closeInspector();connectionDialog?.close?.();connectionDialog?.remove?.();connectionDialog=null;clearSensitiveFields(); if (viewKey.startsWith('account:') || controller.snapshot().authenticating || controller.snapshot().loginDevices.length) controller.cancelSensitive(); root = null; chatNodes = null; viewKey = ''; clearInterval(timer); },
     toggleSearch() { const bar = doc.getElementById('relay-owner-search-bar'); if (!bar) return; bar.hidden = !bar.hidden; if (!bar.hidden) doc.getElementById('relay-owner-search').focus(); else { doc.getElementById('relay-owner-search').value = ''; controller.setQuery(''); } },
-    latest() { if (chatNodes) chatNodes.messages.scrollTop = chatNodes.messages.scrollHeight; },
+    latest() { controller.setQuery('');if(chatNodes)chatNodes.messages.scrollTop=chatNodes.messages.scrollHeight; },
+    requests(){controller.toggleRequests();if(chatNodes)chatNodes.messages.scrollTop=0;},
+    connection(){
+      if(!doc.body)return;connectionDialog?.close?.();const state=controller.snapshot(),dialog=make('dialog','','app-sheet conversation-sheet');connectionDialog=dialog;dialog.setAttribute('aria-label','Private owner connection');const heading=make('div','','dialog-heading'),close=action('',()=>dialog.close(),'icon-button');close.innerHTML=icon('close');close.setAttribute('aria-label','Close connection details');heading.append(make('h2','Private owner connection'),close);dialog.append(heading);
+      dialog.append(make('p',state.status==='approved'?'Owner access was verified for this device.':state.status==='expired'?'This device session has expired.':state.status==='revoked'?'This device session was revoked.':'Private owner access has not been verified.','sheet-context'));
+      if(state.device)dialog.append(make('p','Device access expires '+stamp(state.device.expiresAt)+'. Successful authenticated use renews the inactivity period.','sheet-note'));
+      dialog.append(make('p',state.status!=='approved'?'Sign in or reconnect this phone to use the private conversation. Public Relay is available only when you choose it explicitly.':state.jobsEnabled?state.jobsError||'Messages and durable requests are available. A callback receipt confirms delivery only. Working appears only after authenticated assistant acknowledgement.':'Private messages remain available. Durable request details need a newer owner service.','sheet-note'));
+      if(state.error)dialog.append(make('p',state.error,'relay-owner-error'));dialog.addEventListener('close',()=>{dialog.remove();if(connectionDialog===dialog)connectionDialog=null;},{once:true});doc.body.append(dialog);dialog.showModal();
+    },
     refresh() { return controller.status === 'pending' ? controller.checkPairing() : controller.mode === 'devices' ? controller.refreshDevices() : controller.refresh(); },
     dispose() { this.unmount(); unsubscribe(); doc.removeEventListener?.('visibilitychange', hideSensitive); doc.defaultView?.removeEventListener('pagehide', leavePage); doc.defaultView?.removeEventListener('beforeunload', leavePage); }
-  };
+  };return ui;
 }

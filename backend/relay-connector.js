@@ -88,6 +88,12 @@ export async function relayRpc(ctx, env, principal, rpc) {
       result.content.push({type: 'text', text: 'Private delivery diagnostics (callback acceptance is transport evidence only): ' + JSON.stringify(diagnostics)});
       const subscriptions = await relayOwnerRpc(ctx, env, principal, 'relay_owner_subscription_status', {inbox_id: args.inbox_id});
       result.content.push({type: 'text', text: 'Private subscription diagnostics (current subscription evidence only; no host execution proof): ' + JSON.stringify(subscriptions)});
+      // Keep cached structured conversation schemas unchanged. This explicit
+      // lifecycle block contains no instructions, commands or reply markers.
+      const {job} = await relayOwnerRpc(ctx, env, principal, 'relay_owner_job_read', {inbox_id: args.inbox_id, job_id: args.message_id});
+      const lifecycle = {job_id: job.id, stage: job.stage, actionKind: job.actionKind, cancelRequested: job.cancelRequested,
+        parentJobId: job.parentJobId, rootJobId: job.rootJobId, attempt: job.attempt, execution: job.execution, retryJobId: job.retryJobId};
+      result.content.push({type: 'text', text: 'Private job lifecycle (authenticated server evidence; callback acceptance never establishes execution): ' + JSON.stringify(lifecycle)});
     }
     return result;
   }

@@ -9,16 +9,17 @@
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/assets/shell.css">
   <link rel="stylesheet" href="/assets/premium.css?v=20261003">
+  <link rel="stylesheet" href="/assets/conversation.css?v=20261008">
   <script type="module" src="/assets/app.js"></script>
 </head>
-<body>
+<body class="module-page conversation-page relay-page">
   <a href="#content" class="skip-link">Skip to content</a>
   <div id="app"><main class="loading"><h1>Relay</h1><p>Opening your conversation…</p></main></div>
   <noscript><p>Enable JavaScript to use your messages and Daily Board.</p></noscript>
   <dialog id="connection-dialog" aria-labelledby="connection-heading">
     <div class="dialog-heading"><h2 id="connection-heading">Connection</h2><button type="button" class="close" data-close="connection-dialog" aria-label="Close connection details">×</button></div>
     <h3 id="connection-state"></h3><p id="connection-detail"></p>
-    <p>Open this same website on any phone to see your messages and Daily Board. No account or device linking needed.</p>
+    <p>The public Relay inbox is shared. Private owner access is a separate conversation on this page.</p>
     <button class="primary" id="sync-now" hidden>Refresh messages</button>
   </dialog>
   <dialog id="hub-dialog" aria-labelledby="hub-dialog-heading"></dialog>

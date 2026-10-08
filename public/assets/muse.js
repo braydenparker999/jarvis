@@ -22,10 +22,13 @@ function render() {
   $('refresh').disabled=busy||!!storageError;
   $('error').hidden=!storageError&&!syncError;
   $('error').textContent=storageError||syncError;
-  $('status').textContent=storageError?'Cannot save on this device':state?.outbox.length?'Sending…':busy?'Refreshing inbox…':state?.publisher?.ok===false?'Messages saved · replies delayed':'Replies arrive after Muse checks the inbox';
+  $('muse-sync-notice').hidden=!storageError&&!syncError;
+  $('muse-retry').hidden=!!storageError;$('muse-retry').disabled=busy;
+  $('status').textContent=storageError?'Cannot save on this device':syncError?state?.outbox.length?'Send unconfirmed · queued on this device':'Inbox unavailable · draft saved':busy?state?.outbox.length?'Sending to public Muse inbox…':'Refreshing public inbox…':state?.outbox.length?'Queued on this device':state?.publisher?.ok===false?'Messages saved · replies delayed':'Public inbox · replies arrive after a check';
   if(!state)return;
-  if(!chatUI)chatUI=conversation({panel:$('messages'),composer:$('prompt'),channel:'muse',author:'Muse',body:m=>m.role==='user'?museBody(m.body):m.body,notify,draftChanged:value=>{try{commit({...state,composer:value});}catch{notify('Draft could not be saved');}}});
+  if(!chatUI)chatUI=conversation({panel:$('messages'),composer:$('prompt'),channel:'muse',author:'Muse',body:m=>m.role==='user'?museBody(m.body):m.body,notify,draftChanged:value=>{try{commit({...state,composer:value});}catch{notify('Draft could not be saved');}},emptyTitle:'Follow a thought.',emptyDescription:'Write to Muse when you have an idea to explore. Replies appear here after Muse checks this public inbox.',scope:'Public Muse conversation'});
   chatUI.update(state.messages);
+  chatUI.setDelivery({busy,error:!!syncError});
 }
 async function sync() {
   if (busy || storageError) return;
@@ -61,6 +64,7 @@ $('prompt').onkeydown = e => {
   if (e.key === 'Enter' && (e.ctrlKey||e.metaKey) && !e.isComposing) { e.preventDefault(); $('composer').requestSubmit(); }
 };
 $('refresh').onclick = sync;
+$('muse-retry').onclick=sync;
 $('setup').onclick = async () => {
   $('setup-dialog').showModal(); $('copy-status').textContent = 'Loading instructions…'; $('copy-setup').disabled = true;
   try {
@@ -80,7 +84,12 @@ setInterval(() => { if (!document.hidden) sync(); }, 30000);
 render(); sync();
 
 $('search-toggle').onclick=()=>{const bar=$('search-bar');bar.hidden=!bar.hidden;if(!bar.hidden)$('conversation-search').focus();else{$('conversation-search').value='';chatUI?.search('');}};
+$('search-close').onclick=()=>$('search-toggle').click();
 $('conversation-search').oninput=e=>chatUI?.search(e.target.value);
-$('muse-menu').onclick=()=>sheet('Muse',[{label:'Bookmarks',icon:'bookmark',action:()=>chatUI?.bookmarks()},{label:'Latest messages',icon:'chat',action:()=>chatUI?.latest()},{label:'Refresh inbox',icon:'refresh',action:sync},{label:'Automatic replies',icon:'clock',action:()=>$('setup').click()},{label:'About this conversation',icon:'info',action:()=>{const d=sheet('Your Muse conversation',[]);const p=document.createElement('p');p.textContent='Messages and replies are public and shared across your devices. Replies arrive after Muse checks the inbox; publication can take another five minutes. This page cannot confirm that a schedule is active.';d.append(p);}}]);
+$('muse-menu').onclick=()=>{
+  const d=sheet('Public Muse',[{label:'Search messages',icon:'search',action:()=>$('search-toggle').click()},{label:'Bookmarks',icon:'bookmark',action:()=>chatUI?.bookmarks()},{label:'Latest messages',icon:'chat',action:()=>chatUI?.latest()},{label:'Refresh inbox',icon:'refresh',action:sync},{label:'Connection details',icon:'info',action:()=>{const detail=sheet('Muse connection',[]);detail.classList.add('conversation-sheet');const p=document.createElement('p');p.className='sheet-context';p.textContent=storageError||syncError||(state?.syncedAt?'Public inbox refreshed '+time(state.syncedAt)+'. Messages are stored separately from the assistant’s reply delivery.':'The public inbox has not been refreshed yet.');detail.append(p);const note=document.createElement('p');note.className='sheet-note';note.textContent='This page checks for saved replies. It cannot confirm that Muse has an active schedule or is currently working.';detail.append(note);}},{label:'Reply setup instructions',icon:'clock',action:()=>$('setup').click()}]);
+  d.classList.add('conversation-sheet');const p=document.createElement('p');p.className='sheet-context';p.textContent='Anyone with this website address can read and post here. Muse has its own public inbox; private owner Relay stays separate.';d.querySelector('.dialog-heading').after(p);const note=document.createElement('p');note.className='sheet-note';note.textContent='Replies arrive after Muse checks the inbox. Publication may take another five minutes. No active schedule is confirmed by this page.';d.append(note);
+  const relay=document.createElement('a');relay.href='/jarvis/';relay.className='sheet-action';relay.innerHTML=icon('chat');relay.append(document.createTextNode('Relay conversations'));note.before(relay);
+};
 addEventListener('pagehide',()=>chatUI?.savePosition());
 autosize($('prompt'));
