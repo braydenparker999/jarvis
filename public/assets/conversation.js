@@ -55,8 +55,9 @@ export function conversation({panel, composer, channel, author, body=m=>m.body, 
       const stamp=formatter.format(new Date(m.createdAt));
       const sendLabels={rejected:'Send rejected · text saved on this device',conflict:'ID conflict · original text saved',unknown:'Send unconfirmed · queued on this device'};
       const statusText=stamp+(m.localOnly?' · Local history · on this device':m.role==='user'?' · '+(!m.saved?sendLabels[m.sendState]||(deliveryError?'Send unconfirmed · queued on this device':deliveryBusy?'Sending to public inbox':'Queued on this device'):answered.has(m.id)?'Saved':'Awaiting reply'):'')+(bookmarks.has(m.id)?' · Bookmarked':'');
-      if(row._stamp!==statusText){row.querySelector('.message-time').textContent=statusText;row._stamp=statusText;}
-      row.querySelector('.message-time').dataset.pending=String(!m.localOnly&&m.role==='user'&&(!m.saved||!answered.has(m.id)));
+      const timestamp=row.querySelector(':scope > .message-time');
+      if(row._stamp!==statusText){timestamp.textContent=statusText;row._stamp=statusText;}
+      timestamp.dataset.pending=String(!m.localOnly&&m.role==='user'&&(!m.saved||!answered.has(m.id)));
       if(panel.children[i]!==row)panel.insertBefore(row,panel.children[i]||null);
     }
     if(!selected.length){const empty=el('div','','chat-empty');if(scope&&!query&&!savedOnly)empty.append(el('p',scope,'empty-label'));empty.append(el('h2',query?'No matching messages':savedOnly?'No bookmarks yet':deliveryBusy&&!messages.length?'Opening your conversation…':emptyTitle),el('p',query?'Try a different phrase.':savedOnly?'Bookmark a message from its menu.':deliveryError&&!messages.length?'The inbox is unavailable. Your draft stays on this device; use Retry sync to try again.':deliveryBusy&&!messages.length?'Checking the shared inbox.':emptyDescription));panel.append(empty);}

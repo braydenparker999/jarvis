@@ -41,6 +41,8 @@ test('mobile conversation keeps the hold and displays later final artifacts, cor
     assert.match(await heldRow.textContent(),/Fictional hold/);
     assert.equal(await heldRow.evaluate(row=>row===window.fixtureHoldRow),true);
     assert.match(await finalRow.getAttribute('aria-label'),/Public final report.*version 1.*no private execution authority/);
+    assert.equal(await finalRow.getByText('Public report · private execution unverified.',{exact:true}).isVisible(),true);
+    assert.ok((await finalRow.locator(':scope > .message-time').textContent()).trim(),'The report retains its separate timestamp');
     const link=finalRow.getByRole('link',{name:'Fictional source artifact · revision 1',exact:true});
     assert.equal(await link.getAttribute('href'),final.artifacts[0].url);assert.equal(await link.getAttribute('rel'),'noopener noreferrer');
     assert.equal(await finalRow.locator('.message-row').count(),0,'The update uses the existing article/bubble structure');
@@ -52,6 +54,8 @@ test('mobile conversation keeps the hold and displays later final artifacts, cor
     assert.match(await revised.getAttribute('aria-label'),/Public correction.*version 2/);
     await page.reload();await idle(page,channel);await revised.waitFor();await heldRow.waitFor();await finalRow.waitFor();
     assert.equal(await revised.count(),1);assert.equal(await finalRow.count(),1);
+    assert.equal(await revised.getByText('Public report · private execution unverified.',{exact:true}).isVisible(),true);
+    assert.equal(await finalRow.getByText('Public report · private execution unverified.',{exact:true}).isVisible(),true);
     assert.equal(j.h.rows('SELECT body FROM shared_entries WHERE id=?',holdId)[0].body,'Fictional hold: waiting for the source artifact.');
     assert.equal(phone.records.some(record=>record.path.startsWith('/relay/owner/')),false);
     assertBrowserContained(phone);
