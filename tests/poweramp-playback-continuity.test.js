@@ -163,12 +163,14 @@ function harness(kind = 'native-r2', {webAudio = false, installed = true, extra 
   const Engine = vm.runInContext(diagnostics + block('const Engine = {', 'function SET_shuffleOn()') + '\nEngine', ctx);
   const diagnosticReport = () => vm.runInContext('typeof PlaybackDiagnostics === \"undefined\" ? null : PlaybackDiagnostics.report()', ctx);
   ctx.Engine = Engine;
-  Engine.init(); Engine._playRequest = 1;
+  Engine._playRequest = 1;
   if (installed) vm.runInContext(
     block('const PlaybackQueue={', 'const PlaybackTransitions={') +
     block('const PlaybackTransitions={', 'function installPlaybackRework()') +
     block('function restoreTrackStepOrigin(', '/* Shared finger tracking:') +
     block('function installPlaybackRework(){', '/* Synced lyrics') + '\ninstallPlaybackRework();', ctx);
+  // Production installs wrappers before init binds native ended/time handlers.
+  Engine.init();
   Engine.queue = [selected]; Engine.order = [0]; Engine.pos = 0; Engine.current = selected; Engine.dur = selected.dur;
   Engine.el().src = urls.get(selected.id); Engine.el().metadata();
   // Effects are outside this transport regression; the actual context creation
@@ -538,7 +540,7 @@ test('load cancelling the queued owned pause cannot mask a genuine external paus
 test('installed transition awaits pending AudioContext resume after incoming media starts before reporting actual output', async () => {
   const h = harness('local', {webAudio: true}), next = track('local', {id: 'private-incoming-local'});
   h.add(next, 'blob:private-incoming-local');
-  const context = h.Engine.ensureCtx(); context.change('suspended');
+  await h.start();const context = h.Engine.ctx;context.state='suspended';
   let finishResume; context.resume = () => { context.resumeCalls++; return new Promise(resolve => { finishResume = resolve; }); };
   const transition = h.PlaybackTransitions.to(1, 400); await flush(); const incoming = h.Engine.other();
   assert.equal(incoming.attempts.length, 1, 'the raw installed transition starts the spare element');
