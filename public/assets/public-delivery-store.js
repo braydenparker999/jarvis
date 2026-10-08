@@ -11,10 +11,12 @@ export function hasSharedAcceptance(message){
     &&proof.id===message.id&&proof.role===message.role&&proof.body===message.body&&proof.replyTo===(message.replyTo||null);
 }
 export function mergePublicMessages(known,outbox,received,{sharedEvidence=false}={}){
-  const legacyIds=new Set(known.filter(m=>m.legacyHistory===true).map(m=>m.id));
+  const legacy=known.filter(m=>m.legacyHistory===true),legacyIds=new Set(legacy.map(m=>m.id));
   const pending=new Map();
   for(const queued of outbox){
     const message={...known.find(m=>m.id===queued.id),...queued};
+    const intent={...message,replyTo:queued.replyTo||null};
+    if(legacy.some(m=>m.id===intent.id&&!same(m,intent)))throw Error('A queued message has different content for an ID in your older local history. Saved history, queued text and drafts have not been overwritten.');
     if(pending.has(message.id)&&pending.get(message.id).body!==message.body)throw Error('Queued message ID conflict. Your original text is still saved on this device.');
     const queuedMessage={...message,saved:false};delete queuedMessage.localOnly;
     pending.set(message.id,queuedMessage);
@@ -80,6 +82,9 @@ export function createPublicDeliveryStore({storage,tabStorage,key,read}){
     catch{const error=Error('This device could not save the queued message. Keep your text here or copy it before leaving.');error.storageFailure=true;throw error;}
   }
   function restore(state=read(storage)){
+    // Check both queue representations before migrating either one. A legacy
+    // association failure must leave history, journals and tab drafts untouched.
+    mergePublicMessages(state.messages,[...state.outbox,...journals()],[]);
     if(draft===undefined){
       let savedDraft=null,savedId=null;try{savedDraft=tabStorage?.getItem(draftKey)??null;savedId=tabStorage?.getItem(draftIdKey);}catch{}
       draft=savedDraft??state.composer??'';draftId=uuid(savedId)?savedId:savedDraft===null&&uuid(state.composerId)?state.composerId:crypto.randomUUID();

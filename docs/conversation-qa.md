@@ -21,8 +21,8 @@ browser and includes every `tests/relay-*.test.js` file automatically.
 | `tests/relay-public-store-adversarial.test.js` | Full board history across tab writes, failed independent draft persistence, a deterministic 49-to-51 queue admission race and exact-acceptance journal draining. |
 | `tests/launcher-browser.test.js` | Existing launcher content, identity, schema, draft, Back and isolation journeys; exact receipts/journals, unchanged malformed storage, all mutating API calls, and nonempty old-inbox fixtures proving no automatic publication after restore/reload/refresh. |
 | `tests/relay-public-legacy-history.test.js` | Older local history retention, bounded accepted caching, exact receipt association, old flags without publication authority, and read-only mismatch preflight before any journal/draft/aggregate write. |
-| `tests/relay-public-legacy-acceptance.test.js` | Inherited saved flags, truncated old-history recovery, exact tuple-bound receipt evidence, mixed genuine/current queues, receipt retention beyond 250 old rows, and initial raw/cache conflict preflight with zero persistence writes. |
-| `tests/relay-public-legacy-acceptance-browser.test.js` | Actual offline/online/reload journeys for inherited flags and 301 old rows, genuine paginated shared receipts, stale reads, linked reply identity, current queue UUIDs, all API mutations, and initial conflict before any public storage write. |
+| `tests/relay-public-legacy-acceptance.test.js` | Inherited saved flags, truncated old-history recovery, exact tuple-bound receipt evidence, mixed genuine/current queues, receipt retention beyond 250 old rows, same-UUID queue overlaps, and raw/cache/queue conflict preflight with zero persistence writes. |
+| `tests/relay-public-legacy-acceptance-browser.test.js` | Actual offline/online/reload journeys for inherited flags and 301 old rows, genuine paginated shared receipts, stale reads, linked reply identity, same-UUID queue/journal overlap until exact receipts, all API mutations, and initial conflict before any public storage write. |
 | `tests/helpers/relay-conversation-browser-fixture.js` | Qualified browser, real authenticated routes, fail-closed CDP routing, held/aborted requests, storage inspection and synthetic evidence capture. |
 | `tests/helpers/relay-conversation-evidence.mjs` | Reproducible baseline/current owner, public and Muse captures at four viewport sizes. |
 
@@ -69,16 +69,21 @@ requested until the matching authenticated assistant acknowledgement. Retrying
 delivery keeps the request UUID, while an allowed work retry creates one distinct
 linked child and preserves duplicate-risk restrictions.
 
-Final mandatory Relay validation passed **783/783 tests**, with no failures, cancellations or
+Final mandatory Relay validation passed **805/805 tests**, with no failures, cancellations or
 skips, using Node 24.21.0 and Chrome 154.0.8037.97. This includes the existing
 owner/password browser journeys and all final recovery/security regressions,
-including the inherited-acceptance correction and initial raw/cache conflict guard.
+including the inherited-acceptance correction, same-UUID queue overlap and
+raw/cache/queue conflict guards.
 The five new QA test files contribute 38 top-level cases and 62 counted tests,
 including each Relay/Muse child journey. Eight further legacy-history cases are
 included automatically. The two additional legacy-acceptance files contribute
-14 top-level cases and 18 counted tests. The combined public/store/Muse/shared and
-complete launcher suites passed **89/89**, including **12/12 launcher tests**, using
-Node 22.23.3 and the same Chrome 154 binary. The full mandatory Relay command was:
+20 top-level cases and 40 counted tests. The focused acceptance/browser run passed
+**40/40** using Node 24.21.0 and Chrome 154.0.8037.97. A subsequent **10/10** unit run
+added full queued-role and normalized reply-target checks; all are included in
+the final 805-test mandatory run. The preceding combined public/store/Muse/shared
+and complete launcher suites passed **89/89**, including **12/12 launcher tests**,
+using Node 22.23.3 and the same Chrome 154 binary before this narrow queue-overlap
+follow-up. The full mandatory Relay command was:
 
 ```sh
 REQUIRE_RELAY_OWNER_BROWSER=1 JARVIS_CHROME="$QUALIFIED_CHROME" \
@@ -86,19 +91,20 @@ CHROMIUM_PATH="$QUALIFIED_CHROME" PLAYWRIGHT_CHROMIUM_EXECUTABLE="$QUALIFIED_CHR
 "$QUALIFIED_NODE" tests/helpers/ci-test-inventory.mjs run relay --require-browser
 ```
 
-The final logs are `relay-legacy-acceptance-final-node24.tap` and
-`legacy-acceptance-final-combined-node22.tap` in the synthetic evidence directory
-`/tmp/jarvis-relay-qa`. The latest `qa-legacy-acceptance-manifest.json` records
+The final logs are `relay-legacy-queue-overlap-final-node24.tap`,
+`legacy-queue-overlap-focused-node24.tap` and `legacy-queue-overlap-tuples-node24.tap`
+in the synthetic evidence directory `/tmp/jarvis-relay-qa`.
+The latest `qa-legacy-queue-overlap-manifest.json` records
 toolchain identity,
 source and artifact SHA256 hashes, viewport geometry and the separate earlier
 failing baseline proofs. All 313 recorded implementation/test/toolchain source
 files remained unchanged during and after the final run. This establishes the
 tested working-tree content; the release owner's committed-head qualification
-remains the publication proof. The earlier 738/738, 757/757, 764/764 and 765/765
-local Relay proofs predate the inherited-acceptance correction and are superseded.
+remains the publication proof. The earlier 738/738, 757/757, 764/764, 765/765 and 783/783
+local Relay proofs predate the queue-overlap follow-up and are superseded.
 The prior release owner's Node 22 lane reported 764 passes and one duplicate-test
 skip, with that case covered by its Node 24 owner lane at 765 passes and zero skips;
-that release evidence is separate from this final 783/783 local run.
+that release evidence is separate from this final 805/805 local run.
 
 Final recovery checks prove that a durable journal followed by a failed per-tab
 draft clear is recovered under its original UUID without offering that submitted
@@ -181,6 +187,25 @@ already-open-page tab conflict: no overwritten aggregate or copy-visible-text
 claim is made during initial restore. If the old raw store, migration flag and
 per-row evidence are all absent, past row authority cannot be reconstructed from
 a timestamp or global mode; the code does not guess it.
+
+The queue-overlap follow-up uses the exact released `e4c72ca` assets as a separate
+failing baseline. An old `saved: true` row and an explicit current public outbox
+with the same UUID/body could cause restore to consume the intent without a
+shared receipt or remote write. The new cases cover both migration-flag values
+and aggregate-only, existing-journal-only and combined queues. They preserve the
+original UUID/body, journal and separate draft through offline load/reload and
+a complete empty actual shared GET. A held POST proves the intent remains
+unconfirmed until its exact receipt; releasing it accepts that UUID once. A
+genuine prior actual shared GET receipt can instead finish a redundant queue
+without another POST, including stale-read and reload controls.
+
+Same-ID queued body, role or reply-target conflicts with legacy-associated history
+fail before restore migration, commit or external writes. An absent queued reply
+target is normalized to null and cannot inherit a different target from history.
+Proved and unproved aggregate/journal fixtures retain raw history, genuine receipt
+evidence, queued text and tab drafts byte-for-byte, with zero persistence or API
+mutations. The released-asset run records 28 passing controls and 12 expected
+counted failures; the corrected mandatory run retains every prior assertion.
 
 Synthetic screenshots and fixture results do not establish live assistant tool
 availability, production deployment, physical phone keyboard behavior or
