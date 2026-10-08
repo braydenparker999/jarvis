@@ -9,6 +9,8 @@ on:
       - 'backend/**'
       - 'public/assets/**'
       - 'public/jarvis/**'
+      - 'public/muse/**'
+      - 'scripts/install-qualification-browser.mjs'
       - 'tests/relay-*'
       - 'tests/oauth-consent-browser.test.js'
       - 'tests/ci-workflow.test.js'
@@ -44,14 +46,19 @@ jobs:
         # https://github.com/actions/setup-node/releases/tag/v7.0.0
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '24'
+          node-version: '24.21.0'
           package-manager-cache: false
       - name: Install locked dependencies
         run: npm ci
-      - name: Install the locked Playwright Chromium runtime
+      - name: Restore the checksum-verified qualified browser archive
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/jarvis-qualification-browser/chrome.zip
+          key: jarvis-browser-linux64-154.0.8037.97-487c3b0e89f786d9257a6265a29bacf18b893e90f29c0ef6f7be9706ecc8c7a2
+      - name: Select the exact qualified Chrome154 build
         run: |
-          npx --no-install playwright-core install --with-deps chromium
-          chromium_path="$(node --input-type=module -e 'import {chromium} from "playwright-core"; process.stdout.write(chromium.executablePath())')"
+          node scripts/install-qualification-browser.mjs
+          chromium_path="$RUNNER_TEMP/jarvis-qualification-browser/installed/chrome-linux64/chrome"
           test -x "$chromium_path"
           printf 'CHROMIUM_PATH=%s\n' "$chromium_path" >> "$GITHUB_ENV"
           printf 'PLAYWRIGHT_CHROMIUM_EXECUTABLE=%s\n' "$chromium_path" >> "$GITHUB_ENV"

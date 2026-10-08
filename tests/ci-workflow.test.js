@@ -41,6 +41,14 @@ test('workflows retain full coverage, serial performance gates and fast OAuth br
   assert.equal(auditWorkflows(source, owner), true);
 });
 
+test('fast owner feedback uses the same qualified Node and browser as the release', () => {
+  assert.ok(owner.includes("node-version: '24.21.0'"));
+  assert.ok(owner.includes('node scripts/install-qualification-browser.mjs'));
+  assert.ok(owner.includes('jarvis-browser-linux64-154.0.8037.97-487c3b0e89f786d9257a6265a29bacf18b893e90f29c0ef6f7be9706ecc8c7a2'));
+  assert.ok(!owner.includes('playwright-core install'));
+  assert.ok(owner.includes("- 'public/muse/**'"));
+});
+
 test('workflow audit rejects incomplete, browser-optional and weakened qualification', () => {
   const command = 'node scripts/qualification-proof.mjs plan';
   assert.throws(() => auditWorkflows(source + '\n' + command, owner), /exactly one/);
