@@ -48,6 +48,27 @@ Headers are X-Music-Public-Key, X-Music-Signature (128 hex), X-Music-Timestamp,
 X-Music-Size, X-Music-Sha256. The signature is valid for five minutes. Origin,
 method, path and exact bytes are bound to it; browser uploads are refused.
 
+On an HTTP failure, the standalone uploader still stops with exit status 1 and
+the existing `Upload stopped: Upload HTTP ...` message. It also prints one JSON
+`uploadReceipt` line, available to importing callers as `UploadHTTPError.receipt`.
+The receipt contains status, the original signed Unix timestamp, request timing,
+hashes of the canonical signing message and raw public key, and bounded response
+metadata. It never includes a signature, private key/path, full headers,
+credentials, or arbitrary response text.
+The `--report` file remains a successful-registration report and is not replaced
+by an error receipt.
+
+Only an exact known Worker JSON error with its expected status is recognized.
+For example, 401 plus `Authorized music signature required` produces
+`worker_error_code: signature_required`; an HTML or unknown 401 stays
+`unattributed_http_error`. A Cloudflare header alone does not prove Worker
+invocation. Recognition identifies a known response pattern; it cannot
+cryptographically authenticate the responder or exclude an intermediary echo.
+Error bodies are read once with a 1 KiB limit and one sentinel byte;
+truncated, unreadable or unrecognized bodies cannot establish Worker attribution.
+The receipt aids diagnosis of that request and adds no retries. It does not prove
+recovery or reconstruct earlier failures whose request/response data was lost.
+
 Server hashing plus R2's checksum verifies uploaded bytes. Content-addressed blobs
 are immutable and retries reuse them. Only registration publishes a song after
 both referenced objects match server-created proof. Interrupted uploads remain
