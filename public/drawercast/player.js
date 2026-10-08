@@ -2966,7 +2966,7 @@ const Engine = {
     if(!this.queue.length) return;
     const previousPos=this.pos;
     UI.artDir=1;
-    if(SET_repeat()==='one' && auto){ this._endedRequest=null;this.el().currentTime=0; this.play(); return; }
+    if(SET_repeat()==='one' && auto){ if(this.el().ended)this.resetSelectionRecovery(this.current);this._endedRequest=null;this.el().currentTime=0; this.play(); return; }
     if(this.pos+1 >= this.order.length){
       if(SET_repeat()==='all' || !auto){ this.pos=-1; }
       else { this.pause(); this.el().currentTime=0; UI.renderProgress(); return; }

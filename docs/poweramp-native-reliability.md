@@ -31,6 +31,9 @@ credentials, source URLs, deployment configuration, or available playback option
   online events cannot create more attempts. Expiry stops visibly and requires
   explicit Play. Pause, Stop, focus actions and newer selections cancel both
   stages, including the reload before it spends network resources.
+- **Repeat-one recovery:** a fully completed loop inherited the previous
+  loop's spent retry budget. A real native end now resets recovery before the
+  repeat starts; metadata, Play completion and stalls within a loop cannot do so.
 - **Catalog races:** pending Play and buffering counted as idle, allowing a
   refresh to scan the library or replace a queue during an asynchronous commit.
   Refresh defers while playback is desired and rechecks after the commit. Its
@@ -41,11 +44,11 @@ credentials, source URLs, deployment configuration, or available playback option
 
 `tests/poweramp-native-reliability.test.js` runs the real Engine, production
 transport wrappers, R2 refresh implementation and lifecycle listeners with a
-controlled clock and media tasks. Its 45 scenarios include delayed timers,
+controlled clock and media tasks. Its 47 scenarios include delayed timers,
 explicit Pause, missing events, stale preloads, network and codec failures,
 offline/online races, retry expiry, context interruptions and queue policies.
-Against frozen deployed source, 23 of the 45 scenarios fail. They cover the
-behavior above and missing diagnostic fields. The candidate passes all 45.
+Against frozen deployed source, 25 of the 47 scenarios fail. They cover the
+behavior above and missing diagnostic fields. The candidate passes all 47.
 
 `tests/poweramp-native-reliability-browser.test.js` uses repository-pinned
 Chrome for Testing 154.0.8037.97, real native media elements, the full audio

@@ -500,3 +500,18 @@ test('throttled buffering and spare errors expose timing and slot evidence witho
   for(let i=0;i<160;i++)h.Engine.tracePlayback('preload-media-error',{slot:1-h.Engine.cur,reason:'NotSupportedError',error:'NotSupportedError'});
   assert.ok(JSON.stringify(h.diagnosticReport()).length<32000,'even dense timing and spare-state rows retain the report size bound');
 });
+
+for(const kind of ['native-r2','legacy-r2']) {
+  test(`${kind} completed repeat-one loop gets a fresh retry without renewing it during that loop`, async()=>{
+    const h=harness(kind);h.ctx.SET.repeatMode='one';await h.start(42);const a=h.audio();
+    a.error={code:2};a.emit('error');await h.clock.advance(1000);a.metadata(200);a.playing();await flush();
+    endWithoutEvent(a);a.emit('ended');await flush();
+    assert.equal(h.Engine.current.id,h.selected.id);assert.equal(h.Engine.pos,0);
+    a.ended=false;a.currentTime=0;a.metadata(200);a.playing();await flush();
+    const before=loadSnapshot(a);a.error={code:2};a.emit('error');await h.clock.advance(1000);
+    assert.equal(h.Engine.wantsPlayback(),true,'a completed new repeat cycle gets one retry');assert.ok(recoveryLoads(a,before));
+    a.metadata(200);a.playing();await flush();a.error={code:2};a.emit('error');await h.clock.advance(60000);
+    assert.equal(h.Engine.wantsPlayback(),false,'a second error in the same loop remains terminal');
+    assert.equal(a.sources.slice(before.sources).filter(Boolean).length,1,'only one retry URL reload per loop');
+  });
+}
