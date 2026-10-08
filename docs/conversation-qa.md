@@ -21,6 +21,8 @@ browser and includes every `tests/relay-*.test.js` file automatically.
 | `tests/relay-public-store-adversarial.test.js` | Full board history across tab writes, failed independent draft persistence, a deterministic 49-to-51 queue admission race and exact-acceptance journal draining. |
 | `tests/launcher-browser.test.js` | Existing launcher content, identity, schema, draft, Back and isolation journeys; exact receipts/journals, unchanged malformed storage, all mutating API calls, and nonempty old-inbox fixtures proving no automatic publication after restore/reload/refresh. |
 | `tests/relay-public-legacy-history.test.js` | Older local history retention, bounded accepted caching, exact receipt association, old flags without publication authority, and read-only mismatch preflight before any journal/draft/aggregate write. |
+| `tests/relay-public-legacy-acceptance.test.js` | Inherited saved flags, truncated old-history recovery, exact tuple-bound receipt evidence, mixed genuine/current queues, receipt retention beyond 250 old rows, and initial raw/cache conflict preflight with zero persistence writes. |
+| `tests/relay-public-legacy-acceptance-browser.test.js` | Actual offline/online/reload journeys for inherited flags and 301 old rows, genuine paginated shared receipts, stale reads, linked reply identity, current queue UUIDs, all API mutations, and initial conflict before any public storage write. |
 | `tests/helpers/relay-conversation-browser-fixture.js` | Qualified browser, real authenticated routes, fail-closed CDP routing, held/aborted requests, storage inspection and synthetic evidence capture. |
 | `tests/helpers/relay-conversation-evidence.mjs` | Reproducible baseline/current owner, public and Muse captures at four viewport sizes. |
 
@@ -67,13 +69,16 @@ requested until the matching authenticated assistant acknowledgement. Retrying
 delivery keeps the request UUID, while an allowed work retry creates one distinct
 linked child and preserves duplicate-risk restrictions.
 
-Final mandatory Relay validation passed **765/765 tests**, with no failures, cancellations or
+Final mandatory Relay validation passed **783/783 tests**, with no failures, cancellations or
 skips, using Node 24.21.0 and Chrome 154.0.8037.97. This includes the existing
-owner/password browser journeys and all final recovery/security regressions.
+owner/password browser journeys and all final recovery/security regressions,
+including the inherited-acceptance correction and initial raw/cache conflict guard.
 The five new QA test files contribute 38 top-level cases and 62 counted tests,
 including each Relay/Muse child journey. Eight further legacy-history cases are
-included automatically. The complete launcher suite separately passed **12/12**
-using Node 22.23.3 and the same Chrome 154 binary. The full mandatory Relay command was:
+included automatically. The two additional legacy-acceptance files contribute
+14 top-level cases and 18 counted tests. The combined public/store/Muse/shared and
+complete launcher suites passed **89/89**, including **12/12 launcher tests**, using
+Node 22.23.3 and the same Chrome 154 binary. The full mandatory Relay command was:
 
 ```sh
 REQUIRE_RELAY_OWNER_BROWSER=1 JARVIS_CHROME="$QUALIFIED_CHROME" \
@@ -81,16 +86,19 @@ CHROMIUM_PATH="$QUALIFIED_CHROME" PLAYWRIGHT_CHROMIUM_EXECUTABLE="$QUALIFIED_CHR
 "$QUALIFIED_NODE" tests/helpers/ci-test-inventory.mjs run relay --require-browser
 ```
 
-The final logs are `relay-no-auto-import-final-node24.tap` and
-`launcher-no-auto-import-final-node22.tap` in the synthetic evidence directory
-`/tmp/jarvis-relay-qa`. The latest `qa-no-auto-import-manifest.json` records
+The final logs are `relay-legacy-acceptance-final-node24.tap` and
+`legacy-acceptance-final-combined-node22.tap` in the synthetic evidence directory
+`/tmp/jarvis-relay-qa`. The latest `qa-legacy-acceptance-manifest.json` records
 toolchain identity,
 source and artifact SHA256 hashes, viewport geometry and the separate earlier
-failing baseline proofs. All 311 recorded implementation/test/toolchain source
+failing baseline proofs. All 313 recorded implementation/test/toolchain source
 files remained unchanged during and after the final run. This establishes the
 tested working-tree content; the release owner's committed-head qualification
-remains the publication proof. The earlier 738/738, 757/757 and 764/764 Relay runs
-predate the final legacy-history regressions and are superseded.
+remains the publication proof. The earlier 738/738, 757/757, 764/764 and 765/765
+local Relay proofs predate the inherited-acceptance correction and are superseded.
+The prior release owner's Node 22 lane reported 764 passes and one duplicate-test
+skip, with that case covered by its Node 24 owner lane at 765 passes and zero skips;
+that release evidence is separate from this final 783/783 local run.
 
 Final recovery checks prove that a durable journal followed by a failed per-tab
 draft clear is recovered under its original UUID without offering that submitted
@@ -138,6 +146,48 @@ send normally. The fixture records every API mutation, rather than checking only
 the message endpoint, and retains every original content/privacy/schema assertion.
 The latest manifest records these proofs and all final source hashes.
 
+The inherited-acceptance baseline uses the exact pre-correction `dd188551` public
+assets. Cached public version-1 rows with `saved: true` inherited from an old inbox
+showed Awaiting reply after an empty actual shared GET. Both `legacyPending: true`
+and an already normalized false flag reproduced the defect when the original
+old-store bytes remained. With 301 old rows, the first commit serialized 250 and
+reload hid the oldest 51 even though the original raw history survived. The
+baseline observations record offline load, offline reload, fresh empty shared
+read and online reload, with zero mutating API calls and an unchanged draft/raw
+store. Desired-behavior regressions fail against those frozen assets.
+
+The correction classifies positively associated old tuples before persistence,
+recovers missing raw rows even from a previously truncated cache, and labels
+unconfirmed text Local history · on this device. A shared receipt creates
+`sharedAcceptance` evidence bound to version, UUID, role, exact body and reply
+target. Cache-only merges preserve valid evidence; old raw fields and global sync
+timestamps cannot create it. The marker is cached receipt evidence, never
+permission or authorization. Legacy-associated history and its genuine receipt
+evidence stay outside the ordinary 250-row accepted-cache limit. The tests prove
+301 subsequently confirmed old rows remain accepted through stale empty reads
+and offline reload, with unchanged IDs/bodies and retained original raw bytes.
+Unrelated genuine public rows and existing explicit public queues retain their
+separate behavior. An old flag does not queue or publish text; the one current
+public queue fixture sends only its original UUID/body once. All local-only
+restoration variants record zero mutating API calls, including migration routes.
+
+Initial restore also checks raw and cached rows sharing a UUID but differing in
+body, role or reply target, including a genuinely tuple-marked cached row. It
+fails before journal migration, tab-draft writes or aggregate writes and keeps
+both old/shared stores byte-identical, with the independent queue intact. The
+browser instruments persistence after fixture seeding and confirms the accurate
+initial-load retention error without an API mutation. This differs from the
+already-open-page tab conflict: no overwritten aggregate or copy-visible-text
+claim is made during initial restore. If the old raw store, migration flag and
+per-row evidence are all absent, past row authority cannot be reconstructed from
+a timestamp or global mode; the code does not guess it.
+
 Synthetic screenshots and fixture results do not establish live assistant tool
 availability, production deployment, physical phone keyboard behavior or
-owner-phone acceptance. No product failure remains in the qualified fixture run.
+owner-phone acceptance. No product failure remains in the final qualified Relay
+or combined public/launcher fixture runs. The release owner's separate broader
+non-Relay local run recorded 1034 passes and two counted failures from one existing
+My Media remote-cover child and its parent aggregate. The real cover host was
+blocked: Chrome reported `net::ERR_TUNNEL_CONNECTION_FAILED`, and TLS-verified
+curl received proxy CONNECT 403 with no image bytes. That test remains unchanged;
+committed-head CI in its independent environment remains the broader release proof.

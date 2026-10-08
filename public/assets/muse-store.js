@@ -20,6 +20,6 @@ export function mergeMuse(state, remote) {
   // Collision checks use the entire shared inbox before destination filtering.
   const pending=new Set(state.outbox.map(m=>m.id));
   const received=[...new Map([...channelMessages(remote.messages,'muse'),...remote.messages.filter(m=>pending.has(m.id))].map(m=>[m.id,m])).values()];
-  const merged=mergePublicMessages(state.messages,state.outbox,received);
+  const merged=mergePublicMessages(state.messages,state.outbox,received,{sharedEvidence:true});
   return {...state,...merged,messages:channelMessages(merged.messages,'muse'),publisher:remote.publisher||state.publisher,syncedAt:new Date().toISOString()};
 }

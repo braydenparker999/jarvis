@@ -4,7 +4,14 @@ export const MAX_PUBLIC_CACHED = 250;
 const uuid = value => typeof value==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(value);
 const same = (a,b) => a.id===b.id&&a.role===b.role&&a.body===b.body&&(a.replyTo||null)===(b.replyTo||null);
 const order = (a,b) => String(a.createdAt||'').localeCompare(String(b.createdAt||''))||a.id.localeCompare(b.id);
-export function mergePublicMessages(known,outbox,received){
+export function hasSharedAcceptance(message){
+  const proof=message?.sharedAcceptance;
+  return !!proof&&typeof proof==='object'&&!Array.isArray(proof)&&Object.keys(proof).length===5
+    &&proof.version===1&&uuid(message.id)&&['user','assistant'].includes(message.role)&&typeof message.body==='string'
+    &&proof.id===message.id&&proof.role===message.role&&proof.body===message.body&&proof.replyTo===(message.replyTo||null);
+}
+export function mergePublicMessages(known,outbox,received,{sharedEvidence=false}={}){
+  const legacyIds=new Set(known.filter(m=>m.legacyHistory===true).map(m=>m.id));
   const pending=new Map();
   for(const queued of outbox){
     const message={...known.find(m=>m.id===queued.id),...queued};
@@ -27,7 +34,14 @@ export function mergePublicMessages(known,outbox,received){
       pending.set(message.id,{...queued,sendState:'conflict'});continue;
     }
     if(unconfirmed&&(!uuid(message.id)||!same(unconfirmed,message)))continue;
-    const confirmed={...message,saved:true};delete confirmed.localOnly;
+    const confirmed={...message,saved:true};delete confirmed.localOnly;delete confirmed.legacyHistory;delete confirmed.sharedAcceptance;
+    if(legacyIds.has(message.id))confirmed.legacyHistory=true;
+    if(sharedEvidence&&uuid(message.id)&&['user','assistant'].includes(message.role)&&typeof message.body==='string'){
+      confirmed.sharedAcceptance={version:1,id:message.id,role:message.role,body:message.body,replyTo:message.replyTo||null};
+    }else{
+      const proof=hasSharedAcceptance(message)?message.sharedAcceptance:hasSharedAcceptance(previous)?previous.sharedAcceptance:null;
+      if(proof)confirmed.sharedAcceptance={...proof};
+    }
     accepted.set(message.id,confirmed);local.delete(message.id);
   }
   for(const [id,message] of pending){const proof=accepted.get(id);if(proof&&proof.role==='user'&&proof.body===message.body)pending.delete(id);}
@@ -93,7 +107,9 @@ export function createPublicDeliveryStore({storage,tabStorage,key,read}){
     // Each UUID is independently durable. Another tab's aggregate write cannot
     // erase it, and no journal is removed without exact accepted user text.
     for(const message of result.outbox)savePending(message);
-    const cachedMessages=[...result.messages.filter(m=>m.saved===true).sort(order).slice(-MAX_PUBLIC_CACHED),...result.messages.filter(m=>m.localOnly),...result.outbox].sort(order);
+    // Legacy-associated rows remain recoverable with their evidence even after
+    // public acceptance. A normal cache cap must not erase that provenance.
+    const cachedMessages=[...new Map([...result.messages.filter(m=>m.saved===true&&!m.legacyHistory).sort(order).slice(-MAX_PUBLIC_CACHED),...result.messages.filter(m=>m.localOnly||m.legacyHistory),...result.outbox].map(m=>[m.id,m])).values()].sort(order);
     try{storage.setItem(key,JSON.stringify({...result,messages:cachedMessages,...('posts' in result?{posts:posts.slice(-20)}:{})}));}
     catch{const error=Error('Browser storage could not finish updating. Keep this page open and copy your text before reloading.');error.storageFailure=true;throw error;}
     const accepted=new Map(result.messages.filter(m=>m.saved===true&&m.role==='user').map(m=>[m.id,m.body]));
