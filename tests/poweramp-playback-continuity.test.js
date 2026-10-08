@@ -527,11 +527,14 @@ for (const advancing of [false, true]) {
 
 test('load cancelling the queued owned pause cannot mask a genuine external pause after R2 retry starts', async () => {
   const h = harness(); await h.start(42); const a = h.audio();
+  // A throttled native pause task remains queued when the delayed reload runs.
+  a.dispatch = fn => h.clock.setTimeout(fn, 1000);
   a.cancelPauseOnLoad = true; a.error = {code: 2}; a.emit('error');
+  await h.clock.advance(800);
   assert.equal(a.pauseTasks.size, 0, 'load discarded the owned pause event instead of delivering it');
-  await h.clock.advance(2500); a.metadata(); a.playing(); await flush();
+  await h.clock.advance(1700); a.metadata(); a.playing(); await flush();
   assert.equal(h.Engine.playing, true); assert.equal(h.Engine.wantsPlayback(), true);
-  a.pause(); await h.clock.advance(0);
+  a.pause(); await h.clock.advance(1000);
   assert.equal(h.Engine.playing, false); assert.equal(h.Engine.wantsPlayback(), false);
   const before = loadSnapshot(a); await h.clock.advance(60000); assertNoNewAudio(a, before);
 });
