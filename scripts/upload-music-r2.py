@@ -12,6 +12,8 @@ import os
 import math
 import importlib.util
 import re
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 import subprocess
 import tempfile
@@ -20,6 +22,146 @@ import urllib.error
 import urllib.request
 
 ORIGIN = 'https://jarvis-hub-api.braydenparker999.workers.dev'
+ERROR_BODY_LIMIT = 1024
+
+# Exact status/message pairs from backend/music-upload.js. Never echo arbitrary
+# response text, even if it contains one of these messages as a substring.
+WORKER_ERROR_CODES = {
+    400: {'Query parameters are not supported': 'query_not_supported'},
+    401: {'Authorized music signature required': 'signature_required'},
+    403: {'Origin not allowed': 'origin_not_allowed',
+          'Server-to-server uploads only': 'server_to_server_only'},
+    404: {'Not found': 'not_found'},
+    405: {'Method not allowed': 'method_not_allowed'},
+    409: {'Existing object conflicts with verified upload': 'object_conflict',
+          'Analysis object identity conflict': 'analysis_identity_conflict',
+          'Verified audio is unavailable': 'verified_audio_unavailable',
+          'Analysis changed concurrently; review before retry': 'analysis_changed',
+          'Library changed concurrently; retry analysis with reviewed identity': 'analysis_library_changed',
+          'Upload audio before registration': 'audio_not_registered',
+          'Upload artwork before registration': 'artwork_not_registered',
+          'Library changed concurrently; retry this registration': 'registration_library_changed'},
+    413: {'Upload exceeds its size limit': 'size_limit',
+          'Music library limit reached': 'library_limit'},
+    415: {'Unexpected content type': 'content_type',
+          'A prepared Ogg Opus file is required': 'prepared_opus_required',
+          'Invalid artwork format': 'artwork_format'},
+    422: {'Uploaded bytes do not match signed proof': 'body_proof_mismatch',
+          'Content address mismatch': 'content_address_mismatch',
+          'Invalid analysis registration': 'analysis_registration',
+          'Invalid analysis identity': 'analysis_identity',
+          'Invalid audio analysis': 'audio_analysis',
+          'Invalid track metadata': 'track_metadata',
+          'A positive prepared duration is required': 'positive_duration_required',
+          'Invalid track registration': 'track_registration',
+          'Invalid cover registration': 'cover_registration'},
+    503: {'Music storage is not configured': 'storage_not_configured',
+          'Music upload or library temporarily unavailable': 'temporarily_unavailable'},
+}
+
+
+class UploadHTTPError(RuntimeError):
+    """An HTTP failure with only a bounded, sanitized diagnostic receipt."""
+    def __init__(self, status, receipt):
+        self.receipt = receipt
+        status = status if type(status) is int and 100 <= status <= 599 else 'unknown'
+        super().__init__(f'Upload HTTP {status}; retry only after diagnosing the response.')
+
+
+def _utc_now():
+    return datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+
+
+def _header(error, name, max_length=128):
+    try:
+        value = error.headers.get(name)
+        if isinstance(value, str) and len(value) <= max_length and not re.search(r'[^\x20-\x7e]', value):
+            return value
+    except Exception:
+        pass
+    return None
+
+
+def _header_present(error, name):
+    try:
+        return error.headers.get(name) is not None
+    except Exception:
+        return None
+
+
+def _response_metadata(error, request_url):
+    date = None
+    try:
+        value = _header(error, 'Date', 80)
+        parsed = parsedate_to_datetime(value) if value else None
+        if parsed is not None and parsed.tzinfo is not None:
+            date = parsed.astimezone(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
+    except Exception:
+        pass
+    ray = _header(error, 'CF-Ray', 20)
+    if ray is None or not re.fullmatch(r'[a-fA-F0-9]{16}-[A-Z]{3}', ray):
+        ray = None
+    mime = (_header(error, 'Content-Type') or '').partition(';')[0].strip().lower()
+    content_type = {'application/json': 'json', 'text/html': 'html', 'text/plain': 'text'}.get(mime, 'other')
+    server = 'cloudflare' if (_header(error, 'Server', 64) or '').strip().lower() == 'cloudflare' else 'other'
+    try:
+        response_url = error.geturl()
+        url_matches = response_url == request_url if type(response_url) is str else None
+    except Exception:
+        url_matches = None
+    return {'date_utc': date, 'cf_ray': ray, 'content_type': content_type, 'server': server,
+            'www_authenticate_present': _header_present(error, 'WWW-Authenticate'),
+            'location_present': _header_present(error, 'Location'), 'response_url_matches_request': url_matches}
+
+
+def _unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('Duplicate JSON field')
+        result[key] = value
+    return result
+
+
+def _http_error_receipt(error, message, public, request_url, started_utc, started_monotonic, signed_timestamp):
+    # HTTPError messages/URLs/headers and body/close exceptions can contain
+    # secrets. Only fixed enums, validated public IDs and hashes leave here.
+    try:
+        status = error.code if type(error.code) is int and 100 <= error.code <= 599 else None
+    except Exception:
+        status = None
+    metadata = _response_metadata(error, request_url)
+    capture, worker_code = 'unreadable', None
+    try:
+        body = error.read(ERROR_BODY_LIMIT + 1)
+        if isinstance(body, bytes):
+            capture = 'truncated' if len(body) > ERROR_BODY_LIMIT else 'complete'
+            if capture == 'complete' and metadata['content_type'] == 'json':
+                try:
+                    data = json.loads(body.decode('utf-8'), object_pairs_hook=_unique_object)
+                    if isinstance(data, dict) and set(data) == {'error'} and isinstance(data['error'], str):
+                        worker_code = WORKER_ERROR_CODES.get(status, {}).get(data['error'])
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    finally:
+        try:
+            error.close()
+        except Exception:
+            pass
+    raw_key_fingerprint = None
+    if isinstance(public, str) and re.fullmatch(r'[a-f0-9]{64}', public):
+        raw_key_fingerprint = hashlib.sha256(bytes.fromhex(public)).hexdigest()
+    elapsed = time.monotonic() - started_monotonic
+    elapsed_ms = round(max(0, elapsed) * 1000) if math.isfinite(elapsed) else None
+    return {'version': 1, 'http_status': status, 'started_utc': started_utc, 'finished_utc': _utc_now(),
+            'elapsed_ms': elapsed_ms,
+            'signed_unix_timestamp': signed_timestamp if type(signed_timestamp) is int and abs(signed_timestamp) <= 2**53 - 1 else None,
+            'canonical_message_sha256': hashlib.sha256(message).hexdigest(),
+            'raw_public_key_sha256': raw_key_fingerprint, 'response': metadata, 'body_capture': capture,
+            'classification': 'recognized_worker_error' if worker_code else 'unattributed_http_error',
+            'worker_error_code': worker_code}
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -48,12 +190,13 @@ def upload_request(method, path, body, mime, key, public):
                'X-Music-Timestamp': str(timestamp), 'X-Music-Size': str(len(body)),
                'X-Music-Sha256': digest, 'X-Music-Signature': signature}
     request = urllib.request.Request(ORIGIN + path, data=body, headers=headers, method=method)
+    started_utc, started_monotonic = _utc_now(), time.monotonic()
     try:
         with urllib.request.build_opener(NoRedirect).open(request, timeout=120) as response:
             return json.loads(response.read(65537))
     except urllib.error.HTTPError as error:
-        # Do not print request headers, credential values or SDK exception strings.
-        raise RuntimeError(f'Upload HTTP {error.code}; retry only after diagnosing the response.') from None
+        receipt = _http_error_receipt(error, message, public, request.full_url, started_utc, started_monotonic, timestamp)
+        raise UploadHTTPError(receipt['http_status'], receipt) from None
 
 
 def prepared(file):
@@ -160,10 +303,16 @@ def main():
     print(json.dumps(result))
 
 
-if __name__ == '__main__':
+def cli():
     try:
         main()
     except Exception as error:
         # Exceptions from subprocess/HTTP never disclose signing material.
         print('Upload stopped: ' + (str(error) if isinstance(error, RuntimeError) else type(error).__name__))
+        if isinstance(error, UploadHTTPError):
+            print(json.dumps({'uploadReceipt': error.receipt}, separators=(',', ':')))
         raise SystemExit(1)
+
+
+if __name__ == '__main__':
+    cli()
