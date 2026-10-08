@@ -86,6 +86,8 @@ export async function relayRpc(ctx, env, principal, rpc) {
       // conversation entry or a claim that a callback started host execution.
       const diagnostics = await relayOwnerRpc(ctx, env, principal, 'relay_owner_delivery_status', {inbox_id: args.inbox_id, message_ids: [args.message_id]});
       result.content.push({type: 'text', text: 'Private delivery diagnostics (callback acceptance is transport evidence only): ' + JSON.stringify(diagnostics)});
+      const subscriptions = await relayOwnerRpc(ctx, env, principal, 'relay_owner_subscription_status', {inbox_id: args.inbox_id});
+      result.content.push({type: 'text', text: 'Private subscription diagnostics (current subscription evidence only; no host execution proof): ' + JSON.stringify(subscriptions)});
     }
     return result;
   }

@@ -7,9 +7,10 @@ import {relayOwnerTools} from '../backend/relay-owner-tools.js';
 import {relayRpc} from '../backend/relay-connector.js';
 import {relayEventSchema,enqueueRelayOwnerMessage,relaySubscribe,drainRelayOutbox} from '../backend/relay-events.js';
 import {sharedStore,SHARED_OBJECT} from '../backend/shared.js';
-import {RELAY_OWNER,RELAY_CALLBACK,RELAY_OWNER_SCOPE,RELAY_OWNER_INBOX,RELAY_OWNER_EVENT,random,hash,challenge} from '../backend/relay-common.js';
+import {RELAY_OWNER,RELAY_CALLBACK,RELAY_OWNER_SCOPE,RELAY_OWNER_INBOX,RELAY_OWNER_EVENT,RELAY_EVENT,RELAY_INBOX,random,hash,challenge} from '../backend/relay-common.js';
 
 const toolName='relay_owner_delivery_status';
+const subscriptionTool='relay_owner_subscription_status';
 const args=ids=>({inbox_id:RELAY_OWNER_INBOX,message_ids:ids});
 const receiver=async(_url,init)=>Response.json({challenge:JSON.parse(init.body).challenge});
 const accepted=async()=>new Response(null,{status:204});
@@ -33,6 +34,7 @@ async function fixture(t){
   s.phone=await relayOwnerRpc(s.ctx,s.env,s.auth,'relay_owner_pairing_approve',{request_id:pair.request_id,code:pair.code,access_days:365,confirm:true});
   s.token=pair.device_token;s.tokenHash=await hash(s.token);
   s.read=(ids,auth=s.auth)=>relayOwnerRpc(s.ctx,s.env,auth,toolName,args(ids));
+  s.health=(auth=s.auth)=>relayOwnerRpc(s.ctx,s.env,auth,subscriptionTool,{inbox_id:RELAY_OWNER_INBOX});
   s.call=(name,arguments_,auth=s.auth)=>relayRpc(s.ctx,s.env,auth,{method:'tools/call',params:{_meta:{},name,arguments:arguments_}});
   s.send=async(body='Private diagnostic fixture body',id=crypto.randomUUID())=>{
     const response=await relayOwnerStore(s.ctx,s.env,{op:'message',token_hash:s.tokenHash,id,body},enqueueRelayOwnerMessage);
@@ -172,5 +174,84 @@ test('diagnostic gate stays closed when owner or MCP functionality is disabled',
   for(const field of ['RELAY_OWNER_ENABLED','RELAY_MCP_ENABLED']){
     const s=await fixture(t),message=await s.send(),before=s.snapshot();s.env[field]='false';guardWrites(t,s);
     await forbidden(s.read([message.id]));assert.deepEqual(s.snapshot(),before);
+  }
+});
+
+test('subscription evidence is strict and read-only before an event subscription table exists',async t=>{
+  const s=await fixture(t),tool=relayOwnerTools.find(x=>x.name===subscriptionTool);
+  s.rows('DROP TABLE relay_subscriptions');const before=s.snapshot();guardWrites(t,s);
+  const result=await s.health();assertShape(result,tool.outputSchema);
+  assert.deepEqual(tool.annotations,{readOnlyHint:true,destructiveHint:false,openWorldHint:false});
+  assert.deepEqual(tool.securitySchemes,[{type:'oauth2',scopes:[RELAY_OWNER_SCOPE]}]);
+  assertShape({inbox_id:RELAY_OWNER_INBOX},tool.inputSchema);
+  const {observedAt,...status}=result;assert.ok(Date.parse(observedAt));
+  assert.deepEqual(status,{inbox_id:RELAY_OWNER_INBOX,active:0,unfilteredActive:0,filteredActive:0,deliveryFailed:0,expired:0,unauthorized:0,nextActiveExpiryAt:null,visibility:'private'});
+  assert.deepEqual(s.snapshot(),before,'reading empty subscription evidence does not create event state');
+});
+
+test('subscription evidence distinguishes the absent and expired states hidden by identical saved-message evidence',async t=>{
+  const s=await fixture(t),message=await s.send(),absent=(await s.read([message.id])).deliveries[0];
+  assert.equal((await s.health()).active,0);assert.equal((await s.health()).expired,0);
+  const sub=await s.subscribe();assert.equal((await s.health()).unfilteredActive,1);
+  s.rows('UPDATE relay_subscriptions SET expires_ms=? WHERE id=?',Date.now()-1,sub.id);
+  const before=s.snapshot();guardWrites(t,s);
+  assert.deepEqual((await s.read([message.id])).deliveries[0],absent);
+  const health=await s.health();assert.equal(health.active,0);assert.equal(health.expired,1);assert.equal(health.nextActiveExpiryAt,null);
+  assert.deepEqual(s.snapshot(),before);
+});
+
+test('private subscription evidence separates filters, excludes public subscriptions and never exposes identities or secrets',async t=>{
+  const s=await fixture(t),plain=await s.subscribe('https://receiver.example/plain-private-path');
+  const filtered=await relaySubscribe(s.ctx,s.auth,{name:RELAY_OWNER_EVENT,arguments:{inbox_id:RELAY_OWNER_INBOX,message_contains:'Secret diagnostic filter'},delivery:{mode:'webhook',url:'https://receiver.example/filtered-private-path',secret:'whsec_'+Buffer.alloc(32,23).toString('base64')},cursor:'relay1:0'},s.env,receiver);
+  const publicAuth=await grant(s,'relay:events');
+  await relaySubscribe(s.ctx,publicAuth,{name:RELAY_EVENT,arguments:{inbox_id:RELAY_INBOX},delivery:{mode:'webhook',url:'https://receiver.example/public-path',secret:'whsec_'+Buffer.alloc(32,24).toString('base64')},cursor:'relay1:0'},s.env,receiver);
+  const before=s.snapshot();guardWrites(t,s);const health=await s.health();
+  assert.equal(health.active,2);assert.equal(health.unfilteredActive,1);assert.equal(health.filteredActive,1);
+  assert.equal(health.nextActiveExpiryAt,new Date(Math.min(...s.rows('SELECT expires_ms FROM relay_subscriptions WHERE name=?',RELAY_OWNER_EVENT).map(x=>x.expires_ms))).toISOString());
+  for(const secret of [plain.id,filtered.id,s.auth.grantId,publicAuth.grantId,s.token,s.tokenHash,s.phone.device.id,'receiver.example','whsec_','Secret diagnostic filter','brayden-relay'])assert.ok(!JSON.stringify(health).includes(secret));
+  assert.deepEqual(s.snapshot(),before);
+});
+
+test('paused, expired and unauthorized subscriptions cannot imply an active private responder',async t=>{
+  const s=await fixture(t),active=await s.subscribe('https://receiver.example/active');
+  const paused=await s.subscribe('https://receiver.example/paused'),expired=await s.subscribe('https://receiver.example/expired'),narrowed=await s.subscribe('https://receiver.example/narrowed');
+  const ordinary=await grant(s,'relay:read');
+  s.rows("UPDATE relay_subscriptions SET state='delivery_failed' WHERE id=?",paused.id);
+  s.rows('UPDATE relay_subscriptions SET expires_ms=? WHERE id=?',Date.now()-1,expired.id);
+  s.rows('UPDATE relay_subscriptions SET grant_id=? WHERE id=?',ordinary.grantId,narrowed.id);
+  const before=s.snapshot();guardWrites(t,s);const {observedAt,...health}=await s.health();
+  assert.deepEqual(health,{inbox_id:RELAY_OWNER_INBOX,active:1,unfilteredActive:1,filteredActive:0,deliveryFailed:1,expired:1,unauthorized:1,nextActiveExpiryAt:new Date(s.rows('SELECT expires_ms FROM relay_subscriptions WHERE id=?',active.id)[0].expires_ms).toISOString(),visibility:'private'});
+  assert.deepEqual(s.snapshot(),before);
+});
+
+test('current subscription loss does not erase historical callback acceptance',async t=>{
+  const s=await fixture(t),sub=await s.subscribe(),message=await s.send();await drainRelayOutbox(s.ctx,s.env,accepted);
+  const received=(await s.read([message.id])).deliveries[0];assert.equal(received.callbackAccepted,true);
+  s.rows('DELETE FROM relay_subscriptions WHERE id=?',sub.id);
+  const before=s.snapshot();guardWrites(t,s);
+  assert.equal((await s.health()).active,0);assert.deepEqual((await s.read([message.id])).deliveries[0],received);
+  assert.deepEqual(s.snapshot(),before);
+});
+
+test('subscription diagnostics reject public scopes, foreign identity, disabled gates and extra arguments without writes',async t=>{
+  const s=await fixture(t),ordinary=await grant(s,'relay:read relay:reply relay:events'),before=s.snapshot();guardWrites(t,s);
+  for(const auth of [ordinary,{...ordinary,scopes:[RELAY_OWNER_SCOPE]},{...s.auth,principal:'github:999'},{...s.auth,accessHash:random()}])await forbidden(s.health(auth));
+  const challenge=await s.call(subscriptionTool,{inbox_id:RELAY_OWNER_INBOX},ordinary);assert.equal(challenge.isError,true);assert.equal(challenge.structuredContent,undefined);
+  for(const input of [{inbox_id:RELAY_INBOX},{},{inbox_id:RELAY_OWNER_INBOX,message_ids:[]},{inbox_id:RELAY_OWNER_INBOX,callback:'https://receiver.example'}])await assert.rejects(relayOwnerRpc(s.ctx,s.env,s.auth,subscriptionTool,input));
+  for(const gate of ['RELAY_OWNER_ENABLED','RELAY_MCP_ENABLED']){s.env[gate]='false';await forbidden(s.health());s.env[gate]='true';}
+  assert.deepEqual(s.snapshot(),before);
+});
+
+test('subscription diagnostics revalidate expiry, revocation and scope narrowing inside the read transaction',async t=>{
+  for(const mode of ['revoked','narrowed','access-expired','grant-expired','between-checks']){
+    const s=await fixture(t);await s.subscribe();
+    const key=mode==='access-expired'?'access:'+s.auth.accessHash:'grant:'+s.auth.grantId;
+    const change=()=>{
+      if(mode.endsWith('expired'))s.rows('UPDATE relay_oauth SET expires_at=? WHERE key=?',Date.now()-1,key);
+      else {const value=JSON.parse(s.rows('SELECT value FROM relay_oauth WHERE key=?',key)[0].value);if(mode==='narrowed')value.scope='relay:read';else value.revoked=true;s.rows('UPDATE relay_oauth SET value=? WHERE key=?',JSON.stringify(value),key);}
+    };
+    if(mode==='between-checks'){const transaction=s.ctx.storage.transactionSync.bind(s.ctx.storage);s.ctx.storage.transactionSync=fn=>{change();return transaction(fn);};}
+    else change();
+    await forbidden(s.health());
   }
 });

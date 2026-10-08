@@ -11,6 +11,9 @@ const delivery = object({message_id:deliveryMessageId,state:{type:'string',enum:
   pending:{type:'integer',minimum:0},failed:{type:'integer',minimum:0},
   callbackAcceptedAt:{anyOf:[timestamp,{type:'null'}]},callbackAccepted:{type:'boolean'},replySaved:{type:'boolean'},
   retryable:{type:'boolean'},retryAfter:{anyOf:[timestamp,{type:'null'}]}});
+const count = {type:'integer',minimum:0};
+const subscriptionStatus = object({...inbox,observedAt:timestamp,active:count,unfilteredActive:count,filteredActive:count,
+  deliveryFailed:count,expired:count,unauthorized:count,nextActiveExpiryAt:{anyOf:[timestamp,{type:'null'}]},visibility});
 const entry = object({id,sequence:{type:'integer',minimum:1},body:{type:'string'},role:{type:'string',enum:['user','assistant']},createdAt:timestamp,
   author_authenticated:{type:'boolean',const:true},principal:{type:'string',const:RELAY_OWNER},device_id:id,
   authentication_source:{type:'string',enum:['owner-device-session','owner-password-session','owner-oauth-mcp']},visibility,
@@ -40,6 +43,8 @@ export const relayOwnerTools = [
   {name:'relay_owner_delivery_status',title:'Read private owner delivery evidence',description:'Read persisted delivery evidence for 1–50 exact private owner message IDs, including independent callbackAccepted and replySaved facts. Callback acceptance proves only transport acceptance, not that the host started a model, read the message or is working. Missing evidence may have expired with the 30-day event journal. Returns no message text, callback URL, signing secret, grant or credential. Does not retry deliveries, change subscriptions or write replies.',
     inputSchema:object({...inbox,message_ids:{type:'array',minItems:1,maxItems:50,uniqueItems:true,items:deliveryMessageId}}),
     outputSchema:object({...inbox,deliveries:{type:'array',minItems:1,maxItems:50,items:delivery},visibility}),annotations:read},
+  {name:'relay_owner_subscription_status',title:'Read private Relay subscription evidence',description:'Read current aggregate subscription evidence for the private owner event: active unfiltered/filtered counts, delivery-failed, expired and unauthorized counts, and the earliest active expiry. Expired or revoked rows may already have been removed by cleanup. Active subscriptions do not identify a host task or prove callback reachability or model execution. Returns no message text, filter text, callback URL, subscription ID, grant, secret or credential. Uses existing owner authorization and never renews, retries, changes subscriptions or writes replies.',
+    inputSchema:object(inbox),outputSchema:subscriptionStatus,annotations:read},
   {name:'relay_owner_reply',title:'Reply privately to owner',description:'Write a private reply to the specified owner message. It never writes the public inbox or GitHub issue. Identical retries succeed; conflicting replies preserve the first accepted reply. Applicable approvals still govern account actions and sensitive information.',
     inputSchema:object({...inbox,message_id:id,body:{type:'string',minLength:1,maxLength:6000}}),outputSchema:object({...inbox,entry,newWrite:{type:'boolean'},visibility}),annotations:write}
 ].map(tool => ({...tool,securitySchemes:[{type:'oauth2',scopes:[RELAY_OWNER_SCOPE]}],_meta:{securitySchemes:[{type:'oauth2',scopes:[RELAY_OWNER_SCOPE]}]}}));

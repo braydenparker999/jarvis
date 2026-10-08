@@ -242,10 +242,34 @@ that exact target, through the same authenticated delivery-status RPC. Its
 structured output, first serialized content block and all conversation-entry
 schemas remain unchanged. The supplemental block contains no private message
 or reply body and never masquerades as a conversation entry or saved reply.
-Neither diagnostic path retries callbacks, changes subscriptions or credentials,
-renews phone sessions, or writes messages, replies or events. It reuses existing
-schema initialization, including the one-time historical receipt backfill; it
-does not introduce a new migration or change delivery behavior.
+
+The read-only `relay_owner_subscription_status` tool accepts only
+`inbox_id: "brayden-owner"` under the same live `relay:owner` authorization.
+It returns the observation time, private-event subscription counts (`active`,
+`unfilteredActive`, `filteredActive`, `deliveryFailed`, `expired`, `unauthorized`)
+and `nextActiveExpiryAt`, the earliest active subscription expiry or null.
+Expired and unauthorized subscriptions are excluded from active counts; paused
+deliveries are counted separately. Filter text, callback URLs, subscription IDs,
+grant IDs and credentials are never returned. Public-event subscriptions are
+excluded. This snapshot adds no event-table initialization or receipt backfill.
+An active filtered subscription may not match the next message; an unfiltered
+one is eligible for every new private owner message while its authorization and
+expiry remain valid. Neither count proves callback reachability, identifies the
+host task or shows that a model started. Cleanup may already have removed expired
+or unauthorized rows, so this snapshot cannot establish historical health.
+
+`relay_owner_read_conversation` adds a further **Private subscription diagnostics**
+text block for cached catalogs. Its structured conversation result and existing
+delivery-evidence block stay unchanged. Before a bounded authenticated-phone
+test, read the subscription snapshot; then correlate the exact message ID and
+save time, callback acceptance time, host event/task/run identity and start time,
+and accepted reply time. An accepted callback with no prompt host start requires
+host execution evidence; it does not justify another server delivery repair.
+
+These diagnostic paths never retry callbacks, change subscriptions or credentials,
+renew phone sessions, or write messages, replies or events. The existing MCP
+schema initialization still includes its one-time historical receipt backfill;
+these diagnostics add no migration or change to delivery behavior.
 
 States distinguish the evidence actually persisted:
 
