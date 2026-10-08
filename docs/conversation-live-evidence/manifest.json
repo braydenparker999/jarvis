@@ -1,0 +1,86 @@
+{
+  "schema": 1,
+  "generatedAt": "2026-10-08T10:25:22.071882+00:00",
+  "source": "e63fa716cf3e90522b6d6b1f1bcf36e67a67d186",
+  "deployment": "6135657a25d2f24f1ce082a15504b935a4a734f4",
+  "productionRun": "37760296791",
+  "captureStartedAt": "2026-10-08T10:21:13.037Z",
+  "captureFinishedAt": "2026-10-08T10:21:15.931Z",
+  "transportFinishedAt": "2026-10-08T10:21:16.148Z",
+  "browser": "154.0.8037.97",
+  "node": "v24.21.0",
+  "transport": "TLS-verified curl via existing workspace proxy; CDP fulfills exact live response bytes at original HTTPS Origins",
+  "viewport": {
+    "width": 390,
+    "height": 844
+  },
+  "originalOrigins": [
+    "https://missionarytube.z13.web.core.windows.net",
+    "https://jarvis-hub-api.braydenparker999.workers.dev"
+  ],
+  "liveAnonymousCapture": true,
+  "privateOwnerContentIncluded": false,
+  "ownerCredentialOrSessionUsed": false,
+  "localDomContentReplaced": false,
+  "newTestMessagesAfterDiagnostic": 0,
+  "publicDiagnostic": {
+    "messageId": "4f50ba30-e2b4-4442-83db-0f6617a51282",
+    "replyId": "915f336c-9f9f-555e-ac56-01aba29b4edf",
+    "requestSavedAt": "2026-10-08T10:08:52.209Z",
+    "replySavedAt": "2026-10-08T10:10:17.859Z",
+    "saveToReplyMs": 85650,
+    "submitToUiReceiptMs": 934,
+    "actualPostCount": 1,
+    "originalUuidAndBodyRetained": true,
+    "freshBrowserExactReplyReadback": true,
+    "futureDeliveryGuarantee": false,
+    "privateJobAcceptance": false
+  },
+  "liveAcceptance": {
+    "criticalStaticBuildMatches": 13,
+    "readChecksPassed": 17,
+    "phoneDesktopPagesPassed": 10,
+    "headerTapTargetsPixels": 48,
+    "horizontalOverflow": false,
+    "independentPublicDraftReloadAndScopeReturn": true,
+    "privateReloadNeverShowsPublicComposer": true,
+    "unauthenticatedPrivateJobsStatus": 401,
+    "browserFaults": 0,
+    "unexpectedOrCredentialedWrites": 0
+  },
+  "screenshots": [
+    {
+      "repositoryPath": "docs/conversation-live-evidence/live-public-reply-390x844.png",
+      "label": "Live anonymous public Relay reply; only the independently authored public diagnostic and its accepted public reply are included.",
+      "bytes": 97361,
+      "width": 350,
+      "height": 599,
+      "sha256": "c0c4df68745d6259470dd6b89250f1c8a02fb45a75835624d9d01e8890daf7f7",
+      "gitBlobSha": "654ba716e26c0fe7d1ef7d1f9f35e7a5fc71bb03"
+    },
+    {
+      "repositoryPath": "docs/conversation-live-evidence/live-anonymous-owner-signin-390x844.png",
+      "label": "Live anonymous owner sign-in screen, with empty credentials and no owner session; this is not private job acceptance.",
+      "bytes": 85371,
+      "width": 390,
+      "height": 844,
+      "sha256": "5b3018eb9f426e5b3caff12d38cb552d514c85d79fdd0957f7b4ca81cb258597",
+      "gitBlobSha": "6a127247839a8a396a8ae65ff965347e115bf378"
+    },
+    {
+      "repositoryPath": "docs/conversation-live-evidence/live-anonymous-muse-menu-390x844.png",
+      "label": "Live anonymous public Muse secondary controls; no private owner data is included.",
+      "bytes": 38030,
+      "width": 390,
+      "height": 652,
+      "sha256": "660528cb40f008dcc1c347211f13f711f57da706277a9415b7a5273b1754f47e",
+      "gitBlobSha": "5d7adaa9ad6d8438258eafe94585ac774ac88656"
+    }
+  ],
+  "fixtureDistinction": "The existing docs/conversation-evidence/real-owner-*.png files show synthetic authenticated SQLite/browser fixtures, not live owner-phone request/result completion.",
+  "limitations": [
+    "Physical Android keyboard/audio behavior and a legitimate owner-phone private request-to-result acceptance remain unverified.",
+    "Optional job claim/progress/correction tools remain absent from the connected host catalog; the existing authenticated immutable owner reply is the available completion path.",
+    "Native browser transport in this workspace is unavailable; the browser consumes TLS-verified exact production response bytes through curl/CDP at the original Origins."
+  ]
+}
