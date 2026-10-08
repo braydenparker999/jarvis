@@ -2,8 +2,11 @@ import {API_ORIGIN} from './config.js';
 // Enabled only after the deployed Worker and authenticated assistant pass live tests.
 export function createDirectApi(fetcher=fetch,origin=API_ORIGIN) {
   async function cloud(path,body,headers={}) {
-    const r=await fetcher(origin+path,{method:body?'POST':'GET',headers:{...(body?{'Content-Type':'application/json'}:{}),...headers},body:body?JSON.stringify(body):undefined,cache:'no-store',signal:AbortSignal.timeout(15000)});
-    const data=await r.json();if(!r.ok)throw Error(data.error||'Cloud unavailable. Your draft is saved.');return data;
+    let r;
+    try{r=await fetcher(origin+path,{method:body?'POST':'GET',headers:{...(body?{'Content-Type':'application/json'}:{}),...headers},body:body?JSON.stringify(body):undefined,cache:'no-store',signal:AbortSignal.timeout(15000)});}
+    catch{throw Error('Could not reach the public inbox. Your draft and queued messages stay on this device.');}
+    let data;try{data=await r.json();}catch{throw Error('The public inbox returned an unreadable response. Your draft and queued messages are still here.');}
+    if(!r.ok){const error=Error(data.error||'Cloud unavailable. Your draft is saved.');error.status=r.status;throw error;}return data;
   }
   async function load() {
     const messages=[],posts=[],seen=new Set();let cursor='0',state;
@@ -21,7 +24,23 @@ export function createDirectApi(fetcher=fetch,origin=API_ORIGIN) {
   }
   return async function request(path,body,headers={}) {
     if(path==='/shared/state')return load();
-    if(path==='/shared/messages'){await cloud(path,{id:body.id,body:body.body});return load();}
+    if(path==='/shared/messages'){
+      let data;
+      try{data=await cloud(path,{id:body.id,body:body.body});}
+      catch(error){
+        if(error.status!==409)throw error;
+        // A conflict is acceptance only when the immutable inbox proves the
+        // original UUID, user role and exact text. Never allocate a new UUID.
+        const remote=await load();
+        if(remote.messages.some(m=>m.id===body.id&&m.role==='user'&&m.body===body.body.trim()))return remote;
+        error.message='This message ID has different saved content. Your original text is queued here; copy it before creating a separate message.';throw error;
+      }
+      const entry=data.entry;
+      if(!entry||entry.id!==body.id||entry.role!=='user'||entry.body!==body.body.trim()||!Number.isFinite(Date.parse(entry.createdAt)))throw Error('The send receipt could not confirm your message. Its original text and ID remain queued on this device.');
+      // Consume the actual save receipt immediately. A subsequent read may be
+      // stale or unavailable and must not turn a proved acceptance into loss.
+      return {messages:[{id:entry.id,role:'user',body:entry.body,createdAt:entry.createdAt}],posts:[],mode:'github-publications',partial:true};
+    }
     if(path==='/shared/migrate'){
       if(!/^Bearer [a-f0-9]{64}$/.test(headers.Authorization||''))throw Error('Previous inbox credential unavailable.');
       const old=await cloud('/v1/state',null,headers);

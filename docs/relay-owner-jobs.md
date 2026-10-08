@@ -13,6 +13,12 @@ failed or cancelled job keeps that terminal state when a later explanatory reply
 is saved. Identical reply retries preserve the original reply, completion time
 and lifecycle event; conflicting replies return 409.
 
+Completion records that a final reply was accepted. Authentication proves its
+submission provenance, not factual correctness or successful external actions.
+Receipts and preliminary updates belong in explicit lifecycle progress events;
+`relay_owner_reply` always has final, immutable semantics. The server never
+guesses a receipt, approval or result type from message wording.
+
 These records track the evidence Relay receives. They do not start an executor,
 create new schedules, forward private text to Muse or public services, or establish
 the identity of a particular assistant persona. Publishing new MCP tool schemas
@@ -82,7 +88,8 @@ noncredential `runId`, last `acknowledgedAt`, and `leaseExpiresAt`. The OAuth
 grant binding stays server-side. A run UUID alone cannot claim or change a job.
 
 The optional MCP tools `relay_owner_jobs_list`, `relay_owner_job_read`,
-`relay_owner_job_claim`, and `relay_owner_job_update` use only the existing live
+`relay_owner_job_claim`, `relay_owner_job_update`, and
+`relay_owner_job_result_correct` use only the existing live
 `relay:owner` scope. They revalidate both OAuth token and grant inside the same
 synchronous transaction as the operation. Public read/reply/event scopes, a
 claimed principal, device bearers, or public Muse-prefixed messages provide no
@@ -109,8 +116,29 @@ For a cached host, the existing `relay_owner_read_conversation` retains its exac
 structured result and original serialized content. A fourth separately labeled
 **Private job lifecycle** text block supplies redacted server lifecycle evidence.
 The earlier private delivery and subscription diagnostic blocks remain intact.
-This block contains no private body, device credential, OAuth grant, hidden
-command, synthetic conversation entry or execution instruction.
+For the original result it contains no private body. It reports `resultVersion`
+and, only after a correction, the explicitly labeled `latestResult` plain-text
+body, checking rationale and authenticated provenance. The original structured
+conversation and serialized first content block retain the immutable first
+reply. This owner-authorized supplemental read contains no device credential,
+OAuth grant, hidden command, synthetic conversation entry or execution
+instruction, and its label disclaims factual certification.
+
+Authentication provenance is preserved exactly. A paired-device request reports
+`owner-device-session`, a password-session request reports
+`owner-password-session`, and an accepted assistant reply reports
+`owner-oauth-mcp`. The current source catalog declares all three entry values.
+The connected host catalog observed during the 2026-10-08 review still declares
+only the paired-device and OAuth values for its cached pending/conversation
+schemas. An empty pending result proves the old tool can be invoked, but does
+not prove that this host accepts a returned password-session entry. Fixture
+tests cover the unchanged stored provenance through the existing pending, read
+and final-reply paths; live phone-request acceptance through that cached host
+remains unproven until a password-origin request is successfully returned. Do
+not relabel password provenance to satisfy a stale schema. Resolving the cached
+host schema requires a supported catalog refresh or compatibility fix and adds
+no authority, credential or scope. The fourth lifecycle block remains
+supplemental data, never an alternative write or authorization channel.
 
 ## Cancellation and separate attempts
 
@@ -162,6 +190,96 @@ bodies with text nodes, and allow only independently checked safe links. The API
 accepts no interactive HTML, iframe, credential-bearing artifact URL, browser
 execution command or token property. Private content remains in owner tables;
 public inbox routes, publications and Muse integrations never read these jobs.
+
+## Append-only private result corrections
+
+The original private chat reply and `job.result` remain immutable. An already
+completed private job can accept up to four separate authenticated plain-text
+corrections. Its original result is version 1; corrections are versions 2–5.
+This mechanism corrects saved information only. It cannot execute an action,
+change the execution stage, finish a queued job, resume failed or cancelled work,
+or alter cancellation or retry authority.
+
+The optional `relay_owner_job_result_correct` MCP tool requires the existing
+live owner scope and these exact fields:
+
+| Field | Meaning |
+| --- | --- |
+| `inbox_id` | Exactly `brayden-owner`. |
+| `job_id` | Exact private request/job UUID. |
+| `event_id` | Fresh correction UUID, different from the original reply UUID. |
+| `expected_reply_id` | The original accepted private reply UUID. |
+| `expected_version` | Current result version, from 1 through 4. |
+| `body` | Full corrected result, 1–6,000 characters of plain text. |
+| `correction_summary` | Checking rationale, 1–1,000 characters of plain text. |
+
+Read the request, original reply and current history before submitting a
+correction. The expected original reply and version are checked atomically.
+Competing corrections based on the same version accept only one; the other
+returns 409. The event UUID binds the exact normalized payload, target and
+submitting OAuth grant. An identical lost-response retry returns the same
+`acceptedResult` without inserting a revision or advancing its timestamp. A
+retry of an older accepted event still returns that exact revision, alongside
+the job's current latest revision. Conflicting event reuse returns 409. A fifth
+correction is refused by the bounded revision limit.
+
+`job.resultVersion` is 0 before any accepted reply and otherwise 1–5.
+`job.latestResult` is null before a reply and otherwise contains:
+
+| Field | Meaning |
+| --- | --- |
+| `id` | Original reply UUID for version 1; correction event UUID for later versions. |
+| `version` | Contiguous result version from 1 through 5. |
+| `format`, `body` | `plain_text` and the accepted full text. |
+| `replyId` | Original immutable private reply association for every version. |
+| `createdAt` | Original reply save time or correction save time. |
+| `correctionSummary` | Null for version 1; later correction's checking rationale. |
+| `authentication_source` | `owner-oauth-mcp`. |
+| `author_authenticated`, `visibility` | `true` and `private`. |
+
+Exact job detail also returns `resultHistory` in contiguous version order, with
+at most five records; its last item equals `latestResult`. Appending a correction
+advances `updatedAt` monotonically to its save time. The original `result`, chat
+reply, `finishedAt`, stage and accepted earlier revisions stay intact. Job list
+and exact detail reads expose the latest information without appending another
+conversation entry. Refresh job pages or exact detail to see corrections to
+already completed jobs; the immutable message cursor does not advance for them.
+
+Display a later version as **Authenticated correction**, with its rationale and
+save time, while preserving access to the original reply and earlier versions.
+Neither the first accepted result nor a correction has a server-certified
+factual-verification badge. The rationale is the authenticated author's checking
+account, not independent proof. HTML, PHP, iframe or command-looking text remains
+plain data and must be rendered as text. No browser correction-write route,
+credential, scope or external forwarding mechanism is added.
+
+## First-version public Muse limitation
+
+Public Muse publications still use the existing immutable, append-only public
+reply importer. If an initial receipt or preliminary answer was accepted for a
+`replyTo`, a later corrected publication for that same target cannot replace it.
+The first reply remains and the conflicting publication is reported in importer
+diagnostics. A Muse name, public body, claimed verification, callback receipt or
+GitHub publication does not authenticate a private job executor or control its
+progress, completion, cancellation or corrections. Nothing automatically copies
+the public result into a private job, including when both lanes share a UUID.
+
+The private correction tool is supported only when the connected host actually
+discovers and can call it. A cached catalog with only the original read/reply
+tools cannot write a correction; publishing its schema is not live callability
+evidence. Its existing authenticated conversation read can still see an already
+saved correction in the separately labeled lifecycle block without changing the
+original immutable reply or requiring a new catalog.
+Where unavailable, the owner can explicitly submit a separate private follow-up
+request that names the prior request/reply and asks for review or correction.
+That new request receives its own UUID and immutable final reply, preserving the
+earlier conversation. This is an information follow-up, not a retry permission
+or automatic repetition of an external action. Public Muse corrections likewise
+need a separate supported follow-up/public request; this version adds no public
+revision or multi-reply protocol. Privacy and action-specific approvals continue
+to apply to the content of any follow-up.
+
+## Qualification
 
 Run the focused lifecycle, adversarial, compatibility, owner and OAuth checks
 with the repository's pinned Node 22.23.3 and additional Node 24.21.0 owner

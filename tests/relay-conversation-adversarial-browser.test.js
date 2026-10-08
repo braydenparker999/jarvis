@@ -154,7 +154,7 @@ test('private request UI distinguishes saving, callback receipt, execution, requ
   await jobDialog(page).getByRole('button', {name: 'View retry attempt', exact: true}).click();
   await waitRequestReady(page);
   assert.match(await jobDialog(page).locator('.request-state').textContent(), /Queued/);
-  const attack = 'Fictional saved result <img id="result-xss-probe" src=x onerror="window.__jobXss=1">\n[unsafe](javascript:window.__jobXss=2)\n[safe](https://safe.invalid/result)';
+  const attack = 'Fictional saved result <img id="result-xss-probe" src=x onerror="window.__jobXss=1">\n[unsafe](javascript:window.__jobXss=2)\n[Credential link](https://synthetic-reader:fictional-pass@safe.invalid/private)\n[safe](https://safe.invalid/result)';
   await h.rpc(oauth, 'relay_owner_reply', {inbox_id: RELAY_OWNER_INBOX, message_id: child.id, body: attack});
   await refreshRequest(page);
   assert.match(await jobDialog(page).locator('.request-state').textContent(), /Result saved/);
@@ -163,6 +163,8 @@ test('private request UI distinguishes saving, callback receipt, execution, requ
   assert.equal(await page.evaluate(() => window.__jobXss), undefined);
   const links = await jobDialog(page).locator('.rich-body a').evaluateAll(nodes => nodes.map(node => ({href: node.href, rel: node.rel})));
   assert.equal(links.length, 1); assert.equal(new URL(links[0].href).protocol, 'https:'); assert.match(links[0].rel, /noopener/);
+  assert.match(await jobDialog(page).locator('.rich-body').first().textContent(), /Credential link/);
+  assert.equal(await jobDialog(page).locator('a').filter({hasText: 'Credential link'}).count(), 0, 'A synthetic credential-bearing URL stays inert');
   await assertNoPrivatePersistence(page, [body, attack, 'Fictional comparison request']);
   assert.deepEqual(publicWrites(phone), []);
   assertBrowserContained(phone);
@@ -235,6 +237,82 @@ test('long private result inspector preserves its reading anchor and expanded hi
   await assertNoPrivatePersistence(page, [body, result]); assertBrowserContained(phone);
 });
 
+test('authenticated private corrections preserve the accepted chat reply, rationale and historical reading position', {timeout: 120000}, async t => {
+  const j = await journey(t); if (!j) return;
+  const {h, oauth, owner, open} = j;
+  const request = 'PRIVATE-CORRECTION-REQUEST-8917', original = 'PRIVATE-ORIGINAL-ACCEPTED-RECEIPT-7524';
+  const message = await savedMessage(h, owner, request);
+  const accepted = await h.rpc(oauth, 'relay_owner_reply', {inbox_id: RELAY_OWNER_INBOX, message_id: message.id, body: original});
+  const phone = await open({owner, width: 390, height: 844}), {page} = phone;
+  await page.goto(RELAY_URL); await ownerInput(page).waitFor();
+  const messages = page.locator('.relay-owner-chat .messages');
+  await messages.getByText(original, {exact: true}).waitFor();
+  assert.equal(await messages.getByText(original, {exact: true}).count(), 1);
+  await inspectRequest(page, message.id);
+  const detail = jobDialog(page);
+  await detail.getByRole('heading', {name: 'Saved result', exact: true}).waitFor();
+  const corrected = Array.from({length: 26}, (_, index) => `Fictional corrected paragraph ${index + 1}. This synthetic follow-up reports a checked interpretation and remains subject to further checking.`).join('\n\n');
+  const rationale = 'The initial fictional receipt lacked the result. I checked the synthetic source and added the corrected interpretation.';
+  const correction = {inbox_id: RELAY_OWNER_INBOX, job_id: message.id, event_id: crypto.randomUUID(), expected_reply_id: accepted.entry.id,
+    expected_version: 1, body: corrected, correction_summary: rationale};
+  const appended = await h.rpc(oauth, 'relay_owner_job_result_correct', correction);
+  assert.equal(appended.newWrite, true); assert.equal(appended.job.result.body, original);
+  const duplicate = await h.rpc(oauth, 'relay_owner_job_result_correct', correction);
+  assert.equal(duplicate.newWrite, false); assert.equal(duplicate.acceptedResult.id, appended.acceptedResult.id);
+  await refreshRequest(page);
+  await detail.getByRole('heading', {name: 'Authenticated correction', exact: true}).waitFor();
+  assert.equal(await detail.locator('#relay-owner-result-latest').getAttribute('data-result-version'), '2');
+  assert.equal(await detail.locator('#relay-owner-result-rationale').textContent(), rationale);
+  assert.equal(await messages.getByText(original, {exact: true}).count(), 1, 'Appending a result correction never replaces the immutable chat receipt');
+  assert.equal(await messages.getByText(/Fictional corrected paragraph/).count(), 0);
+  await detail.getByText('Published by the authenticated owner-connected assistant. Authentication identifies the publisher; factual claims may still need checking.', {exact: true}).waitFor();
+  const history = detail.locator('#relay-owner-result-history');
+  assert.equal(await history.evaluate(node => node.open), false, 'Older accepted results start in an explicit disclosure');
+  const historyTarget = await history.locator('summary').boundingBox();
+  assert.ok(historyTarget && historyTarget.width >= 48 && historyTarget.height >= 48);
+  await history.locator('summary').click();
+  await detail.locator('#relay-owner-request-history summary').click();
+  assert.deepEqual(await history.locator('.request-result-version').evaluateAll(nodes => nodes.map(node => node.dataset.resultVersion)), ['1', '2']);
+  assert.equal(await history.locator('[data-result-version="1"] .rich-body').textContent(), original);
+  const marker = 'Fictional corrected paragraph 20.';
+  const reading = align => detail.evaluate((dialog, {marker, align}) => {
+    const paragraph = [...dialog.querySelectorAll('#relay-owner-result-history [data-result-version="2"] .rich-body p')].find(node => node.textContent.startsWith(marker));
+    if (!paragraph) throw Error('Synthetic correction reading marker missing');
+    if (align) dialog.scrollTop += paragraph.getBoundingClientRect().top - dialog.getBoundingClientRect().top - 140;
+    return {text: paragraph.textContent, offset: paragraph.getBoundingClientRect().top - dialog.getBoundingClientRect().top,
+      resultHistoryOpen: dialog.querySelector('#relay-owner-result-history').open, requestHistoryOpen: dialog.querySelector('#relay-owner-request-history').open};
+  }, {marker, align});
+  const before = await reading(true);
+  const latest = 'Fictional final correction 3. <script>window.__correctionUnsafe=1</script> [Unsafe](javascript:window.__correctionUnsafe=2) [Credential source](https://synthetic-reader:fictional-pass@example.com/private) [Safe source](https://example.com/fictional-source)';
+  await h.rpc(oauth, 'relay_owner_job_result_correct', {...correction, event_id: crypto.randomUUID(), expected_version: 2,
+    body: latest, correction_summary: 'Checked another synthetic source and corrected the previous interpretation.'});
+  const refreshed = page.waitForResponse(response => new URL(response.url()).pathname === '/relay/owner/jobs/detail' && response.request().method() === 'GET');
+  await page.clock.fastForward(31000); await refreshed; await waitRequestReady(page);
+  const after = await reading(false);
+  assert.equal(after.text, before.text); assert.ok(Math.abs(after.offset - before.offset) <= 3, 'A newly appended correction keeps the original history paragraph at its reading position');
+  assert.equal(after.resultHistoryOpen, true); assert.equal(after.requestHistoryOpen, true);
+  assert.equal(await detail.locator('#relay-owner-result-latest').getAttribute('data-result-version'), '3');
+  assert.equal(await page.evaluate(() => window.__correctionUnsafe), undefined);
+  assert.equal(await detail.locator('script,iframe,img,a[href^="javascript:"],a[href^="data:"]').count(), 0);
+  const safe = detail.locator('#relay-owner-result-latest a[href="https://example.com/fictional-source"]');
+  assert.match(await safe.getAttribute('rel'), /noopener/);
+  assert.match(await detail.locator('#relay-owner-result-latest').textContent(), /Credential source/);
+  assert.equal(await detail.locator('a').filter({hasText: 'Credential source'}).count(), 0, 'A corrected result cannot turn credential-bearing text into a link');
+  assert.equal(await detail.getByText(/verified (?:result|facts|truth)|fact.checked/i).count(), 0);
+  const truth = await h.rpc(oauth, 'relay_owner_job_read', {inbox_id: RELAY_OWNER_INBOX, job_id: message.id});
+  assert.equal(truth.job.result.body, original); assert.equal(truth.job.resultVersion, 3); assert.equal(truth.job.stage, 'completed');
+  assert.equal(h.rows("SELECT COUNT(*) AS n FROM relay_owner_entries WHERE kind='reply' AND reply_to=?", message.id)[0].n, 1);
+  await writeSyntheticEvidence(phone, 'current-owner-authenticated-correction-390x844', {before, after, resultVersion: 3, immutableChatPreserved: true});
+  await detail.evaluate(dialog => {dialog.scrollTop = 0;});
+  await writeSyntheticEvidence(phone, 'current-owner-authenticated-correction-latest-390x844', {resultVersion: 3, immutableChatPreserved: true});
+  await detail.getByRole('button', {name: 'Close private request', exact: true}).click();
+  assert.equal(await page.getByText(original, {exact: true}).count(), 1);
+  assert.equal(await page.getByText(/Fictional final correction 3/).count(), 0);
+  assert.deepEqual(publicWrites(phone), []);
+  assert.deepEqual(phone.records.filter(record => record.method === 'POST' && record.path.startsWith('/relay/owner/')), [], 'The correction inspector and its refresh only read authenticated projections');
+  await assertNoPrivatePersistence(page, [request, original, corrected, latest, rationale]); assertBrowserContained(phone);
+});
+
 test('long active private request keeps its text reading anchor when new lifecycle evidence changes the inspector', {timeout: 90000}, async t => {
   const j = await journey(t); if (!j) return;
   const {h, oauth, owner, open} = j;
@@ -263,6 +341,36 @@ test('long active private request keeps its text reading anchor when new lifecyc
   assert.match(after.stageText, /Cancellation requested/);
   assert.ok(Math.abs(after.offset - before.offset) <= 3, 'A changed status/evidence block must preserve the text position the owner is reading');
   await assertNoPrivatePersistence(page, [body]); assertBrowserContained(phone);
+});
+
+test('an offline owner inbox labels cached execution evidence as last known and an elapsed lease as unconfirmed', {timeout: 90000}, async t => {
+  const j = await journey(t); if (!j) return;
+  const {h, oauth, owner, open} = j;
+  const message = await savedMessage(h, owner, 'PRIVATE-OFFLINE-EXECUTION-6392');
+  await h.rpc(oauth, 'relay_owner_job_claim', {inbox_id: RELAY_OWNER_INBOX, job_id: message.id, run_id: crypto.randomUUID(), event_id: crypto.randomUUID()});
+  const phone = await open({owner}), {page} = phone;
+  await page.goto(RELAY_URL); await ownerInput(page).waitFor();
+  const row = page.locator(`[data-job-id="${message.id}"]`);
+  await row.getByText('Working · owner-connected assistant acknowledged', {exact: true}).waitFor();
+  phone.rule(record => record.path.startsWith('/relay/owner/') && record.method === 'GET', async ({forward}) => {
+    const response = await forward();
+    return Response.json({code: 'temporary_fixture_failure'}, {status: 503, headers: response.headers});
+  }, Infinity);
+  await page.clock.fastForward(361000);
+  await page.waitForFunction(id => document.querySelector(`[data-job-id="${id}"] .job-state`)?.textContent.includes('Last known:'), message.id);
+  const label = await row.locator('.job-state').textContent();
+  assert.match(label, /Last known:.*Acknowledgement expired.*outcome unconfirmed/);
+  assert.doesNotMatch(label, /Working|completed|cancelled|failed/i);
+  await row.getByRole('button', {name: 'Inspect request', exact: true}).click(); await waitRequestReady(page);
+  const detail = jobDialog(page);
+  assert.match(await detail.locator('.request-state').textContent(), /Last known:.*Acknowledgement expired.*outcome unconfirmed/);
+  assert.equal(await detail.getByRole('button', {name: 'Try again', exact: true}).count(), 0, 'The browser clock cannot authorize a new attempt');
+  assert.equal(h.rows('SELECT stage FROM relay_owner_jobs WHERE id=?', message.id)[0].stage, 'running', 'Displayed uncertainty does not rewrite authenticated server evidence');
+  const mutating = ['/relay/owner/messages', '/relay/owner/jobs', '/relay/owner/jobs/cancel', '/relay/owner/jobs/retry', '/relay/owner/delivery/retry'];
+  assert.deepEqual(phone.records.filter(record => mutating.includes(record.path) && record.method === 'POST'), [], 'Cached uncertainty cannot create a private request, lifecycle event or callback retry');
+  assert.deepEqual(publicWrites(phone), []);
+  await writeSyntheticEvidence(phone, 'current-owner-offline-expired-acknowledgement-390x844', {label, noClientStageMutation: true});
+  await assertNoPrivatePersistence(page, ['PRIVATE-OFFLINE-EXECUTION-6392']); assertBrowserContained(phone);
 });
 
 test('public and Muse preserve separate drafts and reading positions through Home and browser Back; Ctrl+Enter routes only to their public lane', {timeout: 120000}, async t => {

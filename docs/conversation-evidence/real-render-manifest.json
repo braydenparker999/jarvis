@@ -3,7 +3,7 @@
   "node": "v22.23.3",
   "browser": "Google Chrome for Testing 154.0.8037.97",
   "backend": "Real Worker routing and SQLite; original Azure Origin; offline CDP fixture; no live requests",
-  "capturedAt": "2026-10-08T06:07:56.684Z",
+  "capturedAt": "2026-10-08T07:00:04.352Z",
   "evidence": [
     {
       "name": "real-owner-360x800",
@@ -1206,7 +1206,98 @@
       }
     },
     {
+      "name": "real-owner-correction-390x844",
+      "url": "https://missionarytube.z13.web.core.windows.net/jarvis/",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "geometry": {
+        "width": 390,
+        "documentWidth": 390,
+        "header": {
+          "x": 0,
+          "y": 0,
+          "width": 390,
+          "height": 72,
+          "top": 0,
+          "right": 390,
+          "bottom": 72,
+          "left": 0
+        },
+        "composer": {
+          "x": 0,
+          "y": 703,
+          "width": 390,
+          "height": 141,
+          "top": 703,
+          "right": 390,
+          "bottom": 844,
+          "left": 0
+        },
+        "sheet": {
+          "x": 0,
+          "y": 126.609375,
+          "width": 390,
+          "height": 717.390625,
+          "top": 126.609375,
+          "right": 390,
+          "bottom": 844,
+          "left": 0,
+          "opacity": "1",
+          "background": "rgb(27, 27, 27)",
+          "scrollTop": 0,
+          "scrollHeight": 933,
+          "clientHeight": 715,
+          "heading": {
+            "x": 21,
+            "y": 147.609375,
+            "width": 348,
+            "height": 61,
+            "top": 147.609375,
+            "right": 369,
+            "bottom": 208.609375,
+            "left": 21
+          },
+          "focus": "<dialog class=\"app-sheet conversation-sheet owner-request-detail\" id=\"relay-owner-request-dialog\" aria-label=\"Private request\" open=\"\"><div class=\"dialog-heading\"><h2 class=\"\">Private request</h2><button class=\"icon-butt"
+        }
+      }
+    },
+    {
       "name": "real-muse-empty-390x844",
+      "url": "https://missionarytube.z13.web.core.windows.net/muse/",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "geometry": {
+        "width": 390,
+        "documentWidth": 390,
+        "header": {
+          "x": 0,
+          "y": 0,
+          "width": 390,
+          "height": 72,
+          "top": 0,
+          "right": 390,
+          "bottom": 72,
+          "left": 0
+        },
+        "composer": {
+          "x": 0,
+          "y": 733,
+          "width": 390,
+          "height": 111,
+          "top": 733,
+          "right": 390,
+          "bottom": 844,
+          "left": 0
+        },
+        "sheet": null
+      }
+    },
+    {
+      "name": "real-muse-send-unconfirmed-390x844",
       "url": "https://missionarytube.z13.web.core.windows.net/muse/",
       "viewport": {
         "width": 390,

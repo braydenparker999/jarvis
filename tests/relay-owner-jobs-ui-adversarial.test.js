@@ -43,15 +43,72 @@ test('private job client rejects forged provenance and executable result formats
     await assert.rejects(() => f.api.jobDetail(saved.id), error => error.kind === 'invalid');
     assert.equal(f.api.hasCredential, true, 'Malformed lifecycle evidence cannot masquerade as logout');
   }
+  await f.h.rpc(f.owner, 'relay_owner_reply', {inbox_id: RELAY_OWNER_INBOX, message_id: saved.id, body: 'Fictional saved result'});
   const secret = 'SYNTHETIC-EXTRA-SECRET-2354';
   mutation = value => ({...value, credential: secret, job: {...value.job, html: secret, device_token: secret,
     execution: {runId: crypto.randomUUID(), acknowledgedAt: value.job.createdAt, leaseExpiresAt: value.job.createdAt, secret},
-    result: {format: 'plain_text', body: 'Fictional saved result', replyId: crypto.randomUUID(), createdAt: value.job.createdAt, secret},
+    result: {...value.job.result, secret}, latestResult: {...value.job.latestResult, secret},
     failure: {code: 'synthetic', message: 'Fictional failure summary', outcome: 'not_started', secret},
-    delivery: {...value.job.delivery, callback_url: secret}}, events: value.events.map(event => ({...event, secret}))});
+    delivery: {...value.job.delivery, callback_url: secret}}, events: value.events.map(event => ({...event, secret})),
+    resultHistory: value.resultHistory.map(record => ({...record, secret}))});
   const projected = await f.api.jobDetail(saved.id);
   assert.equal(JSON.stringify(projected).includes(secret), false, 'Unexpected nested credentials/transport/HTML fields stay outside controller data');
   assert.equal(projected.job.result.body, 'Fictional saved result');
+});
+
+test('private corrections require bounded associated history, exact latest evidence and authenticated provenance', async t => {
+  let mutation = value => value;
+  const f = await client(t, async (request, response) => request.path.endsWith('/jobs/detail') ? Response.json(mutation(await response.json())) : response);
+  const saved = await job(f), original = 'PRIVATE-CORRECTION-ORIGINAL-1168';
+  const reply = await f.h.rpc(f.owner, 'relay_owner_reply', {inbox_id: RELAY_OWNER_INBOX, message_id: saved.id, body: original});
+  for (const version of [1, 2]) {
+    const accepted = await f.h.rpc(f.owner, 'relay_owner_job_result_correct', {inbox_id: RELAY_OWNER_INBOX, job_id: saved.id,
+      expected_reply_id: reply.entry.id, expected_version: version, event_id: crypto.randomUUID(),
+      body: `Fictional authenticated correction ${version + 1}`, correction_summary: `Checked synthetic source ${version} and corrected its interpretation.`});
+    assert.equal(accepted.newWrite, true); assert.equal(accepted.job.resultVersion, version + 1);
+  }
+  const genuine = await f.api.jobDetail(saved.id);
+  assert.equal(genuine.job.result.body, original);
+  assert.equal(genuine.job.latestResult.body, 'Fictional authenticated correction 3');
+  assert.deepEqual(genuine.resultHistory.map(record => record.version), [1, 2, 3]);
+  const cases = [
+    ['unbounded revision count', value => {value.job.resultVersion = 6;}],
+    ['completed result concealed as version zero', value => {value.job.resultVersion = 0;}],
+    ['latest revision number mismatch', value => {value.job.latestResult.version = 2;}],
+    ['latest correction reuses original reply identifier', value => {value.job.latestResult.id = value.job.result.replyId;}],
+    ['another original reply association', value => {value.job.latestResult.replyId = crypto.randomUUID();}],
+    ['public correction provenance', value => {value.job.latestResult.visibility = 'public';}],
+    ['unauthenticated correction provenance', value => {value.job.latestResult.author_authenticated = false;}],
+    ['device session pretending to author correction', value => {value.job.latestResult.authentication_source = 'owner-device-session';}],
+    ['executable correction format', value => {value.job.latestResult.format = 'html';}],
+    ['oversized correction body', value => {value.job.latestResult.body = 'x'.repeat(6001);}],
+    ['empty correction rationale', value => {value.job.latestResult.correctionSummary = ' ';}],
+    ['oversized correction rationale', value => {value.job.latestResult.correctionSummary = 'x'.repeat(1001);}],
+    ['missing original history', value => {value.resultHistory.shift();}],
+    ['history over five results', value => {value.resultHistory.push(...value.resultHistory);}],
+    ['reordered history', value => {value.resultHistory.reverse();}],
+    ['duplicate history version', value => {value.resultHistory[1] = {...value.resultHistory[0]};}],
+    ['reused immutable history identifier', value => {value.resultHistory[1].id = value.resultHistory[0].id;}],
+    ['historical correction for another reply', value => {value.resultHistory[1].replyId = crypto.randomUUID();}],
+    ['unauthenticated historical correction', value => {value.resultHistory[1].author_authenticated = false;}],
+    ['changed original immutable body', value => {value.resultHistory[0].body = 'A replacement initial answer';}],
+    ['latest body differs from final history record', value => {value.resultHistory[2].body = 'A stale correction';}],
+    ['latest rationale differs from final history record', value => {value.resultHistory[2].correctionSummary = 'A different rationale';}],
+  ];
+  for (const [label, alter] of cases) {
+    mutation = value => {alter(value); return value;};
+    await assert.rejects(() => f.api.jobDetail(saved.id), error => error.kind === 'invalid', label);
+    assert.equal(f.api.hasCredential, true, 'Invalid revision evidence is not authentication failure');
+  }
+  const secret = 'SYNTHETIC-CORRECTION-UNEXPECTED-SECRET-9903';
+  mutation = value => ({...value, secret, job: {...value.job, latestResult: {...value.job.latestResult, secret}},
+    resultHistory: value.resultHistory.map(record => ({...record, secret}))});
+  const projected = await f.api.jobDetail(saved.id);
+  assert.equal(JSON.stringify(projected).includes(secret), false);
+  assert.equal(projected.job.result.body, original);
+  assert.equal(projected.job.resultVersion, 3);
+  assert.deepEqual(projected.job.latestResult, projected.resultHistory.at(-1));
+  assert.equal(JSON.stringify([...f.values.values()]).includes(original), false, 'Result history remains outside persistent credential storage');
 });
 
 test('a stale private inspector response after real server expiry cannot revive jobs, results or drafts', async t => {
@@ -96,4 +153,35 @@ test('uncertain request receipt preserves its original UUID and mutable lifecycl
   await c.refresh();
   assert.equal(c.snapshot().jobs[0].stage, 'completed'); assert.equal(c.snapshot().jobs[0].result.body, 'Fictional immutable final answer');
   assert.equal(JSON.stringify([...f.values.values()]).includes('PRIVATE-UNCERTAIN-JOB-BODY-6874'), false);
+});
+
+test('a failed conversation read marks retained jobs stale while local title validation and fresh recovery preserve honest evidence', async t => {
+  let unavailable = false, detailUnavailable = false;
+  const f = await client(t, async (request, response) => {
+    if (unavailable && request.path.endsWith('/messages') && request.options.method === 'GET' || detailUnavailable && request.path.endsWith('/jobs/detail'))
+      return Response.json({code: 'temporary_fixture_failure'}, {status: 503});
+    return response;
+  });
+  const saved = await job(f), c = createRelayOwnerController({api: f.api});
+  await f.h.rpc(f.owner, 'relay_owner_job_claim', {inbox_id: RELAY_OWNER_INBOX, job_id: saved.id, run_id: crypto.randomUUID(), event_id: crypto.randomUUID()});
+  await c.refresh(); assert.equal(c.snapshot().jobs[0].stage, 'running'); assert.equal(c.snapshot().syncStale, false);
+  const start = f.calls.length; unavailable = true;
+  await c.refresh();
+  assert.equal(c.snapshot().syncStale, true, 'A failure before job reads makes retained lifecycle data explicitly stale');
+  assert.equal(c.snapshot().jobs[0].stage, 'running', 'Network failure supplies no new execution stage');
+  assert.equal(c.status, 'approved'); assert.equal(f.api.hasCredential, true);
+  assert.equal(f.calls.slice(start).some(request => request.path.endsWith('/jobs')), false, 'The failed messages read prevents a fresh job proof');
+  unavailable = false; await c.refresh(); assert.equal(c.snapshot().syncStale, false);
+  c.setJobMode(true); c.setJobTitle(''); c.setDraft('PRIVATE-BLANK-TITLE-DRAFT-6925');
+  const beforeLocal = f.calls.length; await c.send();
+  assert.equal(f.calls.length, beforeLocal, 'Missing request title is local validation');
+  assert.match(c.snapshot().error, /short title/); assert.equal(c.snapshot().syncStale, false);
+  assert.equal(c.snapshot().draft, 'PRIVATE-BLANK-TITLE-DRAFT-6925');
+  await c.inspectJob(saved.id); assert.equal(c.snapshot().jobDetailStale, false);
+  detailUnavailable = true; await c.inspectJob(saved.id, {refresh: true});
+  assert.equal(c.snapshot().jobDetailStale, true); assert.equal(c.snapshot().jobDetail.job.stage, 'running');
+  assert.equal(c.snapshot().syncStale, false, 'One failed inspector read does not invalidate a separately fresh full inbox');
+  detailUnavailable = false; await c.inspectJob(saved.id, {refresh: true});
+  assert.equal(c.snapshot().jobDetailStale, false);
+  assert.equal(JSON.stringify([...f.values.values()]).includes('PRIVATE-BLANK-TITLE-DRAFT-6925'), false);
 });

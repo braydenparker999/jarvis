@@ -114,8 +114,8 @@ export async function launchQualifiedBrowser(t) {
     args: ['--disable-background-networking', '--disable-component-update', '--disable-sync', '--no-first-run']});
 }
 
-export async function openConversationPage(browser, harness, {width = 390, height = 844, mobile = true, root = publicRoot, owner, clock = true} = {}) {
-  const context = await browser.newContext({viewport: {width, height}, isMobile: mobile, hasTouch: mobile, serviceWorkers: 'block', offline: true});
+export async function openConversationPage(browser, harness, {width = 390, height = 844, mobile = true, root = publicRoot, owner, clock = true, context: sharedContext} = {}) {
+  const context = sharedContext || await browser.newContext({viewport: {width, height}, isMobile: mobile, hasTouch: mobile, serviceWorkers: 'block', offline: true});
   const page = await context.newPage();
   page.setDefaultTimeout(10000);
   if (clock) await page.clock.install();
@@ -209,7 +209,7 @@ export async function conversationMenu(page, label) {
 export async function closeConversationHarness(browser, harness, pages) {
   try {
     for (const phone of pages) { phone.markClosing(); phone.releaseHeldRequests(); }
-    await Promise.all(pages.map(phone => phone.context.close()));
+    await Promise.all([...new Set(pages.map(phone => phone.context))].map(context => context.close()));
     await Promise.all(pages.flatMap(phone => [...phone.pending]));
     await browser.close();
   } finally { harness.close(); }
@@ -238,6 +238,9 @@ export async function writeSyntheticEvidence(phone, name, detail = {}) {
   const directory = process.env.RELAY_QA_EVIDENCE_DIR;
   if (!directory) return;
   await mkdir(directory, {recursive: true});
+  // Let layout changes from a programmatic reading-position restoration paint
+  // before capturing. This keeps the real stylesheet and animation behavior.
+  await phone.page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   await phone.page.screenshot({path: resolve(directory, name + '.png'), fullPage: true, animations: 'disabled'});
   await writeFile(resolve(directory, name + '.json'), JSON.stringify({synthetic: true, node: process.version,
     browser: 'Google Chrome for Testing 154.0.8037.97', url: phone.page.url(), viewport: phone.page.viewportSize(), ...detail}, null, 2) + '\n');

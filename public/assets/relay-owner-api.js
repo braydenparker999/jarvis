@@ -29,7 +29,7 @@ function resultRecord(value,original){
     ||value.replyId!==original.replyId||!validDate(value.createdAt)||value.authentication_source!=='owner-oauth-mcp'
     ||value.author_authenticated!==true||value.visibility!=='private'
     ||(value.version===1?(value.id!==original.replyId||value.body!==original.body||value.createdAt!==original.createdAt||value.correctionSummary!==null)
-      :typeof value.correctionSummary!=='string'||!value.correctionSummary.trim()||value.correctionSummary.length>1000))throw new OwnerApiError('invalid');
+      :value.id===original.replyId||typeof value.correctionSummary!=='string'||!value.correctionSummary.trim()||value.correctionSummary.length>1000))throw new OwnerApiError('invalid');
   return {id:value.id,version:value.version,format:'plain_text',body:value.body,replyId:value.replyId,createdAt:value.createdAt,
     correctionSummary:value.correctionSummary,authentication_source:'owner-oauth-mcp',author_authenticated:true,visibility:'private'};
 }
@@ -307,7 +307,8 @@ export function createRelayOwnerApi({ fetcher = globalThis.fetch, origin = API_O
       const history=data.resultHistory===undefined&&!hasRevisionFields?(job.latestResult?[job.latestResult]:[]):data.resultHistory;
       if(!Array.isArray(history)||history.length!==job.resultVersion||history.length>5)throw new OwnerApiError('invalid');
       const resultHistory=history.map((value,i)=>{const record=resultRecord(value,job.result);if(record.version!==i+1)throw new OwnerApiError('invalid');return record;});
-      if(resultHistory.length&&JSON.stringify(resultHistory.at(-1))!==JSON.stringify(job.latestResult))throw new OwnerApiError('invalid');
+      if(new Set(resultHistory.map(record=>record.id)).size!==resultHistory.length
+        ||resultHistory.length&&JSON.stringify(resultHistory.at(-1))!==JSON.stringify(job.latestResult))throw new OwnerApiError('invalid');
       return {job,resultHistory,events:data.events.map(e=>({id:e.id,jobId:e.jobId,kind:e.kind,summary:e.summary,createdAt:e.createdAt,authentication_source:e.authentication_source}))};
     },
     async createJob({id,title,body,actionKind}){

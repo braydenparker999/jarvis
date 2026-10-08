@@ -1,4 +1,5 @@
 import {MUSE_PREFIX, channelMessages} from './channels.js';
+import {mergePublicMessages} from './public-delivery-store.js';
 export const MUSE_STORAGE_KEY = 'jarvis.muse.v1';
 export const MAX_MESSAGE = 4000 - MUSE_PREFIX.length;
 export function readMuse(storage) {
@@ -12,14 +13,13 @@ export function readMuse(storage) {
 export function queueMuse(state, body, id, createdAt) {
   const text = body.trim();
   if (!text || text.length > MAX_MESSAGE) throw Error('Write a message of up to ' + MAX_MESSAGE + ' characters.');
-  const message = {id, createdAt, role: 'user', body: MUSE_PREFIX + text, saved: false};
+  const message = {id, createdAt, role: 'user', body: MUSE_PREFIX + text, saved: false,sendState:'queued'};
   return {...state, composer: '', messages: [...state.messages, message], outbox: [...state.outbox, message]};
 }
 export function mergeMuse(state, remote) {
-  const received = channelMessages(remote.messages, 'muse');
-  const saved = new Set(received.map(m => m.id));
-  const outbox = state.outbox.filter(m => !saved.has(m.id));
-  const messages = [...new Map([...outbox, ...received.map(m => ({...m, saved: true}))].map(m => [m.id, m])).values()]
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-  return {...state, messages, outbox, publisher: remote.publisher, syncedAt: new Date().toISOString()};
+  // Collision checks use the entire shared inbox before destination filtering.
+  const pending=new Set(state.outbox.map(m=>m.id));
+  const received=[...new Map([...channelMessages(remote.messages,'muse'),...remote.messages.filter(m=>pending.has(m.id))].map(m=>[m.id,m])).values()];
+  const merged=mergePublicMessages(state.messages,state.outbox,received);
+  return {...state,...merged,messages:channelMessages(merged.messages,'muse'),publisher:remote.publisher||state.publisher,syncedAt:new Date().toISOString()};
 }

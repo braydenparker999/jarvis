@@ -287,8 +287,9 @@ export function relayOwnerJobRpc(ctx, env, principal, name, args, now) {
       now, source: 'owner-oauth-mcp', arguments: argument, writer: principal.grantId});
     ctx.storage.sql.exec('INSERT INTO relay_owner_job_result_corrections(id,job_id,version,original_reply_id,body,correction_summary,created_ms) VALUES(?,?,?,?,?,?,?)',
       args.event_id, row.id, currentVersion + 1, reply.id, argument.body, argument.correction_summary, now);
+    ctx.storage.sql.exec('UPDATE relay_owner_jobs SET updated_ms=? WHERE id=?', Math.max(row.updated_ms, now), row.id);
     const acceptedResult = resultHistory(ctx, row, reply).at(-1);
-    return {job: present(ctx, env, row, now), acceptedResult, newWrite: true};
+    return {job: present(ctx, env, jobRow(ctx, row.id), now), acceptedResult, newWrite: true};
   }
   if (['completed', 'failed', 'cancelled'].includes(row.stage)) fail(409, 'Private job already has a final state');
   if (rows(ctx, 'SELECT COUNT(*) AS n FROM relay_owner_job_events WHERE job_id=? AND authentication_source=?', row.id, 'owner-oauth-mcp')[0].n >= MAX_PROGRESS_EVENTS

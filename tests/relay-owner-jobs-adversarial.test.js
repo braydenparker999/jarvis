@@ -34,13 +34,15 @@ test('public scopes, public text and Muse cannot read or mutate private jobs or 
   const {h, owner, phone} = await setup(t), ordinary = await h.oauth(RELAY_PUBLIC_SCOPES.join(' '));
   const privateMarker = 'PRIVATE-JOB-AUTHORITY-FIXTURE-6154';
   const job = await createJob(h, phone, {body: privateMarker, title: 'Private fixture title'});
-  const state = () => ['relay_owner_jobs', 'relay_owner_job_events', 'relay_owner_entries'].map(table => h.rows('SELECT * FROM ' + table));
+  const state = () => ['relay_owner_jobs', 'relay_owner_job_events', 'relay_owner_entries', 'relay_owner_job_result_corrections'].map(table => h.rows('SELECT * FROM ' + table));
   const before = state();
   const attempts = [
     ['relay_owner_jobs_list', {inbox_id: RELAY_OWNER_INBOX}],
     ['relay_owner_job_read', jobArgs(job)],
     ['relay_owner_job_claim', {...jobArgs(job), run_id: crypto.randomUUID(), event_id: crypto.randomUUID()}],
     ['relay_owner_job_update', {...jobArgs(job), event_id: crypto.randomUUID(), stage: 'cancelled', summary: 'Unauthorized fake acknowledgement', outcome: 'not_started'}],
+    ['relay_owner_job_result_correct', {...jobArgs(job), event_id: crypto.randomUUID(), expected_reply_id: crypto.randomUUID(), expected_version: 1,
+      body: 'An unauthenticated replacement', correction_summary: 'Claiming an owner correction from public authority'}],
   ];
   for (const [name, args] of attempts) {
     const response = await h.rpcResponse(ordinary, 'tools/call', {name, arguments: args});

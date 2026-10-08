@@ -38,7 +38,8 @@ export function conversation({panel, composer, channel, author, body=m=>m.body, 
       row.classList.toggle('bookmarked',bookmarks.has(m.id));
       const content=body(m);if(row._body!==content){richText(row.querySelector('.bubble'),content);row._body=content;}
       const stamp=formatter.format(new Date(m.createdAt));
-      const statusText=stamp+(m.role==='user'?' · '+(!m.saved?deliveryError?'Send unconfirmed · queued on this device':deliveryBusy?'Sending to public inbox':'Queued on this device':answered.has(m.id)?'Saved':'Awaiting reply'):'')+(bookmarks.has(m.id)?' · Bookmarked':'');
+      const sendLabels={rejected:'Send rejected · text saved on this device',conflict:'ID conflict · original text saved',unknown:'Send unconfirmed · queued on this device'};
+      const statusText=stamp+(m.role==='user'?' · '+(!m.saved?sendLabels[m.sendState]||(deliveryError?'Send unconfirmed · queued on this device':deliveryBusy?'Sending to public inbox':'Queued on this device'):answered.has(m.id)?'Saved':'Awaiting reply'):'')+(bookmarks.has(m.id)?' · Bookmarked':'');
       if(row._stamp!==statusText){row.querySelector('.message-time').textContent=statusText;row._stamp=statusText;}
       row.querySelector('.message-time').dataset.pending=String(m.role==='user'&&(!m.saved||!answered.has(m.id)));
       if(panel.children[i]!==row)panel.insertBefore(row,panel.children[i]||null);

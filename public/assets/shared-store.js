@@ -7,8 +7,6 @@ export function readState(storage){
  return {version:1,messages:(old?.messages||[]).filter(m=>m.role==='user'),posts:[],outbox:(old?.outbox||[]).filter(x=>x.type==='message'),composer:old?.composer||'',legacyPending:!!(old?.key&&old?.messages?.some(m=>m.role==='user')),syncedAt:null};
 }
 export function mergeState(state,remote){
- const pending=new Set(state.outbox.map(x=>x.id));
- const byId=new Map(state.messages.filter(x=>pending.has(x.id)).map(x=>[x.id,x]));
- for(const item of remote.messages)byId.set(item.id,{...item,saved:true});
- return {...state,messages:[...byId.values()].sort((a,b)=>a.createdAt.localeCompare(b.createdAt)),posts:remote.posts.map(x=>({...x,saved:true})),publisher:remote.publisher,mode:remote.mode,syncedAt:new Date().toISOString()};
+ return {...state,...mergePublicMessages(state.messages,state.outbox,remote.messages),posts:remote.partial?state.posts:remote.posts.map(x=>({...x,saved:true})),publisher:remote.publisher||state.publisher,mode:remote.mode||state.mode,syncedAt:new Date().toISOString()};
 }
+import {mergePublicMessages} from './public-delivery-store.js';
