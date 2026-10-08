@@ -2,8 +2,10 @@
 export const MAX_PUBLIC_PENDING = 50;
 export const MAX_PUBLIC_CACHED = 250;
 const uuid = value => typeof value==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(value);
-const same = (a,b) => a.id===b.id&&a.role===b.role&&a.body===b.body&&(a.replyTo||null)===(b.replyTo||null);
-const order = (a,b) => String(a.createdAt||'').localeCompare(String(b.createdAt||''))||a.id.localeCompare(b.id);
+const same = (a,b) => a.id===b.id&&a.role===b.role&&a.body===b.body&&(a.replyTo||null)===(b.replyTo||null)
+  && (a.kind!=='coordination'&&b.kind!=='coordination'||a.kind===b.kind&&JSON.stringify(a.publicReport)===JSON.stringify(b.publicReport));
+const order = (a,b) => String(a.createdAt||'').localeCompare(String(b.createdAt||''))||
+  (a.kind==='coordination'&&b.kind==='coordination'?a.publicReport.sequence-b.publicReport.sequence:0)||a.id.localeCompare(b.id);
 export function hasSharedAcceptance(message){
   const proof=message?.sharedAcceptance;
   return !!proof&&typeof proof==='object'&&!Array.isArray(proof)&&Object.keys(proof).length===5

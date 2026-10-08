@@ -1,11 +1,17 @@
 import {sharedStore} from './shared.js';
+import {decodeCoordination} from './public-coordination.js';
 export const COMMENTS_URL='https://api.github.com/repos/braydenparker999/jarvis/issues/2/comments';
 const OWNER=183016859, INTERVAL=300000;
 const uuid=x=>typeof x==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(x);
 const nonempty=(x,max)=>typeof x==='string'&&x.trim().length>0&&x.length<=max;
 export function decodePublication(comment) {
-  if(comment.user?.id!==OWNER||!Number.isSafeInteger(comment.id)||typeof comment.body!=='string'||comment.body.length>30000)return null;
+  if(comment?.user?.id!==OWNER||!Number.isSafeInteger(comment.id)||comment.id<1||typeof comment.body!=='string'||comment.body.length>30000)return null;
   let p;try{p=JSON.parse(comment.body);}catch{return null;}
+  if (p?.schema === 'jarvis-coordination-v2') {
+    if (!decodeCoordination(p) || !Number.isFinite(Date.parse(comment.created_at))) return null;
+    return {type:'coordination',payload:p,provenance:{source:'github-issue',repository:'braydenparker999/jarvis',issue:2,
+      commentId:comment.id,authorId:OWNER,publishedAt:comment.created_at}};
+  }
   if(!p||p.schema!=='jarvis-publication-v1'||!uuid(p.id)||!['reply','briefing'].includes(p.type)||!nonempty(p.body,p.type==='briefing'?20000:6000)||!Number.isFinite(Date.parse(comment.created_at)))return null;
   if(p.type==='reply'&&!uuid(p.replyTo))return null;
   if(p.type==='briefing'&&(!nonempty(p.title,120)||typeof p.date!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(p.date)||!Number.isFinite(Date.parse(p.date))||new Date(p.date).toISOString().slice(0,10)!==p.date))return null;
@@ -19,6 +25,43 @@ async function boundedJson(response) {
   const bytes=new Uint8Array(size);let offset=0;for(const c of chunks){bytes.set(c,offset);offset+=c.length;}
   return JSON.parse(new TextDecoder().decode(bytes));
 }
+function legacyUpdate(p, commentId) {
+  return {payload:{schema:'jarvis-publication-v1-update',eventId:p.id,requestId:p.replyTo,attemptId:p.id,stage:'final',
+    body:p.body,artifacts:[],resultVersion:1},provenance:{source:'github-issue',repository:'braydenparker999/jarvis',issue:2,
+    commentId,authorId:OWNER,publishedAt:p.createdAt,legacyConflict:true}};
+}
+export async function applyPendingPublications(ctx) {
+  const sql=ctx.storage.sql,rows=(q,...args)=>[...sql.exec(q,...args)];
+  // A bounded fixed-point pass resolves predecessors that arrived out of order.
+  // Only successful writes remove pending work; unavailable originals/dependencies
+  // remain durable and retryable, even during the normal GitHub cooldown.
+  for(let round=0;round<8;round++) {
+    let progressed=false;
+    const after=Number(JSON.parse(rows("SELECT value FROM shared_meta WHERE key='publisher-pending-cursor'")[0]?.value||'0'));
+    const page=rows('SELECT * FROM imported_comments WHERE imported=0 AND comment_id>? ORDER BY comment_id LIMIT 500',after);
+    for(const item of page) {
+      const p=JSON.parse(item.publication);
+      const r=sharedStore(ctx,p.type==='coordination'?'/internal/shared/coordination':p.type==='reply'?'/internal/shared/reply':'/internal/shared/briefing',p);
+      if(r.ok){sql.exec('UPDATE imported_comments SET imported=1,error=NULL WHERE comment_id=?',item.comment_id);progressed=true;}
+      else if(r.status===409){
+        if(p.type==='reply')sharedStore(ctx,'/internal/shared/coordination',legacyUpdate(p,item.comment_id));
+        const failure=p.type==='coordination'?await r.json():null;
+        sql.exec('UPDATE imported_comments SET imported=2,error=? WHERE comment_id=?',failure?.code||'Conflicting publication; original kept',item.comment_id);progressed=true;
+      } else if(![404,425].includes(r.status))throw Error('Publication could not be saved');
+    }
+    sql.exec("INSERT OR REPLACE INTO shared_meta VALUES('publisher-pending-cursor',?)",JSON.stringify(page.length===500?page.at(-1).comment_id:0));
+    if(!progressed&&page.length<500&&after===0)break;
+  }
+  // Recover already imported hidden v1 finals from the existing conflict journal.
+  // The original reply and conflict diagnostics are kept; the new event is an
+  // explicitly labelled later public report, not a rewrite or authority upgrade.
+  for(const item of rows(`SELECT i.* FROM imported_comments i JOIN shared_entries u ON u.id=json_extract(i.publication,'$.replyTo') AND u.kind='user'
+    WHERE imported=2 AND json_extract(i.publication,'$.type')='reply' AND NOT EXISTS(
+    SELECT 1 FROM public_coordination_events e WHERE e.event_id=json_extract(i.publication,'$.id')) ORDER BY comment_id LIMIT 500`)) {
+    const p=JSON.parse(item.publication);
+    if(p.type==='reply')sharedStore(ctx,'/internal/shared/coordination',legacyUpdate(p,item.comment_id));
+  }
+}
 export async function syncPublications(ctx,fetcher=fetch,now=Date.now()) {
   // Initialize schema through the same storage implementation used for reads.
   sharedStore(ctx,'/internal/shared/state');
@@ -27,18 +70,8 @@ export async function syncPublications(ctx,fetcher=fetch,now=Date.now()) {
   const rows=(q,...args)=>[...sql.exec(q,...args)];
   const get=key=>{const v=rows('SELECT value FROM shared_meta WHERE key=?',key)[0]?.value;return v?JSON.parse(v):null;};
   const put=(key,value)=>sql.exec('INSERT OR REPLACE INTO shared_meta VALUES(?,?)',key,JSON.stringify(value));
-  const applyPending=async()=>{
-    for(const item of rows('SELECT * FROM imported_comments WHERE imported=0 ORDER BY comment_id LIMIT 500')){
-      const p=JSON.parse(item.publication);
-      const r=sharedStore(ctx,p.type==='reply'?'/internal/shared/reply':'/internal/shared/briefing',p);
-      if(r.ok)sql.exec('UPDATE imported_comments SET imported=1,error=NULL WHERE comment_id=?',item.comment_id);
-      else if(r.status===409)sql.exec('UPDATE imported_comments SET imported=2,error=? WHERE comment_id=?','Conflicting publication; original kept',item.comment_id);
-      // A reply whose original message has not arrived stays pending for retry.
-      else if(r.status!==404)throw Error('Publication could not be saved');
-    }
-  };
   try {
-    await applyPending();
+    await applyPendingPublications(ctx);
     if(now<Number(get('publisher-next-attempt')||0)){
       const status=get('publisher-status');
       if(status)put('publisher-status',{...status,pending:rows('SELECT COUNT(*) AS n FROM imported_comments WHERE imported=0')[0].n,conflicts:rows('SELECT COUNT(*) AS n FROM imported_comments WHERE imported=2')[0].n});
@@ -70,7 +103,7 @@ export async function syncPublications(ctx,fetcher=fetch,now=Date.now()) {
           sql.exec("DELETE FROM shared_meta WHERE key='publisher-scan'");
         }else put('publisher-scan',scan);
       });
-      await applyPending();if(complete)break;
+      await applyPendingPublications(ctx);if(complete)break;
     }
     const pending=rows('SELECT COUNT(*) AS n FROM imported_comments WHERE imported=0')[0].n;
     const conflicts=rows('SELECT COUNT(*) AS n FROM imported_comments WHERE imported=2')[0].n;

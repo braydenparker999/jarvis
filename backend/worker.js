@@ -33,8 +33,8 @@ export default {
     const guitar=await songsterr(request,reply);if(guitar)return guitar;
     const path=new URL(request.url).pathname;
     if(path==='/health' && request.method==='GET') return reply({ok:true,mode:'github-publications',version:7,publicationIssue:2});
-    if(path==='/shared/state' || path==='/shared/messages') {
-      if((path==='/shared/state'&&request.method!=='GET')||(path==='/shared/messages'&&request.method!=='POST'))return reply({error:'Method not allowed'},405);
+    if(['/shared/state','/shared/changes','/shared/result','/shared/messages'].includes(path)) {
+      if((path!=='/shared/messages'&&request.method!=='GET')||(path==='/shared/messages'&&request.method!=='POST'))return reply({error:'Method not allowed'},405);
       let data;
       if(request.method==='POST'){
         if(!request.headers.get('Content-Type')?.startsWith('application/json'))return reply({error:'Expected JSON'},415);
@@ -47,7 +47,7 @@ export default {
       try {
         // Legacy migration must not gate current writes or erase current reads.
         if(request.method==='GET')try{await syncShared(env);}catch{}
-        const suffix=path==='/shared/state'?'/state'+new URL(request.url).search:'/message';
+        const suffix=request.method==='GET'?path.slice('/shared'.length)+new URL(request.url).search:'/message';
         const response=await sharedInternal(env,suffix,data);
         return new Response(response.body,{status:response.status,headers:{...headers,'Content-Type':'application/json'}});
       }catch{return reply({error:'Storage unavailable; retry later'},503);}
@@ -126,10 +126,16 @@ export class Hub {
       // commit cannot strand its outbox. SQLite and normal Durable Object storage
       // share the same object; old imported rows never become live events.
       if(path==='/internal/shared/message'&&this.ctx.storage.setAlarm)await this.ctx.storage.setAlarm(Date.now()+100);
-      if(path==='/internal/shared/state') {
+      if(['/internal/shared/state','/internal/shared/changes','/internal/shared/result'].includes(path)) {
+        const validation=sharedStore(this.ctx,path,{},new URL(request.url).searchParams);
+        if(!validation.ok)return validation;
+        // Final/correction notifications commit with imported public results.
+        // Persist a wake before import, using the existing callback scheduler.
+        if(this.ctx.storage.setAlarm)await this.ctx.storage.setAlarm(Date.now()+100);
         // A single in-flight importer for the shared object, across all phones.
         if(!this.publicationSync)this.publicationSync=syncPublications(this.ctx).finally(()=>{this.publicationSync=null;});
         await this.publicationSync;
+        try{await scheduleRelayAlarm(this.ctx);}catch{}
       }
       const response=sharedStore(this.ctx,path,request.method==='POST'?await request.json():{},new URL(request.url).searchParams);
       if(path==='/internal/shared/message')try{await scheduleRelayAlarm(this.ctx);}catch{}

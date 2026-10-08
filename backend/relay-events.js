@@ -1,6 +1,7 @@
 import {PRIMARY_SITE} from './origins.js';
-import {RELAY_OWNER, RELAY_INBOX, RELAY_EVENT, RELAY_OWNER_SCOPE, RELAY_OWNER_INBOX, RELAY_OWNER_EVENT, RelayError, fields, inboxArgs, cursor, httpsURL, signingKey, signWebhook, hash, canonical, random, equal, boundedText, encoder, relayEnabled, json} from './relay-common.js';
+import {RELAY_OWNER, RELAY_INBOX, RELAY_EVENT, RELAY_OWNER_SCOPE, RELAY_OWNER_INBOX, RELAY_OWNER_EVENT, RelayError, fields, inboxArgs, cursor, uuid, httpsURL, signingKey, signWebhook, hash, canonical, random, equal, boundedText, encoder, relayEnabled, json} from './relay-common.js';
 import {relayGrantActiveInStore,relayTokenActiveInStore} from './relay-oauth.js';
+import {PUBLIC_RESULT_EVENT} from './public-coordination-tools.js';
 export const EVENT_RETENTION_MS = 30 * 86400000;
 const DEFAULT_TTL = 86400000;
 const VERIFY_TTL = 300000;
@@ -12,7 +13,7 @@ const recoverableFailure = item => item.attempts >= MAX_ATTEMPTS
 const MAX_SUBSCRIPTIONS = 8;
 const MAX_QUEUED = 2000;
 const rows = (ctx, q, ...v) => [...ctx.storage.sql.exec(q, ...v)];
-const eventName = event => JSON.parse(event.data).inbox_id === RELAY_OWNER_INBOX ? RELAY_OWNER_EVENT : RELAY_EVENT;
+const eventName = event => {const data=JSON.parse(event.data);return data.inbox_id === RELAY_OWNER_INBOX ? RELAY_OWNER_EVENT : data.coordination_event_id ? PUBLIC_RESULT_EVENT : RELAY_EVENT;};
 const eventScope = name => name === RELAY_OWNER_EVENT ? RELAY_OWNER_SCOPE : 'relay:events';
 const eventEnabled = (env, name) => relayEnabled(env) && (name !== RELAY_OWNER_EVENT || env.RELAY_OWNER_ENABLED === 'true');
 const subscriptionActive = (ctx, env, sub) => eventEnabled(env, sub.name) && relayGrantActiveInStore(ctx, env, sub.grant_id, eventScope(sub.name));
@@ -66,6 +67,11 @@ export const relayOwnerEventDefinition = {
   payloadSchema: {type: 'object', properties: {inbox_id: {type: 'string', const: RELAY_OWNER_INBOX}, message_id: {type: 'string', format: 'uuid'}, author_authenticated: {type: 'boolean', const: true}, principal: {type: 'string', const: RELAY_OWNER}, device_id: {type: 'string'}, visibility: {type: 'string', const: 'private'}, url: {type: 'string', format: 'uri'}}, required: ['inbox_id', 'message_id', 'author_authenticated', 'principal', 'device_id', 'visibility', 'url'], additionalProperties: false}
 };
 function eventArguments(value, name) {
+  if(name===PUBLIC_RESULT_EVENT){
+    fields(value,['inbox_id','request_id'],['inbox_id']);inboxArgs(value);
+    if(value.request_id!==undefined&&!uuid(value.request_id))throw new RelayError(-32602,'Invalid request filter');
+    return value;
+  }
   fields(value, ['inbox_id', 'message_contains'], ['inbox_id']);
   if (name === RELAY_OWNER_EVENT) {
     if (value.inbox_id !== RELAY_OWNER_INBOX) throw new RelayError(-32012, 'Forbidden inbox');
@@ -81,7 +87,8 @@ const matches = (sub, row) => {
 function enqueueFor(ctx, sub, event, now,budget) {
   const name = eventName(event);
   if (sub.name !== name) return;
-  const message = event.message_body != null ? {body:event.message_body} : name === RELAY_OWNER_EVENT
+  if(name===PUBLIC_RESULT_EVENT){const args=JSON.parse(sub.arguments);if(args.request_id&&args.request_id!==JSON.parse(event.data).message_id)return;}
+  const message = name===PUBLIC_RESULT_EVENT ? {body:''} : event.message_body != null ? {body:event.message_body} : name === RELAY_OWNER_EVENT
     ? rows(ctx, 'SELECT body FROM relay_owner_event_bodies WHERE event_id=?', event.event_id)[0]
     : rows(ctx, "SELECT body FROM shared_entries WHERE id=? AND kind='user'", event.message_id)[0];
   if (!message || !matches(sub, message)) return;
@@ -125,6 +132,17 @@ export function enqueueRelayOwnerMessage(ctx, message, now = Date.now()) {
   ctx.storage.sql.exec('INSERT OR IGNORE INTO relay_owner_event_bodies(event_id,body) VALUES(?,?)', eventId, message.body);
   const event = rows(ctx, 'SELECT * FROM relay_events WHERE event_id=?', eventId)[0];
   for (const sub of rows(ctx, "SELECT * FROM relay_subscriptions WHERE name=? AND state='active' AND expires_ms>?", RELAY_OWNER_EVENT, now)) enqueueFor(ctx, sub, event, now);
+}
+export function enqueueRelayPublicResult(ctx, event, now=Date.now()) {
+  if(event.disposition!=='accepted'||!['final','correction'].includes(event.stage))return;
+  relayEventSchema(ctx);
+  const eventId='relay_public_result_'+event.eventId;
+  const data={inbox_id:RELAY_INBOX,message_id:event.requestId,coordination_event_id:event.eventId,stage:event.stage,sequence:event.sequence,
+    author_authenticated:false,execution_authorized:false,should_execute:false,url:PRIMARY_SITE+'/reader/'};
+  ctx.storage.sql.exec('INSERT OR IGNORE INTO relay_events(event_id,message_id,occurred_at,created_ms,data) VALUES(?,?,?,?,?)',
+    eventId,'public-result:'+event.eventId,event.recordedAt,now,JSON.stringify(data));
+  const saved=rows(ctx,'SELECT * FROM relay_events WHERE event_id=?',eventId)[0];
+  for(const sub of rows(ctx,"SELECT * FROM relay_subscriptions WHERE name=? AND state='active' AND expires_ms>?",PUBLIC_RESULT_EVENT,now))enqueueFor(ctx,sub,saved,now);
 }
 export function webhookTransport(env) {
   // The trusted adapter validates DNS on every connection and pins the public IP.
@@ -173,7 +191,7 @@ async function verifyCallback(ctx, sub, fetcher, now) {
 }
 function subscriptionParams(p, subscribing) {
   fields(p, subscribing ? ['name', 'arguments', 'delivery', 'cursor', 'ttlMs', 'maxAgeMs', '_meta'] : ['name', 'arguments', 'delivery', '_meta'], ['name', 'arguments', 'delivery']);
-  if (![RELAY_EVENT, RELAY_OWNER_EVENT].includes(p.name)) throw new RelayError(-32011, 'Unknown event', {kind: 'event'});
+  if (![RELAY_EVENT, RELAY_OWNER_EVENT, PUBLIC_RESULT_EVENT].includes(p.name)) throw new RelayError(-32011, 'Unknown event', {kind: 'event'});
   eventArguments(p.arguments, p.name);
   fields(p.delivery, subscribing ? ['mode', 'url', 'secret'] : ['mode', 'url'], subscribing ? ['mode', 'url', 'secret'] : ['mode', 'url']);
   if (p.delivery.mode !== 'webhook') throw new RelayError(-32014, 'Unsupported delivery mode', {feature: 'deliveryMode', value: p.delivery.mode});
