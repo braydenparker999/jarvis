@@ -149,6 +149,59 @@ text attests authenticated private execution or host execution. A live lifecycle
 must be independently approved and verified before claiming Lucy/Muse wake-up
 works in production. No direct push to Muse is promised.
 
+## Credential-free import acceleration
+
+After a successful comment write/read-back, a capable publisher may call:
+
+```http
+POST /shared/import-hint
+Content-Type: application/json
+
+{"commentId": 9001}
+```
+
+The endpoint accepts exactly one positive, safe numeric comment ID in at most
+256 streamed bytes. It accepts no URL, query parameters, identity, authority,
+secret or caller-provided publication payload. The server performs one bounded,
+unauthenticated GET to the fixed repository's issue-comment endpoint. It rejects
+redirects, mismatched IDs, a returned `issue_url` other than the fixed issue #2,
+non-numeric/incorrect author ID and invalid publication schema before journaling.
+Caller Authorization/Cookie/custom headers are never forwarded. No access or
+credentials are acquired. GitHub documents both the fixed GET path and public
+unauthenticated access in its [issue comment API](https://docs.github.com/en/rest/issues/comments#get-an-issue-comment).
+
+Hint GETs have a 3.5-second timeout, 128 KiB response cap, two-attempt minute burst
+and twelve-attempt hourly cap shared by the whole inbox. Normal reconciliation
+and hints share at most 48 GitHub GETs/hour, leaving up to 36 for reconciliation
+even if anonymous callers consume every hint. Provider rate-limit/reset and
+Retry-After responses pause both paths. A bounded 128-row temporary hint cache
+suppresses repeated rejected/missing IDs for five minutes and reserves an
+in-flight ID for ten seconds, including recovery after process loss. Already
+journaled comment IDs deduplicate durably without another GET or budget debit.
+
+The response distinguishes `imported`, `update-imported`, `pending`, `conflict`
+and `fetching`; a 202 is not delivery proof. Exact ID/payload/version conflicts
+are explicit. An out-of-order correction or missing original remains durable
+and retries through ordinary reads. Confirm actual artifacts/versions using the
+exact-result reader. A lost hint response can be retried with the same comment
+ID, without republishing or allocating a new event ID.
+
+The hint bypasses only the existing five-minute *read-triggered* attempt throttle;
+it does not change that cadence, schedule, subscription or fallback scanner.
+If hints are absent, unsupported, rate limited, malformed or unavailable, the
+existing paginated reconciler remains intact. No Muse hook activation or producer
+fixture-verifier change is included. Host ability to issue this HTTP POST needs
+its own integration verification; GitHub publication remains the durable source.
+
+The added synthetic end-to-end test exercises hint import during the cooldown,
+signed separate result delivery, actual exact MCP invocation, existing mobile
+menu refresh, accessible artifact render and reload. It verifies one GitHub GET,
+one result occurrence and zero synthetic execution messages. This proves the
+server/browser path in isolated fixtures; live Lucy/Muse host capability and
+subscription activation remain separate parent-review acceptance checks. The
+new tool inputs are flat object schemas and do not rely on root `oneOf` host
+normalization. The unrelated private `job_update` schema repair is excluded.
+
 ## Verification boundary
 
 New deterministic tests cover historical hidden artifacts, exact-payload retries,
