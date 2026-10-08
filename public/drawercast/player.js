@@ -2519,6 +2519,28 @@ const Engine = {
   pauseElement:function(a){
     if(a)a.pause();
   },
+  resetSelectionRecovery:function(track){
+    this._driveRetryId=this._driveErrorReportedId=null;
+    this._serverRetryId=this._serverErrorReportedId=null;
+    this._r2RetryId=this._r2ErrorReportedId=null;
+    clearTimeout(this._driveRetryTimer);clearTimeout(this._serverRetryTimer);clearTimeout(this._r2RetryTimer);
+    this._driveRetryTimer=this._serverRetryTimer=this._r2RetryTimer=null;
+    this.clearBuffering();this._mediaStarted=null;
+    if(track?.source==='drive')DriveSource.playbackRetry.delete(track.id);
+  },
+  cancelTransitionForFailure:function(){
+    if(typeof PlaybackTransitions!=='undefined'&&(PlaybackTransitions.pending||this.xfading))PlaybackTransitions.cancel();
+  },
+  selectionUnavailable:function(message){
+    this.tracePlayback('selection-preflight-failed');
+    // A failed next-song preflight cannot leave a finished element reporting
+    // playback or retain its handled-end marker across an explicit replay.
+    if(this.el()?.ended){
+      this._playIntent=false;this.playing=false;this._mediaStarted=null;this._endedRequest=null;
+      this.clearBuffering();this.cancelTransitionForFailure();UI.renderPlayState();this.saveState();
+    }
+    if(message)toast(message);
+  },
   onPause:function(i){
     const a=this.els[i];
     this.tracePlayback(i===this.cur?'element-pause':'spare-pause');
@@ -2739,23 +2761,13 @@ const Engine = {
   },
   async playIndex(qi, autoplay, position=0){
     const t=this.queue[qi];
-    if(!t) return;
-    if(!sourceTrackEnabled(t))return;
-    if(t.source==='drive'&&!DriveSource.api){toast('Google Drive is unavailable. Check Music Sources in Library settings.');return;}
-    if(t.source==='r2'&&!R2Source.fileFor(t)){toast('Cloudflare R2 is unavailable. Refresh its source in Music Sources.');return;}
-    if(SourceLibrary.kind(t)==='server' && !DrawerCast.canPlay(t)){toast('Music server is unavailable. Reconnect in Music Sources.');return;}
+    if(!t||!sourceTrackEnabled(t))return this.selectionUnavailable();
+    if(t.source==='drive'&&!DriveSource.api)return this.selectionUnavailable('Google Drive is unavailable. Check Music Sources in Library settings.');
+    if(t.source==='r2'&&!R2Source.fileFor(t))return this.selectionUnavailable('Cloudflare R2 is unavailable. Refresh its source in Music Sources.');
+    if(SourceLibrary.kind(t)==='server' && !DrawerCast.canPlay(t))return this.selectionUnavailable('Music server is unavailable. Reconnect in Music Sources.');
     // A deliberate new selection gets its own retry budget. Metadata from a
     // failed retry does not prove the audio ever became playable.
-    this._driveRetryId=null;
-    this._driveErrorReportedId=null;
-    this._serverRetryId=null;
-    this._serverErrorReportedId=null;
-    this._r2RetryId=null;this._r2ErrorReportedId=null;
-    clearTimeout(this._driveRetryTimer);
-    clearTimeout(this._serverRetryTimer);
-    clearTimeout(this._r2RetryTimer);this._r2RetryTimer=null;
-    this.clearBuffering();
-    if(t.source==='drive')DriveSource.playbackRetry.delete(t.id);
+    this.resetSelectionRecovery(t);
     DriveSource.prioritize(t);
     const request=++this._playRequest || (this._playRequest=1);
     const wasPlaying = autoplay!==false;
@@ -2834,11 +2846,13 @@ const Engine = {
   },
   releaseSlot:function(i){
     const a=this.els[i];if(!a)return;const old=a.src;
+    a._transitionOwner=null;
     this.pauseElement(a);a.removeAttribute('src');a.load();a.preload='metadata';
     if(old?.startsWith('blob:'))URL.revokeObjectURL(old);
     if(i!==this.cur)this.preloadId=null;
   },
   startElement:function(a=this.el()){
+    a._transitionOwner=null;
     const request=this._playRequest,source=a.src,attempt=this._playAttempt=(this._playAttempt||0)+1;
     this.playing=false;this._mediaStarted=null;this.tracePlayback('play-request');
     const valid=()=>request===this._playRequest&&attempt===this._playAttempt&&a===this.el()&&source===a.src&&this.wantsPlayback();
@@ -2863,6 +2877,7 @@ const Engine = {
     clearTimeout(this._driveRetryTimer);clearTimeout(this._serverRetryTimer);clearTimeout(this._r2RetryTimer);
     this._driveRetryTimer=this._serverRetryTimer=this._r2RetryTimer=null;
     const a=this.el(),kind=this.transportCapabilities().kind;
+    if(a.ended)this._endedRequest=null;
     const terminal=kind==='drive'&&this._driveErrorReportedId===this.current?.id||kind==='r2'&&this._r2ErrorReportedId===this.current?.id||kind==='server'&&this._serverErrorReportedId===this.current?.id;
     if(terminal||a.error&&this.transportCapabilities().reload){return this.playIndex(this.order[this.pos],true,this.time());}
     if(!a.src){
@@ -2909,6 +2924,7 @@ const Engine = {
   next:function(auto){
     if(!auto)return commitTrackStep(resolveTrackStep(1));
     if(!this.queue.length) return;
+    const previousPos=this.pos;
     UI.artDir=1;
     if(SET_repeat()==='one' && auto){ this._endedRequest=null;this.el().currentTime=0; this.play(); return; }
     if(this.pos+1 >= this.order.length){
@@ -2916,7 +2932,11 @@ const Engine = {
       else { this.pause(); this.el().currentTime=0; UI.renderProgress(); return; }
     }
     this.pos++;
-    this.playIndex(this.order[this.pos], auto || this.wantsPlayback());
+    const request=this._playRequest,result=this.playIndex(this.order[this.pos], auto || this.wantsPlayback());
+    // Preflight failure creates no new request. Keep the selected occurrence
+    // aligned with current, including duplicate tracks and a repeat-all wrap.
+    if(this._playRequest===request)this.pos=previousPos;
+    return result;
   },
   prev:function(){return commitTrackStep(resolveTrackStep(-1));},
   seekWhenReady:function(sec){
@@ -2986,7 +3006,7 @@ const Engine = {
       }
       if(this._driveErrorReportedId===t.id)return;
       this._driveErrorReportedId=t.id;clearTimeout(this._driveRetryTimer);
-      this._playIntent=false;this.playing=false;this.pauseElement(a);UI.renderPlayState();
+      this._playIntent=false;this.playing=false;this.cancelTransitionForFailure();this.pauseElement(a);UI.renderPlayState();
       toast('Drive audio still could not play. Check internet and folder sharing, then try again.',7000);return;
     }
     if(t?.source==='r2'){
@@ -3007,7 +3027,7 @@ const Engine = {
       }
       if(this._r2ErrorReportedId===t.id)return;
       this._r2ErrorReportedId=t.id;clearTimeout(this._r2RetryTimer);this._r2RetryTimer=null;
-      this._playIntent=false;this.playing=false;this.pauseElement(a);UI.renderPlayState();
+      this._playIntent=false;this.playing=false;this.cancelTransitionForFailure();this.pauseElement(a);UI.renderPlayState();
       this.tracePlayback('r2-terminal-error',{reason:cause});
       toast('R2 audio could not play. Check internet or refresh Cloudflare R2 in Music Sources, then try again.',7000);return;
     }
@@ -3038,7 +3058,7 @@ const Engine = {
       }
       if(this._serverErrorReportedId===t.id)return;
       this._serverErrorReportedId=t.id;clearTimeout(this._serverRetryTimer);
-      this._playIntent=false;this.playing=false;this.pauseElement(a);UI.renderPlayState();
+      this._playIntent=false;this.playing=false;this.cancelTransitionForFailure();this.pauseElement(a);UI.renderPlayState();
       const msg='Unable to stream this song. Check the A15 and Wi-Fi connection, or try an MP3. Reconnect in Settings → Library → Music Sources.';
       DrawerCast.markError(msg,error===2||cause==='stall');toast(msg,6500);return;
     }
@@ -3049,7 +3069,7 @@ const Engine = {
     this.playing=false;
     this._err=(this._err||0)+1;
     if(this._err>=Math.min(6,Math.max(2,this.queue.length))){
-      this._err=0;this._playIntent=false;this.playing=false;UI.renderPlayState();
+      this._err=0;this._playIntent=false;this.playing=false;this.cancelTransitionForFailure();UI.renderPlayState();
       toast('This browser cannot decode those files');
       return;
     }
@@ -3111,6 +3131,7 @@ const Engine = {
       const f=await getFileFor(nt);
       if(f&&sourceTrackEnabled(nt)&&this.queue[this.order[nextPos]]===nt&&!PlaybackQueue.shouldStart()&&request===this._playRequest&&slot===this.cur&&!PlaybackTransitions.pending&&!this.xfading){
         const o=this.els[1-this.cur];
+        o._transitionOwner=null;
         const old=o.src;
         o.preload='auto';
         o.src=audioSource(f);
@@ -9006,9 +9027,20 @@ const PlaybackTransitions={token:0,finish:null,pending:false,
     this.cancel();this.pending=true;Engine._playRequest=(Engine._playRequest||0)+1;const token=this.token,old=Engine.cur,next=1-old;let file;try{file=await getFileFor(track);}catch(e){if(token===this.token){this.pending=false;toast('Could not load the next track');}return;}if(token!==this.token)return;if(!file){this.pending=false;return;}
     if(Engine.ctx?.state==='closed'){this.pending=false;Engine.pause('context-failed');toast('Audio output was closed. Reload this page to play again.',6000);return;}
     Engine.ensureCtx('selection');const audio=Engine.els[next],url=audioSource(file),oldURL=audio.src;
+    const owner={token,request:Engine._playRequest};audio._transitionOwner=owner;
+    const ownsSlot=()=>audio._transitionOwner===owner&&audio.src===url;
     Engine.setGain(next,0,0);audio.src=url;audio.currentTime=0;Engine.applySpeed();
-    try{await audio.play();}catch(e){if(token===this.token){this.pending=false;Engine.pauseElement(audio);toast('Could not start the next track');}return;}
-    if(token!==this.token){if(audio.src===url&&Engine.cur!==next)Engine.pauseElement(audio);return;}
+    try{await audio.play();}catch(e){if(token===this.token&&ownsSlot()){this.pending=false;Engine.pauseElement(audio);toast('Could not start the next track');}return;}
+    if(token!==this.token||!Engine.wantsPlayback()||!ownsSlot()){if(ownsSlot()&&Engine.cur!==next)Engine.pauseElement(audio);return;}
+    if(!audio.ended&&audio.paused){this.cancel();Engine.pause('interrupted');return;}
+    Engine.resetSelectionRecovery(track);
+    if(audio.ended){
+      // The renderer can receive play completion after this spare has finished.
+      // Consume its real end through queue policy, never call it active output.
+      this.pending=false;Engine.preloadId=null;Engine.cur=next;Engine.current=track;Engine.pos=Math.max(0,Engine.order.indexOf(index));Engine.dur=track.dur||0;
+      Engine.playing=false;Engine._playIntent=true;Engine._endedRequest=null;Engine.releaseSlot(old);Engine.setGain(old,0,0);Engine.setGain(next,Engine.rgGain(track),0);
+      Engine.tracePlayback('transition-ended-before-commit');UI.renderNowPlaying(track);UI.renderPlayState();Engine.onEnded(next);return;
+    }
     this.pending=false;Engine.preloadId=null;Engine.xfading=true;Engine._overlapTrack=Engine.current;Engine.cur=next;Engine.current=track;Engine.pos=Math.max(0,Engine.order.indexOf(index));Engine.dur=track.dur||0;Engine._playIntent=true;Engine.playing=false;Engine.onPlaying(next);
     if(!Engine.playing&&Engine.transportCapabilities().network)Engine.onBuffering(next,'initial');
     Engine.setGain(old,0,ms);Engine.setGain(next,Engine.rgGain(track),ms);
@@ -9041,7 +9073,7 @@ function installPlaybackRework(){
   const setQueue=Engine.setQueue;Engine.setQueue=function(list,index,autoplay){if(PlaybackQueue.active&&!PlaybackQueue.starting){PlaybackQueue.active=false;PlaybackQueue.resume=null;PlaybackQueue.save();}return setQueue.call(this,list,index,autoplay);};
   const playIndex=Engine.playIndex;
   Engine.playIndex=function(index,autoplay,position){
-    const t=this.queue[index];if(!sourceTrackEnabled(t))return;
+    const t=this.queue[index];if(!sourceTrackEnabled(t))return this.selectionUnavailable();
     const outgoing=this.current;if(outgoing&&!this._autoAdvance&&!this.el().ended&&nativeValues().restore_pos){outgoing.resumeAt=this.time();persistTrack(outgoing);}
     const mode=nativeValues().fade_manual_advance||0;
     // Cloud media can take seconds to become playable. Manual cloud selection
@@ -9069,7 +9101,7 @@ function installPlaybackRework(){
     }finally{this._autoAdvance=previous;}
   };
   Engine.countPlayed=function(){if(!this.current||this.counted)return;this.counted=true;this.current.plays=(this.current.plays||0)+1;this.current.lastPlayed=Date.now();persistTrack(this.current);};
-  Engine.onEnded=function(i){if(i!==this.cur||this._loadingRequest||!this.playing||this._endedRequest===this._playRequest)return;this._endedRequest=this._playRequest;if(this.current){this.current.resumeAt=0;this.countPlayed();persistTrack(this.current);}const request=this._playRequest;const advance=()=>{if(request!==this._playRequest||!this.playing)return;this.listened=0;this.counted=false;this.next(true);};const gap=nativeValues().track_end_silence_ms||0;if(gap){clearTimeout(this.silenceTimer);this.silenceTimer=setTimeout(advance,gap);}else advance();};
+  Engine.onEnded=function(i){this.tracePlayback('ended-received');if(i!==this.cur||this._loadingRequest||!this.wantsPlayback()||!this.el().ended||this._endedRequest===this._playRequest)return;this._endedRequest=this._playRequest;this.playing=false;UI.renderPlayState();if(this.current){this.current.resumeAt=0;this.countPlayed();persistTrack(this.current);}const request=this._playRequest;const advance=()=>{if(request!==this._playRequest||!this.wantsPlayback())return;this.listened=0;this.counted=false;this.next(true);};const gap=nativeValues().track_end_silence_ms||0;if(gap){clearTimeout(this.silenceTimer);this.silenceTimer=setTimeout(advance,gap);}else advance();};
   Engine.startCrossfade=function(){if(SET.audioMode==='transparent')return;if(PlaybackQueue.active&&this.pos+1>=this.order.length)return;if(this.xfading||PlaybackTransitions.pending||!this.playing||PlaybackQueue.shouldStart()||SET.repeatMode==='one')return;let pos=this.pos+1;if(pos>=this.order.length){if(SET.repeatMode==='all')pos=0;else return;}return PlaybackTransitions.to(this.order[pos],Math.max(50,SET.crossfadeLen*1000));};
   const time=Engine.onTime;Engine.onTime=function(i){
     if(i!==this.cur||this._loadingRequest)return;

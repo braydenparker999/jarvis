@@ -224,7 +224,7 @@ test('the installed end-of-track handler ignores old and delayed endings',()=>{
   ctx.setTimeout=fn=>{timers.push(fn);return timers.length};
   ctx.nativeValues=()=>({track_end_silence_ms:50});ctx.persistTrack=()=>{};
   vm.runInContext(block('  Engine.onEnded=function(i){','  Engine.startCrossfade=function()'),ctx);
-  Engine.current={id:'new'};Engine.playing=true;Engine.countPlayed=()=>{};Engine.next=()=>{advances++};
+  Engine.current={id:'new'};Engine.playing=true;Engine._playIntent=true;Engine.el().ended=true;Engine.countPlayed=()=>{};Engine.next=()=>{advances++};
   Engine._loadingRequest=Engine._playRequest;
   Engine.onEnded(0);assert.equal(timers.length,0);
   Engine._loadingRequest=null;Engine.onEnded(0);assert.equal(timers.length,1);
@@ -300,11 +300,11 @@ test('queue finish skips removed resume target without transferring its seek off
 });
 test('autoplay ignores duplicate ended events and delayed ended events after Pause',()=>{
   const {Engine,ctx,values}=installed(),timers=[];values.track_end_silence_ms=50;ctx.setTimeout=fn=>{timers.push(fn);return timers.length};
-  Engine.current={id:'a'};Engine.playing=true;let advances=0;Engine.next=()=>{advances++};Engine.onEnded(0);Engine.onEnded(0);assert.equal(timers.length,1);
+  Engine.current={id:'a'};Engine.playing=true;Engine._playIntent=true;Engine.el().ended=true;let advances=0;Engine.next=()=>{advances++};Engine.onEnded(0);Engine.onEnded(0);assert.equal(timers.length,1);
   Engine.pause();timers[0]();Engine.onEnded(0);assert.equal(advances,0);
 });
 test('repeat one re-arms end handling on each completed play',()=>{
-  const {Engine,ctx}=installed();ctx.SET.repeatMode='one';Engine.queue=[{id:'a'}];Engine.order=[0];Engine.pos=0;Engine.current=Engine.queue[0];Engine.playing=true;
+  const {Engine,ctx}=installed();ctx.SET.repeatMode='one';Engine.queue=[{id:'a'}];Engine.order=[0];Engine.pos=0;Engine.current=Engine.queue[0];Engine.playing=true;Engine._playIntent=true;Engine.el().ended=true;
   let plays=0;Engine.play=()=>{plays++};Engine.onEnded(0);Engine.onEnded(0);assert.equal(plays,2);assert.equal(Engine.el().currentTime,0);
 });
 test('a paused Next starts pending queue paused',()=>{
