@@ -82,6 +82,59 @@ test('Poweramp native R2 Chrome lifecycle and recovery contracts',{timeout:12000
       }catch(error){console.error('NATIVE_R2_BROWSER '+JSON.stringify(await evidence(h)));throw error;}finally{await h.context.close();}
     });
 
+    await t.test('offline Next source error4 preserves intent and recovers the same native media online',async()=>{
+      const h=await openPage(browser,fixture),failures=[];
+      const cdp=await h.context.newCDPSession(h.page);await cdp.send('Network.enable');
+      cdp.on('Network.loadingFailed',event=>{if(event.type==='Media')failures.push(event.errorText);});
+      try{
+        await h.page.locator('#btn-play').tap();await h.page.waitForFunction(()=>PA.Engine.playing&&PA.Engine.el().currentTime>.2);
+        await h.context.setOffline(true);await h.page.locator('#sc-player [data-act="next"]').tap();
+        await h.page.waitForFunction(()=>PA.Engine.el().error?.code===4);
+        const failed=await h.page.evaluate(()=>({pos:PA.Engine.pos,intent:PA.Engine.wantsPlayback(),readyState:PA.Engine.el().readyState,networkState:PA.Engine.el().networkState,online:navigator.onLine}));
+        assert.deepEqual(failed,{pos:1,intent:true,readyState:0,networkState:3,online:false});
+        assert.ok(failures.includes('net::ERR_INTERNET_DISCONNECTED'),'actual native loading failed while Chromium was offline');
+        await h.page.waitForFunction(()=>PA.Engine._r2Recovery?.phase==='offline');
+        await h.context.setOffline(false);
+        await h.page.waitForFunction(()=>PA.Engine.pos===1&&PA.Engine.playing&&PA.Engine.el().currentTime>.2);
+        assert.equal(await h.page.evaluate(()=>PA.Engine.el().error),null);
+        const report=await h.page.evaluate(()=>PA.PlaybackDiagnostics.report());
+        assert.equal(report.events.filter(e=>e.event==='r2-retry-start').length,1);
+        assert.deepEqual(h.errors,[]);
+      }catch(error){console.error('NATIVE_R2_OFFLINE_SOURCE '+JSON.stringify({failures,...await evidence(h)}));throw error;}
+      finally{await h.context.setOffline(false);await h.context.close();}
+    });
+
+    await t.test('Pause cancels the native offline source recovery before online',async()=>{
+      const h=await openPage(browser,fixture);
+      try{
+        await h.page.locator('#btn-play').tap();await h.page.waitForFunction(()=>PA.Engine.playing);
+        await h.context.setOffline(true);await h.page.locator('#sc-player [data-act="next"]').tap();
+        await h.page.waitForFunction(()=>PA.Engine._r2Recovery?.phase==='offline');
+        await h.page.locator('#btn-play').tap();await h.context.setOffline(false);
+        await h.page.waitForTimeout(1000);
+        const state=await h.page.evaluate(()=>({pos:PA.Engine.pos,intent:PA.Engine.wantsPlayback(),playing:PA.Engine.playing,paused:PA.Engine.el().paused,reloads:PA.PlaybackDiagnostics.report().events.filter(e=>e.event==='r2-retry-start').length}));
+        assert.deepEqual(state,{pos:1,intent:false,playing:false,paused:true,reloads:0});assert.deepEqual(h.errors,[]);
+      }catch(error){console.error('NATIVE_R2_OFFLINE_PAUSE '+JSON.stringify(await evidence(h)));throw error;}
+      finally{await h.context.setOffline(false);await h.context.close();}
+    });
+
+    for(const initiallyOffline of [false,true])await t.test(`real unsupported media remains terminal ${initiallyOffline?'after its one offline probe':'online'}`,async()=>{
+      const h=await openPage(browser,fixture);let invalidRequests=0;
+      await h.context.route('**/__fixture__/audio/1.wav',route=>{invalidRequests++;return route.fulfill({contentType:'audio/wav',body:'not a supported audio container'});});
+      try{
+        await h.page.locator('#btn-play').tap();await h.page.waitForFunction(()=>PA.Engine.playing);
+        if(initiallyOffline)await h.context.setOffline(true);
+        await h.page.locator('#sc-player [data-act="next"]').tap();
+        if(initiallyOffline){await h.page.waitForFunction(()=>PA.Engine._r2Recovery?.phase==='offline');await h.context.setOffline(false);}
+        await h.page.waitForFunction(()=>PA.Engine.el().error?.code===4&&!PA.Engine.wantsPlayback());
+        const before=invalidRequests;await h.context.setOffline(true);await h.context.setOffline(false);await h.page.waitForTimeout(1000);
+        assert.equal(invalidRequests,before,'online notifications cannot renew a genuine unsupported source');
+        const state=await h.page.evaluate(()=>({pos:PA.Engine.pos,intent:PA.Engine.wantsPlayback(),playing:PA.Engine.playing,reloads:PA.PlaybackDiagnostics.report().events.filter(e=>e.event==='r2-retry-start').length}));
+        assert.deepEqual(state,{pos:1,intent:false,playing:false,reloads:initiallyOffline?1:0});assert.deepEqual(h.errors,[]);
+      }catch(error){console.error('NATIVE_R2_UNSUPPORTED '+JSON.stringify({invalidRequests,...await evidence(h)}));throw error;}
+      finally{await h.context.setOffline(false);await h.context.close();}
+    });
+
     await t.test('native seek metadata on a held network stream cannot cancel its recovery deadline',async()=>{
       const h=await openPage(browser,fixture),bytes=fixtureWav(),sockets=new Set();let requests=0;
       const held=createServer((req,res)=>{

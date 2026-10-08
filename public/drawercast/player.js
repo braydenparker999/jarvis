@@ -2537,7 +2537,23 @@ const Engine = {
     this.clearBuffering();this._mediaStarted=null;
     if(track?.source==='drive')DriveSource.playbackRetry.delete(track.id);
   },
-  clearR2Recovery:function(){clearTimeout(this._r2RetryTimer);this._r2RetryTimer=null;this._r2Recovery=null;},
+  clearR2Recovery:function(){clearTimeout(this._r2RetryTimer);this._r2RetryTimer=null;this._r2Recovery=null;this._r2OfflineSource=null;},
+  noteR2OfflineSource:function(a=this.el()){
+    const t=this.current,p=this._r2OfflineSource;
+    if(t?.source!=='r2'||typeof navigator==='undefined'||navigator.onLine!==false||!this.wantsPlayback()||a!==this.el()||a.readyState!==0||!/^https?:\/\//i.test(a.src))return;
+    // Keep evidence with this source load, including a media-error task that
+    // arrives just after online. Repeated offline events cannot renew its age.
+    if(p&&p.request===this._playRequest&&p.audio===a&&p.source===a.src&&p.track===t.id)return;
+    this._r2OfflineSource={request:this._playRequest,audio:a,source:a.src,track:t.id,at:Date.now()};
+    this.tracePlayback('r2-load-offline');
+  },
+  r2OfflineSourceError:function(a){
+    const p=this._r2OfflineSource,age=p?Date.now()-p.at:Infinity;
+    // Chromium can report an offline, not-yet-loaded URL as unsupported (4).
+    // Parsed/playing media and decode failures are not network evidence.
+    return a.error?.code===4&&a.readyState===0&&a.networkState===3&&!!p&&age>=0&&age<=30000&&
+      p.request===this._playRequest&&p.audio===a&&p.source===a.src&&p.track===this.current?.id;
+  },
   r2RecoveryValid:function(token){
     return !!token&&this._r2Recovery===token&&this._playRequest===token.request&&this.el()===token.audio&&token.audio.src===token.source&&this.current?.id===token.track.id&&this.wantsPlayback()&&this._r2ErrorReportedId!==token.track.id;
   },
@@ -2547,7 +2563,7 @@ const Engine = {
     if(navigator.onLine===false)return;
     if(this.ctx&&this.ctx.state!=='running'){this.pause('context-interrupted');return;}
     const a=token.audio,position=this.time(),at=Number.isFinite(position)?Math.max(0,position):token.position;
-    clearTimeout(this._r2RetryTimer);this._r2RetryTimer=null;token.phase='reload';
+    clearTimeout(this._r2RetryTimer);this._r2RetryTimer=null;this._r2OfflineSource=null;token.phase='reload';
     // Delay the one clean-URL reload until it can use the network. Keep any
     // seek made while recovery was waiting instead of restoring an old time.
     a.src=token.source;a.load();this.seekWhenReady(at);
@@ -2596,6 +2612,7 @@ const Engine = {
     if(i!==this.cur||this._loadingRequest)return;
     const a=this.els[i];if(!this.wantsPlayback()){if(!a.paused)this.pauseElement(a);return;}
     if(a.paused)return;
+    this._r2OfflineSource=null;
     this._mediaStarted={request:this._playRequest,attempt:this._playAttempt,slot:i,source:a.src};
     if(this.ctx&&this.ctx.state!=='running'){this.tracePlayback('element-awaits-context');return;}
     this.playing=true;this._playIntent=true;this.clearBuffering();this.tracePlayback('element-playing');
@@ -2894,7 +2911,7 @@ const Engine = {
   startElement:function(a=this.el()){
     a._transitionOwner=null;
     const request=this._playRequest,source=a.src,attempt=this._playAttempt=(this._playAttempt||0)+1;
-    this.playing=false;this._mediaStarted=null;this.tracePlayback('play-request');
+    this.playing=false;this._mediaStarted=null;this.noteR2OfflineSource(a);this.tracePlayback('play-request');
     const valid=()=>request===this._playRequest&&attempt===this._playAttempt&&a===this.el()&&source===a.src&&this.wantsPlayback();
     const rejected=e=>{
       if(!valid())return;this.tracePlayback('play-rejected',{error:e?.name});
@@ -3055,9 +3072,10 @@ const Engine = {
       toast('Drive audio still could not play. Check internet and folder sharing, then try again.',7000);return;
     }
     if(t?.source==='r2'){
-      const a=this.el(),retryable=cause==='stall'||cause==='NetworkError'||a.error?.code===2;
+      const a=this.el(),offlineSource=this.r2OfflineSourceError(a),retryable=cause==='stall'||cause==='NetworkError'||a.error?.code===2||offlineSource;
       if(retryable&&this.r2RecoveryValid(this._r2Recovery)&&this._r2Recovery.phase!=='reload'){this.tracePlayback('r2-retry-already-pending');return;}
       if(retryable&&this._r2RetryId!==t.id){
+        if(offlineSource)this.tracePlayback('r2-source-rejected-offline');
         this._r2RetryId=t.id;this._playIntent=true;this.playing=false;this._mediaStarted=null;UI.renderPlayState();
         const position=this.time(),at=Number.isFinite(position)?Math.max(0,position):0,source=a.src,request=this._playRequest;
         // Same-URL reload aborts old pending play promises. Retire that attempt,
@@ -3133,6 +3151,7 @@ const Engine = {
     if(i!==this.cur||this._loadingRequest) return;
     this._err=0;
     const a=this.els[i];
+    if(a.readyState>=1)this._r2OfflineSource=null;
     this.applyPendingSeek();
     if(isFinite(a.duration) && a.duration>0){
       this.dur=a.duration;
@@ -9028,7 +9047,7 @@ function setupRework(){
   window.addEventListener('pageshow',()=>{Engine.tracePlayback('pageshow');Engine.reconcilePlaybackLifecycle();});
   document.addEventListener('freeze',()=>{Engine.tracePlayback('freeze');Engine.checkpoint();});
   document.addEventListener('resume',()=>{Engine.tracePlayback('page-resume');Engine.reconcilePlaybackLifecycle();});
-  window.addEventListener('offline',()=>Engine.tracePlayback('offline'));
+  window.addEventListener('offline',()=>{Engine.tracePlayback('offline');Engine.noteR2OfflineSource();});
   window.addEventListener('online',()=>{Engine.tracePlayback('online');if(Engine._r2Recovery?.phase==='offline')Engine.beginR2Recovery();});
   document.addEventListener('visibilitychange',()=>{Engine.tracePlayback('visibility');if(document.visibilityState==='hidden'){if(nativeValues().pause_on_screen_off&&Engine.wantsPlayback())Engine.pause('screen-off');Engine.checkpoint();}else Engine.reconcilePlaybackLifecycle();});
   installPlaybackRework();installLyricsRework();installSearchPlayback();installSettingsShortcuts();NativeSettings.apply();measurePlayerLabels();
