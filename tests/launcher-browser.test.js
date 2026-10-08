@@ -32,20 +32,28 @@ test('launcher browser behavior', { skip: executablePath ? false : 'Install Chro
     browser = await chromium.launch({ executablePath, headless: true, args: ['--no-sandbox'] });
     async function open({ viewport = { width: 390, height: 844 }, locale = 'en-US', timezoneId = 'UTC', reducedMotion = 'no-preference', storage = {}, messages = [], posts = [], offline = false, legacyMessages = [] } = {}) {
       const context = await browser.newContext({ viewport, locale, timezoneId, reducedMotion, isMobile: true, hasTouch: true });
-      const api = { messages: structuredClone(messages), posts: structuredClone(posts), offline, sent: [] };
+      const api = { messages: structuredClone(messages), posts: structuredClone(posts), offline, sent: [], requests: [], mutations: [] };
       // All cloud requests are fixtures; these tests never post to the live inbox.
       await context.route('**/*', async route => {
         const request = route.request(), url = new URL(request.url());
         if (url.origin === origin) return route.continue();
         if (url.origin !== API_ORIGIN) return route.abort('blockedbyclient');
+        const call = { method: request.method(), path: url.pathname };
+        api.requests.push(call);
+        if (!['GET', 'HEAD', 'OPTIONS'].includes(call.method)) api.mutations.push(call);
         let status = 200, body;
         if (api.offline) { status = 503; body = { error: 'Offline fixture. Your drafts are safe.' }; }
         else if (url.pathname === '/shared/state') body = { mode: 'github-publications', messages: api.messages, posts: api.posts, publisher: { ok: true }, nextCursor: null };
         else if (url.pathname === '/shared/messages' && request.method() === 'POST') {
           const item = request.postDataJSON();
           api.sent.push(item);
-          if (!api.messages.some(m => m.id === item.id)) api.messages.push({ ...item, role: 'user', createdAt: new Date().toISOString() });
-          body = { ok: true };
+          let entry = api.messages.find(m => m.id === item.id);
+          if (!entry) {
+            entry = { ...item, role: 'user', createdAt: new Date().toISOString() };
+            api.messages.push(entry);
+            status = 201;
+          }
+          body = { entry };
         } else if (url.pathname === '/v1/state') body = { messages: legacyMessages, posts: [] };
         else { status = 404; body = { error: 'Unexpected fixture endpoint' }; }
         return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
@@ -235,13 +243,26 @@ test('launcher browser behavior', { skip: executablePath ? false : 'Install Chro
       const session = await open({ offline: true, messages: [user, reply, muse], storage: { ...untouched, [STORAGE_KEY]: JSON.stringify(state) } }), { page, api } = session;
       await page.goto(origin + '/jarvis/');
       await page.getByRole('heading', { name: 'Relay', exact: true }).waitFor();
-      await page.getByRole('status').filter({ hasText: 'Offline fixture' }).waitFor();
+      await page.locator('#relay-sync-error').filter({ hasText: 'Offline fixture' }).waitFor();
       assert.equal(await page.title(), 'Relay · Jarvis');
       assert.equal(await page.locator('.conversation-page').count(),1);
       assert.equal(await page.getByRole('textbox', { name: 'Message Relay' }).inputValue(), state.composer);
       assert.deepEqual(await page.locator('.bubble').allTextContents(), ['Earlier thought', 'Earlier reply', 'Queued thought']);
       assert.equal(await page.locator('.incoming .message-author').textContent(), 'Jarvis');
-      assert.deepEqual(await page.evaluate(key => JSON.parse(localStorage.getItem(key)), STORAGE_KEY), state);
+      const stored = await page.evaluate(({ key, pendingId }) => ({
+        state: JSON.parse(localStorage.getItem(key)),
+        draft: sessionStorage.getItem(key + '.composer.v1'),
+        draftId: sessionStorage.getItem(key + '.composer-id.v1'),
+        journalKeys: Object.keys(localStorage).filter(name => name.startsWith(key + '.pending.')),
+        journal: JSON.parse(localStorage.getItem(key + '.pending.' + pendingId))
+      }), { key: STORAGE_KEY, pendingId: pending.id });
+      const { composerId, ...preserved } = stored.state;
+      assert.match(composerId, /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/);
+      assert.deepEqual(preserved, { ...state, messages: [user, reply, muse, { ...pending, type: 'message' }] }, 'The public adapter adds only draft identity and queued-message metadata');
+      assert.equal(stored.draft, state.composer);
+      assert.equal(stored.draftId, composerId);
+      assert.deepEqual(stored.journalKeys, [STORAGE_KEY + '.pending.' + pending.id]);
+      assert.deepEqual(stored.journal, state.outbox[0], 'The original queued UUID and complete body are independently durable');
       await page.locator('#message-text').fill('Draft after rename');
       await page.getByRole('link', { name: 'Back to Home' }).click();
       await page.goBack();
@@ -253,6 +274,7 @@ test('launcher browser behavior', { skip: executablePath ? false : 'Install Chro
       await page.getByRole('button', { name: 'Refresh messages' }).click();
       await page.waitForFunction(key => JSON.parse(localStorage.getItem(key)).outbox.length === 0, STORAGE_KEY);
       assert.deepEqual(api.sent, [{ id: pending.id, body: pending.body }]);
+      assert.equal(await page.evaluate(key => localStorage.getItem(key), STORAGE_KEY + '.pending.' + pending.id), null, 'Exact acceptance removes the original UUID journal');
       assert.equal(await page.locator('#message-text').inputValue(), 'Draft after rename');
       await page.getByRole('button', { name: 'Close connection details' }).click();
       await page.locator('#message-text').fill('New Relay thought');
@@ -261,25 +283,71 @@ test('launcher browser behavior', { skip: executablePath ? false : 'Install Chro
       assert.deepEqual(Object.keys(api.sent[1]).sort(), ['body', 'id']);
       assert.equal(api.sent[1].body, 'New Relay thought');
       assert.match(api.sent[1].id, /^[a-f0-9-]{36}$/);
+      assert.equal(await page.evaluate(key => sessionStorage.getItem(key + '.composer.v1'), STORAGE_KEY), '');
+      assert.deepEqual(await page.evaluate(key => Object.keys(localStorage).filter(name => name.startsWith(key + '.pending.')), STORAGE_KEY), []);
       for (const [key, value] of Object.entries(untouched)) assert.equal(await page.evaluate(key => localStorage.getItem(key), key), value);
       assert.equal(await page.evaluate(() => Object.keys(localStorage).some(key => key === 'jarvis.relay.messages.v1')), false);
       await finish(session);
     });
 
     await t.test('legacy drafts remain readable and damaged message storage is never overwritten', async () => {
-      const legacy = { key: 'a'.repeat(64), messages: [{ id: 'legacy-message', role: 'user', body: 'Legacy thought', createdAt: '2026-01-01T00:00:00Z' }], outbox: [], composer: 'Legacy draft' };
+      const local = { id: 'legacy-message', role: 'user', body: 'Legacy thought', createdAt: '2026-01-01T00:00:00Z' };
+      const legacy = { key: 'a'.repeat(64), messages: [local], outbox: [{ ...local, type: 'message', sendState: 'sending' }], composer: 'Legacy draft' };
       const legacyRaw = JSON.stringify(legacy);
-      const session = await open({ offline: true, storage: { [LEGACY_KEY]: legacyRaw } }), { page } = session;
-      await page.goto(origin + '/jarvis/');
-      await page.getByRole('status').filter({ hasText: 'Offline fixture' }).waitFor();
-      assert.equal(await page.locator('#message-text').inputValue(), 'Legacy draft');
-      assert.deepEqual(await page.locator('.bubble').allTextContents(), ['Legacy thought']);
-      assert.equal(await page.evaluate(key => localStorage.getItem(key), LEGACY_KEY), legacyRaw);
-      await finish(session);
+      // A nonempty old remote inbox makes an accidental recovery/import visible.
+      const remoteLegacy = { id: '00000000-0000-4000-8000-000000000006', role: 'user', body: 'Fictional earlier remote legacy thought', createdAt: local.createdAt };
+      const cached = { version: 1, messages: [{ ...local, saved: false }], posts: [], outbox: [], composer: legacy.composer, syncedAt: null, legacyPending: true };
+      for (const mode of ['legacy fallback', 'cached legacy flag']) {
+        t.diagnostic(mode);
+        const storage = { [LEGACY_KEY]: legacyRaw, ...(mode === 'cached legacy flag' ? { [STORAGE_KEY]: JSON.stringify(cached) } : {}) };
+        const session = await open({ offline: true, legacyMessages: [remoteLegacy], storage }), { page, api } = session;
+        await page.goto(origin + '/jarvis/');
+        await page.locator('#relay-sync-error').filter({ hasText: 'Offline fixture' }).waitFor();
+        assert.equal(await page.locator('#message-text').inputValue(), 'Legacy draft');
+        assert.deepEqual(await page.locator('.bubble').allTextContents(), ['Legacy thought']);
+        assert.equal(await page.evaluate(key => localStorage.getItem(key), LEGACY_KEY), legacyRaw);
+        const localTime = await page.locator('[data-message-id="legacy-message"] .message-time').textContent();
+        assert.match(localTime, /local|on this device/i, 'Older readable text stays explicitly local');
+        assert.doesNotMatch(localTime, /Sending to public inbox|Send unconfirmed|Queued on this device|Awaiting reply/);
+        const restored = await page.evaluate(key => ({
+          state: JSON.parse(localStorage.getItem(key)),
+          journalKeys: Object.keys(localStorage).filter(name => name.startsWith(key + '.pending.'))
+        }), STORAGE_KEY);
+        assert.equal(restored.state.messages.find(message => message.id === legacy.messages[0].id)?.body, legacy.messages[0].body);
+        assert.notEqual(restored.state.messages.find(message => message.id === legacy.messages[0].id)?.saved, true, 'Local legacy text is not cloud acceptance');
+        assert.deepEqual(restored.state.outbox, []);
+        assert.deepEqual(restored.journalKeys, []);
+        assert.deepEqual(api.sent, [], 'Restoring an older non-UUID row cannot allocate or send a replacement');
+        assert.deepEqual(api.mutations, [], 'Old flags cannot authorize a mutating request to any API route');
+        await page.reload();
+        await page.locator('#relay-sync-error').filter({ hasText: 'Offline fixture' }).waitFor();
+        assert.equal(await page.locator('#message-text').inputValue(), 'Legacy draft');
+        assert.deepEqual(await page.locator('.bubble').allTextContents(), ['Legacy thought']);
+        assert.equal(await page.evaluate(key => localStorage.getItem(key), LEGACY_KEY), legacyRaw);
+        assert.deepEqual(api.sent, []);
+        assert.deepEqual(api.mutations, []);
+        api.offline = false;
+        await page.getByRole('button', { name: 'Conversation menu' }).click();
+        await page.getByRole('button', { name: 'Connection details', exact: true }).click();
+        await page.getByRole('button', { name: 'Refresh messages' }).click();
+        await page.waitForFunction(() => document.querySelector('#sync-now')?.disabled === false);
+        assert.deepEqual(await page.locator('.bubble').allTextContents(), ['Legacy thought'], 'A complete empty public read cannot erase the older local copy');
+        assert.equal(await page.locator('#message-text').inputValue(), 'Legacy draft');
+        assert.equal(await page.evaluate(key => localStorage.getItem(key), LEGACY_KEY), legacyRaw);
+        assert.notEqual(await page.evaluate(key => JSON.parse(localStorage.getItem(key)).messages.find(message => message.id === 'legacy-message')?.saved, STORAGE_KEY), true);
+        assert.deepEqual(api.sent, []);
+        assert.deepEqual(api.mutations, [], 'Fresh shared GET must not trigger migration or a new public send');
+        assert.ok(api.requests.some(call => call.method === 'GET' && call.path === '/shared/state'));
+        assert.equal(api.requests.some(call => call.path.startsWith('/v1/') || call.path === '/shared/migrate'), false, 'Ordinary sync does not invoke old-inbox recovery');
+        assert.deepEqual(await page.evaluate(key => Object.keys(localStorage).filter(name => name.startsWith(key + '.pending.')), STORAGE_KEY), []);
+        await page.getByRole('button', { name: 'Close connection details' }).click();
+        await finish(session);
+      }
       const damaged = await open({ storage: { [STORAGE_KEY]: 'broken' } });
       await damaged.page.goto(origin + '/jarvis/');
       await damaged.page.getByRole('heading', { name: 'Unable to save on this device' }).waitFor();
       assert.equal(await damaged.page.evaluate(key => localStorage.getItem(key), STORAGE_KEY), 'broken');
+      assert.deepEqual(damaged.api.mutations, []);
       await finish(damaged);
     });
 

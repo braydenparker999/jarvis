@@ -9,20 +9,30 @@ export function mergePublicMessages(known,outbox,received){
   for(const queued of outbox){
     const message={...known.find(m=>m.id===queued.id),...queued};
     if(pending.has(message.id)&&pending.get(message.id).body!==message.body)throw Error('Queued message ID conflict. Your original text is still saved on this device.');
-    pending.set(message.id,{...message,saved:false});
+    const queuedMessage={...message,saved:false};delete queuedMessage.localOnly;
+    pending.set(message.id,queuedMessage);
   }
   const accepted=new Map(known.filter(m=>m.saved===true).map(m=>[m.id,m]));
+  // Older public stores also contain readable local history that was never
+  // queued. Keeping that text is not permission to submit it to the inbox.
+  const local=new Map(known.filter(m=>m.saved!==true&&!pending.has(m.id)).map(m=>[m.id,{...m,saved:false,localOnly:true}]));
+  for(const [id,message] of local){
+    const proof=accepted.get(id);
+    if(proof&&(!uuid(id)||!same(message,proof)))throw Error('Local history has different content for this inbox ID. Keep this page open and copy your original text before reloading; another tab changed the saved copy.');
+  }
   for(const message of received){
-    const queued=pending.get(message.id),previous=accepted.get(message.id);
+    const queued=pending.get(message.id),previous=accepted.get(message.id),unconfirmed=local.get(message.id);
     if(previous&&!same(previous,message))throw Error('The inbox returned different content for an already accepted immutable message. Refresh later; saved text has been preserved.');
     if(queued&&!(message.role==='user'&&message.body===queued.body)){
       pending.set(message.id,{...queued,sendState:'conflict'});continue;
     }
-    accepted.set(message.id,{...message,saved:true});
+    if(unconfirmed&&(!uuid(message.id)||!same(unconfirmed,message)))continue;
+    const confirmed={...message,saved:true};delete confirmed.localOnly;
+    accepted.set(message.id,confirmed);local.delete(message.id);
   }
   for(const [id,message] of pending){const proof=accepted.get(id);if(proof&&proof.role==='user'&&proof.body===message.body)pending.delete(id);}
   // Runtime history is complete. Only the serialized offline cache is bounded.
-  const messages=[...new Map([...accepted.values(),...pending.values()].map(m=>[m.id,m])).values()].sort(order);
+  const messages=[...new Map([...local.values(),...accepted.values(),...pending.values()].map(m=>[m.id,m])).values()].sort(order);
   return {messages,outbox:[...pending.values()].sort(order)};
 }
 
@@ -55,8 +65,7 @@ export function createPublicDeliveryStore({storage,tabStorage,key,read}){
       ...(message.type?{type:message.type}:{}),...(message.sendState?{sendState:message.sendState}: {}),...(draftIntent?{draftIntent:{id:draftIntent.id,body:draftIntent.body}}:{})}));}
     catch{const error=Error('This device could not save the queued message. Keep your text here or copy it before leaving.');error.storageFailure=true;throw error;}
   }
-  function restore(){
-    const state=read(storage);
+  function restore(state=read(storage)){
     if(draft===undefined){
       let savedDraft=null,savedId=null;try{savedDraft=tabStorage?.getItem(draftKey)??null;savedId=tabStorage?.getItem(draftIdKey);}catch{}
       draft=savedDraft??state.composer??'';draftId=uuid(savedId)?savedId:savedDraft===null&&uuid(state.composerId)?state.composerId:crypto.randomUUID();
@@ -71,7 +80,7 @@ export function createPublicDeliveryStore({storage,tabStorage,key,read}){
   }
   function commit(next){
     const stored=read(storage),pending=journals();
-    const known=[...stored.messages.filter(m=>m.saved===true),...next.messages];
+    const known=[...stored.messages,...next.messages];
     const merged=mergePublicMessages(known,[...stored.outbox,...pending,...next.outbox],next.messages.filter(m=>m.saved===true));
     const posts=[...new Map([...(stored.posts||[]),...(next.posts||[])].map(p=>[p.id,p])).values()].sort(order);
     const nextDraftId=next.composer===draft?draftId:crypto.randomUUID();
@@ -84,7 +93,7 @@ export function createPublicDeliveryStore({storage,tabStorage,key,read}){
     // Each UUID is independently durable. Another tab's aggregate write cannot
     // erase it, and no journal is removed without exact accepted user text.
     for(const message of result.outbox)savePending(message);
-    const cachedMessages=[...result.messages.filter(m=>m.saved===true).sort(order).slice(-MAX_PUBLIC_CACHED),...result.outbox].sort(order);
+    const cachedMessages=[...result.messages.filter(m=>m.saved===true).sort(order).slice(-MAX_PUBLIC_CACHED),...result.messages.filter(m=>m.localOnly),...result.outbox].sort(order);
     try{storage.setItem(key,JSON.stringify({...result,messages:cachedMessages,...('posts' in result?{posts:posts.slice(-20)}:{})}));}
     catch{const error=Error('Browser storage could not finish updating. Keep this page open and copy your text before reloading.');error.storageFailure=true;throw error;}
     const accepted=new Map(result.messages.filter(m=>m.saved===true&&m.role==='user').map(m=>[m.id,m.body]));
@@ -93,5 +102,12 @@ export function createPublicDeliveryStore({storage,tabStorage,key,read}){
     return result;
   }
   return {restore,commit,savePending,draftKey,prefix,
-    external(current){const incoming=restore(),posts=[...new Map([...(current.posts||[]),...(incoming.posts||[])].map(p=>[p.id,p])).values()].sort(order);return {...current,...mergePublicMessages(current.messages,[...current.outbox,...incoming.outbox],incoming.messages.filter(m=>m.saved===true)),...('posts' in current?{posts}:{}),composer:current.composer};}};
+    external(current){
+      const snapshot=read(storage);
+      // Association failures must be read-only: restore may journal an older
+      // aggregate queue, so validate this exact snapshot before migrating it.
+      mergePublicMessages([...snapshot.messages,...current.messages],[...current.outbox,...snapshot.outbox,...journals()],snapshot.messages.filter(m=>m.saved===true));
+      const incoming=restore(snapshot),posts=[...new Map([...(current.posts||[]),...(incoming.posts||[])].map(p=>[p.id,p])).values()].sort(order);
+      return {...current,...mergePublicMessages([...incoming.messages,...current.messages],[...current.outbox,...incoming.outbox],incoming.messages.filter(m=>m.saved===true)),...('posts' in current?{posts}:{}),composer:current.composer};
+    }};
 }

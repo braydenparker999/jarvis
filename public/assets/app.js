@@ -3,7 +3,7 @@ import {conversation} from './conversation.js';
 import { apps, icon, loadPreferences, savePreferences, renderUtility } from './hub.js';
 import { API_ORIGIN } from './config.js';
 import { request } from './shared-api.js';
-import { STORAGE_KEY, LEGACY_KEY, readState, mergeState } from './shared-store.js';
+import { STORAGE_KEY, readState, mergeState } from './shared-store.js';
 import {createPublicDeliveryStore} from './public-delivery-store.js';
 import { channelMessages } from './channels.js';
 import { OWNER_SESSION_KEY } from './relay-owner-api.js';
@@ -239,12 +239,6 @@ async function sync() {
   $('connection-button').lastElementChild.textContent = connection();
   let sending;
   try {
-    if(state.legacyPending){
-      const old=JSON.parse(localStorage.getItem(LEGACY_KEY)||'null');
-      if(!old?.key)throw Error('Previous inbox is unavailable. Existing drafts have been preserved.');
-      const remote=await request('/shared/migrate',{}, {Authorization:'Bearer '+old.key});
-      commit(mergeState({...state,legacyPending:false},remote));
-    }
     // A lost POST response may already have saved the UUID. Confirm first so a
     // retry sends only entries still missing from the complete public history.
     const inbox=await request('/shared/state');commit(mergeState(state,inbox));

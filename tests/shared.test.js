@@ -27,7 +27,7 @@ test('published reply is visible to a second client',async()=>{
 });
 test('pending drafts survive remote refresh; damaged storage is not reset',()=>{
  const old={key:'a'.repeat(64),messages:[{id:'draft',role:'user',body:'Keep me',createdAt:'2026-01-01'}],outbox:[{id:'draft',type:'message'}],composer:'Unfinished'};
- const store={getItem:k=>k===LEGACY_KEY?JSON.stringify(old):null};const state=readState(store);assert.equal(state.legacyPending,true);assert.equal(state.composer,'Unfinished');
+ const store={getItem:k=>k===LEGACY_KEY?JSON.stringify(old):null};const state=readState(store);assert.equal(state.legacyPending,false);assert.deepEqual(state.outbox,[]);assert.equal(state.composer,'Unfinished');
  const next=mergeState(state,{messages:[],posts:[]});assert.equal(next.messages[0].body,'Keep me');assert.equal(next.composer,'Unfinished');
  assert.throws(()=>readState({getItem:k=>k===STORAGE_KEY?'broken':null}));
 });
