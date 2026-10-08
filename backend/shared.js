@@ -9,7 +9,7 @@ const id = x => typeof x === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[
 const text = (x, max) => typeof x === 'string' && x.trim().length > 0 && x.length <= max;
 const json = (x, status = 200) => Response.json(x, {status});
 
-export function sharedStore(ctx, path, body = {}, params = new URLSearchParams()) {
+export function sharedSchema(ctx) {
   const sql = ctx.storage.sql;
   sql.exec(`CREATE TABLE IF NOT EXISTS shared_entries (
     seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
@@ -19,6 +19,10 @@ export function sharedStore(ctx, path, body = {}, params = new URLSearchParams()
   sql.exec('CREATE TABLE IF NOT EXISTS shared_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
   sql.exec('CREATE TABLE IF NOT EXISTS shared_briefing_dates (date TEXT PRIMARY KEY, entry_id TEXT NOT NULL)');
   coordinationSchema(ctx);
+}
+export function sharedStore(ctx, path, body = {}, params = new URLSearchParams()) {
+  sharedSchema(ctx);
+  const sql = ctx.storage.sql;
   const rows = (q, ...v) => [...sql.exec(q, ...v)];
   const entry = r => ({id:r.id, body:r.body, createdAt:r.created_at,
     ...(r.kind === 'briefing' ? {title:r.title} : {role:r.kind === 'user' ? 'user' : 'assistant'}),

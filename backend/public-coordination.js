@@ -41,6 +41,7 @@ export function coordinationSchema(ctx) {
     result_version INTEGER, disposition TEXT NOT NULL, error_code TEXT,
     payload TEXT NOT NULL, provenance TEXT NOT NULL, recorded_at TEXT NOT NULL)`);
   sql.exec('CREATE INDEX IF NOT EXISTS public_coordination_request ON public_coordination_events(request_id, seq)');
+  sql.exec('CREATE INDEX IF NOT EXISTS public_coordination_attempt ON public_coordination_events(attempt_id)');
   sql.exec(`CREATE UNIQUE INDEX IF NOT EXISTS public_coordination_version ON public_coordination_events(request_id, attempt_id, result_version)
     WHERE disposition='accepted' AND result_version IS NOT NULL`);
   sql.exec(`CREATE TABLE IF NOT EXISTS public_changes (

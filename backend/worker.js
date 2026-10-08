@@ -1,5 +1,5 @@
 import {connector,oauthStore} from './connector.js';
-import {sharedStore,SHARED_OBJECT,PUBLIC_KEY} from './shared.js';
+import {sharedStore,sharedSchema,SHARED_OBJECT,PUBLIC_KEY} from './shared.js';
 import {syncPublications,importPublicationHint} from './publications.js';
 import {PRIMARY_SITE,FRONTEND_ORIGINS} from './origins.js';
 import {songsterr} from './songsterr.js';
@@ -118,7 +118,7 @@ export class Hub {
       try {
         const body=await request.json();
         // The shared journal can replay both inbox kinds even on a fresh owner-only object.
-        sharedStore(this.ctx,'/internal/shared/state');
+        sharedSchema(this.ctx);
         // Persist wake before the atomic message/event insertion; failed requests
         // are cleaned up by the ordinary scheduler without a busy loop.
         if(['message','job_create','job_retry','delivery_retry'].includes(body?.op)&&this.ctx.storage.setAlarm)await this.ctx.storage.setAlarm(Date.now()+100);

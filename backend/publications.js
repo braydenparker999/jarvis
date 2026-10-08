@@ -1,4 +1,4 @@
-import {sharedStore} from './shared.js';
+import {sharedStore,sharedSchema} from './shared.js';
 import {decodeCoordination} from './public-coordination.js';
 import {canonical} from './relay-common.js';
 export const COMMENTS_URL='https://api.github.com/repos/braydenparker999/jarvis/issues/2/comments';
@@ -30,8 +30,9 @@ async function boundedJson(response,limit=2000000) {
   return JSON.parse(new TextDecoder().decode(bytes));
 }
 export function publicationSchema(ctx) {
-  sharedStore(ctx,'/internal/shared/state');
+  sharedSchema(ctx);
   ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS imported_comments (comment_id INTEGER PRIMARY KEY, publication TEXT NOT NULL, imported INTEGER NOT NULL DEFAULT 0, error TEXT)');
+  ctx.storage.sql.exec('CREATE INDEX IF NOT EXISTS imported_comments_status ON imported_comments(imported,comment_id)');
 }
 const meta=(ctx,key)=>JSON.parse([...ctx.storage.sql.exec('SELECT value FROM shared_meta WHERE key=?',key)][0]?.value||'null');
 const putMeta=(ctx,key,value)=>ctx.storage.sql.exec('INSERT OR REPLACE INTO shared_meta VALUES(?,?)',key,JSON.stringify(value));
@@ -170,7 +171,17 @@ export async function importPublicationHint(ctx,input,fetcher=fetch,now=Date.now
     return Response.json({error:'Expected only a positive numeric commentId'},{status:400});
   publicationSchema(ctx);
   const sql=ctx.storage.sql,commentId=input.commentId;
-  await applyPendingPublications(ctx);
+  // Durable retries are cheap indexed receipts. Pending dependencies remain in
+  // the journal and recover through the unchanged read-triggered reconciler.
+  // An older importer may already have journaled this exact legacy final as a
+  // conflict. Recover that one target, preserving the immutable original reply,
+  // instead of scanning every historical conflict before admitting a new hint.
+  const stored=[...sql.exec('SELECT publication,imported FROM imported_comments WHERE comment_id=?',commentId)][0];
+  if(stored?.imported===2){
+    const p=JSON.parse(stored.publication);
+    if(p.type==='reply'&&![...sql.exec('SELECT event_id FROM public_coordination_events WHERE event_id=?',p.id)].length)
+      sharedStore(ctx,'/internal/shared/coordination',legacyUpdate(p,commentId));
+  }
   const prior=hintReceipt(ctx,commentId);if(prior)return prior;
   sql.exec('CREATE TABLE IF NOT EXISTS public_import_hints (comment_id INTEGER PRIMARY KEY,status INTEGER NOT NULL,expires_ms INTEGER NOT NULL)');
   sql.exec('DELETE FROM public_import_hints WHERE expires_ms<=?',now);
