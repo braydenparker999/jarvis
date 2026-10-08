@@ -1,6 +1,6 @@
 import {connector,oauthStore} from './connector.js';
 import {sharedStore,SHARED_OBJECT,PUBLIC_KEY} from './shared.js';
-import {syncPublications} from './publications.js';
+import {syncPublications,importPublicationHint} from './publications.js';
 import {PRIMARY_SITE,FRONTEND_ORIGINS} from './origins.js';
 import {songsterr} from './songsterr.js';
 import {music} from './music.js';
@@ -10,7 +10,7 @@ import {relayConnector,relayRpc} from './relay-connector.js';
 import {relayOAuthStore} from './relay-oauth.js';
 import {drainRelayOutbox,scheduleRelayAlarm,enqueueRelayOwnerMessage} from './relay-events.js';
 import {relayOwnerPublic,relayOwnerStore} from './relay-owner.js';
-import {RelayError} from './relay-common.js';
+import {RelayError,boundedText} from './relay-common.js';
 const paths = new Set(['/v1/state', '/v1/messages', '/v1/board', '/v1/responder/connect', '/v1/responder/revoke', '/v1/agent/inbox', '/v1/agent/replies', '/v1/agent/board']);
 const digest = async value => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))),b=>b.toString(16).padStart(2,'0')).join('');
 const randomKey = () => Array.from(crypto.getRandomValues(new Uint8Array(32)),b=>b.toString(16).padStart(2,'0')).join('');
@@ -33,8 +33,19 @@ export default {
     const guitar=await songsterr(request,reply);if(guitar)return guitar;
     const path=new URL(request.url).pathname;
     if(path==='/health' && request.method==='GET') return reply({ok:true,mode:'github-publications',version:7,publicationIssue:2});
-    if(path==='/shared/state' || path==='/shared/messages') {
-      if((path==='/shared/state'&&request.method!=='GET')||(path==='/shared/messages'&&request.method!=='POST'))return reply({error:'Method not allowed'},405);
+    if(path==='/shared/import-hint'){
+      if(request.method!=='POST')return reply({error:'Method not allowed'},405);
+      if(new URL(request.url).search)return reply({error:'Hint accepts only a JSON commentId'},400);
+      if(!request.headers.get('Content-Type')?.startsWith('application/json'))return reply({error:'Expected JSON'},415);
+      let data;try{data=JSON.parse(await boundedText(request,256));}catch(error){return reply({error:'Invalid hint body'},error instanceof RelayError?413:400);}
+      if(!data||typeof data!=='object'||Array.isArray(data)||Object.keys(data).length!==1||!Number.isSafeInteger(data.commentId)||data.commentId<1)
+        return reply({error:'Expected only a positive numeric commentId'},400);
+      try{const response=await sharedInternal(env,'/import-hint',data);
+        return new Response(response.body,{status:response.status,headers:{...headers,'Content-Type':'application/json',...(response.headers.has('Retry-After')?{'Retry-After':response.headers.get('Retry-After')}:{})}});
+      }catch{return reply({error:'Import hint unavailable; use the existing reconciler'},503);}
+    }
+    if(['/shared/state','/shared/changes','/shared/result','/shared/messages'].includes(path)) {
+      if((path!=='/shared/messages'&&request.method!=='GET')||(path==='/shared/messages'&&request.method!=='POST'))return reply({error:'Method not allowed'},405);
       let data;
       if(request.method==='POST'){
         if(!request.headers.get('Content-Type')?.startsWith('application/json'))return reply({error:'Expected JSON'},415);
@@ -47,7 +58,7 @@ export default {
       try {
         // Legacy migration must not gate current writes or erase current reads.
         if(request.method==='GET')try{await syncShared(env);}catch{}
-        const suffix=path==='/shared/state'?'/state'+new URL(request.url).search:'/message';
+        const suffix=request.method==='GET'?path.slice('/shared'.length)+new URL(request.url).search:'/message';
         const response=await sharedInternal(env,suffix,data);
         return new Response(response.body,{status:response.status,headers:{...headers,'Content-Type':'application/json'}});
       }catch{return reply({error:'Storage unavailable; retry later'},503);}
@@ -122,14 +133,26 @@ export class Hub {
       catch(error){return json({error:{code:error instanceof RelayError?error.code:-32603,message:error instanceof RelayError?error.message:'Relay storage unavailable',...(error instanceof RelayError&&error.data?{data:error.data}:{})}});}
     }
     if(path.startsWith('/internal/shared/')) {
+      if(path==='/internal/shared/import-hint'){
+        if(this.ctx.storage.setAlarm)await this.ctx.storage.setAlarm(Date.now()+100);
+        const response=await importPublicationHint(this.ctx,await request.json());
+        try{await scheduleRelayAlarm(this.ctx);}catch{}
+        return response;
+      }
       // Persist the wake before committing a new message/event, so a crash after
       // commit cannot strand its outbox. SQLite and normal Durable Object storage
       // share the same object; old imported rows never become live events.
       if(path==='/internal/shared/message'&&this.ctx.storage.setAlarm)await this.ctx.storage.setAlarm(Date.now()+100);
-      if(path==='/internal/shared/state') {
+      if(['/internal/shared/state','/internal/shared/changes','/internal/shared/result'].includes(path)) {
+        const validation=sharedStore(this.ctx,path,{},new URL(request.url).searchParams);
+        if(!validation.ok)return validation;
+        // Final/correction notifications commit with imported public results.
+        // Persist a wake before import, using the existing callback scheduler.
+        if(this.ctx.storage.setAlarm)await this.ctx.storage.setAlarm(Date.now()+100);
         // A single in-flight importer for the shared object, across all phones.
         if(!this.publicationSync)this.publicationSync=syncPublications(this.ctx).finally(()=>{this.publicationSync=null;});
         await this.publicationSync;
+        try{await scheduleRelayAlarm(this.ctx);}catch{}
       }
       const response=sharedStore(this.ctx,path,request.method==='POST'?await request.json():{},new URL(request.url).searchParams);
       if(path==='/internal/shared/message')try{await scheduleRelayAlarm(this.ctx);}catch{}
