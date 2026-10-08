@@ -211,6 +211,115 @@ const online = h => {h.ctx.navigator.onLine = true; h.ctx.window.emit('online');
 const hide = h => {h.ctx.document.visibilityState = 'hidden'; h.ctx.document.emit('visibilitychange');};
 const show = h => {h.ctx.document.visibilityState = 'visible'; h.ctx.document.emit('visibilitychange');};
 
+async function offlineNextSourceError(h) {
+  const next = addNext(h, 'offline-source'); await h.start(42);
+  h.ctx.navigator.onLine = false; h.ctx.window.emit('offline');
+  await h.Engine.next(); await flush();
+  const a = h.audio(); a.readyState = 0; a.networkState = 3; a.error = {code: 4}; a.emit('error');
+  return {next, a};
+}
+
+test('offline source error4 retains the selected Next and intent through one online recovery', async () => {
+  const h = harness(), {next, a} = await offlineNextSourceError(h), before = loadSnapshot(a);
+  assert.equal(h.Engine.current.id, next.id); assert.equal(h.Engine.pos, 1);
+  assert.equal(h.Engine.wantsPlayback(), true, 'offline source rejection is not proof of an unsupported codec');
+  await h.clock.advance(1000); h.Engine.seek(19);
+  for (let i = 0; i < 12; i++) {a.emit('error'); h.ctx.window.emit('offline');}
+  await h.clock.advance(12000); assertNoNewAudio(a, before);
+  assert.equal(h.Engine.wantsPlayback(), true); online(h); online(h); await flush();
+  assert.equal(a.sources.slice(before.sources).filter(Boolean).length, 1);
+  assert.equal(a.src, h.urls.get(next.id)); a.metadata(200); assert.equal(a.currentTime, 19);
+  a.playing(); await flush(); assert.equal(h.Engine.playing, true);
+  a.readyState = 0; a.networkState = 3; a.error = {code: 4}; a.emit('error');
+  await h.clock.advance(60000); online(h);
+  assert.equal(h.Engine.wantsPlayback(), false, 'a real online source failure remains terminal');
+  assert.equal(a.sources.slice(before.sources).filter(Boolean).length, 1, 'the selection has one retry');
+});
+
+test('offline source error4 can arrive after online when its interrupted load is still owned', async () => {
+  const h = harness(); addNext(h); await h.start(42); h.ctx.navigator.onLine = false;
+  await h.Engine.next(); await flush(); const a = h.audio(), before = loadSnapshot(a);
+  online(h); a.readyState = 0; a.networkState = 3; a.error = {code: 4}; a.emit('error');
+  assert.equal(h.Engine.wantsPlayback(), true);
+  await h.clock.advance(1000); assert.ok(recoveryLoads(a, before));
+  a.metadata(200); a.playing(); await flush(); assert.equal(h.Engine.playing, true);
+});
+
+for (const action of ['pause', 'stop', 'focus', 'selection']) {
+  for (const elapsed of [0, 1000]) {
+    test(`offline source error4 cannot cross ${action} during ${elapsed ? 'online wait' : 'retry delay'}`, async () => {
+      const h = harness(), {a} = await offlineNextSourceError(h);
+      assert.equal(h.Engine.wantsPlayback(), true); await h.clock.advance(elapsed);
+      if (action === 'focus') h.mediaHandlers.get('pause')();
+      else if (action === 'selection') await h.Engine.playIndex(0, false);
+      else h.Engine[action]();
+      const selected = h.Engine.current, before = h.Engine.els.map(loadSnapshot);
+      online(h); show(h); h.ctx.document.emit('resume'); await h.clock.advance(60000);
+      assert.equal(h.Engine.current, selected); assert.equal(h.Engine.wantsPlayback(), false);
+      assert.equal(h.Engine.playing, false); h.Engine.els.forEach((audio, i) => assertNoNewAudio(audio, before[i]));
+      assert.equal(h.Engine._r2Recovery, null); assert.equal(h.Engine._r2RetryTimer, null);
+    });
+  }
+}
+
+test('offline source error4 expires without media reload or later automatic Play', async () => {
+  const h = harness(), {a} = await offlineNextSourceError(h), before = loadSnapshot(a);
+  assert.equal(h.Engine.wantsPlayback(), true); await h.clock.advance(31000);
+  assert.equal(h.Engine.wantsPlayback(), false); online(h); show(h); await h.clock.advance(60000);
+  assertNoNewAudio(a, before); assert.equal(h.Engine._r2Recovery, null);
+});
+
+for (const state of ['suspended', 'interrupted', 'closed']) {
+  test(`offline source error4 online return respects a ${state} AudioContext`, async () => {
+    const h = harness('native-r2', {webAudio: true}), {a} = await offlineNextSourceError(h);
+    assert.equal(h.Engine.wantsPlayback(), true); await h.clock.advance(1000);
+    h.Engine.ctx.change(state); const before = loadSnapshot(a), resumes = h.Engine.ctx.resumeCalls;
+    online(h); show(h); await h.clock.advance(60000);
+    assert.equal(h.Engine.wantsPlayback(), false); assertNoNewAudio(a, before);
+    assert.equal(h.Engine.ctx.resumeCalls, resumes);
+  });
+}
+
+for (const scenario of ['online', 'metadata', 'playing', 'decode']) {
+  test(`source error4 guards keep ${scenario} failure terminal without offline loading evidence`, async () => {
+    const h = harness(); addNext(h); await h.Engine.playIndex(1, true); const a = h.audio();
+    if (scenario === 'metadata') a.metadata(200);
+    if (scenario === 'playing') {a.metadata(200); a.playing(); await flush();}
+    if (scenario !== 'online') {h.ctx.navigator.onLine = false; h.ctx.window.emit('offline');}
+    a.readyState = 0; a.networkState = 3; a.error = {code: scenario === 'decode' ? 3 : 4};
+    const before = loadSnapshot(a); a.emit('error'); online(h); await h.clock.advance(60000);
+    assert.equal(h.Engine.wantsPlayback(), false); assertNoNewAudio(a, before);
+  });
+}
+
+test('source error4 guards cannot renew old offline evidence with duplicate lifecycle notifications', async () => {
+  const h = harness(); addNext(h); h.ctx.navigator.onLine = false;
+  await h.Engine.playIndex(1, true); const a = h.audio();
+  for (let i = 0; i < 7; i++) {h.clock.elapse(5000); h.ctx.window.emit('offline');}
+  a.readyState = 0; a.networkState = 3; a.error = {code: 4}; const before = loadSnapshot(a); a.emit('error');
+  assert.equal(h.Engine.wantsPlayback(), false); online(h); await h.clock.advance(60000); assertNoNewAudio(a, before);
+});
+
+for (const proof of ['metadata', 'playing']) {
+  test(`source error4 guards retire offline loading evidence after actual ${proof}`, async () => {
+    const h = harness(); addNext(h); h.ctx.navigator.onLine = false;
+    await h.Engine.playIndex(1, true); const a = h.audio(); a.metadata(200);
+    if (proof === 'playing') {a.playing(); await flush();}
+    a.readyState = 0; a.networkState = 3; a.error = {code: 4}; const before = loadSnapshot(a); a.emit('error');
+    assert.equal(h.Engine.wantsPlayback(), false); online(h); await h.clock.advance(60000); assertNoNewAudio(a, before);
+  });
+}
+
+test('offline source error4 and its old play rejection cannot stop a newer playing selection', async () => {
+  const h = harness(), {a} = await offlineNextSourceError(h), old = a.attempts.at(-1);
+  assert.equal(h.Engine.wantsPlayback(), true); await h.clock.advance(1000);
+  h.ctx.navigator.onLine = true; await h.Engine.playIndex(0, true); const current = h.audio();
+  current.metadata(200); current.playing(); await flush(); const before = loadSnapshot(current);
+  old.reject({name: 'NotSupportedError'}); online(h); show(h); await h.clock.advance(60000);
+  assert.equal(h.Engine.current.id, h.selected.id); assert.equal(h.Engine.wantsPlayback(), true);
+  assert.equal(h.Engine.playing, true); assertNoNewAudio(current, before); assert.equal(h.Engine._r2Recovery, null);
+});
+
 for (const webAudio of [false, true]) {
   test(`native R2 ${webAudio ? 'Web Audio' : 'element'} startup preserves a checkpoint before mapping is installed`, async () => {
     const h = harness('native-r2', {webAudio}), a = h.audio();
