@@ -6,6 +6,11 @@ const timestamp = {type:'string',format:'date-time'};
 const visibility = {type:'string',const:'private'};
 const inbox = {inbox_id:{type:'string',const:RELAY_OWNER_INBOX}};
 const nextCursor = {type:['string','null']};
+const deliveryMessageId = {...id,pattern:'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$'};
+const delivery = object({message_id:deliveryMessageId,state:{type:'string',enum:['saved','queued','callback_accepted','delivery_failed','reply_saved']},
+  pending:{type:'integer',minimum:0},failed:{type:'integer',minimum:0},
+  callbackAcceptedAt:{anyOf:[timestamp,{type:'null'}]},callbackAccepted:{type:'boolean'},replySaved:{type:'boolean'},
+  retryable:{type:'boolean'},retryAfter:{anyOf:[timestamp,{type:'null'}]}});
 const entry = object({id,sequence:{type:'integer',minimum:1},body:{type:'string'},role:{type:'string',enum:['user','assistant']},createdAt:timestamp,
   author_authenticated:{type:'boolean',const:true},principal:{type:'string',const:RELAY_OWNER},device_id:id,
   authentication_source:{type:'string',enum:['owner-device-session','owner-password-session','owner-oauth-mcp']},visibility,
@@ -32,6 +37,9 @@ export const relayOwnerTools = [
     outputSchema:object({...inbox,messages:{type:'array',items:entry},nextCursor,visibility}),annotations:read},
   {name:'relay_owner_read_conversation',title:'Read private owner conversation',description:'Read the target private owner message, accepted private reply and up to 25 previous private entries. Use before replying. Keep this data in the private owner channel; do not post it to public Relay or GitHub publications.',
     inputSchema:object({...inbox,message_id:id}),outputSchema:object({...inbox,message:entry,reply:{anyOf:[entry,{type:'null'}]},context:{type:'array',items:entry},visibility}),annotations:read},
+  {name:'relay_owner_delivery_status',title:'Read private owner delivery evidence',description:'Read persisted delivery evidence for 1–50 exact private owner message IDs, including independent callbackAccepted and replySaved facts. Callback acceptance proves only transport acceptance, not that the host started a model, read the message or is working. Missing evidence may have expired with the 30-day event journal. Returns no message text, callback URL, signing secret, grant or credential. Does not retry deliveries, change subscriptions or write replies.',
+    inputSchema:object({...inbox,message_ids:{type:'array',minItems:1,maxItems:50,uniqueItems:true,items:deliveryMessageId}}),
+    outputSchema:object({...inbox,deliveries:{type:'array',minItems:1,maxItems:50,items:delivery},visibility}),annotations:read},
   {name:'relay_owner_reply',title:'Reply privately to owner',description:'Write a private reply to the specified owner message. It never writes the public inbox or GitHub issue. Identical retries succeed; conflicting replies preserve the first accepted reply. Applicable approvals still govern account actions and sensitive information.',
     inputSchema:object({...inbox,message_id:id,body:{type:'string',minLength:1,maxLength:6000}}),outputSchema:object({...inbox,entry,newWrite:{type:'boolean'},visibility}),annotations:write}
 ].map(tool => ({...tool,securitySchemes:[{type:'oauth2',scopes:[RELAY_OWNER_SCOPE]}],_meta:{securitySchemes:[{type:'oauth2',scopes:[RELAY_OWNER_SCOPE]}]}}));

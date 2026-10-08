@@ -309,14 +309,25 @@ export async function drainRelayOutbox(ctx, env, fetcher = webhookTransport(env)
         return !!rows(ctx,"SELECT id FROM relay_subscriptions WHERE id=? AND generation=? AND state='active' AND expires_ms>?",sub.id,sub.generation,at).length&&subscriptionActive(ctx,env,sub);
       })).status; }
       catch (error) { reason = failureReason(error); }
+      // Receipt is a historical transport fact, independent of whether this
+      // generation still has authority to settle the live queue. Renewal or
+      // unsubscribe while awaiting the callback must not erase a real 2xx.
+      // Do not resurrect a journal occurrence already removed by retention.
+      if (status >= 200 && status < 300) sql.exec(
+        'INSERT OR IGNORE INTO relay_delivery_receipts SELECT seq,? FROM relay_events WHERE seq=?',
+        Math.max(now,Date.now()),item.event_seq);
       // Unsubscribe/renew may have happened while delivery was in flight.
       if (!rows(ctx, 'SELECT id FROM relay_subscriptions WHERE id=? AND generation=?', sub.id, sub.generation).length) continue;
       if(!subscriptionActive(ctx,env,sub)){stop(sub.id);continue;}
+      // An overlapping alarm can finish the same attempt while external I/O is
+      // awaited. Only its unchanged pending snapshot may settle this result.
+      // In particular, a late failure must not undo a completed delivery.
+      const current=rows(ctx,'SELECT status,attempts,next_attempt_ms FROM relay_outbox WHERE subscription_id=? AND event_seq=?',sub.id,item.event_seq)[0];
+      if(!current||current.status!=='pending'||current.attempts!==item.attempts||current.next_attempt_ms!==item.next_attempt_ms)continue;
       if (status >= 200 && status < 300) {
         ctx.storage.transactionSync(() => {
           sql.exec("UPDATE relay_outbox SET status='delivered',attempts=attempts+1,last_error=NULL WHERE subscription_id=? AND event_seq=?", sub.id, item.event_seq);
           sql.exec('UPDATE relay_subscriptions SET ack_seq=? WHERE id=?', item.event_seq, sub.id);
-          sql.exec('INSERT OR IGNORE INTO relay_delivery_receipts VALUES(?,?)',item.event_seq,Math.max(now,Date.now()));
         });
       } else if (status === 410) stop(sub.id);
       else {

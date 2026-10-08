@@ -115,6 +115,25 @@ function conversation(ctx, messageId,env) {
   const context = rows(ctx, 'SELECT * FROM relay_owner_entries WHERE seq<? ORDER BY seq DESC LIMIT 25', message.seq).reverse().map(row=>entry(row,ctx,env));
   return {message: entry(message,ctx,env), reply: reply ? entry(reply) : null, context};
 }
+function deliveryMessageIds(ids) {
+  if (!Array.isArray(ids) || ids.length < 1 || ids.length > 50 || ids.some(id => !uuid(id)) || new Set(ids).size !== ids.length) fail(400, 'Invalid delivery message IDs');
+}
+function deliveryStatus(ctx, env, ids, now) {
+  // Resolve every ID before reading evidence. Public, reply, missing or foreign
+  // IDs all fail closed, without returning a partially successful batch.
+  for (const id of ids) {
+    if (!rows(ctx, "SELECT id FROM relay_owner_entries WHERE id=? AND kind='user' AND principal=?", id, RELAY_OWNER).length) fail(404, 'Original private message not found');
+  }
+  return ids.map(id => {
+    const replySaved = !!rows(ctx, "SELECT id FROM relay_owner_entries WHERE kind='reply' AND reply_to=?", id).length;
+    const delivery = relayOwnerDelivery(ctx, env, id, replySaved, now);
+    // The summary state can be reply_saved/queued/delivery_failed while an
+    // earlier callback receipt still proves acceptance. Zero means a migrated
+    // receipt with unknown time, so existence, not timestamp truthiness, wins.
+    const receipt = rows(ctx, 'SELECT r.event_seq FROM relay_delivery_receipts r JOIN relay_events e ON e.seq=r.event_seq WHERE e.message_id=?', 'owner:' + id)[0];
+    return {message_id: id, ...delivery, callbackAccepted: !!receipt || delivery.state === 'callback_accepted' || delivery.callbackAcceptedAt !== null, replySaved};
+  });
+}
 function insertMessage(ctx, session, body, enqueue, now,env) {
   if (!uuid(body.id)) fail(400, 'Invalid message ID');
   const content = text(body.body, 4000);
@@ -248,11 +267,12 @@ export async function relayOwnerRpc(ctx, env, principal, name, args, enqueueOwne
   } else if (controls) {
     fields(args, name === 'relay_owner_device_revoke' ? ['device_id'] : [], name === 'relay_owner_device_revoke' ? ['device_id'] : []);
   } else {
-    const allowed = {relay_owner_list_pending: ['inbox_id', 'cursor', 'limit'], relay_owner_read_conversation: ['inbox_id', 'message_id'], relay_owner_reply: ['inbox_id', 'message_id', 'body']};
+    const allowed = {relay_owner_list_pending: ['inbox_id', 'cursor', 'limit'], relay_owner_read_conversation: ['inbox_id', 'message_id'], relay_owner_delivery_status: ['inbox_id', 'message_ids'], relay_owner_reply: ['inbox_id', 'message_id', 'body']};
     if (!Object.hasOwn(allowed, name)) fail(400, 'Unknown owner tool');
     fields(args, allowed[name], name === 'relay_owner_list_pending' ? ['inbox_id'] : allowed[name]);
     if (args.inbox_id !== RELAY_OWNER_INBOX) fail(403, 'Forbidden private inbox');
     if (name === 'relay_owner_list_pending') pageArgs(args.cursor, args.limit);
+    else if (name === 'relay_owner_delivery_status') deliveryMessageIds(args.message_ids);
     else if (!uuid(args.message_id)) fail(400, 'Invalid message ID');
     if (name === 'relay_owner_reply') text(args.body, 6000);
   }
@@ -285,6 +305,7 @@ export async function relayOwnerRpc(ctx, env, principal, name, args, enqueueOwne
     if (name === 'relay_owner_devices_list') return {devices: rows(ctx, 'SELECT * FROM relay_owner_sessions WHERE principal=? ORDER BY created_ms,device_id', RELAY_OWNER).map(row => device(sessionAudit(ctx, row)))};
     if (name === 'relay_owner_device_revoke') return revokeDevice(ctx, args.device_id, now);
     if (name === 'relay_owner_list_pending') return {inbox_id: RELAY_OWNER_INBOX, ...listMessages(ctx, args.cursor, args.limit, true), visibility: 'private'};
+    if (name === 'relay_owner_delivery_status') return {inbox_id: RELAY_OWNER_INBOX, deliveries: deliveryStatus(ctx, env, args.message_ids, now), visibility: 'private'};
     const data = conversation(ctx, args.message_id);
     if (name === 'relay_owner_read_conversation') return {inbox_id: RELAY_OWNER_INBOX, ...data, visibility: 'private'};
     const content = text(args.body, 6000);
