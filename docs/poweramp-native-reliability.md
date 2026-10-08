@@ -79,7 +79,8 @@ remain mandatory publication gates.
 
 ## Phone evidence and limits
 
-`PA.PlaybackDiagnostics.report()` remains an 80-entry detached RAM-only report.
+`PA.PlaybackDiagnostics.report()` remains a detached RAM-only report bounded to
+80 entries and less than 32 KB of serialized data.
 It now includes playback mode, gapless/crossfade flags, screen-off pause setting,
 online hint, bounded recovery phase, buffering elapsed time and spare-slot error
 state. Titles, track IDs, URLs, credentials, arbitrary error text and browser

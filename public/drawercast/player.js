@@ -2468,23 +2468,25 @@ const R2Source={
 
 // RAM-only, bounded playback evidence. Never retain URLs, track identifiers,
 // artwork, credentials, arbitrary error strings, or a browser fingerprint.
-const PlaybackDiagnostics={limit:80,entries:[],
+const PlaybackDiagnostics={limit:80,maxBytes:31000,entries:[],sizes:[],bytes:0,
   record(event,engine,detail={}){
     const a=engine.els?.[engine.cur],t=engine.current;
     const kind=engine.transportCapabilities(t).kind,state=engine.ctx?.state;
     const eventSlot=[0,1].includes(detail.slot)?detail.slot:engine.cur||0,eventAudio=engine.els?.[eventSlot];
+    const bufferingMs=Number.isFinite(engine._bufferToken?.at)?Math.min(3600000,Math.max(0,Date.now()-engine._bufferToken.at)):0;
     const reason=['user','interrupted','context-interrupted','context-failed','transport','play','selection','screen-off','media-session','stall','initial','seek','offline-timeout','NetworkError','NotSupportedError','NotAllowedError','AbortError'].includes(detail.reason)?detail.reason:null;
     const error=['AbortError','NotAllowedError','NotSupportedError','NetworkError','InvalidStateError','SecurityError'].includes(detail.error)?detail.error:detail.error?'OtherError':null;
-    this.entries.push({at:Date.now(),event,source:kind,request:engine._playRequest||0,attempt:engine._playAttempt||0,slot:engine.cur||0,
+    const entry={at:Date.now(),event,source:kind,request:engine._playRequest||0,attempt:engine._playAttempt||0,slot:engine.cur||0,
       intent:engine.wantsPlayback(),playing:!!engine.playing,paused:a?!!a.paused:true,ended:a?!!a.ended:false,
       time:Number.isFinite(a?.currentTime)?Math.round(a.currentTime*1000)/1000:0,
       readyState:a?.readyState??0,networkState:a?.networkState??0,mediaError:a?.error?.code??0,
       context:['running','suspended','interrupted','closed'].includes(state)?state:'none',visibility:typeof document==='undefined'?'unknown':document.visibilityState,
       online:typeof navigator==='undefined'?null:navigator.onLine!==false,mode:['transparent','custom'].includes(SET.audioMode)?SET.audioMode:'unknown',gapless:!!SET.gapless,crossfade:!!SET.crossfade,
       recovery:engine._r2Recovery?.phase==='offline'?'waiting-online':engine._r2Recovery?'pending':'none',
-      bufferingMs:Number.isFinite(engine._bufferToken?.at)?Math.min(3600000,Math.max(0,Date.now()-engine._bufferToken.at)):0,
-      screenOffPause:typeof nativeValues==='function'?!!nativeValues().pause_on_screen_off:false,eventSlot,eventReadyState:eventAudio?.readyState??0,eventMediaError:eventAudio?.error?.code??0,reason,error});
-    if(this.entries.length>this.limit)this.entries.splice(0,this.entries.length-this.limit);
+      ...(bufferingMs>0?{bufferingMs}:{}),screenOffPause:typeof nativeValues==='function'?!!nativeValues().pause_on_screen_off:false,
+      ...([0,1].includes(detail.slot)?{eventSlot,eventReadyState:eventAudio?.readyState??0,eventMediaError:eventAudio?.error?.code??0}:{}),reason,error};
+    const size=JSON.stringify(entry).length+1;this.entries.push(entry);this.sizes.push(size);this.bytes+=size;
+    while(this.entries.length>this.limit||this.bytes>this.maxBytes){this.entries.shift();this.bytes-=this.sizes.shift();}
   },
   report(){return {schema:'poweramp-playback-v1',events:this.entries.map(entry=>({...entry}))};}
 };

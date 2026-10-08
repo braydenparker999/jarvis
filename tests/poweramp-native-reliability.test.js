@@ -497,4 +497,6 @@ test('throttled buffering and spare errors expose timing and slot evidence witho
   const spare = h.diagnosticReport().events.at(-1);
   assert.equal(spare.event, 'preload-media-error'); assert.equal(spare.eventSlot, 1-h.Engine.cur); assert.equal(spare.eventMediaError, 2);
   assert.equal(h.Engine._r2RetryId, retry); assert.equal(h.Engine.wantsPlayback(), true);
+  for(let i=0;i<160;i++)h.Engine.tracePlayback('preload-media-error',{slot:1-h.Engine.cur,reason:'NotSupportedError',error:'NotSupportedError'});
+  assert.ok(JSON.stringify(h.diagnosticReport()).length<32000,'even dense timing and spare-state rows retain the report size bound');
 });
