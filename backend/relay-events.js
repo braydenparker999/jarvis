@@ -346,6 +346,28 @@ export async function drainRelayOutbox(ctx, env, fetcher = webhookTransport(env)
 
 
 
+// Internal-only current private subscription evidence. The caller must verify
+// live owner authorization. Counts never identify a host task or its execution.
+export function relayOwnerSubscriptionStatus(ctx,env,now=Date.now()) {
+  const result={observedAt:new Date(now).toISOString(),active:0,unfilteredActive:0,filteredActive:0,
+    deliveryFailed:0,expired:0,unauthorized:0,nextActiveExpiryAt:null};
+  // A read must not create event tables or backfill historical receipts. No
+  // subscription table is a valid empty snapshot before events are initialized.
+  if(!rows(ctx,"SELECT name FROM sqlite_master WHERE type='table' AND name='relay_subscriptions'").length)return result;
+  for(const sub of rows(ctx,'SELECT principal,grant_id,name,arguments,expires_ms,state FROM relay_subscriptions WHERE principal=? AND name=?',RELAY_OWNER,RELAY_OWNER_EVENT)){
+    if(sub.expires_ms<=now){result.expired++;continue;}
+    if(!subscriptionActive(ctx,env,sub)){result.unauthorized++;continue;}
+    if(sub.state==='delivery_failed'){result.deliveryFailed++;continue;}
+    if(sub.state!=='active')continue;
+    result.active++;
+    if(JSON.parse(sub.arguments).message_contains)result.filteredActive++;
+    else result.unfilteredActive++;
+    const expiresAt=new Date(sub.expires_ms).toISOString();
+    if(!result.nextActiveExpiryAt||expiresAt<result.nextActiveExpiryAt)result.nextActiveExpiryAt=expiresAt;
+  }
+  return result;
+}
+
 // Internal-only private delivery evidence. Callers must authenticate the owner
 // and verify the requested ID belongs to a private user message before using it.
 // A callback 2xx is transport acceptance, never a claim that dot is working.

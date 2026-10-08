@@ -2,7 +2,7 @@
 // credential through MCP; the display code is deliberately not a credential.
 import {RELAY_OWNER, RELAY_OWNER_SCOPE, RELAY_OWNER_INBOX, RELAY_OAUTH_OBJECT, RelayError, fields, uuid, cursor, random, hash, equal, boundedText, json, relayEnabled, relayIssuer} from './relay-common.js';
 import {relayTokenActiveInStore} from './relay-oauth.js';
-import {relayOwnerDelivery,recoverRelayOwnerDelivery} from './relay-events.js';
+import {relayOwnerDelivery,recoverRelayOwnerDelivery,relayOwnerSubscriptionStatus} from './relay-events.js';
 import {FRONTEND_ORIGINS} from './origins.js';
 import {relayOwnerPasswordSchema, relayOwnerPasswordStore} from './relay-owner-password.js';
 
@@ -267,13 +267,13 @@ export async function relayOwnerRpc(ctx, env, principal, name, args, enqueueOwne
   } else if (controls) {
     fields(args, name === 'relay_owner_device_revoke' ? ['device_id'] : [], name === 'relay_owner_device_revoke' ? ['device_id'] : []);
   } else {
-    const allowed = {relay_owner_list_pending: ['inbox_id', 'cursor', 'limit'], relay_owner_read_conversation: ['inbox_id', 'message_id'], relay_owner_delivery_status: ['inbox_id', 'message_ids'], relay_owner_reply: ['inbox_id', 'message_id', 'body']};
+    const allowed = {relay_owner_list_pending: ['inbox_id', 'cursor', 'limit'], relay_owner_read_conversation: ['inbox_id', 'message_id'], relay_owner_delivery_status: ['inbox_id', 'message_ids'], relay_owner_subscription_status: ['inbox_id'], relay_owner_reply: ['inbox_id', 'message_id', 'body']};
     if (!Object.hasOwn(allowed, name)) fail(400, 'Unknown owner tool');
     fields(args, allowed[name], name === 'relay_owner_list_pending' ? ['inbox_id'] : allowed[name]);
     if (args.inbox_id !== RELAY_OWNER_INBOX) fail(403, 'Forbidden private inbox');
     if (name === 'relay_owner_list_pending') pageArgs(args.cursor, args.limit);
     else if (name === 'relay_owner_delivery_status') deliveryMessageIds(args.message_ids);
-    else if (!uuid(args.message_id)) fail(400, 'Invalid message ID');
+    else if (name !== 'relay_owner_subscription_status' && !uuid(args.message_id)) fail(400, 'Invalid message ID');
     if (name === 'relay_owner_reply') text(args.body, 6000);
   }
   // Server-generated reply IDs need no hashing/await, and their unique
@@ -306,6 +306,7 @@ export async function relayOwnerRpc(ctx, env, principal, name, args, enqueueOwne
     if (name === 'relay_owner_device_revoke') return revokeDevice(ctx, args.device_id, now);
     if (name === 'relay_owner_list_pending') return {inbox_id: RELAY_OWNER_INBOX, ...listMessages(ctx, args.cursor, args.limit, true), visibility: 'private'};
     if (name === 'relay_owner_delivery_status') return {inbox_id: RELAY_OWNER_INBOX, deliveries: deliveryStatus(ctx, env, args.message_ids, now), visibility: 'private'};
+    if (name === 'relay_owner_subscription_status') return {inbox_id: RELAY_OWNER_INBOX, ...relayOwnerSubscriptionStatus(ctx, env, now), visibility: 'private'};
     const data = conversation(ctx, args.message_id);
     if (name === 'relay_owner_read_conversation') return {inbox_id: RELAY_OWNER_INBOX, ...data, visibility: 'private'};
     const content = text(args.body, 6000);

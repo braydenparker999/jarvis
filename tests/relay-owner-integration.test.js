@@ -44,15 +44,15 @@ test('owner schemas are discoverable, capability is explicit and old grants neve
   const s=fixture(t),ordinary=await grant(s),owner=await grant(s,RELAY_OWNER_SCOPE);
   const unauth=await s.request('/relay/mcp');assert.match(unauth.headers.get('WWW-Authenticate'),/scope="relay:read relay:reply relay:events"/);assert.doesNotMatch(unauth.headers.get('WWW-Authenticate'),/relay:owner/);
   const publicTools=(await s.rpc(ordinary,'tools/list')).result.tools;
-  assert.equal(publicTools.length,12);
+  assert.equal(publicTools.length,13);
   const ownerTools=publicTools.filter(x=>x.name.startsWith('relay_owner_'));
-  assert.equal(ownerTools.length,8);
+  assert.equal(ownerTools.length,9);
   for(const tool of ownerTools){
     assert.deepEqual(tool.securitySchemes,[{type:'oauth2',scopes:[RELAY_OWNER_SCOPE]}]);
     assert.deepEqual(tool._meta.securitySchemes,tool.securitySchemes);
     assert.ok(tool.inputSchema&&tool.outputSchema);
   }
-  assert.equal((await s.rpc(owner,'tools/list')).result.tools.length,9);
+  assert.equal((await s.rpc(owner,'tools/list')).result.tools.length,10);
   assert.deepEqual((await s.rpc(ordinary,'events/list')).result.events.map(x=>x.name),[RELAY_EVENT]);
   assert.deepEqual((await s.rpc(owner,'events/list')).result.events.map(x=>x.name),[RELAY_OWNER_EVENT]);
   await assert.rejects(relayOwnerRpc(s.ctx,s.env,ordinary,'relay_owner_devices_list',{}),e=>e.code===-32012);
@@ -108,7 +108,7 @@ test('old public grants get native owner step-up without private reads or owner 
 test('owner step-up preserves only live verified scopes of a partial public grant',async t=>{
   const s=fixture(t),narrow=await grant(s,'relay:read');
   const catalog=(await s.rpc(narrow,'tools/list')).result.tools;
-  assert.equal(catalog.length,11);assert.ok(!catalog.some(x=>x.name==='relay_reply'));
+  assert.equal(catalog.length,12);assert.ok(!catalog.some(x=>x.name==='relay_reply'));
   assert.deepEqual((await s.rpc(narrow,'events/list')).result.events,[]);
   const rpc={method:'tools/call',params:{_meta:{},name:'relay_owner_devices_list',arguments:{}}};
   // A claimed scope does not count as an existing permission or bypass the
@@ -126,7 +126,7 @@ test('owner step-up preserves only live verified scopes of a partial public gran
 
 test('a newly consented full owner grant retains public tools and owner operations',async t=>{
   const s=fixture(t),owner=await grant(s,RELAY_SCOPES.join(' '));
-  assert.equal((await s.rpc(owner,'tools/list')).result.tools.length,12);
+  assert.equal((await s.rpc(owner,'tools/list')).result.tools.length,13);
   assert.deepEqual((await s.rpc(owner,'events/list')).result.events.map(x=>x.name),[RELAY_EVENT,RELAY_OWNER_EVENT]);
   const devices=await s.rpc(owner,'tools/call',{name:'relay_owner_devices_list',arguments:{}});
   assert.equal(devices.result.isError,false);assert.deepEqual(devices.result.structuredContent,{devices:[]});
@@ -203,7 +203,7 @@ test('owner grant revocation during signing blocks private callback transmission
   assert.equal((await s.phone('/session',undefined,phone.device_token)).status,200);
 });
 
-test('existing private conversation tool retains exact structured output and adds separate redacted delivery text',async t=>{
+test('existing private conversation tool retains exact structured output and adds separate redacted diagnostic text',async t=>{
   const s=fixture(t),owner=await grant(s,RELAY_OWNER_SCOPE),phone=await pair(s,owner,'Diagnostic phone');
   const id=crypto.randomUUID(),body='Secret private conversation text';
   await relaySubscribe(s.ctx,owner,subscription(RELAY_OWNER_EVENT,RELAY_OWNER_INBOX,'https://receiver.example/private-callback-secret'),s.env,receiver);
@@ -219,7 +219,7 @@ test('existing private conversation tool retains exact structured output and add
   assert.equal(response.result.isError,false);
   assert.deepEqual(response.result.structuredContent,expected,'cached strict output schema remains valid');
   assert.deepEqual(response.result.content[0],{type:'text',text:JSON.stringify(expected)},'original serialized content is unchanged');
-  assert.equal(response.result.content.length,2);
+  assert.equal(response.result.content.length,3);
   const block=response.result.content[1];
   const label='Private delivery diagnostics (callback acceptance is transport evidence only): ';
   assert.equal(block.type,'text');assert.ok(block.text.startsWith(label));
@@ -227,22 +227,29 @@ test('existing private conversation tool retains exact structured output and add
   assert.equal(evidence.deliveries[0].state,'reply_saved');assert.equal(evidence.deliveries[0].replySaved,true);
   assert.equal(evidence.deliveries[0].callbackAccepted,true);assert.ok(Date.parse(evidence.deliveries[0].callbackAcceptedAt));
   for(const secret of [body,'Secret private reply text',phone.device_token,phone.device.id,owner.grantId,owner.access,owner.accessHash,'receiver.example','whsec_'])assert.ok(!block.text.includes(secret));
+  const subscriptionBlock=response.result.content[2],subscriptionLabel='Private subscription diagnostics (current subscription evidence only; no host execution proof): ';
+  assert.equal(subscriptionBlock.type,'text');assert.ok(subscriptionBlock.text.startsWith(subscriptionLabel));
+  const subscriptions=JSON.parse(subscriptionBlock.text.slice(subscriptionLabel.length));
+  assert.equal(subscriptions.inbox_id,RELAY_OWNER_INBOX);assert.equal(subscriptions.active,1);assert.equal(subscriptions.unfilteredActive,1);assert.equal(subscriptions.filteredActive,0);assert.ok(Date.parse(subscriptions.observedAt));
+  for(const secret of [body,'Secret private reply text',phone.device_token,phone.device.id,owner.grantId,owner.access,owner.accessHash,'receiver.example','whsec_'])assert.ok(!subscriptionBlock.text.includes(secret));
   assert.equal(Object.hasOwn(response.result.structuredContent.message,'delivery'),false);
   assert.equal(Object.hasOwn(response.result.structuredContent.reply,'delivery'),false);
   assert.deepEqual(snapshot(),before,'compatibility text never creates a message, reply, event or delivery');
 });
 
 test('conversation diagnostic compatibility block rechecks owner authorization before releasing the result',async t=>{
+  for(const revokedBefore of [2,3]){
   const s=fixture(t),owner=await grant(s,RELAY_OWNER_SCOPE),phone=await pair(s,owner,'Revalidation phone');
   const id=crypto.randomUUID();await s.phone('/messages',{id,body:'Private text behind live authorization'},phone.device_token);
   const transaction=s.ctx.storage.transactionSync.bind(s.ctx.storage);let calls=0;
   s.ctx.storage.transactionSync=fn=>{
-    if(++calls===2){
+    if(++calls===revokedBefore){
       const key='grant:'+owner.grantId,value=JSON.parse(s.rows('SELECT value FROM relay_oauth WHERE key=?',key)[0].value);
       value.revoked=true;s.rows('UPDATE relay_oauth SET value=? WHERE key=?',JSON.stringify(value),key);
     }
     return transaction(fn);
   };
   await assert.rejects(relayRpc(s.ctx,s.env,owner,{method:'tools/call',params:{_meta:{},name:'relay_owner_read_conversation',arguments:{inbox_id:RELAY_OWNER_INBOX,message_id:id}}}),error=>error.code===-32012);
-  assert.equal(calls,2,'the separate diagnostic RPC validates again inside its own transaction');
+  assert.equal(calls,revokedBefore,'each supplemental diagnostic RPC revalidates inside its own transaction');
+  }
 });
