@@ -79,7 +79,8 @@ export function appendCoordination(ctx, payload, provenance, now = Date.now()) {
     const existing = rows(ctx, 'SELECT * FROM public_coordination_events WHERE event_id=?', payload.eventId)[0];
     if (existing) {
       if (existing.payload !== encoded) return Response.json({error: 'Event ID has different payload', code: 'event_id_conflict'}, {status: 409});
-      return Response.json({event: publicEvent(ctx, existing), duplicate: true}, {status: existing.disposition === 'conflict' ? 409 : 200});
+      return Response.json({event: publicEvent(ctx, existing), duplicate: true,
+        ...(existing.error_code?{error:'Public result version conflict',code:existing.error_code}:{})}, {status: existing.disposition === 'conflict' ? 409 : 200});
     }
     if (!rows(ctx, "SELECT id FROM shared_entries WHERE id=? AND kind='user'", payload.requestId).length)
       return Response.json({error: 'Public original message not found'}, {status: 404});
@@ -94,7 +95,13 @@ export function appendCoordination(ctx, payload, provenance, now = Date.now()) {
       if (prior.request_id !== payload.requestId || prior.attempt_id !== payload.attemptId || prior.disposition !== 'accepted' ||
           prior.result_version !== payload.resultVersion - 1) conflict = 'predecessor_conflict';
       else {
-        const oldArtifacts = new Map(JSON.parse(prior.payload).artifacts.map(item => [item.id, item]));
+        // Removal from one version does not reset a stable artifact's revision.
+        // Retain the latest historical revision when a later correction restores it.
+        const oldArtifacts = new Map();
+        for(const previous of rows(ctx,"SELECT payload FROM public_coordination_events WHERE request_id=? AND attempt_id=? AND disposition='accepted' AND result_version<? ORDER BY result_version DESC",
+          payload.requestId,payload.attemptId,payload.resultVersion)) {
+          for(const item of JSON.parse(previous.payload).artifacts)if(!oldArtifacts.has(item.id))oldArtifacts.set(item.id,item);
+        }
         for (const item of payload.artifacts) {
           const old = oldArtifacts.get(item.id);
           if (old && (item.revision < old.revision || item.revision === old.revision && canonical(item) !== canonical(old))) conflict = 'artifact_revision_conflict';

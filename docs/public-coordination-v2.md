@@ -50,7 +50,9 @@ request/attempt. An unavailable predecessor stays durably pending. Same-version
 races, wrong predecessors and decreasing/changing equal artifact revisions
 remain explicit conflicts; they never replace accepted data. New artifacts may
 be introduced and omitted artifacts are removed from that version's result.
-The result includes the complete artifact list for that version.
+The result includes the complete artifact list for that version. Restoring an
+omitted artifact never resets its historical revision; an identical conflict
+retry returns the same precise conflict code.
 
 Bodies have a 6,000-character cap. At most eight artifacts, each with a stable
 UUID, positive revision, 120-character label and a bounded HTTPS URL without

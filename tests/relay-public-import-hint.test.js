@@ -146,3 +146,16 @@ test('a reconciler/hint race and a legacy later-final hint preserve the accepted
   const result=await sharedStore(h.ctx,'/internal/shared/result',{},new URLSearchParams({requestId})).json();
   assert.deepEqual(result.reply,original);assert.equal(result.events.at(-1).body,later.body);assert.equal(eventCount(h),2);
 });
+
+test('corrections cannot reset omitted artifact revisions and identical conflict retries keep their precise conflict code',async t=>{
+  const {h,requestId}=fixture(t),first=payload(requestId,{artifacts:[{id:uuid(),revision:2,label:'Fictional revised artifact',url:'https://example.test/v2'}]});
+  const omitted={...first,eventId:uuid(),stage:'correction',resultVersion:2,supersedesEventId:first.eventId,artifacts:[]};
+  const downgrade={...omitted,eventId:uuid(),resultVersion:3,supersedesEventId:omitted.eventId,artifacts:[{...first.artifacts[0],revision:1,url:'https://example.test/v1'}]};
+  const now=Date.now();
+  await syncPublications(h.ctx,async()=>Response.json([comment(first,1601),comment(omitted,1602),comment(downgrade,1603)]),now);
+  const conflicting=await importPublicationHint(h.ctx,{commentId:1603},()=>assert.fail('Conflict must be durable'),now);
+  assert.equal(conflicting.status,409);assert.equal((await conflicting.json()).errorCode,'artifact_revision_conflict');
+  const retry=await importPublicationHint(h.ctx,{commentId:1604},async()=>Response.json(comment(downgrade,1604)),now);
+  assert.equal(retry.status,409);assert.equal((await retry.json()).errorCode,'artifact_revision_conflict');
+  assert.equal(eventCount(h),3);assert.equal(h.rows("SELECT COUNT(*) AS n FROM public_coordination_events WHERE disposition='accepted'")[0].n,2);
+});
