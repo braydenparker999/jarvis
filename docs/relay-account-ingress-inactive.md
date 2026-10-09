@@ -22,7 +22,7 @@ outside this Hub counter proof and need an ordinary-traffic reserve.
 The internal preparation adapter accepts only the genuine allocator module engine,
 checks its provisioned source/catalog/evidence/scope allocation, binds scope to the
 native durable-object ID, snapshots input before awaits, pays and consumes a local
-one-use receipt with monotonic elapsed-time revalidation after awaits, and then uses the existing bounded preflight permit/step. The
+one-use receipt with monotonic elapsed-time and cached issuer-confidence revalidation after awaits, and then uses the existing bounded preflight permit/step. The
 allocator's preparation identities cover spent/lost acknowledgements without
 refund. Complete native reports receive a private in-memory brand; report JSON
 cannot unlock final construction. The final adapter refreshes paid reports,

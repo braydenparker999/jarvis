@@ -63,6 +63,7 @@ const day=now=>new Date(now).toISOString().slice(0,10);
 // Anchor fixture/operator time once, then advance it by monotonic elapsed time.
 // Awaited reservation latency cannot freeze receipt/day/evidence validation.
 const admissionClock=now=>{const started=performance.now();return ()=>Math.ceil(now+Math.max(0,performance.now()-started));};
+const sameIssuer=(allocator,plan)=>{const current=accountAdmissionPlan(allocator);return current&&current.signature===plan.signature&&current.sourceHash===plan.sourceHash&&current.catalogHash===plan.catalogHash&&current.day===plan.day;};
 const grantStale=(grant,plan,now)=>relayAccountAdmissionPlanProblem(Object.fromEntries(['v','planId','day','sourceHash','catalogHash','account','scopes','coordination','final'].map(key=>[key,plan[key]])),now)||day(now)!==grant.day||now<grant.issuedAt||now-grant.issuedAt>RELAY_ACCOUNT_ADMISSION_LIMITS.receiptAgeMs;
 export async function relayAccountRuntimeIdentity(){
   if(!CATALOG.schemaBasis||!CATALOG.sourceFiles['backend/relay-account-ingress.js']||!CATALOG.sourceFiles['backend/relay-account-admission.js'])return null;
@@ -112,6 +113,7 @@ export async function relayAccountPrepare(allocator,ctx,input,now=Date.now()){
   if(permit?.status==='blocked')return permit;
   if(JSON.stringify(input)!==signature)return nativeBlocked('account_preparation_input_changed');
   const stepTime=currentTime();
+  if(!sameIssuer(allocator,configuration.plan))return nativeBlocked('account_preparation_issuer_unknown');
   if(!paid||grantStale(paid,configuration.plan,stepTime))return nativeBlocked('account_preparation_grant_expired');
   const result=immutable({...relayMigrationPreflightStep(ctx,snapshot,stepTime,permit),runtimeIdentity:configuration.identity,paidReservationId:paid.id});
   if(result.status==='complete')prepared.set(result,{ctx,input:snapshot,identity:configuration.identity,planSignature:configuration.plan.signature});
@@ -147,7 +149,7 @@ export async function relayAccountConstructCatalog(allocator,reports,now=Date.no
   const measured={rowsRead:0,rowsWritten:0},completed=[];
   try{
     for(const report of current){
-      if(grantStale(final,plan,currentTime()))throw Error('Final grant expired');
+      if(!sameIssuer(allocator,plan)||grantStale(final,plan,currentTime()))throw Error('Final grant expired');
       const meta=prepared.get(report),ctx=meta.ctx;
       ctx.storage.transactionSync(()=>{
         const run=(query,...values)=>{const cursor=ctx.storage.sql.exec(query,...values),rows=[...cursor];if(!Number.isSafeInteger(cursor.rowsRead)||!Number.isSafeInteger(cursor.rowsWritten))throw Error('Metering unavailable');measured.rowsRead+=cursor.rowsRead;measured.rowsWritten+=cursor.rowsWritten;return rows;};
