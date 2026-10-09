@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createConversationFixture,launchQualifiedBrowser,openConversationPage,conversationMenu,closeConversationHarness,assertBrowserContained,assertNoPrivatePersistence,writeSyntheticEvidence,RELAY_URL} from './helpers/relay-conversation-browser-fixture.js';
+import {createConversationFixture,launchQualifiedBrowser,openConversationPage,conversationMenu,closeConversationHarness,assertBrowserContained,assertNoPrivatePersistence,writeSyntheticEvidence,RELAY_URL,OWNER_KEY} from './helpers/relay-conversation-browser-fixture.js';
 import {RELAY_OWNER_INBOX} from '../backend/relay-common.js';
 
 test('private projects expose truthful current work and corrected results with zero extra expansion requests', {timeout:120000},async t=>{
@@ -73,5 +73,24 @@ test('phone work rows wrap and preserve focused reading through heartbeat and ne
     for(const size of [{width:360,height:800},{width:390,height:844},{width:390,height:520}]){await page.setViewportSize(size);const bounds=await page.evaluate(()=>({width:document.documentElement.scrollWidth,viewport:innerWidth,bottom:document.querySelector('#relay-owner-message-form').getBoundingClientRect().bottom}));assert.ok(bounds.width<=size.width&&bounds.bottom<=size.height+1,JSON.stringify({size,bounds}));}
     assert.equal(phone.records.filter(r=>r.path.endsWith('/jobs/detail')).length,0);assertBrowserContained(phone);await assertNoPrivatePersistence(page,['FictionalLongProjectLabel','Fictional meaningful activity']);
     await writeSyntheticEvidence(phone,'private-work-reading-anchor',{synthetic:true,focusPreserved:true,readingAnchorTolerance:1,heartbeatReordered:false,heartbeatAdvancedActivity:false});
+  }finally{await closeConversationHarness(browser,h,pages);}
+});
+
+
+test('authorization loss while private work is public and unmounted clears search and disclosure state', {timeout:120000},async t=>{
+  const browser=await launchQualifiedBrowser(t);if(!browser)return;const h=createConversationFixture(t),pages=[];
+  try{
+    const auth=await h.oauth(),owner=await h.pair(auth),project='Fictional prior private project';
+    const response=await h.phone('/jobs',{id:crypto.randomUUID(),title:'Fictional private task',body:'Fictional private scope.',action_kind:'read_only',project_title:project},owner.device_token);assert.equal(response.status,201);const job=(await response.json()).job;
+    const phone=await openConversationPage(browser,h,{owner,clock:false});pages.push(phone);const page=phone.page;
+    await page.goto(RELAY_URL);await page.locator('[data-job-id="'+job.id+'"]').waitFor();await conversationMenu(page,'Requests');await conversationMenu(page,'Search current work');const search=page.getByRole('searchbox',{name:'Search current work'});await search.fill(project);
+    const projects=page.locator('#relay-owner-current-work .owner-work-project');await projects.locator(':scope>summary').click();await search.fill('prior private project');assert.equal(await projects.evaluate(n=>n.open),false,'The previous private disclosure choice is saved by a render');
+    await conversationMenu(page,'Public chat');assert.equal(await page.locator('#relay-owner-current-work').count(),0,'The private UI is unmounted while showing public chat');
+    await page.evaluate(key=>{localStorage.removeItem(key);dispatchEvent(new StorageEvent('storage',{key,newValue:null,storageArea:localStorage}));},OWNER_KEY);
+    const replacement=await h.pair(auth,'Fictional replacement session');const value=JSON.stringify({device_token:replacement.device_token,device_id:replacement.device.id});
+    await page.evaluate(({key,value})=>{localStorage.setItem(key,value);dispatchEvent(new StorageEvent('storage',{key,newValue:value,storageArea:localStorage}));},{key:OWNER_KEY,value});
+    await conversationMenu(page,'Owner chat');await page.locator('[data-job-id="'+job.id+'"]').waitFor();assert.equal(await page.locator('#relay-owner-search').inputValue(),'','The old private search is not restored into the replacement session');
+    await conversationMenu(page,'Requests');const restored=page.locator('#relay-owner-current-work .owner-work-project');assert.equal(await restored.evaluate(n=>n.open),true,'Authorization loss resets private disclosure choices even while unmounted/public');
+    assert.match(await restored.innerText(),/Fictional private task/);assertBrowserContained(phone);await assertNoPrivatePersistence(page,[project,'prior private project']);
   }finally{await closeConversationHarness(browser,h,pages);}
 });

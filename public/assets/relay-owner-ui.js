@@ -670,8 +670,10 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
     chatNodes.notice.hidden=!state.error;chatNodes.retry.textContent=state.sendUnconfirmed?'Retry private send':'Retry private sync';chatNodes.retry.disabled=state.busy||state.sending;
   }
   function render() {
-    if (!root?.isConnected || controller.mode === 'public') { clearSensitiveFields(); return; }
     const state = controller.snapshot();
+    // The subscription also runs while private UI is hidden or unmounted.
+    if(state.status!=='approved'){readingAnchor=null;workOpen.clear();workContext='';workSignature='';workVisible=50;}
+    if (!root?.isConnected || controller.mode === 'public') { clearSensitiveFields(); return; }
     if(connectionDialog&&(state.status!=='approved'||state.mode!=='owner')){connectionDialog.close?.();connectionDialog.remove?.();connectionDialog=null;}
     renderInspector(state);
     const key = state.mode === 'owner' && state.status === 'approved' ? 'chat' : state.mode + ':' + state.status;
@@ -681,7 +683,6 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
     // Preserve unsent setup choices when a status repaint follows network work.
     if (root.contains(active) && active?.id === 'relay-owner-label') pairLabel = active.value;
     if(chatNodes)readingAnchor=position(chatNodes.messages);
-    if(state.status!=='approved'){readingAnchor=null;workOpen.clear();workContext='';}
     clearSensitiveFields(); root.classList.add('relay-owner-content'); root.replaceChildren(); viewKey = key; chatNodes = null;
     const section = make('section', '', 'relay-owner-panel'); root.append(section);
     if (key !== 'chat' && state.draft) section.append(make('p', 'Your unsent private draft is kept in this tab. Sign in to review it.', 'relay-owner-notice'));
