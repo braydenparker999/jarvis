@@ -2,6 +2,7 @@ import {PRIMARY_SITE} from './origins.js';
 import {RELAY_OWNER, RELAY_INBOX, RELAY_EVENT, RELAY_OWNER_SCOPE, RELAY_OWNER_INBOX, RELAY_OWNER_EVENT, RelayError, fields, inboxArgs, cursor, uuid, httpsURL, signingKey, signWebhook, hash, canonical, random, equal, boundedText, encoder, relayEnabled, json} from './relay-common.js';
 import {relayGrantActiveInStore,relayTokenActiveInStore} from './relay-oauth.js';
 import {PUBLIC_RESULT_EVENT} from './public-coordination-tools.js';
+import {reserveRelayCoreWake,releaseRelayCoreWake,scheduleRelayCoreAlarm} from './relay-core-alarm.js';
 export const EVENT_RETENTION_MS = 30 * 86400000;
 const DEFAULT_TTL = 86400000;
 const VERIFY_TTL = 300000;
@@ -12,8 +13,15 @@ const recoverableFailure = item => item.attempts >= MAX_ATTEMPTS
   && (['timeout','tls_error','connection_refused'].includes(item.last_error) || /^http_(408|429|5[0-9]{2})$/.test(item.last_error || ''));
 const MAX_SUBSCRIPTIONS = 8;
 const MAX_QUEUED = 2000;
+export const RELAY_REFILL_PAGE_SIZE = 250;
 const rows = (ctx, q, ...v) => [...ctx.storage.sql.exec(q, ...v)];
+const initializedEventSchemas=new WeakSet();
 const eventName = event => {const data=JSON.parse(event.data);return data.inbox_id === RELAY_OWNER_INBOX ? RELAY_OWNER_EVENT : data.coordination_event_id ? PUBLIC_RESULT_EVENT : RELAY_EVENT;};
+// Keep the routing expression identical in the index and the refill predicate.
+// Journal data is server-created; the expression also preserves the original
+// empty/false coordination-id behavior for retained occurrences.
+const eventKindSQL = `CASE WHEN json_extract(data,'$.inbox_id')='${RELAY_OWNER_INBOX}' THEN '${RELAY_OWNER_EVENT}'
+  WHEN COALESCE(json_extract(data,'$.coordination_event_id'),'') NOT IN ('',0) THEN '${PUBLIC_RESULT_EVENT}' ELSE '${RELAY_EVENT}' END`;
 const eventScope = name => name === RELAY_OWNER_EVENT ? RELAY_OWNER_SCOPE : 'relay:events';
 const eventEnabled = (env, name) => relayEnabled(env) && (name !== RELAY_OWNER_EVENT || env.RELAY_OWNER_ENABLED === 'true');
 const subscriptionActive = (ctx, env, sub) => eventEnabled(env, sub.name) && relayGrantActiveInStore(ctx, env, sub.grant_id, eventScope(sub.name));
@@ -23,12 +31,16 @@ export function relayEventSchema(ctx) {
     seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE,
     message_id TEXT NOT NULL UNIQUE, occurred_at TEXT NOT NULL, created_ms INTEGER NOT NULL, data TEXT NOT NULL)`);
   sql.exec('CREATE INDEX IF NOT EXISTS relay_event_created_seq ON relay_events(created_ms,seq)');
+  sql.exec(`CREATE INDEX IF NOT EXISTS relay_event_kind_seq ON relay_events((${eventKindSQL}),seq)`);
   sql.exec(`CREATE TABLE IF NOT EXISTS relay_subscriptions (
     id TEXT PRIMARY KEY, principal TEXT NOT NULL, grant_id TEXT NOT NULL,
     name TEXT NOT NULL, arguments TEXT NOT NULL, callback TEXT NOT NULL,
     secret TEXT NOT NULL, previous_secret TEXT, rotate_until INTEGER,
     expires_ms INTEGER NOT NULL, ack_seq INTEGER NOT NULL, start_seq INTEGER NOT NULL,
     generation TEXT NOT NULL, state TEXT NOT NULL)`);
+  // Separate from delivery acknowledgment and from the positional subscription
+  // schema used by older deployments. Ignoring an event never acknowledges it.
+  sql.exec('CREATE TABLE IF NOT EXISTS relay_subscription_scans (subscription_id TEXT PRIMARY KEY,examined_seq INTEGER NOT NULL)');
   sql.exec(`CREATE TABLE IF NOT EXISTS relay_outbox (
     subscription_id TEXT NOT NULL, event_seq INTEGER NOT NULL, body TEXT NOT NULL,
     status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
@@ -52,6 +64,7 @@ export function relayEventSchema(ctx) {
   }
   // Private filter/replay text is never part of public entries or callback previews.
   sql.exec('CREATE TABLE IF NOT EXISTS relay_owner_event_bodies (event_id TEXT PRIMARY KEY,body TEXT NOT NULL)');
+  initializedEventSchemas.add(ctx);
 }
 const latest = ctx => Math.max(rows(ctx, 'SELECT COALESCE(MAX(seq),0) AS n FROM relay_events')[0].n,rows(ctx,"SELECT value FROM relay_event_meta WHERE key='floor'")[0]?.value||0);
 const eventCursor = seq => 'relay1:' + seq;
@@ -89,30 +102,77 @@ const matches = (sub, row) => {
 };
 function enqueueFor(ctx, sub, event, now,budget) {
   const name = eventName(event);
-  if (sub.name !== name) return;
-  if(name===PUBLIC_RESULT_EVENT){const args=JSON.parse(sub.arguments);if(args.request_id&&args.request_id!==JSON.parse(event.data).message_id)return;}
+  if (sub.name !== name) return 'ignored';
+  if(name===PUBLIC_RESULT_EVENT){const args=JSON.parse(sub.arguments);if(args.request_id&&args.request_id!==JSON.parse(event.data).message_id)return 'ignored';}
   const message = name===PUBLIC_RESULT_EVENT ? {body:''} : event.message_body != null ? {body:event.message_body} : name === RELAY_OWNER_EVENT
     ? rows(ctx, 'SELECT body FROM relay_owner_event_bodies WHERE event_id=?', event.event_id)[0]
     : rows(ctx, "SELECT body FROM shared_entries WHERE id=? AND kind='user'", event.message_id)[0];
-  if (!message || !matches(sub, message)) return;
-  if(budget?budget.remaining<=0:rows(ctx,"SELECT COUNT(*) AS n FROM relay_outbox INDEXED BY relay_outbox_unsettled WHERE subscription_id=? AND status IN ('pending','failed')",sub.id)[0].n>=MAX_QUEUED)return;
+  if (!message || !matches(sub, message)) return 'ignored';
+  if(!budget&&rows(ctx,'SELECT event_seq FROM relay_outbox WHERE subscription_id=? AND event_seq=?',sub.id,event.seq).length)return 'present';
+  if(budget?budget.remaining<=0:rows(ctx,"SELECT COUNT(*) AS n FROM relay_outbox INDEXED BY relay_outbox_unsettled WHERE subscription_id=? AND status IN ('pending','failed')",sub.id)[0].n>=MAX_QUEUED)return 'full';
   const body = JSON.stringify({eventId: event.event_id, name, timestamp: event.occurred_at, data: JSON.parse(event.data), cursor: eventCursor(event.seq)});
   if (encoder.encode(body).length > 262144) throw Error('Relay event exceeds payload limit');
   ctx.storage.sql.exec("INSERT OR IGNORE INTO relay_outbox(subscription_id,event_seq,body,status,next_attempt_ms) VALUES(?,?,?,'pending',?)", sub.id, event.seq, body, now);
   if(budget)budget.remaining--;
+  return 'enqueued';
 }
-function fillOutbox(ctx,sub,start,now){
-  const count=rows(ctx,"SELECT COUNT(*) AS n FROM relay_outbox INDEXED BY relay_outbox_unsettled WHERE subscription_id=? AND status IN ('pending','failed')",sub.id)[0].n;
-  const budget={remaining:MAX_QUEUED-count};if(budget.remaining<=0)return;
-  if(!rows(ctx,'SELECT seq FROM relay_events WHERE seq>? LIMIT 1',start).length)return;
-  // One joined scan, not thousands of per-row count/message queries. Existing
-  // outbox rows are excluded so capacity is used only for missing occurrences.
-  const missing=rows(ctx,`SELECT e.*,COALESCE(b.body,u.body) AS message_body FROM relay_events e
-    LEFT JOIN shared_entries u ON u.id=e.message_id AND u.kind='user'
-    LEFT JOIN relay_owner_event_bodies b ON b.event_id=e.event_id
-    LEFT JOIN relay_outbox o ON o.subscription_id=? AND o.event_seq=e.seq
-    WHERE e.seq>? AND o.event_seq IS NULL ORDER BY e.seq`,sub.id,start);
-  for(const event of missing){enqueueFor(ctx,sub,event,now,budget);if(budget.remaining<=0)break;}
+function recordExamined(ctx,id,seq){
+  ctx.storage.sql.exec(`INSERT INTO relay_subscription_scans VALUES(?,?)
+    ON CONFLICT(subscription_id) DO UPDATE SET examined_seq=excluded.examined_seq
+    WHERE examined_seq<>excluded.examined_seq`,id,seq);
+}
+function considerLiveEvent(ctx,sub,event,now){
+  const result=enqueueFor(ctx,sub,event,now);
+  if(result==='full')return;
+  const examined=rows(ctx,'SELECT examined_seq FROM relay_subscription_scans WHERE subscription_id=?',sub.id)[0]?.examined_seq??sub.ack_seq;
+  // A later live insert cannot certify an older replay gap. Enqueue and this
+  // cursor update run inside the message's existing synchronous transaction.
+  if(event.seq>examined&&!rows(ctx,'SELECT seq FROM relay_events WHERE seq>? AND seq<? LIMIT 1',examined,event.seq).length)
+    recordExamined(ctx,sub.id,event.seq);
+}
+function fillOutbox(ctx,sub,now,inTransaction=false){
+  const fill=()=>{
+    const previous=rows(ctx,'SELECT examined_seq FROM relay_subscription_scans WHERE subscription_id=?',sub.id)[0]?.examined_seq;
+    const floor=rows(ctx,"SELECT value FROM relay_event_meta WHERE key='floor'")[0]?.value||0;
+    const start=Math.max(sub.ack_seq,previous??sub.ack_seq,floor),ceiling=latest(ctx);
+    if(start>=ceiling){if(previous!==start)recordExamined(ctx,sub.id,start);return start;}
+    const budget={remaining:MAX_QUEUED-rows(ctx,"SELECT COUNT(*) AS n FROM relay_outbox INDEXED BY relay_outbox_unsettled WHERE subscription_id=? AND status IN ('pending','failed')",sub.id)[0].n};
+    const limit=Math.max(1,Math.min(RELAY_REFILL_PAGE_SIZE,budget.remaining));
+    // Limit the examined *input* range, not merely the returned matches. The
+    // routing index skips unrelated public/private event kinds without loading
+    // their payloads. Sparse substring filters cannot cause an unbounded scan.
+    const page=rows(ctx,`SELECT seq FROM relay_events INDEXED BY relay_event_kind_seq
+      WHERE (${eventKindSQL})=? AND seq>? AND seq<=? ORDER BY seq LIMIT ?`,sub.name,start,ceiling,limit);
+    const end=page.length<limit?ceiling:page.at(-1).seq;
+    const args=JSON.parse(sub.arguments),values=[sub.id,sub.name,start,end];
+    let filter='';
+    if(sub.name===PUBLIC_RESULT_EVENT){
+      if(args.request_id){filter=" AND json_extract(e.data,'$.message_id')=?";values.push(args.request_id);}
+    }else{
+      filter=' AND COALESCE(b.body,u.body) IS NOT NULL';
+      // SQLite lower() folds ASCII only. SQL eliminates ordinary ASCII misses;
+      // a bounded Unicode/control-text fallback retains JS's exact existing
+      // literal toLowerCase()/includes() semantics (including Kelvin sign).
+      if(args.message_contains&&/^[\x20-\x7e]*$/.test(args.message_contains)){
+        filter+=" AND (instr(lower(COALESCE(b.body,u.body)),?)>0 OR COALESCE(b.body,u.body) GLOB '*[^ -~]*' OR instr(COALESCE(b.body,u.body),char(0))>0)";
+        values.push(args.message_contains.toLowerCase());
+      }
+    }
+    const missing=page.length?rows(ctx,`SELECT e.*,COALESCE(b.body,u.body) AS message_body FROM relay_events e INDEXED BY relay_event_kind_seq
+      LEFT JOIN shared_entries u ON u.id=e.message_id AND u.kind='user'
+      LEFT JOIN relay_owner_event_bodies b ON b.event_id=e.event_id
+      LEFT JOIN relay_outbox o ON o.subscription_id=? AND o.event_seq=e.seq
+      WHERE (${eventKindSQL})=? AND e.seq>? AND e.seq<=? AND o.event_seq IS NULL${filter}
+      ORDER BY e.seq LIMIT ${limit}`,...values):[];
+    let examined=end;
+    for(const event of missing)if(enqueueFor(ctx,sub,event,now,budget)==='full'){examined=event.seq-1;break;}
+    // A crash/throw between insertion and cursor commit rolls back both. If a
+    // previous deployment committed an outbox row alone, the join deduplicates
+    // it on replay without replacing its immutable body or retry state.
+    if(previous!==examined)recordExamined(ctx,sub.id,examined);
+    return examined;
+  };
+  return inTransaction?fill():ctx.storage.transactionSync(fill);
 }
 export function enqueueRelayMessage(ctx, message, now = Date.now()) {
   // Called synchronously inside the same transaction as the new user row.
@@ -122,7 +182,7 @@ export function enqueueRelayMessage(ctx, message, now = Date.now()) {
   const data = {inbox_id: RELAY_INBOX, message_id: message.id, body_preview: message.body.slice(0, 240), author_authenticated: false, url: PRIMARY_SITE + '/reader/'};
   sql.exec('INSERT OR IGNORE INTO relay_events(event_id,message_id,occurred_at,created_ms,data) VALUES(?,?,?,?,?)', 'relay_msg_' + message.id, message.id, message.createdAt, now, JSON.stringify(data));
   const event = rows(ctx, 'SELECT * FROM relay_events WHERE message_id=?', message.id)[0];
-  for (const sub of rows(ctx, "SELECT * FROM relay_subscriptions WHERE state='active' AND expires_ms>?", now)) enqueueFor(ctx, sub, event, now);
+  for (const sub of rows(ctx, "SELECT * FROM relay_subscriptions WHERE state='active' AND expires_ms>?", now)) considerLiveEvent(ctx, sub, event, now);
 }
 export function enqueueRelayOwnerMessage(ctx, message, now = Date.now()) {
   // Called only by the authenticated owner store in the same SQLite transaction.
@@ -134,7 +194,7 @@ export function enqueueRelayOwnerMessage(ctx, message, now = Date.now()) {
     eventId, 'owner:' + message.id, message.createdAt, now, JSON.stringify(data));
   ctx.storage.sql.exec('INSERT OR IGNORE INTO relay_owner_event_bodies(event_id,body) VALUES(?,?)', eventId, message.body);
   const event = rows(ctx, 'SELECT * FROM relay_events WHERE event_id=?', eventId)[0];
-  for (const sub of rows(ctx, "SELECT * FROM relay_subscriptions WHERE name=? AND state='active' AND expires_ms>?", RELAY_OWNER_EVENT, now)) enqueueFor(ctx, sub, event, now);
+  for (const sub of rows(ctx, "SELECT * FROM relay_subscriptions WHERE state='active' AND expires_ms>?", now)) considerLiveEvent(ctx, sub, event, now);
 }
 export function enqueueRelayPublicResult(ctx, event, now=Date.now()) {
   if(event.disposition!=='accepted'||!['final','correction'].includes(event.stage))return;
@@ -145,7 +205,7 @@ export function enqueueRelayPublicResult(ctx, event, now=Date.now()) {
   ctx.storage.sql.exec('INSERT OR IGNORE INTO relay_events(event_id,message_id,occurred_at,created_ms,data) VALUES(?,?,?,?,?)',
     eventId,'public-result:'+event.eventId,event.recordedAt,now,JSON.stringify(data));
   const saved=rows(ctx,'SELECT * FROM relay_events WHERE event_id=?',eventId)[0];
-  for(const sub of rows(ctx,"SELECT * FROM relay_subscriptions WHERE name=? AND state='active' AND expires_ms>?",PUBLIC_RESULT_EVENT,now))enqueueFor(ctx,sub,saved,now);
+  for(const sub of rows(ctx,"SELECT * FROM relay_subscriptions WHERE state='active' AND expires_ms>?",now))considerLiveEvent(ctx,sub,saved,now);
 }
 export function webhookTransport(env) {
   // The trusted adapter validates DNS on every connection and pins the public IP.
@@ -176,8 +236,8 @@ async function signedPost(sub, body, eventId, fetcher, now,beforeSend) {
   return fetcher(sub.callback, {method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10000), headers: {'Content-Type': 'application/json', 'webhook-id': eventId, 'webhook-timestamp': String(seconds), 'webhook-signature': signature, 'X-MCP-Subscription-Id': sub.id}, body});
 }
 function failureReason(error) {
-  if (error instanceof RelayError && error.data?.reason) return error.data.reason;
-  if (['TimeoutError', 'AbortError'].includes(error.name)) return 'timeout';
+  if (error instanceof RelayError && ['timeout','tls_error','connection_refused'].includes(error.data?.reason)) return error.data.reason;
+  if (['TimeoutError', 'AbortError'].includes(error?.name)) return 'timeout';
   return 'connection_refused';
 }
 async function verifyCallback(ctx, sub, fetcher, now) {
@@ -224,6 +284,7 @@ export async function relaySubscribe(ctx, principal, p, env, fetcher = webhookTr
   // cancel it while callback verification is awaiting an external response.
   ctx.storage.sql.exec('INSERT OR REPLACE INTO relay_activations VALUES(?,?,?)',id,revision,Math.max(now,Date.now())+10000);
   const sub = {id, principal: principal.principal, grant_id: principal.grantId, callback: p.delivery.url, secret: p.delivery.secret};
+  let wake=null;
   try{
   await verifyCallback(ctx, sub, fetcher, now);
   // Verification awaits external I/O. Recheck revocation before activating storage.
@@ -231,7 +292,7 @@ export async function relaySubscribe(ctx, principal, p, env, fetcher = webhookTr
   if(principal.accessHash&&!relayTokenActiveInStore(ctx,env,principal,requiredScope))throw new RelayError(-32012,'Connection rotated or revoked');
   // Persist a wake before the activation/replay transaction. Alarm I/O is an
   // await boundary, so validate the same live token/grant again inside it.
-  if(ctx.storage.setAlarm)await ctx.storage.setAlarm(Math.max(now,Date.now())+100);
+  wake=await reserveRelayCoreWake(ctx,Math.max(now,Date.now()));
   const expires = Math.max(now,Date.now()) + Math.min(p.ttlMs ?? DEFAULT_TTL, DEFAULT_TTL);
   const result = ctx.storage.transactionSync(() => {
     if(!relayGrantActiveInStore(ctx,env,principal.grantId,requiredScope)||principal.accessHash&&!relayTokenActiveInStore(ctx,env,principal,requiredScope))throw new RelayError(-32012,'Connection rotated or revoked');
@@ -262,14 +323,19 @@ export async function relaySubscribe(ctx, principal, p, env, fetcher = webhookTr
     // Pending rows behind a preserved failure must not create a 50ms busy loop.
     if(oldest?.status==='failed')ctx.storage.sql.exec("UPDATE relay_subscriptions SET state='delivery_failed' WHERE id=?",id);
     const saved = rows(ctx, 'SELECT * FROM relay_subscriptions WHERE id=?', id)[0];
-    fillOutbox(ctx,saved,start,now);
+    const scanned=rows(ctx,'SELECT examined_seq FROM relay_subscription_scans WHERE subscription_id=?',id)[0]?.examined_seq;
+    // An explicit older replay can revisit a previously examined range. Normal
+    // renewal/rotation preserves scan progress independently of the live ACK.
+    recordExamined(ctx,id,current&&start>=current.ack_seq?Math.max(start,scanned??current.ack_seq):start);
+    fillOutbox(ctx,saved,now,true);
     return {id, refreshBefore: new Date(expires).toISOString(), cursor: eventCursor(start), truncated};
   });
+  releaseRelayCoreWake(ctx,wake);wake=null;
   // A committed activation is successful even if fine-grained rescheduling
   // fails: its earlier durable wake will repair the schedule.
   try{await scheduleRelayAlarm(ctx, now);}catch(error){if(!ctx.storage.setAlarm)throw error;}
   return result;
-  }finally{ctx.storage.sql.exec('DELETE FROM relay_activations WHERE id=? AND revision=?',id,revision);}
+  }finally{releaseRelayCoreWake(ctx,wake);ctx.storage.sql.exec('DELETE FROM relay_activations WHERE id=? AND revision=?',id,revision);}
 }
 export async function relayUnsubscribe(ctx, principal, p, now = Date.now(),env) {
   relayEventSchema(ctx); subscriptionParams(p, false);
@@ -280,6 +346,7 @@ export async function relayUnsubscribe(ctx, principal, p, now = Date.now(),env) 
   ctx.storage.transactionSync(() => {
     ctx.storage.sql.exec('DELETE FROM relay_activations WHERE id=?',id);
     ctx.storage.sql.exec('DELETE FROM relay_outbox WHERE subscription_id=?', id);
+    ctx.storage.sql.exec('DELETE FROM relay_subscription_scans WHERE subscription_id=?', id);
     ctx.storage.sql.exec('DELETE FROM relay_subscriptions WHERE id=? AND principal=?', id, principal.principal);
   });
   await scheduleRelayAlarm(ctx, now); return {};
@@ -287,23 +354,47 @@ export async function relayUnsubscribe(ctx, principal, p, now = Date.now(),env) 
 export async function scheduleRelayAlarm(ctx, now = Date.now(),pendingDelay=0) {
   if (!ctx.storage.setAlarm) return;
   relayEventSchema(ctx);
-  // Only a subscription's oldest unsettled occurrence can be delivered. A
-  // later due item must not repeatedly wake an alarm during the head's backoff.
-  const next = rows(ctx, `SELECT MIN((SELECT CASE WHEN status='pending' THEN next_attempt_ms END
-    FROM relay_outbox INDEXED BY relay_outbox_unsettled WHERE subscription_id=s.id
-    AND status IN ('pending','failed') ORDER BY event_seq LIMIT 1)) AS n
-    FROM relay_subscriptions s WHERE s.state='active' AND s.expires_ms>?`, now)[0].n;
-  const expiration = rows(ctx, 'SELECT MIN(expires_ms) AS n FROM relay_subscriptions')[0].n;
-  const history = rows(ctx, 'SELECT MIN(created_ms) AS n FROM relay_events')[0].n;
-  const times = [next===null?null:Math.max(next,now+pendingDelay), expiration, history === null ? null : history + EVENT_RETENTION_MS].filter(x => x !== null);
-  if (times.length) await ctx.storage.setAlarm(Math.max(now + 50, Math.min(...times)));
-  else if (ctx.storage.deleteAlarm) await ctx.storage.deleteAlarm();
+  return scheduleRelayCoreAlarm(ctx,()=>relayNextAlarmTime(ctx,now,pendingDelay),now);
 }
-export async function drainRelayOutbox(ctx, env, fetcher = webhookTransport(env), now = Date.now()) {
+// Pure scheduling input for the shared object's single alarm composer. Reads
+// never initialize tables, migrate schemas, backfill receipts or set alarms.
+export function relayNextAlarmTime(ctx, now = Date.now(),pendingDelay=0) {
+  const tables=initializedEventSchemas.has(ctx)?new Set(['relay_events','relay_subscriptions','relay_subscription_scans'])
+    :new Set(rows(ctx,"SELECT name FROM sqlite_master WHERE type='table' AND name IN ('relay_events','relay_subscriptions','relay_subscription_scans')").map(row=>row.name));
+  const times=[];
+  if(tables.has('relay_subscriptions')){
+    // Only a subscription's oldest unsettled occurrence can be delivered. A
+    // later due item must not repeatedly wake an alarm during the head's backoff.
+    const subs=rows(ctx,`SELECT s.id,s.ack_seq,${tables.has('relay_subscription_scans')?'c.examined_seq':'NULL AS examined_seq'}
+      FROM relay_subscriptions s ${tables.has('relay_subscription_scans')?'LEFT JOIN relay_subscription_scans c ON c.subscription_id=s.id':''}
+      WHERE s.state='active' AND s.expires_ms>?`,now);
+    const ceiling=subs.length&&tables.has('relay_events')?rows(ctx,'SELECT COALESCE(MAX(seq),0) AS n FROM relay_events')[0].n:0;
+    for(const sub of subs){
+      const head=rows(ctx,"SELECT event_seq,status,next_attempt_ms FROM relay_outbox INDEXED BY relay_outbox_unsettled WHERE subscription_id=? AND status IN ('pending','failed') ORDER BY event_seq LIMIT 1",sub.id)[0];
+      if(head?.status==='failed')continue;
+      const examined=sub.examined_seq??sub.ack_seq;
+      // A safely examined FIFO head owns backoff. Refill only needs its own
+      // continuation when no head exists, or an older gap prevents sending it.
+      // Old subscriptions without a scan row keep their existing head wake;
+      // the first drain establishes bounded scan progress at that deadline.
+      const refill=ceiling>examined&&(!head||sub.examined_seq!==null&&head.event_seq>examined);
+      if(refill)times.push(now+pendingDelay);
+      else if(head?.status==='pending')times.push(Math.max(head.next_attempt_ms,now+pendingDelay));
+    }
+    const expiration = rows(ctx, 'SELECT MIN(expires_ms) AS n FROM relay_subscriptions')[0].n;
+    if(expiration!==null)times.push(expiration);
+  }
+  if(tables.has('relay_events')){
+    const history = rows(ctx, 'SELECT MIN(created_ms) AS n FROM relay_events')[0].n;
+    if(history!==null)times.push(history+EVENT_RETENTION_MS);
+  }
+  return times.length?Math.max(now+50,Math.min(...times)):null;
+}
+export async function drainRelayOutbox(ctx, env, fetcher = webhookTransport(env), now = Date.now(),options={}) {
   relayEventSchema(ctx);
   const sql = ctx.storage.sql;
   // Cleanup also destroys expired callback secrets. Do not retain them in diagnostics.
-  const stop = id => { sql.exec('DELETE FROM relay_outbox WHERE subscription_id=?', id); sql.exec('DELETE FROM relay_subscriptions WHERE id=?', id); };
+  const stop = id => { sql.exec('DELETE FROM relay_outbox WHERE subscription_id=?', id); sql.exec('DELETE FROM relay_subscription_scans WHERE subscription_id=?',id);sql.exec('DELETE FROM relay_subscriptions WHERE id=?', id); };
   for (const sub of rows(ctx, 'SELECT * FROM relay_subscriptions')) {
     if (sub.expires_ms <= now || !relayEnabled(env) || !subscriptionActive(ctx,env,sub)) { stop(sub.id); continue; }
     if (sub.rotate_until && sub.rotate_until <= now) sql.exec('UPDATE relay_subscriptions SET previous_secret=NULL,rotate_until=NULL WHERE id=?', sub.id);
@@ -313,7 +404,7 @@ export async function drainRelayOutbox(ctx, env, fetcher = webhookTransport(env)
   sql.exec('DELETE FROM relay_activations WHERE expires_ms<=?',now);
   const expired = rows(ctx, 'SELECT COALESCE(MAX(seq),0) AS n FROM relay_events INDEXED BY relay_event_created_seq WHERE created_ms<=?', now - EVENT_RETENTION_MS)[0].n;
   if (expired) {
-    sql.exec("INSERT OR REPLACE INTO relay_event_meta VALUES('floor',?)", expired);
+    sql.exec("INSERT INTO relay_event_meta VALUES('floor',?) ON CONFLICT(key) DO UPDATE SET value=MAX(value,excluded.value)", expired);
     sql.exec('DELETE FROM relay_owner_event_bodies WHERE event_id IN (SELECT event_id FROM relay_events WHERE seq<=?)', expired);
     sql.exec('DELETE FROM relay_delivery_receipts WHERE event_seq<=?', expired);
     sql.exec('DELETE FROM relay_outbox WHERE event_seq<=?',expired);
@@ -322,13 +413,16 @@ export async function drainRelayOutbox(ctx, env, fetcher = webhookTransport(env)
   if (fetcher) {
     // At most one oldest occurrence per subscription per alarm. Ordering keeps cursor safe.
     for (const sub of rows(ctx, "SELECT * FROM relay_subscriptions WHERE state='active' ORDER BY id LIMIT 8")) {
+      // Earlier subscriptions await callback I/O. A later snapshot may already
+      // have been removed or replaced; never recreate its queue/scan on refill.
+      const fresh = rows(ctx, "SELECT id FROM relay_subscriptions WHERE id=? AND generation=? AND state='active' AND expires_ms>?", sub.id, sub.generation, now)[0];
+      if(!fresh)continue;
+      if(!subscriptionActive(ctx,env,sub)){stop(sub.id);continue;}
       // Refill from the durable journal, including occurrences skipped while the
       // bounded pending outbox was full. Delivered rows stay deduplicated.
-      fillOutbox(ctx,sub,sub.ack_seq,now);
+      const examined=fillOutbox(ctx,sub,now);
       const item = rows(ctx, "SELECT * FROM relay_outbox INDEXED BY relay_outbox_unsettled WHERE subscription_id=? AND status IN ('pending','failed') ORDER BY event_seq LIMIT 1", sub.id)[0];
-      if (!item || item.status !== 'pending' || item.next_attempt_ms > now) continue;
-      const fresh = rows(ctx, "SELECT id FROM relay_subscriptions WHERE id=? AND generation=? AND state='active' AND expires_ms>?", sub.id, sub.generation, now)[0];
-      if (!fresh || !subscriptionActive(ctx,env,sub)) continue;
+      if (!item || item.status !== 'pending' || item.next_attempt_ms > now || item.event_seq>examined) continue;
       let status = 0, reason = null;
       try { status = (await signedPost(sub, item.body, JSON.parse(item.body).eventId, fetcher, now,()=>{
         const at=Math.max(now,Date.now());
@@ -367,7 +461,7 @@ export async function drainRelayOutbox(ctx, env, fetcher = webhookTransport(env)
     }
   }
   // Missing deployment configuration must not produce a 50ms alarm busy loop.
-  await scheduleRelayAlarm(ctx, now,fetcher?0:60000);
+  if(options.schedule!==false)await scheduleRelayAlarm(ctx, now,fetcher?0:60000);
 }
 
 
@@ -421,6 +515,55 @@ export function relayOwnerDelivery(ctx,env,messageId,replied=false,now=Date.now(
   }
   return {state:replied?'reply_saved':failed?'delivery_failed':pending?'queued':accepted?'callback_accepted':'saved',
     pending,failed,callbackAcceptedAt:acceptedAt,retryable:!replied&&retryable,retryAfter:replied?null:retryAfter};
+}
+const sanitizedDeliveryError=value=>value===null||value===undefined?null:
+  ['timeout','tls_error','connection_refused'].includes(value)||/^http_[1-5][0-9]{2}$/.test(value)?value:'delivery_error';
+// Opt-in diagnostics for the existing authenticated private status tools. This
+// is route/transport evidence only; ownership, run claims and work completion
+// remain the private job store's independently authenticated attestations.
+// Keep the legacy phone/job delivery object unchanged for cached clients.
+export function relayOwnerDeliveryRoute(ctx,env,messageId,now=Date.now()) {
+  const empty={state:'unconfigured',lastError:null,attempts:0,maxAttempts:MAX_ATTEMPTS,nextAttemptAt:null,
+    exhausted:false,retryable:false,retryAfter:null,callbackAccepted:false};
+  if(!initializedEventSchemas.has(ctx)&&!rows(ctx,"SELECT name FROM sqlite_master WHERE type='table' AND name='relay_events'").length)return empty;
+  const event=rows(ctx,'SELECT seq,event_id FROM relay_events WHERE message_id=?','owner:'+messageId)[0];
+  if(!event)return empty;
+  const accepted=rows(ctx,'SELECT event_seq FROM relay_delivery_receipts WHERE event_seq=?',event.seq).length>0;
+  const body=rows(ctx,'SELECT body FROM relay_owner_event_bodies WHERE event_id=?',event.event_id)[0];
+  let result={...empty,state:accepted?'callback_accepted':'unconfigured',callbackAccepted:accepted};
+  const rank={unconfigured:0,filtered_out:1,callback_accepted:2,awaiting_refill:3,queued:4,retrying:5,blocked:6,rejected:7,exhausted:8};
+  for(const sub of rows(ctx,`SELECT s.id,s.grant_id,s.name,s.arguments,s.expires_ms,s.ack_seq,s.state,
+    o.status,o.attempts,o.last_error,o.next_attempt_ms,r.recoveries,r.last_recovery_ms,
+    c.examined_seq FROM relay_subscriptions s LEFT JOIN relay_outbox o ON o.subscription_id=s.id AND o.event_seq=?
+    LEFT JOIN relay_outbox_recoveries r ON r.subscription_id=o.subscription_id AND r.event_seq=o.event_seq
+    LEFT JOIN relay_subscription_scans c ON c.subscription_id=s.id WHERE s.principal=? AND s.name=? AND s.expires_ms>?`,event.seq,RELAY_OWNER,RELAY_OWNER_EVENT,now)){
+    if(!subscriptionActive(ctx,env,sub))continue;
+    const route={...empty,callbackAccepted:accepted||sub.status==='delivered'};
+    if(sub.status==='delivered')route.state='callback_accepted';
+    else if(sub.status==='pending'||sub.status==='failed'){
+      const head=rows(ctx,"SELECT event_seq,status,attempts,last_error,next_attempt_ms FROM relay_outbox INDEXED BY relay_outbox_unsettled WHERE subscription_id=? AND status IN ('pending','failed') ORDER BY event_seq LIMIT 1",sub.id)[0];
+      const item=head?.event_seq<event.seq?head:sub;
+      route.state=head?.event_seq<event.seq?'blocked':sub.status==='failed'?(recoverableFailure(sub)?'exhausted':'rejected'):sub.attempts?'retrying':'queued';
+      route.attempts=item.attempts;route.lastError=sanitizedDeliveryError(item.last_error);
+      route.exhausted=item.status==='failed'&&item.attempts>=MAX_ATTEMPTS;
+      if(item.status==='pending')route.nextAttemptAt=new Date(item.next_attempt_ms).toISOString();
+      if(sub.status==='failed'&&head?.event_seq===event.seq&&recoverableFailure(sub)&&(sub.recoveries||0)<MAX_RECOVERIES){
+        const at=(sub.last_recovery_ms||0)+RECOVERY_COOLDOWN_MS;
+        if(at<=now)route.retryable=true;else route.retryAfter=new Date(at).toISOString();
+      }
+    }else if(event.seq>sub.ack_seq){
+      route.state=body&&matches(sub,body)&&event.seq>(sub.examined_seq??sub.ack_seq)?'awaiting_refill':'filtered_out';
+      if(route.state==='awaiting_refill'&&sub.state==='delivery_failed'){
+        const head=rows(ctx,"SELECT status,attempts,last_error FROM relay_outbox INDEXED BY relay_outbox_unsettled WHERE subscription_id=? AND status IN ('pending','failed') ORDER BY event_seq LIMIT 1",sub.id)[0];
+        if(head?.status==='failed'){
+          route.state='blocked';route.attempts=head.attempts;route.lastError=sanitizedDeliveryError(head.last_error);route.exhausted=head.attempts>=MAX_ATTEMPTS;
+        }
+      }
+    }
+    if(rank[route.state]>rank[result.state])result={...route,callbackAccepted:route.callbackAccepted||result.callbackAccepted};
+    else if(route.callbackAccepted)result.callbackAccepted=true;
+  }
+  return result;
 }
 export function recoverRelayOwnerDelivery(ctx,env,messageId,now=Date.now()) {
   relayEventSchema(ctx);
