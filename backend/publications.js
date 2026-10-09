@@ -253,6 +253,32 @@ function summary(ctx) {
   const conflicts=rows(ctx,'SELECT comment_id FROM imported_comments WHERE imported=2 LIMIT 101').length;
   return {pending:Math.min(pending,600),conflicts:Math.min(conflicts,100),morePending:pending>600,moreConflicts:conflicts>100};
 }
+function publicationCoverage(ctx) {
+  // c4 advances its since/scan even for v2 comments it cannot decode. Only this
+  // candidate-owned checkpoint proves complete v2 coverage; absent older state
+  // starts a bounded replay from the beginning, never from c4's watermark.
+  const coverage=meta(ctx,'publisher-v2-coverage')??{v:1,since:null,scan:null};
+  const timestamp=value=>value===null||typeof value==='string'&&value.length<=64&&Number.isFinite(Date.parse(value));
+  const object=value=>value&&typeof value==='object'&&!Array.isArray(value);
+  if(!object(coverage)||Object.keys(coverage).sort().join(',')!=='scan,since,v'||coverage.v!==1||!timestamp(coverage.since)||
+    coverage.scan!==null&&(!object(coverage.scan)||Object.keys(coverage.scan).sort().join(',')!=='newest,page,since'||
+      coverage.scan.since!==coverage.since||!Number.isSafeInteger(coverage.scan.page)||coverage.scan.page<1||!timestamp(coverage.scan.newest)))
+    throw Error('Publication coverage checkpoint unavailable');
+  const changed=meta(ctx,'publisher-since')!==coverage.since||canonical(meta(ctx,'publisher-scan'))!==canonical(coverage.scan);
+  // Another c4 phase may have changed a partial offset as well as the cutoff.
+  // Restart only that partial scan from our last fully completed coverage.
+  return {coverage,scan:!changed&&coverage.scan||{since:coverage.since,page:1,newest:null}};
+}
+function savePublicationCoverage(ctx,coverage) {
+  putMeta(ctx,'publisher-v2-coverage',coverage);
+  // Keep the old diagnostic fields as actual mirrors, including a null since
+  // during first-page replay. A stale high cutoff would otherwise look like a
+  // new c4 interruption and repeatedly rewind that replay on every restart.
+  if(coverage.since===null)ctx.storage.sql.exec("DELETE FROM shared_meta WHERE key='publisher-since'");
+  else putMeta(ctx,'publisher-since',coverage.since);
+  if(coverage.scan===null)ctx.storage.sql.exec("DELETE FROM shared_meta WHERE key='publisher-scan'");
+  else putMeta(ctx,'publisher-scan',coverage.scan);
+}
 async function reconcile(ctx,fetcher,now,env) {
   seedPublicationReconciliation(ctx,now,env);
   const localDue=now>=Number(meta(ctx,'publisher-local-next-attempt')||0)||generation(ctx)!==meta(ctx,'publisher-local-generation')||
@@ -285,7 +311,7 @@ async function reconcile(ctx,fetcher,now,env) {
     }
     if(networkDue){
       putMeta(ctx,'publisher-next-attempt',now+INTERVAL);
-      const scan=meta(ctx,'publisher-scan')||{since:meta(ctx,'publisher-since')||null,page:1,newest:null};
+      const {coverage,scan}=publicationCoverage(ctx);
       let complete=false,newPublications=0;
       for(let pages=0;pages<PUBLICATION_LIMITS.pagesPerRun;pages++){
         const permit=takePublicationFetch(ctx,'reconcile',now);
@@ -306,9 +332,16 @@ async function reconcile(ctx,fetcher,now,env) {
           }
           scan.page++;
           if(comments.length<100){
-            complete=true;if(scan.newest)putMeta(ctx,'publisher-since',new Date(Date.parse(scan.newest)-1000).toISOString());
-            sql.exec("DELETE FROM shared_meta WHERE key='publisher-scan'");
-          }else putMeta(ctx,'publisher-scan',scan);
+            complete=true;
+            if(scan.newest){
+              const since=new Date(Date.parse(scan.newest)-1000).toISOString();
+              if(coverage.since===null||Date.parse(since)>Date.parse(coverage.since))coverage.since=since;
+            }
+            coverage.scan=null;
+          }else coverage.scan=scan;
+          // Journal, examined page and both compatibility mirrors commit or
+          // roll back together. Only a complete scan advances covered since.
+          savePublicationCoverage(ctx,coverage);
         });
         for(const id of new Set(admitted))if(work.pending&&allowance(ctx,'pending',1,now)){
           const item=rows(ctx,'SELECT * FROM imported_comments WHERE comment_id=? AND imported IN(0,-1)',id)[0];

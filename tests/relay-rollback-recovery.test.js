@@ -143,3 +143,93 @@ test('native mixed v1/v2 dependency scans merge indexed ranges in exact global c
   const state=await snapshot(h);assert.equal(state.imported.at(-1).imported,-2,'Unsupported negative dispositions are not part of the pending category');
   assert.equal(state.pendingWork.hourly,700);assert.equal(state.events.length,0);assert.equal(h.external,0);
 });
+
+test('candidate-owned coverage recovers v2 comments first published during actual c4 despite its later legacy since watermark, without hints or reposts', {timeout:60000},async t=>{
+  const h=await createRollbackHarness(t);
+  await h.control({op:'store',path:'/internal/shared/message',body:message(1),now:NOW});
+  const hold={id:id(2),replyTo:id(1),body:'Fictional immutable replay hold',createdAt:stamp};await store(h,'reply',hold);
+  const checkpoint=await adapter(h)('/shared/state'),saved=structuredClone(checkpoint.publicReader);
+  const first=report(id(1),31,{attemptId:id(32),artifacts:[{id:id(33),revision:1,label:'Fictional replay artifact',url:'https://example.test/replay-v1'}]});
+  const correction={...first,eventId:id(34),stage:'correction',supersedesEventId:first.eventId,resultVersion:2,body:'Fictional replay correction',
+    artifacts:[{...first.artifacts[0],revision:2,url:'https://example.test/replay-v2'}]};
+  const at=(payload,n,time)=>({...comment(n,payload),created_at:time,updated_at:time});
+  await h.restart();await h.control({op:'append-history',comments:[at(first,91001,'2026-10-01T12:00:01.000Z'),at(correction,91002,'2026-10-01T12:00:02.000Z'),
+    at({schema:'jarvis-publication-v1',type:'briefing',id:id(35),title:'Fictional later c4 briefing',date:'2026-10-01',body:'Fictional later legacy watermark'},91003,'2026-10-01T12:00:10.000Z')]});
+  const old=await h.control({op:'sync',old:true,now:NOW+3600000});assert.equal(old.calls,1);
+  let state=await snapshot(h);assert.equal(state.since,'2026-10-01T12:00:09.000Z');
+  assert.equal(state.imported.some(row=>row.comment_id===91001||row.comment_id===91002),false,'Raw c4 must genuinely ignore both original v2 comments');
+  assert.equal(state.events.length,0);assert.equal(state.imported.find(row=>row.comment_id===91003).imported,1);
+  await h.restart();const recovered=await h.control({op:'alarm',now:NOW+3900001});
+  state=await snapshot(h);
+  process.stdout.write('LOCAL_ROLLBACK_REPLAY '+JSON.stringify({oldSource:h.oldSource,oldFetches:old.calls,oldSince:'2026-10-01T12:00:09.000Z',
+    candidateSince:recovered.requested[0].since,recoveredEvents:state.events.length,historyReposted:false,hints:0,external:h.external})+'\n');
+  assert.equal(recovered.calls,1);assert.equal(recovered.requested[0].since,null,'Old since cannot become candidate coverage');
+  assert.deepEqual(state.events.map(row=>row.event_id),[first.eventId,correction.eventId]);
+  assert.equal(state.artifacts[0].result_version,2);assert.equal(JSON.parse(state.artifacts[0].artifact).revision,2);
+  const exact=await (await h.read('/shared/result?requestId='+id(1))).json();assert.equal(exact.reply.id,hold.id);assert.equal(exact.reply.body,hold.body);
+  const resumed=await adapter(h)('/shared/state',{publicReader:saved});
+  assert.equal(resumed.publicReader.changes.filter(change=>change.event?.eventId===first.eventId).length,1);
+  assert.equal(resumed.publicReader.changes.filter(change=>change.event?.eventId===correction.eventId).length,1);
+  const immutable=state.events;
+  await h.restart();const next=await h.control({op:'alarm',now:NOW+4200002});assert.equal(next.requested[0].since,state.coverage.since);
+  assert.deepEqual((await snapshot(h)).events,immutable,'Subsequent covered scans preserve exact payloads, provenance and event identity');
+  assert.equal(h.external,0);
+});
+
+test('older unowned replay commits page journal and null mirrors atomically, then preserves its partial page across read failure,429 and whole-runtime restart', {timeout:60000},async t=>{
+  const h=await createRollbackHarness(t);await h.control({op:'store',path:'/internal/shared/message',body:message(1),now:NOW});
+  await h.control({op:'seed-reconciliation'}); // Actual normal-write seed; no owned coverage exists on older902.
+  const progress=Array.from({length:100},(_,index)=>report(id(1),100+index,{attemptId:id(500),stage:'progress',resultVersion:undefined,
+    body:'Fictional replay progress '+index}));
+  const final=report(id(1),300,{attemptId:id(500),artifacts:[{id:id(501),revision:1,label:'Fictional final source',url:'https://example.test/replay-final'}]});
+  const at=(payload,n,time)=>({...comment(n,payload),created_at:time,updated_at:time});
+  await h.control({op:'append-history',comments:[...progress.map((payload,index)=>at(payload,92000+index,'2026-10-01T12:00:01.000Z')),
+    at(final,92100,'2026-10-01T12:00:02.000Z'),at({schema:'jarvis-publication-v1',type:'briefing',id:id(502),title:'Fictional later old marker',body:'Fictional old marker',date:'2026-10-01'},92101,'2026-10-01T12:00:10.000Z')]});
+  await h.control({op:'sync',old:true,now:NOW+3600000});let state=await snapshot(h);assert.equal(state.coverage,null);
+  assert.equal(state.since,'2026-10-01T12:00:09.000Z');assert.equal(state.imported.length,1);
+  await h.restart();const failed=await h.control({op:'alarm',now:NOW+3900001,failKey:'publisher-scan'});assert.equal(failed.calls,1);
+  state=await snapshot(h);assert.equal(state.coverage,null);assert.equal(state.since,'2026-10-01T12:00:09.000Z');
+  assert.equal(state.scan,null);assert.equal(state.imported.length,1);assert.equal(state.events.length,0,
+    'A fault after owned checkpoint and since mirror writes rolls back the whole page journal as well');
+  await h.restart();const partial=await h.control({op:'alarm',now:NOW+4200002,failure:{page:2,kind:'body'}});
+  assert.deepEqual(partial.requested,[{page:1,since:null},{page:2,since:null}]);
+  state=await snapshot(h);assert.deepEqual(state.coverage,{v:1,since:null,scan:{since:null,page:2,newest:'2026-10-01T12:00:01.000Z'}});
+  assert.equal(state.since,null,'First replay page clears the incompatible high legacy cutoff atomically');assert.deepEqual(state.scan,state.coverage.scan);
+  assert.equal(state.events.length,100);const accepted=state.events;
+  await h.restart();const limited=await h.control({op:'alarm',now:NOW+4500003,failure:{page:2,kind:'http429'}});
+  assert.deepEqual(limited.requested,[{page:2,since:null}]);state=await snapshot(h);assert.equal(state.coverage.scan.page,2);
+  const retryAt=state.upstreamNotBefore;assert.ok(retryAt>=NOW+5400003);
+  await h.restart();const cooldown=await h.control({op:'alarm',now:retryAt-1});assert.equal(cooldown.calls,0,'Restart cannot bypass provider backoff');
+  await h.restart();const recovered=await h.control({op:'alarm',now:retryAt+1});assert.deepEqual(recovered.requested,[{page:2,since:null}]);
+  state=await snapshot(h);assert.equal(state.coverage.scan,null);assert.equal(state.coverage.since,'2026-10-01T12:00:09.000Z');
+  assert.equal(state.scan,null);assert.equal(state.since,state.coverage.since);assert.deepEqual(state.events.slice(0,100),accepted);
+  assert.equal(state.events.filter(row=>row.event_id===final.eventId).length,1);assert.equal(h.external,0);
+});
+
+test('actual c4 partial-offset drift restarts from owned completed coverage, while a matching candidate restart resumes its bounded page instead of replaying again', {timeout:60000},async t=>{
+  const h=await createRollbackHarness(t);await h.control({op:'store',path:'/internal/shared/message',body:message(1),now:NOW});
+  const at=(payload,n,time)=>({...comment(n,payload),created_at:time,updated_at:time});
+  await h.control({op:'append-history',comments:[at({schema:'jarvis-publication-v1',type:'briefing',id:id(600),title:'Fictional owned baseline',body:'Fictional baseline',date:'2026-09-30'},93000,stamp)]});
+  await h.control({op:'sync',now:NOW});let state=await snapshot(h);const covered=state.coverage.since;
+  assert.equal(covered,'2026-10-01T11:59:59.000Z');assert.equal(state.coverage.scan,null);
+  const first=report(id(1),601,{attemptId:id(602),artifacts:[{id:id(603),revision:1,label:'Fictional offset artifact',url:'https://example.test/offset-v1'}]});
+  const correction={...first,eventId:id(604),stage:'correction',supersedesEventId:first.eventId,resultVersion:2,
+    artifacts:[{...first.artifacts[0],revision:2,url:'https://example.test/offset-v2'}]};
+  const history=Array.from({length:401},(_,index)=>index===350?at(first,94000+index,'2026-10-01T12:00:01.000Z'):
+    index===351?at(correction,94000+index,'2026-10-01T12:00:02.000Z'):
+    index===400?at({schema:'jarvis-publication-v1',type:'briefing',id:id(605),title:'Fictional later offset marker',body:'Fictional later marker',date:'2026-10-01'},94000+index,'2026-10-01T12:00:10.000Z'):
+    {...at({ignored:'Fictional unauthenticated noise'},94000+index,'2026-10-01T12:00:03.000Z'),user:{id:42}});
+  await h.control({op:'append-history',comments:history});const initial=await h.control({op:'alarm',now:NOW+300001});
+  assert.deepEqual(initial.requested.map(item=>item.page),[1,2,3]);state=await snapshot(h);assert.equal(state.coverage.since,covered);assert.equal(state.coverage.scan.page,4);
+  const original=state.coverage;
+  await h.restart();const old=await h.control({op:'sync',old:true,now:NOW+600002,failure:{page:5,kind:'body'}});
+  assert.deepEqual(old.requested.map(item=>item.page),[4,5]);state=await snapshot(h);assert.deepEqual(state.coverage,original);
+  assert.equal(state.since,covered);assert.equal(state.scan.page,5,'Genuine c4 changed only the mirrored partial page');
+  assert.equal(state.imported.some(row=>row.comment_id===94350||row.comment_id===94351),false);
+  await h.restart();const replay=await h.control({op:'alarm',now:NOW+900003});assert.deepEqual(replay.requested.map(item=>item.page),[1,2,3]);
+  assert.ok(replay.requested.every(item=>item.since===covered));state=await snapshot(h);assert.equal(state.coverage.since,covered);assert.equal(state.coverage.scan.page,4);assert.deepEqual(state.scan,state.coverage.scan);
+  await h.restart();const finish=await h.control({op:'alarm',now:NOW+1200004});assert.deepEqual(finish.requested.map(item=>item.page),[4,5]);
+  state=await snapshot(h);assert.equal(state.coverage.scan,null);assert.equal(state.coverage.since,'2026-10-01T12:00:09.000Z');
+  assert.deepEqual(state.events.map(row=>row.event_id),[first.eventId,correction.eventId]);assert.equal(JSON.parse(state.artifacts[0].artifact).revision,2);
+  assert.ok([initial,old,replay,finish].every(pass=>pass.calls<=3));assert.equal(h.external,0);
+});

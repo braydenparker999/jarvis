@@ -3,7 +3,7 @@
 import {Hub} from '../../backend/worker.js';
 import {sharedSchema,sharedStore} from '../../backend/shared.js';
 import {backfillPublicChanges,publicChangesReady} from '../../backend/public-coordination.js';
-import {syncPublications,publicationSchema,publicationRollbackCompatible,decodePublication,importPublicationHint,applyPendingPublications,COMMENTS_URL} from '../../backend/publications.js';
+import {syncPublications,publicationSchema,publicationRollbackCompatible,decodePublication,importPublicationHint,applyPendingPublications,seedPublicationReconciliation,COMMENTS_URL} from '../../backend/publications.js';
 import {sharedStore as oldSharedStore} from 'c4:backend/shared.js';
 import {syncPublications as oldSyncPublications} from 'c4:backend/publications.js';
 
@@ -22,11 +22,20 @@ export class RollbackRecoveryHub extends Hub {
       const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;}});
     const ctx=new Proxy(raw,{get(target,key){if(key==='storage')return storage;
       const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;}});
-    super(ctx,{},{});this.raw=raw;this.tracker=tracker;this.calls=0;this.comments=[];
+    super(ctx,{},{});this.raw=raw;this.tracker=tracker;this.calls=0;this.comments=[];this.requested=[];this.failure=null;
     this.publicationFetcher=async(input,init={})=>{
       const url=new URL(input);if(url.origin+url.pathname!==COMMENTS_URL||(init.method||'GET')!=='GET')throw Error('Unexpected fictional publication request');
-      this.calls++;const page=Number(url.searchParams.get('page')||1);
-      return Response.json(this.comments.slice((page-1)*100,page*100));
+      this.calls++;const page=Number(url.searchParams.get('page')||1);this.requested.push({page,since:url.searchParams.get('since')});
+      if(this.failure?.page===page){
+        if(this.failure.kind==='http429')return Response.json({},{status:429,headers:{'Retry-After':'900'}});
+        return new Response(new ReadableStream({start(controller){controller.enqueue(new TextEncoder().encode('['));controller.error(Error('Fictional interrupted comment response'));}}));
+      }
+      const history=await this.raw.storage.get('fictional-comment-history');
+      // Match the real API: filter by updated_at strictly after since BEFORE
+      // pagination. Persisted history is never reposted during candidate resume.
+      const cutoff=url.searchParams.has('since')?Date.parse(url.searchParams.get('since')):-Infinity;
+      const comments=(history??this.comments).filter(comment=>Date.parse(comment.updated_at)>cutoff).sort((a,b)=>a.id-b.id);
+      return Response.json(comments.slice((page-1)*100,page*100));
     };
   }
   async alarm(){} // Explicit /case alarm drives the original Hub.alarm below.
@@ -40,7 +49,8 @@ export class RollbackRecoveryHub extends Hub {
     if(url.pathname!=='/case')return super.fetch(request);
     const input=await request.json();
     if(input.now!==undefined){await this.raw.storage.put('fictional-clock',input.now);Date.now=()=>input.now;}
-    this.tracker.queries=[];this.calls=0;this.comments=input.comments||[];let response;
+    this.tracker.queries=[];this.calls=0;this.comments=input.comments||[];this.requested=[];this.failure=input.failure||null;let response;
+    if(input.failKey&&input.op!=='schema')this.tracker.failKey=input.failKey;
     if(input.op==='store')response=(input.old?oldSharedStore:sharedStore)(this.ctx,input.path,input.body||{},new URLSearchParams(input.params||{}));
     else if(input.op==='sync'){
       await (input.old?oldSyncPublications:syncPublications)(this.ctx,this.publicationFetcher,Date.now());response=Response.json({ok:true});
@@ -64,6 +74,8 @@ export class RollbackRecoveryHub extends Hub {
       });response=Response.json({ok:true});
     }else if(input.op==='prepare-unsafe'){
       publicationSchema(this.ctx);response=Response.json({ok:true});
+    }else if(input.op==='seed-reconciliation'){
+      seedPublicationReconciliation(this.ctx,Date.now());response=Response.json({ok:true});
     }else if(input.op==='seed-mixed'){
       publicationSchema(this.ctx);
       this.ctx.storage.transactionSync(()=>{
@@ -108,6 +120,10 @@ export class RollbackRecoveryHub extends Hub {
           if(!result.ok)throw Error('Fictional old append rejected');
         }
       });response=Response.json({ok:true});
+    }else if(input.op==='append-history'){
+      const history=await this.raw.storage.get('fictional-comment-history')||[];
+      for(const comment of input.comments){if(history.some(prior=>prior.id===comment.id))throw Error('Fictional history cannot repost an existing comment');history.push(comment);}
+      await this.raw.storage.put('fictional-comment-history',history);response=Response.json({count:history.length});
     }else if(input.op==='snapshot'){
       const measured=this.tracker.queries.length;
       const tables=this.rows("SELECT name FROM sqlite_master WHERE type='table'").map(row=>row.name);
@@ -121,6 +137,9 @@ export class RollbackRecoveryHub extends Hub {
         checkpoint:has('shared_meta')?this.meta('public-changes-backfill'):null,
         compatibility:has('shared_meta')?this.meta('publisher-v2-pending-compatibility'):null,
         publisher:has('shared_meta')?this.meta('publisher-status'):null,
+        since:has('shared_meta')?this.meta('publisher-since'):null,scan:has('shared_meta')?this.meta('publisher-scan'):null,
+        coverage:has('shared_meta')?this.meta('publisher-v2-coverage'):null,
+        upstreamNotBefore:has('shared_meta')?this.meta('publisher-upstream-not-before'):null,
         pendingWork:has('shared_meta')?this.meta('publisher-work:pending'):null,
         ready:has('public_changes')?publicChangesReady(this.ctx):false,
         rollbackCompatible:has('shared_meta')?publicationRollbackCompatible(this.ctx):false};
@@ -130,7 +149,7 @@ export class RollbackRecoveryHub extends Hub {
         ids:this.rows('SELECT comment_id FROM imported_comments WHERE imported=? AND comment_id>? ORDER BY comment_id LIMIT ?',disposition,0,100).map(row=>row.comment_id)})));
     }else return new Response('Unknown fictional control',{status:404});
     const body=await response.json();const queries=this.tracker.queries.map(({query,cursor})=>({query,rowsRead:cursor.rowsRead,rowsWritten:cursor.rowsWritten}));
-    return Response.json({status:response.status,body,calls:this.calls,queries,
+    return Response.json({status:response.status,body,calls:this.calls,requested:this.requested,queries,
       rowsRead:queries.reduce((sum,item)=>sum+item.rowsRead,0),rowsWritten:queries.reduce((sum,item)=>sum+item.rowsWritten,0)});
   }
 }
