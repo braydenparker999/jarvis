@@ -13,6 +13,11 @@ function continueInRelay(question,answer){
   ]);
 }
 function transferToRelay(question,answer,destination){
+  if(!save()){
+    warn('Could not save this Quick AI chat. It is still open; copy new messages and your draft before leaving. No Relay draft was prepared.');
+    $('status').textContent='Relay transfer paused: save or copy your Quick AI content before leaving.';
+    return;
+  }
   try{createRelayTransferStore().stage(quickAITransfer(question,answer,destination));location.href='/jarvis/';}
   catch(error){$('status').textContent=error.message||'Could not prepare a Relay draft.';}
 }

@@ -38,7 +38,12 @@ An existing destination draft is retained and separated from the incoming text.
 If the combined text exceeds4,000 characters, both drafts remain saved and
 the user can shorten the existing draft and retry. Long Quick AI answers keep
 the existing bounded transfer behavior with an explicit shortening notice;
-the complete source chat and its unsent draft remain in Quick AI. A pending
+the complete source chat and its unsent draft remain saved in Quick AI after a
+successful transfer. Before staging or navigating, Quick AI must successfully
+save its current source state. If source storage is blocked, full or unreadable,
+it stays open with the live messages and draft and a copy/recovery warning; no
+incoming Relay draft is staged. This is bounded hardening of an existing source
+save/navigation gap, not evidence that this branch introduced the gap. A pending
 transfer cannot be overwritten by another one. A write-ahead before/after
 record makes interrupted draft adoption recoverable without appending twice.
 If text changed after an interrupted write, the transfer remains pending for
@@ -102,7 +107,8 @@ qualification. Draft source PRs provide code for review; merging and deployment
 are separate release actions.
 
 Run the targeted transfer/provider suites, the existing owner isolation
-journeys, the complete repository tests and a Worker bundle. The local
-environment provides Node24.19.0 and Chromium151.0.7922.173. Results with those
-tools are local regression evidence; they do not replace the exact hosted
-qualification recipe requiring Node22.23.3/24.21.0 and Chrome154.0.8037.97.
+journeys, the complete repository tests and a Worker bundle. Initial local
+diagnostics used Node24.19.0 and Chromium151.0.7922.173. Follow-up checks use
+checksum-verified official Node22.23.3/24.21.0 and Chrome154.0.8037.97 binaries.
+Local checks still do not replace the trusted hosted qualification recipe or
+Android device acceptance required before release.
