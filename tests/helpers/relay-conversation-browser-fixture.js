@@ -226,10 +226,12 @@ export function assertBrowserContained(phone) {
   }
 }
 
-export async function assertNoPrivatePersistence(page, privateStrings) {
+export async function assertNoPrivatePersistence(page, privateStrings, {draft} = {}) {
   const stores = await page.evaluate(() => ({local: Object.fromEntries(Object.entries(localStorage)), session: Object.fromEntries(Object.entries(sessionStorage))}));
+  const savedDraft=stores.session['jarvis.relay.owner-draft.v1'];
+  if(draft!==undefined){assert.deepEqual(JSON.parse(savedDraft),{body:draft},'Only the expected unsent draft may survive in tab storage');delete stores.session['jarvis.relay.owner-draft.v1'];}
   const raw = JSON.stringify(stores);
-  for (const value of privateStrings) assert.equal(raw.includes(value), false, 'Private text must stay out of browser storage');
+  for (const value of privateStrings) assert.equal(raw.includes(value), false, 'Private history/text must stay out of all other browser storage');
   if (stores.local[OWNER_KEY]) assert.deepEqual(Object.keys(JSON.parse(stores.local[OWNER_KEY])).sort(), ['device_id', 'device_token']);
   return stores;
 }
