@@ -3,7 +3,7 @@
 // A separately reviewed caller must authenticate, reserve the account-wide budget,
 // cover every affected Hub, and run this BEFORE any candidate schema helper.
 export const RELAY_MIGRATION_PREFLIGHT_PLAN = Object.freeze({
-  revision: 'relay-storage-c4-ea9-core-reserve-v1',
+  revision: 'relay-storage-c4-ea9-core-reserve-v2',
   sourceCommit: 'c4d62409a3b67e4e5dac88809c6a4a0290b6e39e',
   candidateCommit: 'ea9c09c1ddb172c1f0d668b58a5e7066f1c8318f',
   maxBatch: 250, maxScopes: 16, evidenceMaxAgeMs: 300000, reportMaxAgeMs: 30000,
@@ -15,12 +15,15 @@ const PLAN = RELAY_MIGRATION_PREFLIGHT_PLAN;
 const CHECKPOINT = 'relay_migration_preflight';
 const SOURCES = 'relay_migration_preflight_sources';
 const ATTEMPTS = 'relay_migration_preflight_attempts';
+const permits = new WeakMap();
+const admittedContexts = new WeakMap();
 const MIN_TRAFFIC = {rowsRead: 10000, rowsWritten: 1000, storedBytes: 1048576};
 const integer = value => Number.isSafeInteger(value) && value >= 0;
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 const exact = (value, keys) => object(value) && Object.keys(value).every(key => keys.includes(key)) && keys.every(key => Object.hasOwn(value, key));
 const label = value => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,64}$/.test(value);
 const blocked = reason => ({status: 'blocked', reason, planRevision: PLAN.revision});
+const beforeSqlBlocked = reason => ({...blocked(reason), native: {rowsRead: 0, rowsWritten: 0, databaseBytes: null}});
 const add = (...values) => {const total = values.reduce((a, b) => a + b, 0); if (!integer(total)) throw Error('Migration bound exceeds safe numeric range'); return total;};
 const multiply = (a, b) => {const total = a * b; if (!integer(total)) throw Error('Migration bound exceeds safe numeric range'); return total;};
 const sum = values => values.reduce((a, b) => ({rowsRead: add(a.rowsRead, b.rowsRead), rowsWritten: add(a.rowsWritten, b.rowsWritten), storedBytes: add(a.storedBytes, b.storedBytes)}), {rowsRead: 0, rowsWritten: 0, storedBytes: 0});
@@ -41,6 +44,7 @@ const tables = [
   {name: 'relay_outbox_recoveries', columns: '0 AS key_bytes'},
   {name: 'public_coordination_events', columns: 'length(CAST(payload AS BLOB)) AS payload_bytes'},
   {name: 'public_changes', columns: '0 AS key_bytes'},
+  {name: 'relay_oauth', columns: '8+length(CAST(category AS BLOB)) AS key_bytes'},
 ];
 const indices = [
   {name: 'shared_kind_seq', table: 'shared_entries'},
@@ -48,6 +52,8 @@ const indices = [
   {name: 'relay_event_created_seq', table: 'relay_events'},
   {name: 'relay_outbox_event', table: 'relay_outbox'},
   {name: 'relay_outbox_unsettled', table: 'relay_outbox', partial: 'unsettled'},
+  {name: 'relay_oauth_expiry', table: 'relay_oauth'},
+  {name: 'relay_oauth_category_expiry', table: 'relay_oauth'},
 ];
 
 function evidenceProblem(evidence, now) {
@@ -80,6 +86,54 @@ function budgetInputsProblem(options, now) {
   return null;
 }
 const allocationSignature = options => JSON.stringify(options.allocations.toSorted((a, b) => a.scope.localeCompare(b.scope)));
+
+function stepInputsProblem(input, now) {
+  if (!exact(input, ['action', 'runId', 'scope', 'expectedRevision', 'batchSize', 'evidence', 'reserve', 'allocations'])
+    || !['start', 'continue', 'report', 'discard'].includes(input.action) || !label(input.runId) || !label(input.scope)
+    || !(input.expectedRevision === null || integer(input.expectedRevision)) || !integer(input.batchSize) || input.batchSize < 1 || input.batchSize > PLAN.maxBatch) return 'invalid_preflight_input';
+  return budgetInputsProblem(input, now) || (!input.allocations.some(item => item.scope === input.scope) ? 'affected_scope_allocation_unknown' : null);
+}
+
+// Mandatory external admission contract, not a production allocator. reserve()
+// must atomically persist a finite account/scope reservation OUTSIDE source SQL
+// before replying. Unknown state and exhausted/failed/lost replies fail closed.
+// Its own finite rejection/coordination cost belongs in the external reservation.
+// No adapter is installed here; a plain input flag/receipt cannot enter Step.
+export async function relayMigrationPreflightAdmission(ctx, input, now, reserve) {
+  const problem = stepInputsProblem(input, now); if (problem) return beforeSqlBlocked(problem);
+  if (!object(ctx)) return beforeSqlBlocked('native_context_unknown');
+  if (typeof reserve !== 'function') return beforeSqlBlocked('external_admission_required');
+  const request = {planRevision: PLAN.revision, reservationId: crypto.randomUUID(), utcDay: day(now), scope: input.scope,
+    allocationSignature: allocationSignature(input), allocation: {...input.allocations.find(item => item.scope === input.scope)},
+    envelope: {rowsRead: PLAN.stepRowsRead, rowsWritten: PLAN.stepRowsWritten, storedBytes: PLAN.checkpointBytes}};
+  const previous = admittedContexts.get(ctx);
+  if (previous?.utcDay === request.utcDay) {
+    if (previous.scope !== request.scope || previous.allocationSignature !== request.allocationSignature) return beforeSqlBlocked('preflight_allocation_plan_changed');
+    if (previous.attempt >= Math.min(Math.floor(request.allocation.rowsRead / PLAN.stepRowsRead), Math.floor(request.allocation.rowsWritten / PLAN.stepRowsWritten))) return beforeSqlBlocked('preflight_allocation_exhausted');
+  }
+  let receipt;
+  try {receipt = await reserve(request);} catch {return beforeSqlBlocked('external_admission_unavailable');}
+  if (exact(receipt, ['status', 'reason']) && receipt.status === 'blocked'
+    && ['preflight_allocation_exhausted', 'preflight_allocation_plan_changed', 'external_admission_unknown'].includes(receipt.reason)) return beforeSqlBlocked(receipt.reason);
+  if (!exact(receipt, ['status', 'reservationId', 'utcDay', 'scope', 'allocationSignature', 'attempt', 'reserved']) || receipt.status !== 'reserved'
+    || ['reservationId', 'utcDay', 'scope', 'allocationSignature'].some(key => receipt[key] !== request[key])
+    || !integer(receipt.attempt) || receipt.attempt < 1 || !exact(receipt.reserved, ['rowsRead', 'rowsWritten', 'storedBytes'])) return beforeSqlBlocked('external_admission_invalid');
+  try {
+    const expected = {rowsRead: multiply(receipt.attempt, PLAN.stepRowsRead), rowsWritten: multiply(receipt.attempt, PLAN.stepRowsWritten), storedBytes: PLAN.checkpointBytes};
+    if (Object.keys(expected).some(key => receipt.reserved[key] !== expected[key] || expected[key] > request.allocation[key])) return beforeSqlBlocked('external_admission_invalid');
+  } catch {return beforeSqlBlocked('external_admission_invalid');}
+  // A concurrent reservation can finish while this callback is pending. Check
+  // the current context fence so a delayed older receipt cannot rewind it.
+  const latest = admittedContexts.get(ctx);
+  if (latest?.utcDay === request.utcDay) {
+    if (latest.scope !== request.scope || latest.allocationSignature !== request.allocationSignature) return beforeSqlBlocked('preflight_allocation_plan_changed');
+    if (receipt.attempt <= latest.attempt) return beforeSqlBlocked('preflight_admission_obsolete');
+  }
+  admittedContexts.set(ctx, {utcDay: request.utcDay, scope: request.scope, allocationSignature: request.allocationSignature, attempt: receipt.attempt});
+  const permit = Object.freeze({});
+  permits.set(permit, {ctx, input: JSON.stringify(input), issuedAt: now, attempt: receipt.attempt, reserved: {...receipt.reserved}});
+  return permit;
+}
 
 function native(ctx) {
   let rowsRead = 0, rowsWritten = 0;
@@ -118,9 +172,17 @@ function estimate(state) {
   const scalar = (name, key) => state.tables.find(table => table.name === name)?.[key] ?? 0;
   const construction = sum(indices.filter(index => !state.existingIndices.includes(index.name)).map(index => {
     const scanned = count(index.table), written = index.partial ? scalar(index.table, index.partial) : scanned;
-    return {rowsRead: multiply(scanned, 2), rowsWritten: multiply(written, 2),
+    // Index creation also reads/writes bounded schema metadata. Include it even
+    // for empty inputs; exact native OAuth construction exceeds 4N reads across
+    // its two new indexes before any legacy-row cleanup is counted.
+    return {rowsRead: add(256, multiply(scanned, 4)), rowsWritten: add(64, multiply(written, 2)),
       storedBytes: add(65536, multiply(add(scalar(index.table, 'key_bytes'), multiply(written, 128)), 4))};
   }));
+  // relayOAuthStore also extends retained legacy clients and deletes expired
+  // rows on first access. Reserve one worst-case pass, including both new index
+  // updates and preflight revision monitors, without reading identity payloads.
+  const oauthMaintenance = {rowsRead: add(512, multiply(count('relay_oauth'), 8)), rowsWritten: add(256, multiply(count('relay_oauth'), 16)),
+    storedBytes: add(65536, multiply(count('relay_oauth'), 256))};
   // Reserve the complete public history and receipt population even if an old
   // marker might permit a cheaper no-op. Unknown marker state is never a credit.
   const publicRows = add(count('shared_entries'), count('public_coordination_events'));
@@ -141,7 +203,7 @@ function estimate(state) {
   const corePrivateReserve = {rowsRead: add(multiply(privateRequests, 128), multiply(privateHistory, 16), multiply(count('relay_owner_job_deadlines'), 16)),
     rowsWritten: add(multiply(privateRequests, 64), multiply(count('relay_owner_job_deadlines'), 8)),
     storedBytes: add(multiply(privateRequests, 8192), multiply(count('relay_outbox_recoveries'), 512))};
-  return {construction, backfill, replay, corePrivateReserve, total: sum([construction, backfill, replay, corePrivateReserve])};
+  return {construction, oauthMaintenance, backfill, replay, corePrivateReserve, total: sum([construction, oauthMaintenance, backfill, replay, corePrivateReserve])};
 }
 function currentState(sql) {
   const selected = schema(sql);
@@ -149,16 +211,17 @@ function currentState(sql) {
   const row = sql.exec(`SELECT checkpoint FROM ${CHECKPOINT} WHERE id=1`)[0];
   return {selected, state: row ? JSON.parse(row.checkpoint) : null};
 }
-function reserveAttempt(sql, input, allocation, now, databaseBytes) {
+function reserveAttempt(sql, input, admission, now, databaseBytes) {
   // This small reservation commits BEFORE the inventory transaction. An aborted
   // scan consumes its reservation too; reloading or discarding cannot erase it.
   sql.exec(`CREATE TABLE IF NOT EXISTS ${ATTEMPTS}(id INTEGER PRIMARY KEY CHECK(id=1),utc_day TEXT NOT NULL,scope TEXT NOT NULL,allocation_signature TEXT NOT NULL,attempts INTEGER NOT NULL,database_base INTEGER NOT NULL)`);
   const row = sql.exec(`SELECT * FROM ${ATTEMPTS} WHERE id=1`)[0];
   const allocation_signature = allocationSignature(input);
   if (row && (row.scope !== input.scope || row.allocation_signature !== allocation_signature)) return blocked('preflight_allocation_plan_changed');
-  const attempts = add(row?.utc_day === day(now) ? row.attempts : 0, 1);
-  const reserved = {rowsRead: multiply(attempts, PLAN.stepRowsRead), rowsWritten: multiply(attempts, PLAN.stepRowsWritten), storedBytes: PLAN.checkpointBytes};
-  if (Object.keys(reserved).some(key => reserved[key] > allocation[key])) return blocked('preflight_allocation_exhausted');
+  // The external counter can include a lost permit or a response lost before
+  // SQL. Persist its monotonic value; neither case can reclaim spent allocation.
+  const attempts = admission.attempt, reserved = admission.reserved;
+  if (attempts <= (row?.utc_day === day(now) ? row.attempts : 0)) return blocked('preflight_admission_obsolete');
   sql.exec(`INSERT INTO ${ATTEMPTS} VALUES(1,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET utc_day=excluded.utc_day,attempts=excluded.attempts`, day(now), input.scope, allocation_signature, attempts, databaseBytes);
   return {reserved, databaseBase: row?.database_base ?? databaseBytes};
 }
@@ -181,12 +244,13 @@ function report(state, now, measured, databaseBytes) {
 // Owns only its tiny checkpoint/source-revision tables and additive triggers.
 // No target CREATE INDEX, data migration, credentials, grant or alarm is executed.
 // Call synchronously; each transaction consumes every native cursor before exit.
-export function relayMigrationPreflightStep(ctx, input, now = Date.now()) {
-  if (!exact(input, ['action', 'runId', 'scope', 'expectedRevision', 'batchSize', 'evidence', 'reserve', 'allocations'])
-    || !['start', 'continue', 'report', 'discard'].includes(input.action) || !label(input.runId) || !label(input.scope)
-    || !(input.expectedRevision === null || integer(input.expectedRevision)) || !integer(input.batchSize) || input.batchSize < 1 || input.batchSize > PLAN.maxBatch) return blocked('invalid_preflight_input');
-  const problem = budgetInputsProblem(input, now); if (problem) return blocked(problem);
-  const allocation = input.allocations.find(item => item.scope === input.scope); if (!allocation) return blocked('affected_scope_allocation_unknown');
+export function relayMigrationPreflightStep(ctx, input, now = Date.now(), permit = null) {
+  const admission = object(permit) ? permits.get(permit) : null;
+  if (admission) permits.delete(permit);
+  const problem = stepInputsProblem(input, now); if (problem) return beforeSqlBlocked(problem);
+  if (!admission) return beforeSqlBlocked('external_admission_required');
+  if (admission.ctx !== ctx || admission.input !== JSON.stringify(input) || now < admission.issuedAt || now - admission.issuedAt > PLAN.reportMaxAgeMs) return beforeSqlBlocked('external_admission_invalid');
+  const allocation = input.allocations.find(item => item.scope === input.scope);
   const databaseBytes = ctx?.storage?.sql?.databaseSize;
   if (!integer(databaseBytes) || typeof ctx?.storage?.transactionSync !== 'function') return blocked('native_storage_unknown');
   // The same fresh screenshot may precede our checkpoint's small growth. That
@@ -196,10 +260,12 @@ export function relayMigrationPreflightStep(ctx, input, now = Date.now()) {
     || databaseBytes > input.evidence.perObjectStoredBytesLimit) return blocked('storage_evidence_inconsistent');
   const sql = native(ctx);
   try {
-    const reservation = ctx.storage.transactionSync(() => reserveAttempt(sql, input, allocation, now, databaseBytes));
-    if (reservation.status === 'blocked') return reservation;
+    const reservation = ctx.storage.transactionSync(() => reserveAttempt(sql, input, admission, now, databaseBytes));
+    const charged = value => ({...value, preflightReserved: {...admission.reserved}, admission: {mode: 'external_atomic_before_sql', attempt: admission.attempt},
+      native: {...sql.measure(), databaseBytes: ctx.storage.sql.databaseSize, ...(value.native?.databaseBytesAtStart === undefined ? {} : {databaseBytesAtStart: value.native.databaseBytesAtStart})}});
+    if (reservation.status === 'blocked') return charged(reservation);
     const reserved = reservation.reserved;
-    return ctx.storage.transactionSync(() => {
+    return charged(ctx.storage.transactionSync(() => {
       let {selected, state} = currentState(sql);
       if (state && (state.planRevision !== PLAN.revision || state.scope !== input.scope || state.runId !== input.runId
         || state.allocationSignature !== allocationSignature(input))) return blocked('checkpoint_plan_mismatch');
@@ -257,8 +323,9 @@ export function relayMigrationPreflightStep(ctx, input, now = Date.now()) {
       if (measured.rowsRead > PLAN.stepRowsRead || measured.rowsWritten > PLAN.stepRowsWritten || size - state.databaseBytesAtStart > allocation.storedBytes
         || size > input.evidence.perObjectStoredBytesLimit) throw Error('Native preflight exceeded reserved envelope');
       return report(state, now, measured, size);
-    });
-  } catch {return {...blocked('native_preflight_rolled_back'), native: {...sql.measure(), databaseBytes: ctx.storage.sql.databaseSize}};}
+    }));
+  } catch {return {...blocked('native_preflight_rolled_back'), preflightReserved: {...admission.reserved}, admission: {mode: 'external_atomic_before_sql', attempt: admission.attempt},
+    native: {...sql.measure(), databaseBytes: ctx.storage.sql.databaseSize}};}
 }
 
 // A pure aggregate review, not a production authorization or quota reservation.
@@ -268,6 +335,7 @@ export function relayMigrationPreflightBudget(reports, options, now = Date.now()
   if (!Array.isArray(reports) || reports.length !== options.allocations.length || new Set(reports.map(item => item?.scope)).size !== reports.length
     || reports.some(item => !item || !options.allocations.some(allocation => allocation.scope === item.scope))) return blocked('affected_scope_inventory_incomplete');
   if (reports.some(item => item.status !== 'complete' || item.planRevision !== PLAN.revision || item.sourceCommit !== PLAN.sourceCommit || item.candidateCommit !== PLAN.candidateCommit
+    || item.admission?.mode !== 'external_atomic_before_sql' || !integer(item.admission.attempt) || item.admission.attempt < 1
     || item.allocationSignature !== allocationSignature(options) || !integer(item.observedAt) || item.observedAt > now || now - item.observedAt > PLAN.reportMaxAgeMs)) return blocked('inventory_incomplete_or_stale');
   try {
     // Include whole allocated preflight budgets, not only observed successful
