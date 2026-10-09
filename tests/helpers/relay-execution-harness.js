@@ -29,7 +29,7 @@ export async function createExecutionHarness(t) {
     RELAY_GITHUB_CLIENT_ID: 'fictional-client', RELAY_GITHUB_CLIENT_SECRET: 'fictional-secret',
     RELAY_WEBHOOK_EGRESS_URL: 'https://egress.execution.test/callback',
     RELAY_WEBHOOK_EGRESS_TOKEN: 'fictional-egress-token'};
-  const comments = new Map(), notifications = [], sources = new Map();
+  const comments = new Map(), notifications = [], sources = new Map(), responseDrops = [], droppedResponses = [];
   let callback = async () => new Response(null, {status: 204});
   let upstream = null;
   const cost = (key, value = 1) => { const active = context.getStore(); if (active) active[key] += value; };
@@ -76,7 +76,7 @@ export async function createExecutionHarness(t) {
   env.HUBS = {idFromName: name => name, get: name => object(name).hub};
   const openLedger = () => new DatabaseSync(join(directory, 'fictional-executor.sqlite'));
   let ledger = openLedger();
-  ledger.exec('CREATE TABLE runs(request_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,claim_event_id TEXT NOT NULL,reply_body TEXT,effects INTEGER NOT NULL DEFAULT 0)');
+  ledger.exec('CREATE TABLE runs(request_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,claim_event_id TEXT NOT NULL,reply_body TEXT,effects INTEGER NOT NULL DEFAULT 0,completion_payload TEXT,cancellation_payload TEXT)');
 
   const server = createServer(async (incoming, outgoing) => {
     // Never print bodies or exception messages: they can contain private input.
@@ -111,6 +111,24 @@ export async function createExecutionHarness(t) {
           method: incoming.method, headers, ...(bytes.length ? {body: bytes} : {}),
         });
         response = await worker.fetch(request, env);
+      }
+      if (path === '/relay/mcp' && responseDrops.length) {
+        const rpc = JSON.parse(bytes.toString()), args = rpc.params?.arguments;
+        const index = responseDrops.findIndex(drop => rpc.method === 'tools/call' && rpc.params.name === drop.tool
+          && args?.job_id === drop.requestId && (!drop.stage || args.stage === drop.stage));
+        if (index >= 0) {
+          // Awaiting worker.fetch completes its transaction; inspect a cloned
+          // successful result solely as the fixture oracle, before sending ANY
+          // HTTP headers/body to the client. This is a real socket failure, not
+          // a fabricated error after a successful ownerCall return.
+          const committed = await response.clone().json();
+          assert.equal(response.status, 200); assert.equal(committed.result?.isError, false);
+          assert.equal(committed.result?.structuredContent?.newWrite, true, 'Response drop requires a fresh committed operation');
+          responseDrops.splice(index, 1);
+          droppedResponses.push({tool: rpc.params.name, requestId: args.job_id, runId: args.run_id, eventId: args.event_id});
+          const measured = context.getStore(); if (measured) measured.fixtureWorkerCommitObserved = true;
+          outgoing.destroy(); return;
+        }
       }
       const responseBytes = Buffer.from(await response.arrayBuffer());
       outgoing.writeHead(response.status, Object.fromEntries(response.headers)); outgoing.end(responseBytes);
@@ -163,20 +181,29 @@ export async function createExecutionHarness(t) {
       pendingMeasurements.set(key, record);
       try {
         record.requestBytes = Buffer.byteLength(payload || '');
-        const response = await networkFetch(base + path, {method: body === undefined ? 'GET' : 'POST',
-          headers: {Origin: PRIMARY_SITE, ...(body === undefined ? {} : {'Content-Type': 'application/json'}),
-            ...(token ? {Authorization: 'Bearer ' + token} : {}), 'X-Fixture-Measurement': key, ...extra}, body: payload});
+        const intent = body?.params?.arguments || {};
+        record.ids = Object.fromEntries(Object.entries({requestId: intent.job_id || intent.message_id, runId: intent.run_id,
+          eventId: intent.event_id, replyId: intent.expected_reply_id, resultVersion: intent.expected_version}).filter(([, value]) => value !== undefined));
+        let response;
+        try {
+          response = await networkFetch(base + path, {method: body === undefined ? 'GET' : 'POST',
+            headers: {Origin: PRIMARY_SITE, ...(body === undefined ? {} : {'Content-Type': 'application/json'}),
+              ...(token ? {Authorization: 'Bearer ' + token} : {}), 'X-Fixture-Measurement': key, ...extra}, body: payload});
+        } catch (error) { record.transportFailed = true; throw error; }
         const text = await response.text(); record.responseBytes = Buffer.byteLength(text);
         const data = JSON.parse(text), args = body?.params?.arguments || {}, structured = data.result?.structuredContent || data;
         const job = structured.job;
+        const publicEvent = structured.events?.at(-1) || structured.changes?.findLast(item => item.event)?.event;
+        const publicEntry = structured.changes?.findLast(item => item.entry)?.entry;
         const candidate = {requestId: args.job_id || args.message_id || job?.id || structured.message?.id ||
+          publicEvent?.requestId || publicEntry?.replyTo || (publicEntry?.role === 'user' ? publicEntry.id : undefined) ||
           (path.split('?')[0] === '/shared/messages' ? body?.id : undefined) || new URL(path, base).searchParams.get('requestId') || undefined,
           runId: args.run_id || job?.execution?.runId, eventId: args.event_id,
           replyId: job?.result?.replyId || structured.reply?.id || (structured.entry?.kind === 'reply' ? structured.entry.id : undefined),
-          resultId: job?.latestResult?.id || structured.events?.at(-1)?.eventId,
-          resultVersion: job?.resultVersion ?? structured.events?.at(-1)?.resultVersion,
+          resultId: job?.latestResult?.id || publicEvent?.eventId,
+          resultVersion: job?.resultVersion ?? publicEvent?.resultVersion,
           completionEventId: job?.completion?.eventId, completionResultVersion: job?.completion?.resultVersion,
-          publicationAttemptId: structured.events?.at(-1)?.attemptId};
+          publicationAttemptId: publicEvent?.attemptId};
         record.ids = Object.fromEntries(Object.entries(candidate).filter(([, value]) => value !== undefined && value !== null));
         record.httpStatus = response.status; record.rpcErrorCode = data.error?.code ?? null;
         record.toolIsError = data.result?.isError ?? null;
@@ -255,7 +282,23 @@ export async function createExecutionHarness(t) {
   async function performFixtureWork(requestId, {stopAfterEffect = false, stopAfterClaim = false} = {}) {
     let saved = ledger.prepare('SELECT * FROM runs WHERE request_id=?').get(requestId);
     const state = await read(requestId);
-    if (state.job.completion) return {job: state.job, executed: false};
+    if (state.job.completion) {
+      if (!saved?.completion_payload) return {job: state.job, executed: false};
+      const payload = JSON.parse(saved.completion_payload);
+      assert.equal(state.job.completion.eventId, payload.event_id);
+      assert.equal(state.job.completion.runId, payload.run_id);
+      assert.equal(state.job.completion.replyId, payload.expected_reply_id);
+      assert.equal(state.job.completion.resultVersion, payload.expected_version);
+      const replay = await ownerCall('relay_owner_job_update', payload);
+      assert.equal(replay.newWrite, false, 'Persisted terminal event must replay without another write');
+      return {job: replay.job, executed: false, completionNewWrite: replay.newWrite};
+    }
+    if (state.job.stage === 'cancelled') {
+      if (!saved?.cancellation_payload) return {job: state.job, executed: false};
+      const replay = await ownerCall('relay_owner_job_update', JSON.parse(saved.cancellation_payload));
+      assert.equal(replay.newWrite, false, 'Persisted cancellation must replay without another write');
+      return {job: replay.job, executed: false, cancellationNewWrite: replay.newWrite};
+    }
     await ownerCall('relay_owner_read_conversation', {message_id: requestId});
     if (!saved) {
       const runId = randomUUID(), eventId = randomUUID();
@@ -264,14 +307,28 @@ export async function createExecutionHarness(t) {
       ledger.prepare('INSERT INTO runs(request_id,run_id,claim_event_id) VALUES(?,?,?)').run(requestId, runId, eventId);
       saved = ledger.prepare('SELECT * FROM runs WHERE request_id=?').get(requestId);
     }
-    if (!state.job.execution)
-      await ownerCall('relay_owner_job_claim', {job_id: requestId, run_id: saved.run_id, event_id: saved.claim_event_id});
-    else assert.equal(state.job.execution.runId, saved.run_id, 'A different authenticated run must not execute fixture work');
+    if (state.job.execution) assert.equal(state.job.execution.runId, saved.run_id, 'A different authenticated run must not execute fixture work');
+    // A running stage is insufficient permission to start an effect. After
+    // restart, inspect the pending cancellation before replaying any claim.
+    if (!saved.effects && state.job.cancelRequested) {
+      const payload = saved.cancellation_payload ? JSON.parse(saved.cancellation_payload) : {
+        inbox_id: RELAY_OWNER_INBOX, job_id: requestId, run_id: saved.run_id, event_id: randomUUID(), stage: 'cancelled',
+        summary: 'Fictional executor stopped before its source read or local marker; no action started.', outcome: 'not_started'};
+      if (!saved.cancellation_payload) ledger.prepare('UPDATE runs SET cancellation_payload=? WHERE request_id=?').run(JSON.stringify(payload), requestId);
+      const cancellation = await ownerCall('relay_owner_job_update', payload);
+      return {job: cancellation.job, executed: false, cancellationNewWrite: cancellation.newWrite};
+    }
+    let claimNewWrite;
+    if (!saved.effects) {
+      const claim = await ownerCall('relay_owner_job_claim', {job_id: requestId, run_id: saved.run_id, event_id: saved.claim_event_id});
+      claimNewWrite = claim.newWrite;
+    }
     if (stopAfterClaim) return {runId: saved.run_id, executed: false};
     const executed = !saved.effects;
     if (!saved.effects) {
       const current = (await read(requestId)).job;
       assert.equal(current.stage, 'running', 'Recovered work cannot start with an expired/blocked execution lease');
+      assert.equal(current.cancelRequested, false, 'Pending owner cancellation prevents the fixture effect');
       assert.ok(sources.has(requestId));
       const source = await (await networkFetch(base + '/__fixture/source/' + requestId)).json();
       assert.equal(source.nonce, sources.get(requestId), 'Fixture work result is checked against the separate fictional source');
@@ -280,10 +337,14 @@ export async function createExecutionHarness(t) {
     if (stopAfterEffect) return {runId: saved.run_id, executed: true};
     const reply = await ownerCall('relay_owner_reply', {message_id: requestId, body: saved.reply_body});
     const current = await read(requestId);
-    const completion = await ownerCall('relay_owner_job_update', {job_id: requestId, run_id: saved.run_id, event_id: randomUUID(),
-      stage: 'completed', expected_reply_id: reply.entry.id, expected_version: current.job.resultVersion,
-      summary: 'Fictional isolated source read and local marker are verified.', outcome: 'known'});
-    return {job: completion.job, executed};
+    const payload = saved.completion_payload ? JSON.parse(saved.completion_payload) : {
+      inbox_id: RELAY_OWNER_INBOX, job_id: requestId, run_id: saved.run_id, event_id: randomUUID(), stage: 'completed', expected_reply_id: reply.entry.id,
+      expected_version: current.job.resultVersion, summary: 'Fictional isolated source read and local marker are verified.', outcome: 'known'};
+    // Persist the ENTIRE exact intent before the call. Never regenerate its
+    // event UUID, version or summary after an ambiguous transport failure.
+    if (!saved.completion_payload) ledger.prepare('UPDATE runs SET completion_payload=? WHERE request_id=?').run(JSON.stringify(payload), requestId);
+    const completion = await ownerCall('relay_owner_job_update', payload);
+    return {job: completion.job, executed, claimNewWrite, completionNewWrite: completion.newWrite};
   }
   async function close() {
     server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
@@ -291,7 +352,17 @@ export async function createExecutionHarness(t) {
     rmSync(directory, {recursive: true, force: true});
   }
   return {auth, grant, env, http, rpc, call, ownerCall, phone, read, createJob, subscribe, subscription, publish,
-    rows, restart, alarm, notifications, sources, measurements, performFixtureWork,
+    rows, restart, alarm, notifications, sources, measurements, performFixtureWork, droppedResponses,
+    dropNextRpcResponse: (tool, requestId, stage) => {
+      assert.ok(['relay_owner_job_claim', 'relay_owner_job_update'].includes(tool));
+      responseDrops.push({tool, requestId, stage});
+    },
+    fixtureIntent: id => {
+      const saved = ledger.prepare('SELECT request_id,run_id,claim_event_id,completion_payload,cancellation_payload FROM runs WHERE request_id=?').get(id);
+      return saved ? {requestId: saved.request_id, runId: saved.run_id, claimEventId: saved.claim_event_id,
+        completionPayload: saved.completion_payload ? JSON.parse(saved.completion_payload) : null,
+        cancellationPayload: saved.cancellation_payload ? JSON.parse(saved.cancellation_payload) : null} : null;
+    },
     effectCount: id => ledger.prepare('SELECT effects FROM runs WHERE request_id=?').get(id)?.effects || 0,
     advance: ms => { assert.ok(ms >= 0); now += ms; },
     setCallback: fn => { callback = fn; }, setUpstream: fn => { upstream = fn; },

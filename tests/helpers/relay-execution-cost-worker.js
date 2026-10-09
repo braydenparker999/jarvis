@@ -1,5 +1,5 @@
 import worker, {Hub} from '../../backend/worker.js';
-import {SHARED_OBJECT, sharedSchema} from '../../backend/shared.js';
+import {SHARED_OBJECT, sharedSchema, sharedStore} from '../../backend/shared.js';
 import {relayOAuthStore} from '../../backend/relay-oauth.js';
 import {publicationSchema} from '../../backend/publications.js';
 import {RELAY_CALLBACK, RELAY_SCOPES, hash, challenge} from '../../backend/relay-common.js';
@@ -45,6 +45,24 @@ export class ExecutionCostHub extends Hub {
       publicationSchema(this.ctx);
       this.ctx.storage.sql.exec('INSERT OR REPLACE INTO shared_meta VALUES(?,?)', 'publisher-next-attempt', JSON.stringify(Date.now() + 300000));
       return Response.json({ok: true});
+    }
+    if (url.pathname === '/__fixture/public-result-history') {
+      // Populated result projection setup only. This is deliberately distinct
+      // from the isolated lost-hint tests, which must use the real importer.
+      const {requestId, finalEventId, correctionEventId, attemptId} = await request.json();
+      const first = {schema: 'jarvis-coordination-v2', requestId, eventId: finalEventId, attemptId,
+        stage: 'final', resultVersion: 1, body: 'Fictional local workerd final result.', artifacts: []};
+      const correction = {...first, eventId: correctionEventId, stage: 'correction', resultVersion: 2,
+        supersedesEventId: finalEventId, body: 'Fictional local workerd corrected result.'};
+      for (const [index, payload] of [first, correction].entries()) {
+        const response = sharedStore(this.ctx, '/internal/shared/coordination', {payload,
+          provenance: {source: 'github-issue', repo: 'fictional/cost-fixture', issue: 2, authorId: 183016859,
+            commentId: 90001 + index, publishedAt: new Date().toISOString()}});
+        if (!response.ok) throw Error('Fictional result-history setup must succeed');
+        const accepted = await response.json();
+        if (accepted.event?.disposition !== 'accepted') throw Error('Fictional result-history setup must be accepted');
+      }
+      return Response.json({ok: true, requestId, finalEventId, correctionEventId, attemptId});
     }
     if (url.pathname === '/__fixture/background') {
       const count = Number(url.searchParams.get('count')); const sql = this.ctx.storage.sql;

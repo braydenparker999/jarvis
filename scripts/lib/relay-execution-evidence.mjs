@@ -7,12 +7,13 @@ import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 
 export const EVIDENCE_SCHEMA = 'relay-execution-evidence-v1';
-export const scenarios = ['contract', 'lucy-absent-phone', 'muse-lost-hint-mcp', 'muse-lost-hint-http',
+export const scenarios = ['contract', 'lucy-absent-phone', 'muse-lost-hint-mcp', 'muse-lost-hint-changes', 'muse-lost-hint-http',
   'duplicate-races', 'later-correction', 'subscription-expired', 'subscription-410', 'subscription-413',
-  'consequential-reconciliation', 'delivery-recovery', 'public-result-notification', 'steady-cost', 'parent-terminal-reconciliation', 'claim-response-recovery'];
+  'consequential-reconciliation', 'delivery-recovery', 'public-result-notification', 'steady-cost', 'parent-terminal-reconciliation',
+  'claim-response-recovery', 'completion-response-recovery', 'cancellation-before-effect', 'cancellation-after-effect'];
 const operations = ['http', 'fixture_alarm', 'fixture_pair_start', 'host_public_result_http',
   'server/discover', 'tools/list', 'events/list', 'events/subscribe', 'events/unsubscribe',
-  '/jobs', '/jobs/detail', '/jobs/retry', '/delivery/retry',
+  '/jobs', '/jobs/detail', '/jobs/retry', '/jobs/cancel', '/delivery/retry',
   'relay_owner_pairing_approve', 'relay_owner_job_read', 'relay_owner_jobs_list', 'relay_owner_read_conversation',
   'relay_owner_job_claim', 'relay_owner_job_update', 'relay_owner_reply', 'relay_owner_job_result_correct',
   'relay_owner_subscription_status', 'relay_owner_delivery_status',
@@ -29,7 +30,7 @@ const correlationKeys = ['requestId', 'runId', 'publicationAttemptId', 'original
 const sourceKeys = ['workerSourceCommit', 'deployedSourceCommit', 'deploymentCommit', 'hostSourceSha256', 'hostToolSchemaSha256'];
 const costKeys = ['operation', 'elapsedMs', 'requestBytes', 'responseBytes', 'sqlStatements', 'sqliteReturnedRows',
   'sqliteChangedRows', 'upstreamRequests', 'ids', 'httpStatus', 'rpcErrorCode', 'toolIsError', 'workerdRowsRead', 'workerdRowsWritten',
-  'startedAt', 'finishedAt', 'clock'];
+  'startedAt', 'finishedAt', 'clock', 'transportFailed', 'fixtureWorkerCommitObserved'];
 function fail(path, reason) { throw Error('Invalid execution evidence at ' + path + ': ' + reason); }
 function object(value, allowed, required, path) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) fail(path, 'object required');
@@ -67,6 +68,11 @@ export function validateCost(record, path = 'cost') {
   if (record.httpStatus !== undefined) number(record.httpStatus, path + '.httpStatus', {min: 100, max: 599});
   if (record.rpcErrorCode !== undefined && record.rpcErrorCode !== null) number(record.rpcErrorCode, path + '.rpcErrorCode', {min: -99999, max: -1});
   if (record.toolIsError !== undefined && record.toolIsError !== null && typeof record.toolIsError !== 'boolean') fail(path, 'invalid tool error flag');
+  for (const key of ['transportFailed', 'fixtureWorkerCommitObserved'])
+    if (record[key] !== undefined && typeof record[key] !== 'boolean') fail(path, 'invalid transport observation');
+  if (record.transportFailed === true && record.httpStatus !== undefined) fail(path, 'failed transport cannot invent a received HTTP status');
+  if (record.fixtureWorkerCommitObserved === true && (record.transportFailed !== true ||
+      !record.ids?.requestId || !record.ids?.runId || !record.ids?.eventId)) fail(path, 'post-commit loss requires correlated failed transport');
   if (record.startedAt !== undefined || record.finishedAt !== undefined || record.clock !== undefined) {
     oneOf(record.clock, ['fixture-virtual-wall-real-monotonic', 'real-wall-real-monotonic'], path + '.clock');
     for (const key of ['startedAt', 'finishedAt']) {
@@ -154,6 +160,8 @@ export function validateEvidence(evidence) {
     for (const [key, value] of Object.entries(record.proofs)) pattern(value, sha256, path + '.proofs.' + key, true);
     if (!Array.isArray(record.costs) || record.costs.length > 10000) fail(path + '.costs', 'bounded costs array required');
     record.costs.forEach((cost, costIndex) => validateCost(cost, path + '.costs[' + costIndex + ']'));
+    if (record.scope !== 'loopback-fixture' && record.costs.some(cost => Object.hasOwn(cost, 'fixtureWorkerCommitObserved')))
+      fail(path, 'fixture commit observation scope mismatch');
     if (record.level === 'genuine-execution') {
       if (record.status !== 'passed' || missingExecutionGates(record).length) fail(path, 'genuine execution gates are incomplete');
     }
