@@ -18,7 +18,22 @@ export const publicEventSchema = {type:'object',properties:{
   required:['schema','eventId','requestId','attemptId','stage','body','artifacts','sequence','recordedAt','disposition','provenance','destination','visibility','author_authenticated','execution_authorized'],additionalProperties:false};
 const entry = {type:'object',properties:{id,role:{enum:['user','assistant']},body:{type:'string'},createdAt:{type:'string',format:'date-time'},
   replyTo:id,kind:{const:'reply'},title:{type:'string'}},required:['id','body','createdAt'],additionalProperties:false};
-const output = {mode:{const:'github-publications'},coordinationVersion:{const:2},cursor:{type:'string'},nextCursor:{type:['string','null']},
+const timestamp={type:'string',format:'date-time',maxLength:64};
+const diagnostic={type:'string',maxLength:4096};
+// Older persisted health snapshots contain full counts rather than the current
+// capped summaries. They remain readable until reconciliation admits a pass.
+const retainedCount={type:'integer',minimum:0,maximum:Number.MAX_SAFE_INTEGER};
+const legacyPublisher={type:'object',properties:{ok:{type:'boolean'},catchingUp:{type:'boolean'},lastAttempt:timestamp,error:diagnostic},
+  required:['ok','lastAttempt'],maxProperties:4,additionalProperties:false};
+const publisher={type:'object',properties:{source:{type:'string',const:'GitHub issue #2 → Cloudflare'},ok:{type:'boolean'},
+  lastAttempt:timestamp,lastSuccessfulSync:timestamp,catchingUp:{type:'boolean'},error:diagnostic,
+  httpStatus:{type:'integer',minimum:100,maximum:599},reason:{type:'string',enum:['github_backoff','clock_backoff','egress_budget','daily_egress_budget']},retryAt:timestamp,
+  pending:retainedCount,conflicts:retainedCount,morePending:{type:'boolean'},moreConflicts:{type:'boolean'},
+  reconciliation:{type:'object',properties:{enabled:{const:true},nextAttemptAt:timestamp,localCatchingUp:{type:'boolean'},legacy:{anyOf:[legacyPublisher,{type:'null'}]}},
+    required:['enabled','nextAttemptAt','localCatchingUp','legacy'],maxProperties:4,additionalProperties:false}},
+  required:['source','ok'],maxProperties:14,additionalProperties:false};
+const output = {mode:{const:'github-publications'},serviceVersion:{type:'integer',const:7},coordinationVersion:{const:2},publisher,
+  cursor:{type:'string'},nextCursor:{type:['string','null']},
   public_inbox:{const:true},author_authenticated:{const:false},execution_authorized:{const:false}};
 export const publicCoordinationTools = [
   {name:'relay_read_public_result',title:'Read exact public request results',

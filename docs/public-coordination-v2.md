@@ -103,9 +103,14 @@ attestation rules are unchanged. Public text cannot authorize privileged work.
   completed cursor. Deduplicate by event/request identity, never response order.
   `pc2` cursors are separate from callback delivery `relay1` cursors.
 
-The browser keeps only a complete in-memory change checkpoint, reads all existing
-history pages and never changes the current POST receipt/conflict semantics.
-Reload starts a fresh complete read. The existing 30-second visible polling,
+The browser atomically persists a complete validated `pc2` cache with its completed
+cursor. Warm polls and reloads read deltas from that checkpoint; errors and partial
+pages preserve the previous complete cache and cursor. At cold bootstrap, an
+explicit `503 public_history_initializing` permits one complete legacy snapshot
+while later refreshes check v2 readiness. A known `pc2` cache is never downgraded.
+The retained cache remains unbounded, and validation/materialization requires at
+least O(n) work over its entries/events; it does not provide constant memory.
+The current POST receipt/conflict semantics, 30-second visible polling,
 visibility/online recovery and manual refresh remain; this is not background
 execution or a push guarantee. Legacy backends without `coordinationVersion: 2`
 continue using their original frontend adapter/fallback.
