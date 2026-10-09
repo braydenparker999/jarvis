@@ -1,0 +1,36 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {createConversationFixture,launchQualifiedBrowser,openConversationPage,conversationMenu,closeConversationHarness,assertBrowserContained,assertNoPrivatePersistence,writeSyntheticEvidence,RELAY_URL} from './helpers/relay-conversation-browser-fixture.js';
+import {RELAY_OWNER_INBOX} from '../backend/relay-common.js';
+
+test('private projects expose truthful current work and corrected results with zero extra expansion requests', {timeout:120000},async t=>{
+  const browser=await launchQualifiedBrowser(t);if(!browser)return;const h=createConversationFixture(t),pages=[];
+  try{
+    const auth=await h.oauth(),owner=await h.pair(auth),rpc=(name,args)=>h.rpc(auth,name,{inbox_id:RELAY_OWNER_INBOX,...args});
+    async function create(title,labels=true){const response=await h.phone('/jobs',{id:crypto.randomUUID(),title,body:'Fictional private task: '+title,action_kind:'read_only',...(labels?{project_title:'Fictional garden',goal_title:'Plan a quiet path'}:{})},owner.device_token);assert.equal(response.status,201);return (await response.json()).job;}
+    const queued=await create('Compare path materials'),working=await create('Check the two source notes'),blocked=await create('Confirm the path width'),done=await create('Draft the planting list'),unverified=await create('An old acknowledgement',false);
+    const workingRun=crypto.randomUUID();await rpc('relay_owner_job_claim',{job_id:working.id,run_id:workingRun,event_id:crypto.randomUUID()});await rpc('relay_owner_job_update',{job_id:working.id,run_id:workingRun,event_id:crypto.randomUUID(),stage:'running',summary:'Read both fictional notes; checking the measurements.'});
+    const blockedRun=crypto.randomUUID();await rpc('relay_owner_job_claim',{job_id:blocked.id,run_id:blockedRun,event_id:crypto.randomUUID()});await rpc('relay_owner_job_update',{job_id:blocked.id,run_id:blockedRun,event_id:crypto.randomUUID(),stage:'waiting_for_owner',summary:'Which fictional width should the path use?',outcome:'not_started'});
+    const doneRun=crypto.randomUUID();await rpc('relay_owner_job_claim',{job_id:done.id,run_id:doneRun,event_id:crypto.randomUUID()});const reply=await rpc('relay_owner_reply',{message_id:done.id,body:'Fictional original list: three shrubs.'});await rpc('relay_owner_job_update',{job_id:done.id,run_id:doneRun,event_id:crypto.randomUUID(),stage:'completed',summary:'Checked and prepared the fictional planting list.',outcome:'known',expected_reply_id:reply.entry.id,expected_version:1});await rpc('relay_owner_job_result_correct',{job_id:done.id,event_id:crypto.randomUUID(),expected_reply_id:reply.entry.id,expected_version:1,body:'Fictional corrected list: four shrubs. https://example.test/fictional-source',correction_summary:'Checked the fictional second note; corrected the count.'});
+    await rpc('relay_owner_reply',{message_id:unverified.id,body:'Fictional acknowledgement: I received this.'});
+    const phone=await openConversationPage(browser,h,{owner,clock:false});pages.push(phone);const page=phone.page;
+    await page.goto(RELAY_URL);await page.locator('[data-job-id="'+working.id+'"]').waitFor();
+    const before=phone.records.filter(r=>r.method==='GET'&&r.path.startsWith('/relay/owner/')).length;
+    await conversationMenu(page,'Requests');const work=page.locator('#relay-owner-current-work');await work.waitFor();
+    assert.equal(await work.locator('[data-job-id="'+queued.id+'"]').getAttribute('data-state'),'queued');assert.equal(await work.locator('[data-job-id="'+working.id+'"]').getAttribute('data-state'),'working');assert.equal(await work.locator('[data-job-id="'+blocked.id+'"]').getAttribute('data-state'),'blocked');assert.equal(await work.locator('[data-job-id="'+unverified.id+'"]').getAttribute('data-state'),'blocked');
+    const current=work.locator('[data-job-id="'+working.id+'"]');await current.locator('summary').first().click();assert.match(await current.innerText(),/Read both fictional notes/);
+    const waiting=work.locator('[data-job-id="'+blocked.id+'"]');await waiting.locator('summary').first().click();assert.match(await waiting.innerText(),/Which fictional width/);
+    await work.locator('.owner-work-finished>summary').click();const finished=work.locator('[data-job-id="'+done.id+'"]');await finished.locator('summary').first().click();assert.match(await finished.innerText(),/Corrected result · version 2/);assert.match(await finished.innerText(),/four shrubs/);assert.match(await finished.innerText(),/reply version 1/);
+    assert.equal(phone.records.filter(r=>r.method==='GET'&&r.path.startsWith('/relay/owner/')).length,before,'Opening Projects, Goals and Tasks uses cached change records only');
+    assert.equal(phone.records.filter(r=>r.path.endsWith('/jobs/detail')).length,0);
+    for(const size of [{width:360,height:800},{width:390,height:844},{width:390,height:520}]){
+      await page.setViewportSize(size);const geometry=await page.evaluate(()=>({viewport:innerWidth,width:document.documentElement.scrollWidth,composer:document.querySelector('#relay-owner-message-form').getBoundingClientRect().toJSON()}));assert.ok(geometry.width<=geometry.viewport);assert.ok(geometry.composer.bottom<=size.height+1);await writeSyntheticEvidence(phone,'private-current-work-'+size.width+'x'+size.height,{synthetic:true,extraExpansionRequests:0,detailRequestsBeforeEvidence:0});
+    }
+    await page.setViewportSize({width:390,height:844});await current.getByRole('button',{name:'Evidence and result',exact:true}).click();await page.locator('#relay-owner-latest-progress').waitFor();assert.match(await page.locator('#relay-owner-latest-progress').innerText(),/Read both fictional notes/);assert.equal(phone.records.filter(r=>r.path.endsWith('/jobs/detail')).length,1);
+    await page.getByRole('button',{name:'Close private request',exact:true}).click();assert.equal(await current.evaluate(n=>n.open),true,'Expanded task survives opening its evidence');
+    const beforeRefresh=phone.records.length;await conversationMenu(page,'Refresh private inbox');await page.locator('#relay-owner-current-work').waitFor();assert.equal(await current.evaluate(n=>n.open),true,'Expanded task survives ordinary refresh');assert.ok(phone.records.slice(beforeRefresh).some(r=>r.path.endsWith('/jobs/changes')));assert.equal(phone.records.filter(r=>r.path.endsWith('/jobs/detail')).length,1);
+    await page.reload();await page.locator('[data-job-id="'+done.id+'"]').waitFor();await conversationMenu(page,'Requests');await page.locator('#relay-owner-current-work .owner-work-finished>summary').click();const reloaded=page.locator('#relay-owner-current-work [data-job-id="'+done.id+'"]');await reloaded.locator('summary').first().click();assert.match(await reloaded.innerText(),/four shrubs/);
+    await conversationMenu(page,'Public chat');assert.equal(await page.locator('#relay-owner-current-work:visible').count(),0);assert.equal((await page.locator('body').innerText()).includes('Fictional garden'),false);
+    assertBrowserContained(phone);await assertNoPrivatePersistence(page,['Fictional garden','Fictional private task','four shrubs']);
+  }finally{await closeConversationHarness(browser,h,pages);}
+});

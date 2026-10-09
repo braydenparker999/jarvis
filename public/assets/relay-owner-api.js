@@ -76,6 +76,18 @@ function privateJob(value){
   let latestResult=null;
   if(resultVersion){latestResult=resultRecord(revisionFields?value.latestResult:{id:result.replyId,version:1,...result,correctionSummary:null,authentication_source:'owner-oauth-mcp',author_authenticated:true,visibility:'private'},result);if(latestResult.version!==resultVersion)throw new OwnerApiError('invalid');}
   else if(revisionFields&&value.latestResult!==null)throw new OwnerApiError('invalid');
+  let presentation;
+  if(value.presentation!==undefined){
+    const p=value.presentation,u=p?.latestUpdate;
+    const label=text=>text===null||typeof text==='string'&&!!text.trim()&&text.length<=120&&!/[\u0000-\u001f\u007f]/.test(text);
+    if(!p||!label(p.projectTitle)||!label(p.goalTitle)||p.goalTitle&&!p.projectTitle
+      ||!(u===null||u&&jobIdentifier(u.id)&&u.jobId===value.id
+        &&['claimed','running','waiting_for_owner','failed','cancelled','work_completed','result_corrected'].includes(u.kind)
+        &&typeof u.summary==='string'&&!!u.summary.trim()&&u.summary.length<=1000&&validDate(u.createdAt)
+        &&u.authentication_source==='owner-oauth-mcp'&&u.author_authenticated===true&&u.visibility==='private'))throw new OwnerApiError('invalid');
+    presentation={projectTitle:p.projectTitle,goalTitle:p.goalTitle,latestUpdate:u?{id:u.id,jobId:u.jobId,kind:u.kind,summary:u.summary,createdAt:u.createdAt,
+      authentication_source:'owner-oauth-mcp',author_authenticated:true,visibility:'private'}:null};
+  }
   // Project the contract: unexpected credential, HTML or transport fields never
   // enter the controller or the private request inspector.
   return normalizeOwnerJobCompletion({id:value.id,sequence:value.sequence,messageId:value.messageId,title:value.title,body:value.body,actionKind:value.actionKind,stage:value.stage,
@@ -86,7 +98,8 @@ function privateJob(value){
     resultVersion,latestResult,...('completion' in value?{completion:value.completion}:{}),
     failure:failure?{code:failure.code,message:failure.message,outcome:failure.outcome}:null,
     retryAllowed:value.retryAllowed,retryRequiresConfirmation:value.retryRequiresConfirmation,retryJobId:value.retryJobId,
-    delivery:{state:value.delivery.state,pending:value.delivery.pending,failed:value.delivery.failed,callbackAcceptedAt:value.delivery.callbackAcceptedAt,retryable:value.delivery.retryable,retryAfter:value.delivery.retryAfter}});
+    delivery:{state:value.delivery.state,pending:value.delivery.pending,failed:value.delivery.failed,callbackAcceptedAt:value.delivery.callbackAcceptedAt,retryable:value.delivery.retryable,retryAfter:value.delivery.retryAfter},
+    ...(presentation?{presentation}:{})});
 }
 
 export class OwnerApiError extends Error {
@@ -352,11 +365,15 @@ export function createRelayOwnerApi({ fetcher = globalThis.fetch, origin = API_O
         ||resultHistory.length&&JSON.stringify(resultHistory.at(-1))!==JSON.stringify(job.latestResult))throw new OwnerApiError('invalid');
       return {job,resultHistory,events:data.events.map(e=>({id:e.id,jobId:e.jobId,kind:e.kind,summary:e.summary,createdAt:e.createdAt,authentication_source:e.authentication_source}))};
     },
-    async createJob({id,title,body,actionKind}){
+    async createJob({id,title,body,actionKind,projectTitle='',goalTitle=''}){
       if(!jobIdentifier(id)||typeof title!=='string'||!title.trim()||title.length>120||typeof body!=='string'||!body.trim()||body.length>4000||!['read_only','draft','consequential'].includes(actionKind))throw new OwnerApiError('invalid');
-      const data=await authenticated('/relay/owner/jobs',{id,title,body,action_kind:actionKind});
+      const label=text=>typeof text==='string'&&text.length<=120&&!/[\u0000-\u001f\u007f]/.test(text);
+      if(!label(projectTitle)||!label(goalTitle)||goalTitle.trim()&&!projectTitle.trim())throw new OwnerApiError('invalid');
+      const data=await authenticated('/relay/owner/jobs',{id,title,body,action_kind:actionKind,
+        ...(projectTitle.trim()?{project_title:projectTitle.trim()}:{}),...(goalTitle.trim()?{goal_title:goalTitle.trim()}:{})});
       const job=privateJob(data.job);
       if(job.id!==id||job.body!==body.trim()||job.title!==title.trim()||job.actionKind!==actionKind||typeof data.newWrite!=='boolean')throw new OwnerApiError('invalid');
+      if((projectTitle.trim()||goalTitle.trim())&&(!job.presentation||job.presentation.projectTitle!==(projectTitle.trim()||null)||job.presentation.goalTitle!==(goalTitle.trim()||null)))throw new OwnerApiError('invalid');
       return {job,newWrite:data.newWrite};
     },
     async cancelJob(id){
