@@ -181,7 +181,7 @@ test('public/unverified rows and malformed cursors are rejected by the private c
   await assert.rejects(() => f.api.messages('unsafe-token-cursor'), e => e.kind === 'invalid');
 });
 
-test('private controller keeps draft/history separate across in-page public switches and never writes them to storage', async () => {
+test('private controller keeps draft/history separate across public switches and never writes them to public or credential storage', async () => {
   const store = storage({ public: 'untouched' }), f = fixture({ store, remember: true }), modes = [];
   const controller = createRelayOwnerController({ api: f.api, onModeChange: mode => modes.push(mode) });
   controller.connect(); await controller.startPairing('Phone', true); f.state.pairing = 'approved'; await controller.checkPairing();
@@ -214,13 +214,13 @@ test('confirmed revocation clears private history and draft; failed revoke retai
   assert.equal(f.api.hasCredential, false); assert.equal(controller.status, 'revoked'); assert.equal(controller.snapshot().draft, ''); assert.deepEqual(controller.snapshot().messages, []);
 });
 
-test('network failures retain approved private history, while authenticated expiry erases it', async () => {
+test('network failures retain private history; expiry clears history and retains the unsent private draft', async () => {
   const f = fixture({ remember: true }); await f.pair(); f.state.messages = [privateMessage];
   const controller = createRelayOwnerController({ api: f.api }); await controller.refresh(); controller.setDraft('Secret draft');
   f.state.error = Error('offline'); await controller.refresh();
   assert.equal(controller.status, 'approved'); assert.equal(controller.snapshot().messages.length, 1); assert.equal(controller.snapshot().draft, 'Secret draft');
   f.state.error = { status: 401, body: { code: 'session_expired' } }; await controller.refresh();
-  assert.equal(controller.status, 'expired'); assert.deepEqual(controller.snapshot().messages, []); assert.equal(controller.snapshot().draft, '');
+  assert.equal(controller.status, 'expired'); assert.deepEqual(controller.snapshot().messages, []); assert.equal(controller.snapshot().draft, 'Secret draft');
 });
 
 test('session removal in another tab clears private memory without writing or sending text', async () => {

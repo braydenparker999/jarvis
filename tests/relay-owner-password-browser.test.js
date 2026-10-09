@@ -221,6 +221,7 @@ async function typeLogin(page, password, {remember = false, label = 'Recovered b
 }
 async function assertIsolation(phone) {
   const data = await phone.page.evaluate(() => ({local: Object.fromEntries(Object.entries(localStorage)), session: Object.fromEntries(Object.entries(sessionStorage)), history: history.state}));
+  if(data.session['jarvis.relay.owner-draft.v1']){assert.deepEqual(JSON.parse(data.session['jarvis.relay.owner-draft.v1']),{body:PRIVATE_DRAFT});delete data.session['jarvis.relay.owner-draft.v1'];}
   for (const secret of secrets) assert.equal(JSON.stringify(data).includes(secret), false, 'Credentials and private content never enter browser storage/history');
   if (data.local[OWNER_SESSION_KEY]) assert.deepEqual(Object.keys(JSON.parse(data.local[OWNER_SESSION_KEY])).sort(), ['device_id', 'device_token']);
   assert.equal(await phone.page.locator('.relay-owner-content a, .relay-owner-content iframe').count(), 0);
@@ -275,7 +276,7 @@ test('real browser configures, clears site data, signs in and changes password e
   const saved = JSON.parse(await session(page)); assert.notEqual(saved.device_token, h.token); assert.notEqual(saved.device_id, h.id);
   await page.getByText(PRIVATE_BODY, {exact: true}).waitFor(); await assertIsolation(phone);
   await page.reload(); await ownerReady(page); assert.equal(JSON.parse(await session(page)).device_token, saved.device_token);
-  assert.equal(await page.locator('#relay-owner-message-text').inputValue(), '');
+  assert.equal(await page.locator('#relay-owner-message-text').inputValue(), PRIVATE_DRAFT, 'The unsent draft survives only in this tab');
   await accountForm(page); assert.equal(await page.locator('#relay-owner-current-password').inputValue(), '');
   await typeCredentials(page, NEXT_PASSWORD, {currentPassword: 'Incorrect-fixture-password'}); await page.getByRole('button', {name: 'Save account changes', exact: true}).click();
   await page.getByText('The username or password could not be verified. Check them and try again.', {exact: true}).waitFor(); assert.equal(JSON.parse(await session(page)).device_token, saved.device_token);
