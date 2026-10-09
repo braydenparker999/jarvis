@@ -1,13 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,writeFile,readFile,rm,symlink} from 'node:fs/promises';
+import {mkdtemp,mkdir,writeFile,readFile,rm,symlink} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {execFileSync,spawnSync} from 'node:child_process';
 import {collectInfoMetadata,inventoryFingerprint,metadataFromInfo,mergePreparedMetadata,planDateBackfill,rowsFromArchive} from '../scripts/video-date-backfill.mjs';
 import {enrichVideos} from '../public/mymedia/discovery.js';
 import {createVideoApi,parseLibrary} from '../public/mymedia/library.js';
-import {dateProvenance,youtubeDate} from '../public/mymedia/metadata.js';
+import {dateProvenance,savedYouTubeDate,youtubeDate} from '../public/mymedia/metadata.js';
 
 const video=(id='video123456789',youtubeId='abcdefghijk')=>({id,youtubeId,name:`Video [${youtubeId}].mp4`,title:'Video',folder:'Videos',size:100,modified:1790000000000,addedAt:1790000001000});
 const inventory=(videos=[video()])=>({id:'folder123456789',name:'Videos',metadataStatus:'missing',videos});
@@ -147,4 +147,109 @@ test('optional missing, invalid, duplicate and inaccessible manifests never hide
     const list=await createVideoApi(key,async()=>responses.shift()).list(root);
     assert.equal(list.videos.length,1);assert.equal(list.metadataStatus,scenario.status);
   }
+});
+
+test('legacy cached dates survive without inventing provenance from missing source fields',()=>{
+  for(const kind of ['upload','published']){
+    const cached={...video(),youtubeAt:Date.UTC(2020,0,2),youtubeDateKind:kind};
+    const parsed=parseLibrary(JSON.stringify(inventory([cached]))).videos[0];
+    assert.equal(parsed.youtubeAt,cached.youtubeAt);
+    assert.equal(parsed.youtubeDateKind,kind);
+    assert.equal(parsed.youtubeDateProvenance,null);
+    assert.equal(dateProvenance(cached,savedYouTubeDate(cached)),null);
+  }
+});
+
+test('invalid, absent or disagreeing source evidence keeps a known date but leaves provenance unknown',()=>{
+  const cached={...video(),youtubeAt:Date.UTC(2020,0,2),youtubeDateKind:'upload'};
+  const valid={source:'manifest.youtubeUploadDate',kind:'upload',youtubeId:cached.youtubeId};
+  const cases=[
+    {youtubeDateProvenance:valid},
+    {youtubeUploadDate:'2020-01-03',youtubeDateProvenance:valid},
+    {youtubeUploadDate:'2020-02-30',youtubeDateProvenance:valid},
+    {youtubeUploadDate:'2020-01-02',youtubeDateProvenance:{...valid,source:'drive.createdTime'}},
+    {youtubeUploadDate:'2020-01-02',youtubeDateProvenance:{...valid,kind:'published'}},
+    {youtubeUploadDate:'2020-01-02',youtubeDateProvenance:{...valid,youtubeId:'lmnopqrstuv'}},
+    {upload_date:'20200102',youtubeDateProvenance:valid},
+    {upload_date:'bad',youtubeUploadDate:'2020-01-02',youtubeDateProvenance:{...valid,source:'yt-dlp.upload_date'}},
+    {youtubeUploadDate:'2020-01-02',youtubeDateProvenance:null},
+    {youtubePublishedAt:'2020-01-02T00:00:00Z'}
+  ];
+  for(const fields of cases){
+    const row={...cached,...fields},parsed=parseLibrary(JSON.stringify(inventory([row]))).videos[0];
+    assert.equal(parsed.youtubeAt,cached.youtubeAt);
+    assert.equal(parsed.youtubeDateKind,'upload');
+    assert.equal(parsed.youtubeDateProvenance,null);
+    assert.equal(dateProvenance(row,savedYouTubeDate(row)),null);
+  }
+  const published={...cached,youtubeDateKind:'published',youtubePublishedAt:'bad',timestamp:cached.youtubeAt/1000};
+  assert.equal(dateProvenance(published,savedYouTubeDate(published)).source,'yt-dlp.timestamp','an invalid publication field cannot claim the valid timestamp');
+  for(const fields of [
+    {youtubePublishedAt:'2020-01-02T00:00:00Z',timestamp:cached.youtubeAt/1000-1,youtubeDateProvenance:{source:'yt-dlp.timestamp',kind:'published',youtubeId:cached.youtubeId}},
+    {youtubePublishedAt:'2020-01-02T00:00:00Z',youtubeDateProvenance:{source:'drive.createdTime',kind:'published',youtubeId:cached.youtubeId}}
+  ]){
+    const row={...cached,youtubeDateKind:'published',...fields};
+    const parsed=parseLibrary(JSON.stringify(inventory([row]))).videos[0];
+    assert.equal(parsed.youtubeAt,cached.youtubeAt);assert.equal(parsed.youtubeDateProvenance,null);
+  }
+});
+
+test('validated source dates and provenance remain supported through enrichment and cache reload',()=>{
+  for(const fields of [
+    {upload_date:'20100506'},
+    {youtubeUploadDate:'2010-05-06'},
+    {timestamp:1700000000},
+    {youtubePublishedAt:'2023-11-14T22:13:20Z'},
+    source()
+  ]){
+    const original={...fields,youtubeId:video().youtubeId};
+    const [enriched]=enrichVideos([video()],{videos:[original]});
+    const cached=parseLibrary(JSON.stringify(inventory([enriched]))).videos[0];
+    assert.deepEqual(cached.youtubeDateProvenance,dateProvenance(original));
+    assert.equal(cached.youtubeAt,youtubeDate(original).youtubeAt);
+  }
+});
+
+test('non-downloadable root manifests remain visible and prevent an empty backfill baseline',async t=>{
+  const key='AIza'+'x'.repeat(35),root=inventory().id;
+  const info={id:root,name:'Videos',mimeType:'application/vnd.google-apps.folder'};
+  const media={id:video().id,name:video().name,size:'100',mimeType:'video/mp4'};
+  const readable={id:'metadata123456',name:'jarvis-video-metadata.json',size:'200',mimeType:'application/json'};
+  const unreadable={...readable,id:'metadata223456',capabilities:{canDownload:false}};
+  const scenarios=[
+    {name:'single unreadable manifest',pages:[[unreadable]],status:'unavailable'},
+    {name:'unreadable manifest before a readable duplicate',pages:[[unreadable,readable]],status:'ambiguous'},
+    {name:'unreadable duplicate on a later page',pages:[[readable],[unreadable]],status:'ambiguous'},
+    {name:'two unreadable manifests',pages:[[unreadable,{...unreadable,id:'metadata323456'}]],status:'ambiguous'}
+  ];
+  for(const scenario of scenarios)await t.test(scenario.name,async()=>{
+    const requests=[],pages=scenario.pages.map((files,index)=>({
+      files:index===0?[media,{...media,id:'video223456789',capabilities:{canDownload:false}},...files]:files,
+      ...(index<scenario.pages.length-1?{nextPageToken:'page-'+(index+1)}:{})
+    }));
+    const api=createVideoApi(key,async url=>{
+      const request=new URL(url);requests.push(request);
+      assert.notEqual(request.searchParams.get('alt'),'media','an unreadable or ambiguous manifest must not be fetched');
+      return new Response(JSON.stringify(request.pathname.endsWith('/'+root)?info:pages.shift()));
+    });
+    const listed=await api.list(root);
+    assert.equal(listed.metadataStatus,scenario.status);
+    assert.deepEqual(listed.videos.map(v=>v.id),[media.id],'metadata access does not hide downloadable media or expose blocked media');
+    assert.equal(listed.videos[0].youtubeAt,undefined,'ambiguous metadata is never applied');
+    assert.equal(requests.length,scenario.pages.length+1);
+
+    const dir=await mkdtemp(join(tmpdir(),'video-manifest-guard-'));
+    try{
+      const path=join(dir,'inventory.json'),out=join(dir,'review'),sources=join(dir,'sources');
+      await writeFile(path,JSON.stringify(listed));
+      // A known source date would otherwise produce an additive candidate over an empty baseline.
+      await mkdir(sources);
+      await writeFile(join(sources,'video.info.json'),JSON.stringify({id:'abcdefghijk',upload_date:'20100506'}));
+      const blocked=spawnSync(process.execPath,['scripts/backfill-video-dates.mjs','--inventory',path,'--sources',sources,'--out',out]);
+      assert.notEqual(blocked.status,0);
+      assert.match(String(blocked.stderr),/reviewed existing manifest/);
+      await assert.rejects(readFile(join(out,'video-date-backfill-plan.json')),{code:'ENOENT'});
+      await assert.rejects(readFile(join(out,'jarvis-video-metadata.candidate.json')),{code:'ENOENT'});
+    }finally{await rm(dir,{recursive:true,force:true});}
+  });
 });

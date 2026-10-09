@@ -30,15 +30,29 @@ export function savedYouTubeDate(video) {
 
 // Provenance describes the date field, never extraction time or Drive creation.
 export function dateProvenance(row, date = youtubeDate(row)) {
-  if (!date.youtubeAt) return null;
+  if (!savedYouTubeDate(date).youtubeAt) return null;
+  const actual = youtubeDate(row);
+  // Cached timestamps alone cannot identify a source. Evidence must agree with the retained date.
+  if (actual.youtubeAt !== date.youtubeAt || actual.youtubeDateKind !== date.youtubeDateKind) return null;
   const expected = date.youtubeDateKind;
   const sources = expected === 'upload'
     ? ['yt-dlp.upload_date', 'manifest.youtubeUploadDate', 'archive.yt-dlp.upload_date']
     : ['yt-dlp.timestamp', 'manifest.youtubePublishedAt'];
   const raw = row.youtubeDateProvenance;
-  if (raw && raw.kind === expected && sources.includes(raw.source) &&
-      /^[A-Za-z0-9_-]{11}$/.test(raw.youtubeId || '') &&
-      (!row.youtubeId || raw.youtubeId === row.youtubeId)) {
+  if (raw !== undefined) {
+    if (!raw || raw.kind !== expected || !sources.includes(raw.source) ||
+        !/^[A-Za-z0-9_-]{11}$/.test(raw.youtubeId || '') ||
+        row.youtubeId && raw.youtubeId !== row.youtubeId) return null;
+    // Prepared sidecars normalize their date fields; an explicit raw field still takes precedence.
+    const evidence = {
+      'yt-dlp.upload_date': {upload_date:row.upload_date !== undefined ? row.upload_date : row.youtubeUploadDate},
+      'manifest.youtubeUploadDate': {youtubeUploadDate:row.youtubeUploadDate},
+      'archive.yt-dlp.upload_date': {youtubeUploadDate:row.youtubeUploadDate},
+      'yt-dlp.timestamp': row.timestamp !== undefined ? {timestamp:row.timestamp} : {youtubePublishedAt:row.youtubePublishedAt},
+      'manifest.youtubePublishedAt': {youtubePublishedAt:row.youtubePublishedAt}
+    };
+    const claimed = youtubeDate(evidence[raw.source]);
+    if (claimed.youtubeAt !== date.youtubeAt || claimed.youtubeDateKind !== expected) return null;
     return {source:raw.source, kind:expected, youtubeId:raw.youtubeId,
       ...(/^[a-f0-9]{64}$/.test(raw.evidenceSha256 || '') ? {evidenceSha256:raw.evidenceSha256} : {}),
       ...(typeof raw.observedAt === 'string' && youtubeDate({youtubePublishedAt:raw.observedAt}).youtubeAt
@@ -48,6 +62,6 @@ export function dateProvenance(row, date = youtubeDate(row)) {
   if (!/^[A-Za-z0-9_-]{11}$/.test(youtubeId || '')) return null;
   const source = expected === 'upload'
     ? youtubeUploadDate(row.upload_date) ? 'yt-dlp.upload_date' : 'manifest.youtubeUploadDate'
-    : row.youtubePublishedAt ? 'manifest.youtubePublishedAt' : 'yt-dlp.timestamp';
+    : youtubeDate({youtubePublishedAt:row.youtubePublishedAt}).youtubeAt ? 'manifest.youtubePublishedAt' : 'yt-dlp.timestamp';
   return {source, kind:expected, youtubeId};
 }

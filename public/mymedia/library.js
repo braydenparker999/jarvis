@@ -78,7 +78,7 @@ export function createVideoApi(key, fetcher = fetch) {
     const info = await get('/' + root, {fields:'id,name,mimeType'}, signal);
     if (info.mimeType !== FOLDER) throw Error('The configured video folder is not a folder.');
     const queue = [{id:root, path:info.name}], visited = new Set(), videos = [];
-    let metadataFiles=[];
+    const metadataFiles=[];
     while (queue.length) {
       if (visited.size >= 500) throw Error('This folder has too many subfolders.');
       const current = queue.shift();
@@ -94,20 +94,24 @@ export function createVideoApi(key, fetcher = fetch) {
         for (const f of page.files) {
           if (!ID.test(f.id || '') || typeof f.name !== 'string') continue;
           if (f.mimeType === FOLDER) queue.push({id:f.id, path:current.path + '/' + f.name});
-          else if (f.capabilities?.canDownload !== false) files.push(f);
+          else {
+            // Existence and ambiguity must include manifests that cannot be downloaded.
+            if(current.id===root&&f.name==='jarvis-video-metadata.json')metadataFiles.push(f);
+            if(f.capabilities?.canDownload!==false)files.push(f);
+          }
         }
         token = page.nextPageToken || '';
         if (token && seen.has(token)) throw Error('Drive pagination repeated.');
         seen.add(token);
       } while (token);
-      if(current.id===root)metadataFiles=files.filter(f=>f.name==='jarvis-video-metadata.json');
       const others = files.filter(f => !VIDEO.test(f.name));
       for (const f of files) if (VIDEO.test(f.name)) videos.push(toVideo(f, current.path, others));
       if (videos.length > 20000) throw Error('Choose a folder with fewer than 20,000 videos.');
     }
     let enriched=videos,metadataStatus=metadataFiles.length>1?'ambiguous':'missing';
     const metadataFile=metadataFiles.length===1?metadataFiles[0]:null;
-    if(metadataFile){
+    if(metadataFile?.capabilities?.canDownload===false)metadataStatus='unavailable';
+    else if(metadataFile){
       metadataStatus='invalid';
       if(Number(metadataFile.size||0)<2000000){try{
         const manifest=await get('/'+metadataFile.id,{alt:'media'},signal);

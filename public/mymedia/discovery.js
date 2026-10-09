@@ -29,11 +29,14 @@ export function enrichVideos(videos,manifest){
   const index=indexMetadata(Array.isArray(manifest?.videos)?manifest.videos.slice(0,20000):[]);
   return videos.map(v=>{const {row}=matchMetadata(v,index);if(!row)return v;
     const incoming=youtubeDate(row),date=incoming.youtubeAt?incoming:savedYouTubeDate(v);
-    const provenance=incoming.youtubeAt?dateProvenance({...row,youtubeId:v.youtubeId||row.youtubeId},date):v.youtubeDateProvenance;
+    const provenance=incoming.youtubeAt?dateProvenance({...row,youtubeId:v.youtubeId||row.youtubeId},date):dateProvenance(v,date);
     return {...v,
     ...(typeof row.creator==='string'?{creator:row.creator.slice(0,160)}:{}),
     ...(typeof row.description==='string'?{description:row.description.slice(0,2000)}:{}),
     ...(Array.isArray(row.topics)?{topics:row.topics.filter(x=>typeof x==='string').slice(0,12).map(x=>x.slice(0,80))}:{}),
     addedAt:Number.isFinite(row.addedAt)&&row.addedAt>0?row.addedAt:v.addedAt||0,
+    ...(incoming.youtubeAt?(incoming.youtubeDateKind==='upload'
+      ?{youtubeUploadDate:new Date(incoming.youtubeAt).toISOString().slice(0,10)}
+      :{youtubePublishedAt:new Date(incoming.youtubeAt).toISOString()}):{}),
     ...date,youtubeDateProvenance:provenance||null};});
 }
