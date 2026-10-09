@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createConversationFixture, SITE, WORKER, OWNER_KEY} from './helpers/relay-conversation-browser-fixture.js';
+import {createConversationFixture, deferred, SITE, WORKER, OWNER_KEY} from './helpers/relay-conversation-browser-fixture.js';
 import {createRelayOwnerApi} from '../public/assets/relay-owner-api.js';
 import {createRelayOwnerController, ownerWorkStatus, ownerWorkAttention, ownerWorkActivity, ownerWorkPreview, groupOwnerWork} from '../public/assets/relay-owner-ui.js';
 import {relayOwnerJobTools} from '../backend/relay-owner-job-tools.js';
@@ -83,6 +83,39 @@ test('lost accepted response retries the original labels and UUID while retainin
   const controller=createRelayOwnerController({api:f.api,draftStore:{read:()=>'',save:()=>true}});await controller.refresh();controller.setJobMode(true);controller.setJobTitle('Fictional design task');controller.setJobKind('draft');controller.setJobProject('Fictional garden');controller.setJobGoal('Original goal');controller.setDraft('Fictional private draft');await controller.send();assert.equal(controller.snapshot().sendUnconfirmed,true);
   const first=JSON.parse(f.calls.find(c=>c.path==='/relay/owner/jobs'&&c.options.method==='POST').options.body);controller.setJobGoal('Edited goal');await controller.send();assert.equal(f.calls.filter(c=>c.path==='/relay/owner/jobs'&&c.options.method==='POST').length,1);
   await controller.retryUnconfirmed();const writes=f.calls.filter(c=>c.path==='/relay/owner/jobs'&&c.options.method==='POST').map(c=>JSON.parse(c.options.body));assert.deepEqual(writes[1],first);assert.equal(controller.snapshot().jobGoal,'Edited goal');assert.equal(controller.snapshot().draft,'Fictional private draft');assert.equal(f.h.rows('SELECT COUNT(*) AS n FROM relay_owner_jobs')[0].n,1);
+});
+
+test('project and goal shortcuts prefill the existing editable composer without requests or submission',async t=>{
+  const f=await fixture(t),original=await f.create({project_title:'Fictional garden',goal_title:'Plan the path'});
+  const c=createRelayOwnerController({api:f.api,draftStore:{read:()=>'',save:()=>true}});await c.refresh();c.toggleRequests();c.setQuery('fictional garden');c.setWorkFilter('queued');c.setJobKind('draft');
+  const before=f.calls.length,jobs=c.snapshot().jobs;
+  assert.equal(c.beginTask({projectTitle:'Fictional garden'}),true);assert.equal(c.snapshot().jobGoal,'');c.setJobProject('');
+  assert.equal(c.beginTask({projectTitle:' Fictional garden ',goalTitle:' Plan the path '}),true);
+  const state=c.snapshot();assert.equal(state.jobMode,true);assert.equal(state.jobProject,'Fictional garden');assert.equal(state.jobGoal,'Plan the path');assert.equal(state.jobTitle,'');assert.equal(state.draft,'');assert.equal(state.jobKind,'draft');
+  assert.equal(state.requestsOnly,true);assert.equal(state.query,'fictional garden');assert.equal(state.workFilter,'queued');assert.deepEqual(state.jobs,jobs);assert.equal(f.calls.length,before,'Opening either shortcut creates no read, preflight or write');
+  c.setJobProject('Fictional revised project');c.setJobGoal('Fictional revised goal');c.setJobTitle('Fictional new task');c.setDraft('Fictional explicit task submission');await c.send();
+  const writes=f.calls.filter(call=>call.path==='/relay/owner/jobs'&&call.options.method==='POST');assert.equal(writes.length,1);
+  const payload=JSON.parse(writes[0].options.body);assert.equal(payload.project_title,'Fictional revised project');assert.equal(payload.goal_title,'Fictional revised goal');assert.equal(payload.action_kind,'draft');assert.equal(payload.title,'Fictional new task');
+  const saved=c.snapshot().jobs.find(job=>job.id!==original.job.id);assert.equal(saved.stage,'queued');assert.equal(saved.completion,null);assert.equal(saved.result,null);assert.equal(c.snapshot().sendNotice,'Work request saved');assert.equal(c.snapshot().jobProject,'');assert.equal(c.snapshot().jobGoal,'');
+});
+
+test('task shortcuts preserve drafts, partial titles, public boundaries and invalid-label state',async t=>{
+  const f=await fixture(t),c=createRelayOwnerController({api:f.api,draftStore:{read:()=>'',save:()=>true}});await c.refresh();c.setJobKind('read_only');
+  const before=f.calls.length;c.setDraft('Fictional unsent message');assert.equal(c.beginTask({projectTitle:'Fictional garden',goalTitle:'A new goal'}),false);assert.equal(c.snapshot().draft,'Fictional unsent message');assert.equal(c.snapshot().jobMode,false);assert.equal(c.snapshot().jobProject,'');assert.equal(c.snapshot().jobKind,'read_only');
+  c.setDraft('');c.setJobTitle('Fictional partial task');assert.equal(c.beginTask({projectTitle:'Fictional garden'}),false);assert.equal(c.snapshot().jobTitle,'Fictional partial task');assert.equal(c.snapshot().jobProject,'');c.setJobTitle('');
+  for(const labels of [{projectTitle:'',goalTitle:'Orphan'},{projectTitle:'bad\nlabel'},{projectTitle:'x'.repeat(121)},{projectTitle:17},{projectTitle:'Good',goalTitle:null}])assert.equal(c.beginTask(labels),false);
+  c.showPublic();assert.equal(c.beginTask({projectTitle:'Fictional garden'}),false);assert.equal(c.snapshot().jobProject,'');assert.equal(f.calls.length,before);c.showOwner();assert.equal(c.beginTask({projectTitle:'Fictional garden'}),true);assert.equal(c.snapshot().jobKind,'read_only');
+});
+
+test('in-flight and uncertain task sends cannot be replaced even after composer text is erased',async t=>{
+  const arrived=deferred(),release=deferred();let lose=true;
+  const f=await fixture(t,async(request,response)=>{if(request.path==='/relay/owner/jobs'&&request.options.method==='POST'&&lose){arrived.resolve();await release.promise;lose=false;throw Error('Fictional accepted response lost');}return response;});
+  const c=createRelayOwnerController({api:f.api,draftStore:{read:()=>'',save:()=>true}});await c.refresh();c.setJobKind('draft');assert.equal(c.beginTask({projectTitle:'Fictional original project',goalTitle:'Fictional original goal'}),true);c.setJobTitle('Fictional original task');c.setDraft('Fictional original body');
+  const sending=c.send();await arrived.promise;const inFlight=c.snapshot();assert.equal(inFlight.sending,true);assert.equal(c.beginTask({projectTitle:'Fictional replacement project'}),false);assert.equal(c.snapshot().jobProject,inFlight.jobProject);assert.equal(c.snapshot().draft,inFlight.draft);release.resolve();await sending;
+  assert.equal(c.snapshot().sendUnconfirmed,true);const first=JSON.parse(f.calls.find(call=>call.path==='/relay/owner/jobs'&&call.options.method==='POST').options.body);
+  c.setDraft('');c.setJobTitle('');c.setJobProject('');c.setJobGoal('');c.setJobMode(false);await c.refresh();assert.equal(c.snapshot().error,'');const before=f.calls.length;
+  assert.equal(c.beginTask({projectTitle:'Fictional replacement project',goalTitle:'Fictional replacement goal'}),false);assert.equal(c.snapshot().jobProject,'');assert.equal(c.snapshot().jobGoal,'');assert.equal(c.snapshot().jobMode,false);assert.equal(c.snapshot().sendUnconfirmed,true);assert.match(c.snapshot().sendNotice,/Resolve your unconfirmed send/);assert.equal(f.calls.length,before);
+  await c.retryUnconfirmed();const writes=f.calls.filter(call=>call.path==='/relay/owner/jobs'&&call.options.method==='POST').map(call=>JSON.parse(call.options.body));assert.equal(writes.length,2);assert.deepEqual(writes[1],first);assert.equal(f.h.rows('SELECT COUNT(*) AS n FROM relay_owner_jobs')[0].n,1);assert.equal(c.snapshot().draft,'');assert.equal(c.beginTask({projectTitle:'Fictional replacement project'}),true,'Only resolving the original send permits new prefills');
 });
 
 
