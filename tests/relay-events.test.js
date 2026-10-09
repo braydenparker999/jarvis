@@ -119,7 +119,8 @@ test('filter matching uses full message text; unmatched events are never deliver
   await s.add('Does not match'); const match = await s.add('x'.repeat(300) + ' IMPORTANT');
   await drainRelayOutbox(s.ctx, s.env, r.fetcher); assert.equal(r.calls.length, 2); assert.equal(JSON.parse(r.calls.at(-1).body).data.message_id, match.id);
 });
-test('retry preserves event ID/body, refresh does not skip pending cursor, and accepted 204 stops retry', async () => {
+test('retry preserves event ID/body, refresh does not skip pending cursor, and accepted 204 stops retry', async tc => {
+  const fixedNow = Date.now(); tc.mock.method(Date, 'now', () => fixedNow);
   const s = setup(), auth = await grant(s), key = secret(), r = receiver(key, [503, 204]), p = params(key), t = Date.now();
   await relaySubscribe(s.ctx, auth, p, s.env, r.fetcher, t); await s.add(); await drainRelayOutbox(s.ctx, s.env, r.fetcher, t + 50);
   const first = r.calls.at(-1); assert.equal(s.rows('SELECT attempts FROM relay_outbox')[0].attempts, 1);
