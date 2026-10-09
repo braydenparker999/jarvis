@@ -55,7 +55,7 @@ replacement reported by another tab clear the private draft and history.
 Successful explicit sending clears the draft. Closing the tab ends ordinary
 tab storage; browser session restoration behavior is browser-controlled.
 
-## Security decisions reserved for the parent
+## Security decisions requiring separate approval
 
 Remembered owner bearers still use localStorage on the shared origin. Any
 script executing in that origin can access them. Removing Podcasts JSONP
@@ -72,7 +72,7 @@ revocation, with separate fresh owner administration for device enumeration,
 other-device revocation, pairing approval and credential management. It is
 absent from both deployed dependency graphs and cannot authorize anything.
 
-The parent must separately clear the concrete owner-origin/storage migration,
+The project owner must separately approve the concrete owner-origin/storage migration,
 any CSP restriction (including removal of the now-unused Apple script source),
 and any device administration/step-up policy change before runtime enforcement.
 Session durations and existing grants must not change as a side effect. Decide
@@ -85,8 +85,9 @@ or authorize retrying consequential work.
 The core owner integrates the narrow `public/assets/app.js` transfer hunks;
 polling, jobs and event logic belong to that owner. No Poweramp/Astra files or
 CSS are changed. MissionaryTube main still pins an earlier source; release
-pinning and promotion belong to the parent after integration and its required
-qualification. This branch does not independently merge, publish or deploy.
+pinning and promotion require separate approval after integration and the required
+qualification. Draft source PRs provide code for review; merging and deployment
+are separate release actions.
 
 Run the targeted transfer/provider suites, the existing owner isolation
 journeys, the complete repository tests and a Worker bundle. The local
