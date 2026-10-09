@@ -7,6 +7,7 @@ import {build} from 'esbuild';
 import {chromium} from 'playwright-core';
 import {Miniflare, convertV4MiniflareOptions, Response as FixtureResponse} from 'miniflare';
 import {RELAY_CALLBACK, RELAY_EVENT, RELAY_INBOX, RELAY_OAUTH_OBJECT, RELAY_SCOPES, RELAY_VERSION} from '../backend/relay-common.js';
+import {COMMENTS_URL} from '../backend/publications.js';
 
 const ISSUER = 'https://relay.example.test';
 const CHATGPT = 'https://chatgpt.com';
@@ -58,6 +59,11 @@ test('Relay OAuth navigation uses browser-generated origins and real workerd SQL
         assert.equal(request.headers.get('Authorization'), 'Bearer fixture-upstream-token-never-persist');
         outbound.push('github-identity');
         return FixtureResponse.json({id: 183016859, login: 'fixture-owner'});
+      }
+      if (url.origin + url.pathname === COMMENTS_URL && request.method === 'GET') {
+        assert.equal(request.headers.get('Authorization'), null);
+        assert.equal(request.headers.get('Cookie'), null);
+        return FixtureResponse.json([]);
       }
       unexpectedOutbound.push(url.origin + url.pathname);
       throw Error('Blocked unrecognized Worker outbound fixture request');

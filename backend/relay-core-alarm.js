@@ -36,6 +36,11 @@ function nextReserved(ctx) {
 export function releaseRelayCoreWake(ctx, id) {
   if (id) ctx.storage.sql.exec('DELETE FROM relay_core_alarm_wakes WHERE id=?',id);
 }
+export function assertRelayCoreWake(ctx, id, now=Date.now()) {
+  if (!id) return;
+  const wake=rows(ctx,'SELECT expires_ms FROM relay_core_alarm_wakes WHERE id=?',id)[0];
+  if (!wake || wake.expires_ms<=now) throw Error('Relay alarm admission expired');
+}
 async function reserve(ctx, now, delay, ignoreElapsed) {
   if (!ctx.storage.setAlarm) return null;
   wakeSchema(ctx);
@@ -52,6 +57,7 @@ async function reserve(ctx, now, delay, ignoreElapsed) {
       // when another reservation already owns the same earlier timestamp.
       await ctx.storage.setAlarm(Math.max(now+50,Math.min(...times)));
     });
+    assertRelayCoreWake(ctx,id);
     return id;
   } catch(error) { releaseRelayCoreWake(ctx,id); throw error; }
 }

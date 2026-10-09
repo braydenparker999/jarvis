@@ -204,6 +204,42 @@ test('actual worker precommit wake survives a fired alarm, late message commit, 
   assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_events WHERE message_id=?',requestId)[0].n,1);
 });
 
+test('a body held beyond admission expiry fails before message or hint mutation and a stable-ID retry re-admits once',async t=>{
+  let hintEgress=0;t.mock.method(globalThis,'fetch',async()=>{hintEgress++;throw Error('Expired fictional hint must not fetch');});
+  for(const path of ['/shared/messages','/shared/import-hint']){
+    const f=fixture(t),requestId=uuid(),entered=deferred(),set=f.ctx.storage.setAlarm;let controller,hold=true;
+    publicationSchema(f.ctx);
+    f.ctx.storage.setAlarm=async value=>{await set(value);entered.resolve();};
+    const payload=path==='/shared/messages'?{id:requestId,body:'Fictional expired admission'}:{commentId:42};
+    const encoded=JSON.stringify(payload),body=new ReadableStream({start(value){controller=value;value.enqueue(new TextEncoder().encode(encoded.slice(0,-1)));}});
+    const fetch=f.hub.fetch.bind(f.hub);
+    t.mock.method(f.hub,'fetch',request=>{
+      if(hold&&new URL(request.url).pathname.startsWith('/internal/shared/')){
+        hold=false;return fetch(new Request(request,{body,duplex:'half'}));
+      }
+      return fetch(request);
+    });
+    const saving=f.request(path,{method:'POST',headers:{'Content-Type':'application/json'},body:encoded});
+    await entered.promise;f.clock.now=await f.ctx.storage.getAlarm();await f.hub.alarm();
+    f.clock.now=await f.ctx.storage.getAlarm();await f.hub.alarm();
+    assert.equal(await f.ctx.storage.getAlarm(),null,'Abandoned admission expires without renewing an empty wake');
+    controller.enqueue(new TextEncoder().encode('}'));controller.close();
+    assert.equal((await saving).status,503);
+    assert.equal(f.rows('SELECT COUNT(*) AS n FROM shared_entries')[0].n,0);
+    assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_events')[0].n,0);
+    assert.equal(f.rows('SELECT COUNT(*) AS n FROM imported_comments')[0].n,0);
+    assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')[0].n,0);
+    assert.equal(f.calls.length,0);assert.equal(hintEgress,0,'Expired hint admission is rejected before importer fetch');
+    if(path==='/shared/messages'){
+      assert.equal((await f.request(path,{method:'POST',headers:{'Content-Type':'application/json'},body:encoded})).status,201);
+      assert.equal((await f.request(path,{method:'POST',headers:{'Content-Type':'application/json'},body:encoded})).status,200);
+      assert.equal(f.rows('SELECT COUNT(*) AS n FROM shared_entries WHERE id=?',requestId)[0].n,1);
+      assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_events WHERE message_id=?',requestId)[0].n,1);
+      assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')[0].n,0);
+    }
+  }
+});
+
 test('authenticated private conversation exposes only transport route diagnostics in the existing lifecycle block',async t=>{
   const f=fixture(t),auth=await grant(f,RELAY_OWNER_SCOPE),messageId=uuid(),body='Fictional private route body';
   relayOwnerSchema(f.ctx);

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {createRelayFixture} from './relay-fixture.js';
 import {relayOAuthStore} from '../backend/relay-oauth.js';
 import {relayRpc} from '../backend/relay-connector.js';
+import {relayEventSchema} from '../backend/relay-events.js';
 import {sharedStore, SHARED_OBJECT} from '../backend/shared.js';
 import {RELAY_CALLBACK, RELAY_OWNER, RELAY_SCOPES, RELAY_EVENT, RELAY_OWNER_EVENT, RELAY_VERSION, random, hash, challenge} from '../backend/relay-common.js';
 
@@ -95,6 +96,7 @@ test('forged scope claims and mismatched token/grant capabilities cannot widen o
 
 test('authorized event status contains only static scope/event status and rejects arbitrary arguments', async t => {
   const s = fixture(t), auth = await grant(s, RELAY_SCOPES.join(' '));
+  relayEventSchema(s.ctx);
   await s.rpc(auth, 'tools/list');
   const before = s.rows('SELECT * FROM relay_oauth');
   const result = (await s.rpc(auth, 'tools/call', {name: TOOL, arguments: {}})).result;

@@ -9,7 +9,7 @@ import {podcasts} from './podcasts.js';
 import {relayConnector,relayRpc} from './relay-connector.js';
 import {relayOAuthStore} from './relay-oauth.js';
 import {drainRelayOutbox,scheduleRelayAlarm,enqueueRelayOwnerMessage,webhookTransport} from './relay-events.js';
-import {reserveRelayCoreWake,releaseRelayCoreWake,beginRelayCoreAlarm} from './relay-core-alarm.js';
+import {reserveRelayCoreWake,releaseRelayCoreWake,assertRelayCoreWake,beginRelayCoreAlarm} from './relay-core-alarm.js';
 import {relayOwnerPublic,relayOwnerStore} from './relay-owner.js';
 import {RelayError,boundedText} from './relay-common.js';
 const paths = new Set(['/v1/state', '/v1/messages', '/v1/board', '/v1/responder/connect', '/v1/responder/revoke', '/v1/agent/inbox', '/v1/agent/replies', '/v1/agent/board']);
@@ -116,7 +116,7 @@ export class Hub {
   }
   async withCoreWake(operation){
     const wake=await reserveRelayCoreWake(this.ctx);
-    try{return await operation();}
+    try{return await operation(wake);}
     finally{
       releaseRelayCoreWake(this.ctx,wake);
       // A committed save keeps its receipt even if this fine-grained setter
@@ -171,8 +171,9 @@ export class Hub {
         return json({ok:true});
       }
       if(path==='/internal/shared/import-hint'){
-        return this.withCoreWake(async()=>{
-          const response=await importPublicationHint(this.ctx,await request.json());
+        return this.withCoreWake(async wake=>{
+          const data=await request.json();assertRelayCoreWake(this.ctx,wake);
+          const response=await importPublicationHint(this.ctx,data);
           if(response.status!==400)seedPublicationReconciliation(this.ctx,Date.now(),this.env);
           return response;
         });
@@ -180,8 +181,9 @@ export class Hub {
       // Persist the wake before committing a new message/event, so a crash after
       // commit cannot strand its outbox. SQLite and normal Durable Object storage
       // share the same object; old imported rows never become live events.
-      if(path==='/internal/shared/message')return this.withCoreWake(async()=>{
-        const response=sharedStore(this.ctx,path,await request.json());
+      if(path==='/internal/shared/message')return this.withCoreWake(async wake=>{
+        const data=await request.json();assertRelayCoreWake(this.ctx,wake);
+        const response=sharedStore(this.ctx,path,data);
         if(response.ok)seedPublicationReconciliation(this.ctx,Date.now(),this.env,{initialAlarmDelay:300000});
         return response;
       });
