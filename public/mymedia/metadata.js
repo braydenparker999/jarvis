@@ -10,7 +10,7 @@ export function youtubeUploadDate(value) {
 }
 
 export function youtubeDate(row = {}) {
-  const upload = youtubeUploadDate(row.upload_date || row.youtubeUploadDate);
+  const upload = youtubeUploadDate(row.upload_date) || youtubeUploadDate(row.youtubeUploadDate);
   if (upload) return {youtubeAt:upload, youtubeDateKind:'upload'};
   // timestamp means the video became available; epoch is extraction time.
   const stamp = Number(row.timestamp) * 1000;
@@ -26,4 +26,42 @@ export function savedYouTubeDate(video) {
   return Number.isFinite(video.youtubeAt) && video.youtubeAt >= Date.UTC(2005, 0, 1) && video.youtubeAt < Date.UTC(2200, 0, 1) &&
     ['upload','published'].includes(video.youtubeDateKind)
     ? {youtubeAt:video.youtubeAt, youtubeDateKind:video.youtubeDateKind} : {youtubeAt:0, youtubeDateKind:''};
+}
+
+// Provenance describes the date field, never extraction time or Drive creation.
+export function dateProvenance(row, date = youtubeDate(row)) {
+  if (!savedYouTubeDate(date).youtubeAt) return null;
+  const actual = youtubeDate(row);
+  // Cached timestamps alone cannot identify a source. Evidence must agree with the retained date.
+  if (actual.youtubeAt !== date.youtubeAt || actual.youtubeDateKind !== date.youtubeDateKind) return null;
+  const expected = date.youtubeDateKind;
+  const sources = expected === 'upload'
+    ? ['yt-dlp.upload_date', 'manifest.youtubeUploadDate', 'archive.yt-dlp.upload_date']
+    : ['yt-dlp.timestamp', 'manifest.youtubePublishedAt'];
+  const raw = row.youtubeDateProvenance;
+  if (raw !== undefined) {
+    if (!raw || raw.kind !== expected || !sources.includes(raw.source) ||
+        !/^[A-Za-z0-9_-]{11}$/.test(raw.youtubeId || '') ||
+        row.youtubeId && raw.youtubeId !== row.youtubeId) return null;
+    // Prepared sidecars normalize their date fields; an explicit raw field still takes precedence.
+    const evidence = {
+      'yt-dlp.upload_date': {upload_date:row.upload_date !== undefined ? row.upload_date : row.youtubeUploadDate},
+      'manifest.youtubeUploadDate': {youtubeUploadDate:row.youtubeUploadDate},
+      'archive.yt-dlp.upload_date': {youtubeUploadDate:row.youtubeUploadDate},
+      'yt-dlp.timestamp': row.timestamp !== undefined ? {timestamp:row.timestamp} : {youtubePublishedAt:row.youtubePublishedAt},
+      'manifest.youtubePublishedAt': {youtubePublishedAt:row.youtubePublishedAt}
+    };
+    const claimed = youtubeDate(evidence[raw.source]);
+    if (claimed.youtubeAt !== date.youtubeAt || claimed.youtubeDateKind !== expected) return null;
+    return {source:raw.source, kind:expected, youtubeId:raw.youtubeId,
+      ...(/^[a-f0-9]{64}$/.test(raw.evidenceSha256 || '') ? {evidenceSha256:raw.evidenceSha256} : {}),
+      ...(typeof raw.observedAt === 'string' && youtubeDate({youtubePublishedAt:raw.observedAt}).youtubeAt
+        ? {observedAt:raw.observedAt} : {})};
+  }
+  const youtubeId = row.youtubeId || row.id;
+  if (!/^[A-Za-z0-9_-]{11}$/.test(youtubeId || '')) return null;
+  const source = expected === 'upload'
+    ? youtubeUploadDate(row.upload_date) ? 'yt-dlp.upload_date' : 'manifest.youtubeUploadDate'
+    : youtubeDate({youtubePublishedAt:row.youtubePublishedAt}).youtubeAt ? 'manifest.youtubePublishedAt' : 'yt-dlp.timestamp';
+  return {source, kind:expected, youtubeId};
 }
