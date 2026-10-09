@@ -15,10 +15,10 @@ import {relayEventSchema,relaySubscribe,relayUnsubscribe,drainRelayOutbox,relayN
 const fixtureId=n=>'00000000-0000-4000-8000-'+String(n).padStart(12,'0');
 const fixtureSecret='whsec_'+Buffer.alloc(32,29).toString('base64');
 const status=code=>async()=>new Response([204,205].includes(code)?null:'',{status:code});
-async function setup(t){
+async function setup(t,{ownerOnly=false}={}){
   const fixture=createRelayFixture({env:{RELAY_OWNER_ENABLED:'true'}});t.after(()=>fixture.close());
   const ctx=fixture.object(SHARED_OBJECT).ctx,sql=ctx.storage.sql;
-  sharedSchema(ctx);relayEventSchema(ctx);
+  if(!ownerOnly)sharedSchema(ctx);relayEventSchema(ctx);
   const now=Date.now(),grantId='fictional-event-delivery-grant';
   const grant={principal:RELAY_OWNER,resource:fixture.env.RELAY_MCP_ORIGIN+'/relay/mcp',scope:'relay:events '+RELAY_OWNER_SCOPE,revoked:false};
   await relayOAuthStore(ctx,{op:'get',key:'fictional-missing'}).json();
@@ -44,6 +44,37 @@ async function setup(t){
   const examined=id=>rows('SELECT examined_seq FROM relay_subscription_scans WHERE subscription_id=?',id)[0]?.examined_seq;
   return {...fixture,ctx,sql,rows,now,auth,parameters,subscribe,seed,ack,examined};
 }
+
+test('fresh owner-only subscription initializes an empty shared journal only after validation and replays private events',async t=>{
+  const s=await setup(t,{ownerOnly:true}),messageId=s.seed(1,RELAY_OWNER_EVENT,'Fictional sensitive private replay text');
+  const publicTables=()=>s.rows("SELECT name FROM sqlite_master WHERE name IN ('shared_entries','shared_meta','public_changes')");
+  assert.deepEqual(publicTables(),[]);
+  const p=s.parameters();
+  await assert.rejects(()=>s.subscribe({...p,arguments:{...p.arguments,extra:'Fictional invalid argument'}}),error=>error.code===-32602);
+  assert.deepEqual(publicTables(),[],'Invalid arguments cannot initialize the public journal');
+  await assert.rejects(()=>relaySubscribe(s.ctx,{...s.auth,scopes:['relay:events']},p,s.env,status(204),s.now),error=>error.code===-32012);
+  assert.deepEqual(publicTables(),[],'Missing owner scope cannot initialize the public journal');
+  const grant=s.rows('SELECT value FROM relay_oauth WHERE key=?','grant:'+s.auth.grantId)[0].value;
+  s.sql.exec('UPDATE relay_oauth SET value=? WHERE key=?',JSON.stringify({...JSON.parse(grant),revoked:true}),'grant:'+s.auth.grantId);
+  await assert.rejects(()=>s.subscribe(p),error=>error.code===-32012);assert.deepEqual(publicTables(),[],'A revoked grant cannot initialize the public journal');
+  s.sql.exec('UPDATE relay_oauth SET value=? WHERE key=?',grant,'grant:'+s.auth.grantId);
+  const stop={name:p.name,arguments:p.arguments,delivery:{mode:p.delivery.mode,url:p.delivery.url}};
+  await relayUnsubscribe(s.ctx,s.auth,stop,s.now,s.env);assert.deepEqual(publicTables(),[],'Unsubscribe performs no public journal initialization');
+  await assert.rejects(()=>relaySubscribe(s.ctx,s.auth,p,s.env,status(204),s.now),error=>error.code===-32015);
+  assert.deepEqual(publicTables(),[],'Callback verification failure cannot initialize the public journal');
+  await assert.rejects(()=>relaySubscribe(s.ctx,s.auth,p,s.env,async(_url,options)=>{
+    await relayUnsubscribe(s.ctx,s.auth,stop,s.now,s.env);return Response.json({challenge:JSON.parse(options.body).challenge});
+  },s.now),error=>error.code===-32012);
+  assert.deepEqual(publicTables(),[],'Canceled activation cannot initialize the public journal');
+  const event=s.rows('SELECT * FROM relay_events')[0],privateBody=s.rows('SELECT * FROM relay_owner_event_bodies')[0],sub=await s.subscribe(p);
+  assert.equal(s.rows("SELECT name FROM sqlite_master WHERE name='shared_entries'").length,1);
+  assert.equal(s.rows('SELECT COUNT(*) AS n FROM shared_entries')[0].n,0,'Schema initialization imports or publishes no content');
+  assert.deepEqual(s.rows('SELECT * FROM relay_events')[0],event);assert.deepEqual(s.rows('SELECT * FROM relay_owner_event_bodies')[0],privateBody);
+  assert.deepEqual(s.rows('SELECT event_seq,status FROM relay_outbox').map(({event_seq,status})=>({event_seq,status})),[{event_seq:1,status:'pending'}]);
+  const received=[];await drainRelayOutbox(s.ctx,s.env,async(_url,options)=>{received.push(JSON.parse(options.body));return new Response(null,{status:204});},s.now+50);
+  assert.equal(received[0].data.message_id,messageId);assert.equal(received[0].name,RELAY_OWNER_EVENT);assert.equal(received[0].data.author_authenticated,true);
+  assert.equal(s.ack(sub.id),1);assert.equal(s.rows('SELECT COUNT(*) AS n FROM shared_entries')[0].n,0);
+});
 
 test('mixed retained kinds use bounded SQL pages and an older replay match precedes a later live occurrence',async t=>{
   const s=await setup(t),calls=[];

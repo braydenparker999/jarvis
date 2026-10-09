@@ -3,6 +3,7 @@ import {RELAY_OWNER, RELAY_INBOX, RELAY_EVENT, RELAY_OWNER_SCOPE, RELAY_OWNER_IN
 import {relayGrantActiveInStore,relayTokenActiveInStore} from './relay-oauth.js';
 import {PUBLIC_RESULT_EVENT} from './public-coordination-tools.js';
 import {reserveRelayCoreWake,releaseRelayCoreWake,scheduleRelayCoreAlarm} from './relay-core-alarm.js';
+import {sharedSchema} from './shared.js';
 export const EVENT_RETENTION_MS = 30 * 86400000;
 const DEFAULT_TTL = 86400000;
 const VERIFY_TTL = 300000;
@@ -292,6 +293,11 @@ export async function relaySubscribe(ctx, principal, p, env, fetcher = webhookTr
   // Verification awaits external I/O. Recheck revocation before activating storage.
   if (!relayGrantActiveInStore(ctx,env,principal.grantId,requiredScope)) throw new RelayError(-32012, 'Connection revoked');
   if(principal.accessHash&&!relayTokenActiveInStore(ctx,env,principal,requiredScope))throw new RelayError(-32012,'Connection rotated or revoked');
+  if(!rows(ctx,'SELECT id FROM relay_activations WHERE id=? AND revision=? AND expires_ms>?',id,revision,Math.max(now,Date.now())).length)throw new RelayError(-32012,'Subscription activation canceled or superseded');
+  // Owner-only objects need the public side of the replay join, even when it
+  // is empty. Initialize schema only after validated live authorization and
+  // callback verification, without importing history or copying private data.
+  sharedSchema(ctx);
   // Persist a wake before the activation/replay transaction. Alarm I/O is an
   // await boundary, so validate the same live token/grant again inside it.
   wake=await reserveRelayCoreWake(ctx,Math.max(now,Date.now()));
