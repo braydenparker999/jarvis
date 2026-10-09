@@ -7,6 +7,9 @@ import {join,resolve,extname} from 'node:path';
 import {chromium} from 'playwright-core';
 import {API_ORIGIN} from '../public/assets/config.js';
 import {MUSE_PREFIX} from '../public/assets/channels.js';
+import {STORAGE_KEY as QUICK_AI_KEY} from '../public/assets/quick-ai-core.js';
+import {RELAY_TRANSFER_KEY,LEGACY_TRANSFER_KEY,quickAITransfer} from '../public/assets/relay-transfer.js';
+import {OWNER_DRAFT_KEY} from '../public/assets/relay-draft-store.js';
 const chrome=process.env.JARVIS_CHROME;
 const publicRoot=resolve('public');
 const policy=JSON.parse(await readFile(join(publicRoot,'staticwebapp.config.json'),'utf8'));
@@ -23,10 +26,12 @@ test('redesigned modules: mobile flows, retained state, safe text and notation p
  await new Promise(done=>server.listen(0,'127.0.0.1',done));const origin='http://127.0.0.1:'+server.address().port;
  const browser=await chromium.launch({executablePath:chrome,headless:true,args:['--no-sandbox']});
  async function session(width=390){
-  const context=await browser.newContext({viewport:{width,height:844},isMobile:width<600,hasTouch:true}),page=await context.newPage(),errors=[];
+  const context=await browser.newContext({viewport:{width,height:844},isMobile:width<600,hasTouch:true}),page=await context.newPage(),errors=[],requests=[],navigations=[];
+  page.on('framenavigated',frame=>{if(frame===page.mainFrame())navigations.push(frame.url());});
   page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(m.type()==='error'&&m.text().includes('Content Security Policy'))errors.push(m.text());});let inbox=[...relayMessages,{id:'muse-one',role:'user',body:MUSE_PREFIX+'Please find a new album.',createdAt:stamp},{id:'muse-two',role:'assistant',kind:'reply',replyTo:'muse-one',body:'## Your music is ready\nOpen [Poweramp]('+origin+'/drawercast/).',createdAt:stamp}];
   await context.route('**/*',async route=>{
    const r=route.request(),url=new URL(r.url()),json=data=>route.fulfill({contentType:'application/json',body:JSON.stringify(data)});
+   requests.push({url:url.href,path:url.pathname,method:r.method(),body:r.postData()});
    if(url.origin===origin){if(url.pathname==='/assets/quick-ai-config.json')return json({version:3,geminiKey:'test-gemini',groqKey:'test-groq',tavilyKey:'test-search'});if(url.pathname==='/assets/drive-config.json')return json({apiKey:'AIza'+'x'.repeat(35),videoFolderId:'folder123456789'});return route.continue();}
    if(url.origin===API_ORIGIN){if(url.pathname==='/shared/state')return json({mode:'github-publications',messages:inbox,posts:[],publisher:{ok:true},nextCursor:null});if(url.pathname==='/shared/messages'){const m=r.postDataJSON();inbox.push({...m,role:'user',createdAt:stamp});return json({ok:true});}if(url.pathname==='/guitar/search')return json({results:[guitarSong]});if(url.pathname==='/guitar/songs/1')return json({song:guitarSong});if(url.pathname==='/guitar/songs/1/score')return json(score);}
    if(url.host==='www.googleapis.com'){
@@ -39,7 +44,7 @@ test('redesigned modules: mobile flows, retained state, safe text and notation p
    if(url.host==='generativelanguage.googleapis.com')return route.fulfill({contentType:'text/event-stream',body:'data: '+JSON.stringify({candidates:[{content:{parts:[{text:'## A clear answer\nHere is **useful information**.\n\n- First point\n- Second point'}]},finishReason:'STOP'}],usageMetadata:{promptTokenCount:15,candidatesTokenCount:22}})+'\n\n'});
    return route.abort();
   });
-  return {page,context,errors,addMessage(m){inbox.push(m);}};
+  return {page,context,errors,requests,navigations,addMessage(m){inbox.push(m);}};
  }
  async function checkLayout(page){const m=await page.evaluate(()=>({width:innerWidth,scroll:document.documentElement.scrollWidth,height:innerHeight,body:document.documentElement.scrollHeight}));assert.ok(m.scroll<=m.width+1,'no document-level horizontal overflow');}
  async function screenshot(page,name){if(process.env.JARVIS_SCREENSHOT_DIR){await mkdir(process.env.JARVIS_SCREENSHOT_DIR,{recursive:true});await page.screenshot({path:join(process.env.JARVIS_SCREENSHOT_DIR,name+'.png')});}}
@@ -60,8 +65,62 @@ test('redesigned modules: mobile flows, retained state, safe text and notation p
   await t.test('Quick AI streams formatted replies, opens saved chats, and transfers a draft to Relay',async()=>{
    const s=await session(),{page}=s;await page.goto(origin+'/quick-ai/');await page.locator('#prompt').fill('Explain this clearly');await page.locator('#send').click();await page.locator('.ai-message.assistant .reply-menu').waitFor();assert.equal(await page.locator('.ai-message.assistant h3').textContent(),'A clear answer');assert.equal(await page.locator('.ai-message.assistant li').count(),2);
    await page.locator('#chat-drawer').click();assert.equal(await page.locator('.saved-chat-row').count(),1);await page.locator('[data-close="history-dialog"]').click();await checkLayout(page);await screenshot(page,'quick-ai');
-   await page.locator('.reply-menu').click();await page.getByRole('button',{name:'Continue in Relay',exact:true}).click();await page.locator('#message-text').waitFor();assert.match(await page.locator('#message-text').inputValue(),/Explain this clearly/);assert.deepEqual(s.errors,[]);await s.context.close();
+   await page.locator('.reply-menu').click();await page.getByRole('button',{name:'Continue in Relay',exact:true}).click();await page.getByRole('button',{name:'Public Relay · shared',exact:true}).click();await page.locator('#message-text').waitFor();assert.match(await page.locator('#message-text').inputValue(),/Explain this clearly/);assert.deepEqual(s.errors,[]);await s.context.close();
   });
+  for(const destination of ['owner','public'])for(const failSource of [true,false])
+   await t.test(`Quick AI ${destination} transfer ${failSource?'keeps unsaved prompt and answer open after source-save failure':'saves new source content before normal navigation'}`,async()=>{
+    const s=await session(360),{page,context}=s;
+    try{
+     const oldHistory={version:1,active:'source-save',chats:[{id:'source-save',title:'Saved source control',draft:'',provider:'gemini',search:false,messages:[
+      {role:'user',content:'Previously saved question',attachments:[]},{role:'assistant',content:'Previously saved answer',status:'complete',attachments:[]}]}]};
+     await context.addInitScript(({key,value})=>{if(location.pathname==='/quick-ai/')localStorage.setItem(key,value);},{key:QUICK_AI_KEY,value:JSON.stringify(oldHistory)});
+     const sourceURL=origin+'/quick-ai/?fixture=source-save#same';
+     await page.goto(sourceURL);await page.locator('#prompt').waitFor();
+     const original=await page.evaluate(key=>localStorage.getItem(key),QUICK_AI_KEY);
+     if(failSource)await page.evaluate(key=>{
+      sessionStorage.setItem(key,JSON.stringify({body:'Existing owner draft stays untouched'}));
+      localStorage.setItem('jarvis.shared.v1',JSON.stringify({version:1,messages:[],posts:[],outbox:[],composer:'Existing public draft stays untouched',syncedAt:null}));
+     },OWNER_DRAFT_KEY);
+     const previousDestinations=await page.evaluate(key=>({owner:sessionStorage.getItem(key),public:localStorage.getItem('jarvis.shared.v1')}),OWNER_DRAFT_KEY);
+     await page.evaluate(({key,failSource})=>{
+      const set=Storage.prototype.setItem;
+      Storage.prototype.setItem=function(name,value){if(failSource&&this===localStorage&&name===key)throw new DOMException('Synthetic source-save failure','QuotaExceededError');return set.call(this,name,value);};
+      sessionStorage.setItem('source-save-control','tab storage remains writable');
+     },{key:QUICK_AI_KEY,failSource});
+     const freshQuestion='New source question for '+destination,freshDraft='New unsent source draft for '+destination;
+     await page.locator('#prompt').fill(freshQuestion);await page.locator('#send').click();
+     await page.locator('.reply-menu').nth(1).waitFor();
+     await page.locator('#prompt').fill(freshDraft);
+     const freshAnswer='## A clear answer\nHere is **useful information**.\n\n- First point\n- Second point';
+     assert.match(await page.locator('.ai-message.user').last().textContent(),new RegExp(freshQuestion));
+     assert.equal(await page.locator('.ai-message.assistant').last().locator('h3').textContent(),'A clear answer');
+     const providerRequests=s.requests.filter(request=>new URL(request.url).host==='generativelanguage.googleapis.com');
+     assert.equal(providerRequests.length,1);assert.equal(providerRequests[0].method,'POST');assert.ok(providerRequests[0].body.includes(freshQuestion));
+     const navigationCount=s.navigations.length;
+     await page.locator('.reply-menu').last().click();await page.getByRole('button',{name:'Continue in Relay',exact:true}).click();
+     await page.getByRole('button',{name:destination==='owner'?'Owner chat · private':'Public Relay · shared',exact:true}).click();
+     if(failSource){
+      await page.locator('#storage-status').filter({hasText:'No Relay draft was prepared.'}).waitFor();
+      assert.equal(page.url(),sourceURL);assert.equal(s.navigations.length,navigationCount);
+      assert.equal(await page.locator('#prompt').inputValue(),freshDraft);
+      assert.equal(await page.locator('.ai-message.assistant').last().locator('h3').textContent(),'A clear answer');
+      assert.equal(await page.locator('.ai-message.assistant').last().getByRole('button',{name:'Copy',exact:true}).isVisible(),true);
+      assert.equal(await page.evaluate(key=>localStorage.getItem(key),QUICK_AI_KEY),original,'Failed source saves preserve the previously stored history exactly');
+      for(const key of [RELAY_TRANSFER_KEY,LEGACY_TRANSFER_KEY])assert.equal(await page.evaluate(key=>sessionStorage.getItem(key),key),null,'Source-save failure cannot stage either Relay destination');
+      assert.deepEqual(await page.evaluate(key=>({owner:sessionStorage.getItem(key),public:localStorage.getItem('jarvis.shared.v1')}),OWNER_DRAFT_KEY),previousDestinations,'Source-save failure leaves both existing destination drafts untouched');
+      assert.equal(await page.evaluate(()=>sessionStorage.getItem('source-save-control')),'tab storage remains writable');
+     }else{
+      await page.waitForURL(origin+'/jarvis/');
+      const saved=await page.evaluate(key=>JSON.parse(localStorage.getItem(key)),QUICK_AI_KEY);
+      assert.equal(saved.chats[0].draft,freshDraft);assert.equal(saved.chats[0].messages.at(-2).content,freshQuestion);assert.equal(saved.chats[0].messages.at(-1).content,freshAnswer);
+      const expected=quickAITransfer(freshQuestion,freshAnswer,destination).body;
+      if(destination==='public'){await page.locator('#message-text').waitFor();assert.equal(await page.locator('#message-text').inputValue(),expected);}
+      else{await page.waitForFunction(key=>!!sessionStorage.getItem(key),OWNER_DRAFT_KEY);assert.equal(await page.evaluate(key=>JSON.parse(sessionStorage.getItem(key)).body,OWNER_DRAFT_KEY),expected);assert.match(await page.locator('#conversation-visibility').textContent(),/private/i);assert.equal(await page.locator('#message-text').count(),0);}
+     }
+     assert.deepEqual(s.requests.filter(request=>request.method==='POST'&&new URL(request.url).origin===API_ORIGIN&&/^\/(?:relay\/owner\/|shared\/messages|v1\/messages)/.test(request.path)),[],'Transfer never sends a Relay message or job');
+     assert.deepEqual(s.errors,[]);await checkLayout(page);
+    }finally{await context.close();}
+   });
   await t.test('Muse stays conversation-only, preserves multiline input and renders useful links',async()=>{
    const s=await session(),{page}=s;await page.goto(origin+'/muse/');await page.locator('.incoming').waitFor();assert.equal(await page.getByRole('link',{name:'Poweramp',exact:true}).count(),1);assert.equal(await page.getByText('Activity',{exact:true}).count(),0);await page.locator('#prompt').fill('First line');await page.locator('#prompt').press('Enter');assert.equal(await page.locator('#prompt').inputValue(),'First line\n');await checkLayout(page);await screenshot(page,'muse');assert.deepEqual(s.errors,[]);await s.context.close();
   });
