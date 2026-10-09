@@ -16,11 +16,11 @@ import {RELAY_MIGRATION_CATALOG} from './backend/relay-migration-preflight-catal
 // engine over a fictional external KV transaction model outside source SQL.
 // Sibling native allocator tests establish actual durable KV separately; this
 // fixture deliberately does NOT claim working cross-DO production transport.
-let account;const reports=new Map(),externalKV=new Map();let tail=Promise.resolve();
+let account;let elapsedOffset=0;const actualMonotonic=performance.now.bind(performance);Object.defineProperty(performance,'now',{value:()=>actualMonotonic()+elapsedOffset});const reports=new Map(),externalKV=new Map();let tail=Promise.resolve();
 const externalStorage={transaction(action){const execute=async()=>{const staged=new Map([...externalKV].map(([k,v])=>[k,structuredClone(v)]));const txn={get:async key=>structuredClone(staged.get(key)),put:async(key,value)=>{if(typeof key==='object'){for(const [k,v] of Object.entries(key))staged.set(k,structuredClone(v));}else staged.set(key,structuredClone(value));}};const value=await action(txn);externalKV.clear();for(const [k,v] of staged)externalKV.set(k,v);return value;};const result=tail.then(execute,execute);tail=result.catch(()=>{});return result;}};
 export class AllocatorFixture {
  constructor(){this.engine=new RelayAccountAdmission({storage:externalStorage});account=this.engine;}
- async fetch(request){const b=await request.json();if(b.op==='provision')return Response.json(await this.engine.provision(b.plan,b.now));if(b.op==='inspect')return Response.json(await this.engine.inspect(b.now));if(b.op==='restart'){this.engine=new RelayAccountAdmission({storage:externalStorage});account=this.engine;return Response.json(await this.engine.inspect(b.now));}if(b.op==='lose'){const reserve=this.engine.reserve.bind(this.engine);let once=true;this.engine.reserve=async(...args)=>{const result=await reserve(...args);if(once){once=false;return {status:'blocked',reason:'fictional_lost_ack'};}return result;};return Response.json({status:'armed'});}if(b.op==='revoke')return Response.json(await this.engine.revoke(b.now));return Response.json({status:'blocked'});}
+ async fetch(request){const b=await request.json();if(b.op==='provision')return Response.json(await this.engine.provision(b.plan,b.now));if(b.op==='inspect')return Response.json(await this.engine.inspect(b.now));if(b.op==='restart'){this.engine=new RelayAccountAdmission({storage:externalStorage});account=this.engine;return Response.json(await this.engine.inspect(b.now));}if(b.op==='lose'){const reserve=this.engine.reserve.bind(this.engine);let once=true;this.engine.reserve=async(...args)=>{const result=await reserve(...args);if(once){once=false;return {status:'blocked',reason:'fictional_lost_ack'};}return result;};return Response.json({status:'armed'});}if(b.op==='delay'){const method=b.method==='final'?'reserveFinal':'reserve',original=this.engine[method].bind(this.engine);this.engine[method]=async(...args)=>{const result=await original(...args);await Promise.resolve();elapsedOffset+=b.advance;return result;};return Response.json({status:'armed'});}if(b.op==='revoke')return Response.json(await this.engine.revoke(b.now));return Response.json({status:'blocked'});}
 }
 export class SourceFixture {
  constructor(ctx){this.ctx=ctx;}
@@ -43,7 +43,7 @@ async function local(t){
  let egress=0;
  const mf=new Miniflare(convertV4MiniflareOptions({modules:true,script:bundle.outputFiles[0].text,compatibilityDate:configuration.compatibility_date,compatibilityFlags:configuration.compatibility_flags||[],cf:false,telemetry:{enabled:false},durableObjects:{ACCOUNT:{className:'AllocatorFixture',useSQLite:true},SOURCE:{className:'SourceFixture',useSQLite:true}},outboundService(){egress++;throw Error('Closed fictional network');}}));
  t.after(async()=>{await mf.dispose();assert.equal(egress,0);});
- const call=async(path,b)=>{const r=await mf.dispatchFetch('https://local.test/'+path,{method:'POST',body:JSON.stringify(b)});assert.equal(r.status,200);return r.json();};
+ const call=async(path,b)=>{const r=await mf.dispatchFetch('https://local.test/'+path,{method:'POST',body:JSON.stringify({...b,...(b.now===undefined?{}:{now:Math.max(b.now,Date.now())})})});assert.equal(r.status,200);return r.json();};
  return call;
 }
 async function setup(call){
@@ -100,4 +100,22 @@ test('day rollover and account revocation refuse before source preflight or cand
  assert.equal((await call('allocator',{op:'revoke',now:c.now})).status,'revoked');
  const revoked=await call('source',{op:'prepare',input:c.input,now:c.now});assert.equal(revoked.status,'blocked');assert.equal(revoked.native.rowsRead,0);assert.equal(revoked.native.rowsWritten,0);
  const actual=await call('source',{op:'catalog'});assert.equal(actual.catalog.some(row=>row.name==='relay_event_kind_seq'||row.name==='relay_migration_preflight'),false);
+});
+
+
+test('elapsed reservation latency refuses expired preparation receipt, evidence and UTC day before native SQL',async t=>{
+ for(const advance of [31001,300001,86400000]){
+  const call=await local(t),c=await setup(call);await call('allocator',{op:'delay',method:'prepare',advance});
+  const result=await call('source',{op:'prepare',input:c.input,now:c.now});
+  assert.equal(result.status,'blocked');assert.equal(result.native.rowsRead,0);assert.equal(result.native.rowsWritten,0);
+  const actual=await call('source',{op:'catalog'});assert.equal(actual.catalog.some(row=>row.name==='relay_migration_preflight'),false);
+ }
+});
+test('elapsed final reservation latency cannot reach candidate construction SQL',async t=>{
+ const call=await local(t),c=await setup(call);await complete(call,c);
+ await call('allocator',{op:'delay',method:'final',advance:31001});
+ const result=await call('source',{op:'construct',now:c.now});
+ assert.equal(result.status,'blocked');assert.equal(result.reason,'account_final_reservation_unavailable');
+ assert.equal(result.native.rowsRead,0);assert.equal(result.native.rowsWritten,0);
+ const actual=await call('source',{op:'catalog'});assert.equal(actual.catalog.some(row=>row.name==='relay_event_kind_seq'),false);
 });

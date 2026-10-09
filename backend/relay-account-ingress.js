@@ -51,7 +51,7 @@ export async function relayAccountRequestGate(request,env,runtime){
   return {response:relayAccountDenialResponse(denial)};
 }
 
-import {isRelayAccountAdmission,accountAdmissionPlan,accountAdmissionPreparationIds,consumeRelayAccountReservation,relayAccountAdmissionHash} from './relay-account-admission.js';
+import {isRelayAccountAdmission,accountAdmissionPlan,accountAdmissionPreparationIds,consumeRelayAccountReservation,relayAccountAdmissionHash,relayAccountAdmissionPlanProblem,RELAY_ACCOUNT_ADMISSION_LIMITS} from './relay-account-admission.js';
 import {RELAY_MIGRATION_PREFLIGHT_PLAN as PREFLIGHT,relayMigrationPreflightAdmission,relayMigrationPreflightStep,relayMigrationPreflightBudget} from './relay-migration-preflight.js';
 import {RELAY_MIGRATION_CATALOG as CATALOG} from './relay-migration-preflight-catalog.js';
 const prepared=new WeakMap(),history=new WeakMap();
@@ -60,6 +60,10 @@ const immutable=value=>{if(value&&typeof value==='object'){Object.values(value).
 const nativeBlocked=reason=>({...blocked(reason),native:{rowsRead:0,rowsWritten:0,databaseBytes:null}});
 const costSum=values=>values.reduce((sum,value)=>{for(const key of ['rowsRead','rowsWritten','storedBytes']){sum[key]+=value[key];if(!Number.isSafeInteger(sum[key]))throw Error('Finite bound overflow');}return sum;},{rowsRead:0,rowsWritten:0,storedBytes:0});
 const day=now=>new Date(now).toISOString().slice(0,10);
+// Anchor fixture/operator time once, then advance it by monotonic elapsed time.
+// Awaited reservation latency cannot freeze receipt/day/evidence validation.
+const admissionClock=now=>{const started=performance.now();return ()=>Math.ceil(now+Math.max(0,performance.now()-started));};
+const grantStale=(grant,plan,now)=>relayAccountAdmissionPlanProblem(Object.fromEntries(['v','planId','day','sourceHash','catalogHash','account','scopes','coordination','final'].map(key=>[key,plan[key]])),now)||day(now)!==grant.day||now<grant.issuedAt||now-grant.issuedAt>RELAY_ACCOUNT_ADMISSION_LIMITS.receiptAgeMs;
 export async function relayAccountRuntimeIdentity(){
   if(!CATALOG.schemaBasis||!CATALOG.sourceFiles['backend/relay-account-ingress.js']||!CATALOG.sourceFiles['backend/relay-account-admission.js'])return null;
   return {sourceHash:await relayAccountAdmissionHash(Object.entries(CATALOG.sourceFiles).sort(([a],[b])=>a.localeCompare(b))),
@@ -89,6 +93,7 @@ async function preparationConfiguration(allocator,ctx,input,now){
 // a genuine local durable allocator, never a caller callback/serialized receipt.
 // Transport across isolates is intentionally unavailable pending upstream proof.
 export async function relayAccountPrepare(allocator,ctx,input,now=Date.now()){
+  const currentTime=admissionClock(now);
   let signature,snapshot,configuration;
   try{signature=JSON.stringify(input);snapshot=JSON.parse(signature);configuration=await preparationConfiguration(allocator,ctx,snapshot,now);}catch{return nativeBlocked('account_preparation_input_unknown');}
   if(configuration.reason)return nativeBlocked(configuration.reason);
@@ -96,8 +101,8 @@ export async function relayAccountPrepare(allocator,ctx,input,now=Date.now()){
   const permit=await relayMigrationPreflightAdmission(ctx,snapshot,now,async claim=>{
     const payloadHash=await relayAccountAdmissionHash({input:snapshot,reservationId:claim.reservationId});
     const receipt=await allocator.reserve({planId:configuration.plan.planId,day:claim.utcDay,scope:claim.scope,lane:'preparation',id:claim.reservationId,payloadHash,
-      cost:{rowsRead:PREFLIGHT.stepRowsRead,rowsWritten:PREFLIGHT.stepRowsWritten,storedBytes:PREFLIGHT.checkpointBytes}},now);
-    paid=consumeRelayAccountReservation(receipt,receiptBinding(receipt),now);
+      cost:{rowsRead:PREFLIGHT.stepRowsRead,rowsWritten:PREFLIGHT.stepRowsWritten,storedBytes:PREFLIGHT.checkpointBytes}},currentTime());
+    paid=consumeRelayAccountReservation(receipt,receiptBinding(receipt),currentTime());
     if(paid.status!=='granted')return {status:'blocked',reason:'external_admission_unknown'};
     const trace=history.get(ctx)||[];trace.push(paid.id);history.set(ctx,trace);
     return {status:'reserved',reservationId:claim.reservationId,utcDay:claim.utcDay,scope:claim.scope,allocationSignature:claim.allocationSignature,attempt:paid.attempt,
@@ -106,7 +111,9 @@ export async function relayAccountPrepare(allocator,ctx,input,now=Date.now()){
   });
   if(permit?.status==='blocked')return permit;
   if(JSON.stringify(input)!==signature)return nativeBlocked('account_preparation_input_changed');
-  const result=immutable({...relayMigrationPreflightStep(ctx,snapshot,now,permit),runtimeIdentity:configuration.identity,paidReservationId:paid.id});
+  const stepTime=currentTime();
+  if(!paid||grantStale(paid,configuration.plan,stepTime))return nativeBlocked('account_preparation_grant_expired');
+  const result=immutable({...relayMigrationPreflightStep(ctx,snapshot,stepTime,permit),runtimeIdentity:configuration.identity,paidReservationId:paid.id});
   if(result.status==='complete')prepared.set(result,{ctx,input:snapshot,identity:configuration.identity,planSignature:configuration.plan.signature});
   return result;
 }
@@ -115,6 +122,7 @@ export async function relayAccountPrepare(allocator,ctx,input,now=Date.now()){
 // the final all-Hub catalog construction. This builds schema only: lazy private
 // feed/data backfill and ordinary/remote operation activation remain closed.
 export async function relayAccountConstructCatalog(allocator,reports,now=Date.now()){
+  const currentTime=admissionClock(now);
   if(!isRelayAccountAdmission(allocator)||!Array.isArray(reports)||!reports.length||reports.length>PREFLIGHT.maxScopes)return nativeBlocked('account_final_authority_unknown');
   const originals=reports.map(report=>prepared.get(report));
   if(originals.some(value=>!value))return nativeBlocked('account_final_report_unattested');
@@ -122,23 +130,24 @@ export async function relayAccountConstructCatalog(allocator,reports,now=Date.no
   if(!plan||!identity||plan.day!==day(now)||plan.sourceHash!==identity.sourceHash||plan.catalogHash!==identity.catalogHash||originals.some(value=>value.planSignature!==plan.signature))return nativeBlocked('account_final_identity_unknown');
   const current=[];
   for(let n=0;n<reports.length;n++){
-    const meta=originals[n],next=await relayAccountPrepare(allocator,meta.ctx,{...copy(meta.input),action:'report',expectedRevision:reports[n].revision},now);
+    const meta=originals[n],next=await relayAccountPrepare(allocator,meta.ctx,{...copy(meta.input),action:'report',expectedRevision:reports[n].revision},currentTime());
     if(next.status!=='complete')return nativeBlocked('account_final_inventory_changed');current.push(next);
   }
-  const options=originals[0].input,budget=relayMigrationPreflightBudget(current,options,now);
+  const options=originals[0].input,budget=relayMigrationPreflightBudget(current,options,currentTime());
   if(budget.status!=='reviewable')return nativeBlocked('account_final_budget_unknown');
   const details=[];
   for(const report of current){const meta=prepared.get(report);details.push({scope:report.scope,reportHash:await relayAccountAdmissionHash(report),preparationIds:accountAdmissionPreparationIds(allocator,report.scope),constructionCost:report.estimate.total});}
   if(details.length!==plan.scopes.length||new Set(details.map(item=>item.scope)).size!==details.length)return nativeBlocked('account_final_scope_incomplete');
   const reportsHash=await relayAccountAdmissionHash(details),id=crypto.randomUUID(),payloadHash=await relayAccountAdmissionHash({id,sourceHash:identity.sourceHash,catalogHash:identity.catalogHash,reportsHash});
-  const receipt=await allocator.reserveFinal({planId:plan.planId,day:plan.day,id,payloadHash,...identity,reportsHash,reports:details,constructionCost:budget.migration},now);
-  const final=consumeRelayAccountReservation(receipt,receiptBinding(receipt),now);
+  const receipt=await allocator.reserveFinal({planId:plan.planId,day:plan.day,id,payloadHash,...identity,reportsHash,reports:details,constructionCost:budget.migration},currentTime());
+  const final=consumeRelayAccountReservation(receipt,receiptBinding(receipt),currentTime());
   if(final.status!=='granted')return nativeBlocked('account_final_reservation_unavailable');
   // No await occurs between source/catalog revalidation and construction in a
   // Hub transaction. A source change during reservation is therefore refused.
   const measured={rowsRead:0,rowsWritten:0},completed=[];
   try{
     for(const report of current){
+      if(grantStale(final,plan,currentTime()))throw Error('Final grant expired');
       const meta=prepared.get(report),ctx=meta.ctx;
       ctx.storage.transactionSync(()=>{
         const run=(query,...values)=>{const cursor=ctx.storage.sql.exec(query,...values),rows=[...cursor];if(!Number.isSafeInteger(cursor.rowsRead)||!Number.isSafeInteger(cursor.rowsWritten))throw Error('Metering unavailable');measured.rowsRead+=cursor.rowsRead;measured.rowsWritten+=cursor.rowsWritten;return rows;};

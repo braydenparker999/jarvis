@@ -12,8 +12,8 @@ export const RELAY_MIGRATION_CATALOG = Object.freeze({
   compatibilityDate: '2026-09-19',
   sourceFiles: Object.freeze({
     "backend/relay-migration-preflight.js": "d69ec78837712c0fe32cfac68539d88f0afbd84ee672937e214ff3b134e4d518",
-    "backend/relay-account-admission.js": "953db6bc350ba34ca25b3cd5162c9a9ad4ab351c481fd2946c5fc18abc99381a",
-    "backend/relay-account-ingress.js": "27d79fbe98ab34b7fa1b6960aaf13828c62fb8a4d8fd9aef649216997cec132c",
+    "backend/relay-account-admission.js": "4e52e6e50562d04139ac83a33c671324f09fff1beb4c63af00eed910bd7800cb",
+    "backend/relay-account-ingress.js": "196713683d4f14170e7eb89c65229bcbc58dd4c2f785c5cd89acb9575904780d",
     "backend/shared.js": "528e100b60f221f5cf7bacdd4eedc21c89b6bb6c62c52797f3c2fb31c435ea0a",
     "backend/publications.js": "3c1b18920391f855168a0348bf4574bb0db1421df710bcfef22a16585b420d81",
     "backend/public-coordination.js": "b299572d09d1451aa16ae4af2d37ec1edd1a6bf5b0ca0b93ea0debde9e04a23d",
