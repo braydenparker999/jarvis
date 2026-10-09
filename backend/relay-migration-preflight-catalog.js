@@ -4,7 +4,7 @@
 const freezeRows = rows => Object.freeze(rows.map(row => Object.freeze(row)));
 export const RELAY_MIGRATION_CATALOG = Object.freeze({
   sourceCommit: 'c4d62409a3b67e4e5dac88809c6a4a0290b6e39e',
-  candidateCommit: 'a77ed42ba659010c477a4808a37d9d9d96896f4f',
+  candidateCommit: 'bb29214aa7081b8d8b26937b7eff07fea199c8f7',
   compatibilityDate: '2026-09-19',
   sourceFiles: Object.freeze({
     "backend/shared.js": "528e100b60f221f5cf7bacdd4eedc21c89b6bb6c62c52797f3c2fb31c435ea0a",
@@ -15,9 +15,9 @@ export const RELAY_MIGRATION_CATALOG = Object.freeze({
     "backend/relay-owner.js": "7990babd74d55bb253e00a74357c8ab6bd9143f79af892c0035113a5a0290da7",
     "backend/relay-owner-jobs.js": "d2a192d9b839eb9686e1e28bb99e266919f1ddd630527a1b32d2ecb9e6298aba",
     "backend/relay-owner-password.js": "0d56aaabcd516b494ca3cea4e0ffbb3eb8f0199bd6d99029ab52cedfbb435f93",
-    "backend/relay-core-alarm.js": "06be4eb389d524423ca1e0aa2ec8f21a8501699652bd94bb49cb6e762fb66a6d",
+    "backend/relay-core-alarm.js": "9d09aedc621bca2b14c27543458dce38d364edf1676c9e39c1b28a6de980c189",
     "backend/relay-common.js": "5a9ef7d4082efcf4fc94f7773e9b5325b65f5eac840a756872997a365ef19fd1",
-    "backend/worker.js": "86eca492cd39b3dac5defde2d7df9521ef578cbeacce7c9ce70a877e1d38a2fd",
+    "backend/worker.js": "e8dfc4632fc777e9a2013e4001a016d417465720ca0fc6385a166b988a58e25a",
     "backend/relay-connector.js": "374b038037f5b8748aa4a1e05b93a9276daac5982cb56cb24ee78c2a927ced94",
     "backend/connector.js": "3d8277cf6ce0e4c0944501832ac6ed4c964d31ef796e87258dca8b446e61dae7",
     "public/content/jarvis.json": "305cc39ffc9b47567b36a4b7835ab912446074c0446281f11b54fafd109b54e8"
