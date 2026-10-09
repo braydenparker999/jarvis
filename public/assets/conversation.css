@@ -104,6 +104,8 @@ body:is(.relay-page,.muse-page) .rich-body .code-block pre{padding-top:60px}
 .owner-job-organization{grid-column:1/-1}
 .owner-job-organization summary{min-height:48px;padding:12px 0;cursor:pointer;color:#c4beb5;font-size:13px;line-height:24px}
 .owner-job-labels{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px}
+/* Keep private chat inside a shrinking viewport while its resize event is pending. */
+.relay-page[data-conversation-mode=owner] .workspace{max-height:100dvh}
 .owner-work{width:100%;max-width:640px;margin:0 auto}
 .owner-work h2{font-size:20px;line-height:28px;margin:0 0 8px}
 .owner-work h3{font-size:14px;line-height:22px;margin:16px 0 8px}
