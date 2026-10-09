@@ -48,6 +48,9 @@ test('actual local workerd HTTP/MCP boundaries record stable rows-read/written c
     const created = await request('/relay/owner/jobs', {id: requestId, title: 'Fictional cost request', body: 'Read the isolated fixture.', action_kind: 'read_only'}, pair.device_token);
     assert.equal(created.job.id, requestId);
     const publicId = randomUUID(); await request('/shared/messages', {id: publicId, body: 'Fictional public cost request.'});
+    // Explicit warm/cooldown setup: an eventual MCP importer repair must not
+    // turn this steady-state cost profile into a cold upstream request sample.
+    await request('/__fixture/publication-cooldown');
     const ownerArgs = {inbox_id: RELAY_OWNER_INBOX, job_id: requestId}, publicArgs = {inbox_id: RELAY_INBOX, message_id: publicId, limit: 1};
     const warm = async () => {
       await rpc('relay_owner_job_read', ownerArgs);

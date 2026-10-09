@@ -41,6 +41,11 @@ export class ExecutionCostHub extends Hub {
         accessKey: 'access:' + await hash(access), refreshKey: 'refresh:' + await hash('5'.repeat(64))});
       return Response.json({access: issued.scope ? access : null});
     }
+    if (url.pathname === '/__fixture/publication-cooldown') {
+      publicationSchema(this.ctx);
+      this.ctx.storage.sql.exec('INSERT OR REPLACE INTO shared_meta VALUES(?,?)', 'publisher-next-attempt', JSON.stringify(Date.now() + 300000));
+      return Response.json({ok: true});
+    }
     if (url.pathname === '/__fixture/background') {
       const count = Number(url.searchParams.get('count')); const sql = this.ctx.storage.sql;
       publicationSchema(this.ctx); sharedSchema(this.ctx);
