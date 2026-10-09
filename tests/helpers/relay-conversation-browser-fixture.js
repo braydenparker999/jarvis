@@ -9,6 +9,7 @@ import {relayOAuthStore} from '../../backend/relay-oauth.js';
 import {COMMENTS_URL} from '../../backend/publications.js';
 import {SHARED_OBJECT} from '../../backend/shared.js';
 import {RELAY_OWNER, RELAY_CALLBACK, RELAY_OWNER_SCOPE, RELAY_VERSION, challenge, hash, random} from '../../backend/relay-common.js';
+import {createInterceptionCancellationTracker} from './browser-interception-cancellation.js';
 
 export const SITE = 'https://missionarytube.z13.web.core.windows.net';
 export const WORKER = 'https://jarvis-hub-api.braydenparker999.workers.dev';
@@ -133,16 +134,28 @@ export async function openConversationPage(browser, harness, {width = 390, heigh
   page.on('pageerror', error => errors.push(error.message));
   await cdp.send('Network.enable');
   await cdp.send('Network.setCacheDisabled', {cacheDisabled: true});
+  const confirmCancellation = createInterceptionCancellationTracker(cdp);
   async function bridge(event) {
     const request = event.request, url = new URL(request.url);
     const headers = Object.fromEntries(Object.entries(request.headers).map(([name, value]) => [name.toLowerCase(), String(value)]));
     let body = request.postData;
     const record = {url: url.href, path: url.pathname, method: request.method, headers};
     records.push(record);
+    // Called only after the static root or synthetic Worker route/response has
+    // passed validation. Errors in that validation still reach unexpected.
+    async function sendSyntheticResponse(command, params) {
+      try { return await cdp.send(command, params); }
+      catch (error) {
+        const proof = await confirmCancellation({event, error, command, validated: true});
+        if (!proof) throw error;
+        record.cancelledByBrowser = true;
+        record.cancellation = proof;
+      }
+    }
     async function fulfill(response) {
       record.status = response.status;
       record.responseHeaders = Object.fromEntries(response.headers);
-      await cdp.send('Fetch.fulfillRequest', {requestId: event.requestId, responseCode: response.status,
+      await sendSyntheticResponse('Fetch.fulfillRequest', {requestId: event.requestId, responseCode: response.status,
         responseHeaders: [...response.headers].map(([name, value]) => ({name, value})),
         body: Buffer.from(await response.arrayBuffer()).toString('base64')});
     }
@@ -170,7 +183,7 @@ export async function openConversationPage(browser, harness, {width = 390, heigh
       else response = await forward();
       if (response?.abort) {
         record.aborted = true;
-        return await cdp.send('Fetch.failRequest', {requestId: event.requestId, errorReason: 'ConnectionClosed'});
+        return await sendSyntheticResponse('Fetch.failRequest', {requestId: event.requestId, errorReason: 'ConnectionClosed'});
       }
       assert.ok(response instanceof Response, 'Fixture rule must return a Response or explicit abort');
       assert.equal(response.status >= 300 && response.status < 400, false, 'Phone API must not redirect to authentication');
