@@ -136,7 +136,7 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), draftS
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     setDraft(value) { state.draft = value.slice(0, 4000); const saved = draftStore.save(state.draft); if (!saved) state.warning = 'Could not retain this private draft in the tab. Copy it before leaving.'; return saved; },
     setQuery(value) { state.query = value.trim().toLowerCase(); emit(); },
-    setWorkFilter(value){if(['all','queued','working','blocked','finished'].includes(value)){state.workFilter=value;emit();}},
+    setWorkFilter(value){if(['all','queued','working','blocked','finished','waiting_for_owner','execution_unknown','failed','cancellation_pending','completion_unverified'].includes(value)){state.workFilter=value;emit();}},
     setJobMode(value){if(!state.jobsEnabled||state.sending)return;state.jobMode=value===true;state.sendUnconfirmed=false;emit();},
     setJobTitle(value){state.jobTitle=value.slice(0,120);},
     setJobProject(value){state.jobProject=value.slice(0,120);},
@@ -361,13 +361,20 @@ const jobLabel=job=>{
 };
 
 export function ownerWorkStatus(job, now=Date.now()) {
-  if(job.stage==='completed'&&job.completion)return {state:'finished',label:'Finished · work reported complete'};
-  if(job.stage==='cancelled')return {state:'finished',label:'Finished · cancellation acknowledged'};
-  if(job.cancelRequested)return {state:'blocked',label:'Blocked · cancellation awaiting acknowledgement'};
-  if(job.result&&!job.completion&&!['failed','waiting_for_owner'].includes(job.stage))return {state:'blocked',label:'Blocked · completion unverified'};
-  if(job.stage==='queued')return {state:'queued',label:'Queued · awaiting assistant'};
-  if(job.stage==='running'&&job.execution&&Date.parse(job.execution.leaseExpiresAt)>now)return {state:'working',label:'Working · execution acknowledged'};
-  return {state:'blocked',label:job.stage==='waiting_for_owner'?'Blocked · needs your input':job.stage==='failed'?'Blocked · attempt failed':'Blocked · outcome unconfirmed'};
+  if(job.stage==='completed'&&job.completion)return {state:'finished',attention:null,label:'Finished · work reported complete'};
+  if(job.stage==='cancelled')return {state:'finished',attention:null,label:'Finished · cancellation acknowledged'};
+  if(job.cancelRequested)return {state:'blocked',attention:'cancellation_pending',label:'Cancellation pending · outcome unconfirmed'};
+  if(job.stage==='failed')return {state:'blocked',attention:'failed',label:'Failed · review details'};
+  if(job.stage==='waiting_for_owner')return {state:'blocked',attention:'waiting_for_owner',label:'Waiting for you · input needed'};
+  if(job.result&&!job.completion||job.stage==='completed')return {state:'blocked',attention:'completion_unverified',label:'Completion unverified'+(job.result?' · reply saved':'')};
+  if(job.stage==='queued')return {state:'queued',attention:null,label:'Queued · awaiting assistant'};
+  if(job.stage==='running'&&job.execution&&Date.parse(job.execution.leaseExpiresAt)>now)return {state:'working',attention:null,label:'Working · execution acknowledged'};
+  return {state:'blocked',attention:'execution_unknown',label:'Execution unknown · outcome unconfirmed'};
+}
+
+const attentionLabels=[['waiting_for_owner','Waiting for you'],['execution_unknown','Execution unknown'],['failed','Failed'],['cancellation_pending','Cancellation pending'],['completion_unverified','Completion unverified']];
+export function ownerWorkAttention(tasks) {
+  return attentionLabels.map(([reason,label])=>({reason,label,count:tasks.filter(task=>task.status.attention===reason).length}));
 }
 
 export function groupOwnerWork(jobs, {query='', filter='all', now=Date.now()}={}) {
@@ -378,7 +385,7 @@ export function groupOwnerWork(jobs, {query='', filter='all', now=Date.now()}={}
     attempts.sort((a,b)=>a.attempt-b.attempt||a.sequence-b.sequence);
     const job=attempts.at(-1);return {job,attempts,status:ownerWorkStatus(job,now)};
   }).filter(({job,attempts})=>job.actionKind!=='unclassified'||job.attempt>1||attempts.some(attempt=>attempt.execution||attempt.completion))
-    .filter(({status})=>filter==='all'||status.state===filter)
+    .filter(({status})=>filter==='all'||status.state===filter||status.attention===filter)
     .filter(({job})=>!query||[job.title,job.body,job.presentation?.projectTitle,job.presentation?.goalTitle,job.presentation?.latestUpdate?.summary,job.latestResult?.body||job.result?.body,job.latestResult?.correctionSummary].some(text=>text?.toLowerCase().includes(query)));
   tasks.sort((a,b)=>b.job.updatedAt.localeCompare(a.job.updatedAt)||b.job.sequence-a.job.sequence);
   return tasks;
@@ -541,8 +548,8 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
     if(focused){const node=focused.id?detailDialog.querySelector('#'+focused.id):[...detailDialog.querySelectorAll('button,summary,input')].find(n=>(n.getAttribute('aria-label')||n.textContent)===focused.label);node?.focus({preventScroll:true});}
   }
   function renderWork(state) {
-    const panel=chatNodes.messages,allTasks=groupOwnerWork(state.jobs),tasks=groupOwnerWork(state.jobs,{query:state.query,filter:state.workFilter});
-    const signature=JSON.stringify([state.jobs,state.query,state.workFilter,state.jobsError,state.syncStale,workVisible,tasks.map(t=>t.status)]);
+    const panel=chatNodes.messages,allTasks=groupOwnerWork(state.jobs),tasks=groupOwnerWork(state.jobs,{query:state.query,filter:state.workFilter}),attention=ownerWorkAttention(groupOwnerWork(state.jobs,{query:state.query}));
+    const signature=JSON.stringify([state.jobs,state.query,state.workFilter,state.jobsError,state.syncStale,workVisible,tasks.map(t=>t.status),attention]);
     if(workSignature===signature)return;workSignature=signature;
     const open=new Map([...panel.querySelectorAll?.('details[data-work-key]')||[]].map(n=>[n.dataset.workKey,n.open]));
     const scroll=panel.scrollTop,focused=panel.contains?.(doc.activeElement)?doc.activeElement?.id:null;
@@ -550,13 +557,15 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
     body.append(make('h2','Current work'),make('p','Private · saved requests and authenticated execution updates','request-meta'));
     const filters=make('div','','owner-work-filters'),filterLabel=make('label','Status');filterLabel.htmlFor='relay-owner-work-filter';
     const filter=make('select');filter.id='relay-owner-work-filter';
-    for(const [value,label] of [['all','All work'],['queued','Queued'],['working','Working'],['blocked','Needs attention'],['finished','Finished']]){const option=make('option',label);option.value=value;filter.append(option);}
+    for(const [value,label] of [['all','All work'],['queued','Queued'],['working','Working'],['blocked','Needs attention'],['finished','Finished'],...attentionLabels]){const option=make('option',label);option.value=value;filter.append(option);}
     filter.value=state.workFilter;filter.onchange=()=>controller.setWorkFilter(filter.value);filters.append(filterLabel,filter);body.append(filters);
     const count=make('p',tasks.length+' of '+allTasks.length+' saved task'+(allTasks.length===1?'':'s'),'request-meta');count.id='relay-owner-work-count';body.append(count);
     if(state.syncStale||state.jobsError){const stale=make('p','Last known records · '+(state.jobsError||'refresh unavailable'),'relay-owner-note');stale.setAttribute('role','status');body.append(stale);}
+    const needsAttention=attention.filter(item=>item.count);
+    if(needsAttention.length){const summary=make('section','','owner-work-attention');summary.setAttribute('aria-label','Saved work needing attention');summary.append(make('h3','Needs attention'+(state.query?' · matching search':'')));const list=make('ul');for(const item of needsAttention){const row=make('li',item.label+' · '+item.count);row.dataset.attention=item.reason;list.append(row);}summary.append(list);body.append(summary);}
     function disclosure(key,title,cls,initial=false){const n=make('details','',cls);n.dataset.workKey=key;n.open=open.has(key)?open.get(key):initial;const s=make('summary',title);s.id='owner-work-'+encodeURIComponent(key);n.append(s);return n;}
     function taskRow(task){
-      const {job,status,attempts}=task,row=disclosure('task:'+job.id,'','owner-work-task');row.dataset.jobId=job.id;row.dataset.state=status.state;
+      const {job,status,attempts}=task,row=disclosure('task:'+job.id,'','owner-work-task');row.dataset.jobId=job.id;row.dataset.state=status.state;if(status.attention)row.dataset.attention=status.attention;
       row.firstChild.append(make('span',job.title,'owner-work-title'),make('span',status.label,'job-state'));
       row.append(make('p','Owner · You'+(job.execution?' · Owner-connected assistant':' · execution unacknowledged'),'request-meta'));
       const update=meaningfulUpdate(job),latest=job.latestResult||job.result;

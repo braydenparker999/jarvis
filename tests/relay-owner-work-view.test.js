@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createConversationFixture, SITE, WORKER, OWNER_KEY} from './helpers/relay-conversation-browser-fixture.js';
 import {createRelayOwnerApi} from '../public/assets/relay-owner-api.js';
-import {createRelayOwnerController, ownerWorkStatus, groupOwnerWork} from '../public/assets/relay-owner-ui.js';
+import {createRelayOwnerController, ownerWorkStatus, ownerWorkAttention, groupOwnerWork} from '../public/assets/relay-owner-ui.js';
 import {relayOwnerJobTools} from '../backend/relay-owner-job-tools.js';
 import {RELAY_OWNER_INBOX} from '../backend/relay-common.js';
 
@@ -98,4 +98,18 @@ test('current work search and status filters stay private and perform no request
   controller.setWorkFilter('all');controller.setQuery('no fictional match');assert.equal(select().length,0);assert.equal(f.calls.length,reads,'Search and filtering use already loaded records only');
   controller.toggleRequests();controller.setQuery('private work');assert.equal(controller.snapshot().requestsOnly,false,'Message search remains in the message context');
   assert.equal(f.store.has('jarvis.relay.work-filter'),false);
+});
+
+
+test('attention keeps owner input, unknown execution, failure, pending cancellation and unverified completion distinct',()=>{
+  const now=Date.parse('2026-10-09T12:00:00Z'),base={title:'Fictional task',body:'Fictional scope',actionKind:'read_only',attempt:1,updatedAt:new Date(now).toISOString()};
+  const stages=[{stage:'waiting_for_owner'},{stage:'running',execution:{leaseExpiresAt:new Date(now-1).toISOString()}},{stage:'failed',failure:{message:'Fictional failure'}},{stage:'running',cancelRequested:true},{stage:'outcome_unknown',result:{body:'Fictional acknowledgement'}},{stage:'running',execution:{leaseExpiresAt:new Date(now+1000).toISOString()}},{stage:'completed',completion:{createdAt:new Date(now).toISOString()},result:{body:'Fictional result'}},{stage:'cancelled'}];
+  const jobs=stages.map((fields,i)=>({...base,...fields,id:'task-'+i,rootJobId:'root-'+i,sequence:i+1}));
+  // A prior failed attempt is history, not an additional current attention item.
+  jobs[5].attempt=2;jobs.push({...jobs[5],id:'old-working-root',attempt:1,stage:'failed'});
+  const tasks=groupOwnerWork(jobs,{now}),summary=ownerWorkAttention(tasks);assert.deepEqual(summary.map(item=>item.count),[1,1,1,1,1]);
+  for(const item of summary){const matching=groupOwnerWork(jobs,{filter:item.reason,now});assert.equal(matching.length,1);assert.equal(matching[0].status.attention,item.reason);}
+  assert.equal(groupOwnerWork(jobs,{filter:'blocked',now}).length,5);assert.equal(ownerWorkStatus(jobs[6],now).attention,null);assert.equal(ownerWorkStatus(jobs[7],now).attention,null);
+  assert.equal(ownerWorkStatus({...jobs[1],execution:null},now).attention,'execution_unknown');assert.equal(ownerWorkStatus({...jobs[1],execution:{leaseExpiresAt:'invalid'}},now).attention,'execution_unknown');
+  assert.equal(ownerWorkStatus({...jobs[0],cancelRequested:true},now).attention,'cancellation_pending');
 });
