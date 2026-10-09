@@ -211,6 +211,32 @@ test('admission is mandatory before native storage, binds the complete request a
   assert.equal(delayed.reason,'preflight_admission_obsolete');assert.equal(delayed.native.rowsRead,0);assert.equal(delayed.native.rowsWritten,0);
 });
 
+test('delayed admission rejects input mutation and freezes the original reservation reference before any storage access', async()=>{
+  const now=Date.now(),scopeA='fictional-scope-a',scopeB='fictional-scope-b';let storageAccesses=0;
+  const ctx={get storage(){++storageAccesses;return {};}};
+  const receipt=claim=>({status:'reserved',reservationId:claim.reservationId,utcDay:claim.utcDay,scope:claim.scope,
+    allocationSignature:claim.allocationSignature,attempt:1,reserved:{rowsRead:PLAN.stepRowsRead,rowsWritten:PLAN.stepRowsWritten,storedBytes:PLAN.checkpointBytes}});
+  for(const mutate of [value=>{value.scope=scopeB;},value=>{value.action='discard';},value=>{value.allocations[1].rowsRead+=PLAN.stepRowsRead;},
+    value=>{value.evidence.account.rowsRead.used+=1;},value=>{value.allocations.push(value.allocations);}]) {
+    const request=input(options(now,{scope:scopeA,extraScope:scopeB})),unchanged=structuredClone(request);
+    const admission=await relayMigrationPreflightAdmission(ctx,request,now,async claim=>{
+      const original=receipt(claim);await Promise.resolve();mutate(request);return original;
+    });
+    assert.equal(admission.reason,'external_admission_invalid');assert.equal(admission.native.rowsRead,0);assert.equal(admission.native.rowsWritten,0);
+    assert.equal(relayMigrationPreflightStep(ctx,unchanged,now,admission).reason,'external_admission_required');
+    const rejected=relayMigrationPreflightStep(ctx,request,now,admission);
+    assert.equal(rejected.status,'blocked');assert.equal(rejected.native.rowsRead,0);assert.equal(rejected.native.rowsWritten,0);assert.equal(storageAccesses,0);
+  }
+  const request=input(options(now,{scope:scopeA,extraScope:scopeB}));let captured,mutations;
+  const forged=await relayMigrationPreflightAdmission(ctx,request,now,async claim=>{
+    captured=claim;mutations=[Reflect.set(claim,'scope',scopeB),Reflect.set(claim.allocation,'rowsRead',Number.MAX_SAFE_INTEGER),Reflect.set(claim.envelope,'rowsRead',0)];
+    await Promise.resolve();return {...receipt(claim),scope:scopeB};
+  });
+  assert.equal(Object.isFrozen(captured),true);assert.equal(Object.isFrozen(captured.allocation),true);assert.equal(Object.isFrozen(captured.envelope),true);
+  assert.deepEqual(mutations,[false,false,false]);assert.equal(captured.scope,scopeA);assert.equal(captured.allocation.rowsRead,500000);
+  assert.equal(captured.envelope.rowsRead,PLAN.stepRowsRead);assert.equal(forged.reason,'external_admission_invalid');assert.equal(storageAccesses,0);
+});
+
 test('native pinned OAuth inventory bounds both retained-row indexes and first-access legacy maintenance without exposing identity payloads', {timeout:30000}, async t=>{
   const f=await local(t),now=Date.now();
   for(const legacyClients of [false,true]) {
