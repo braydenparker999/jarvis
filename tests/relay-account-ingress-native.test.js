@@ -56,7 +56,7 @@ const publicPaths=['/relay/mcp','/relay/oauth/authorize','/relay/oauth/register'
 
 test('native Hub schema/auth/storage routes refuse enforcement before SQL, KV, namespace and egress',async t=>{
  const call=await local(t);
- for(const path of hubPaths){const value=await call({path,method:path.endsWith('/state')?'GET':'POST',headers:{'X-Account-Admission':'forged','Authorization':'Bearer '+'a'.repeat(64)},body:JSON.stringify({principal:'github:183016859',approved:true,budget:{rowsRead:999999999},permit:{status:'granted'}})});assert.equal(value.status,503,path);assert.equal(JSON.parse(value.body).code,'finite_upstream_admission_unknown');untouched(value);}
+ for(const path of hubPaths){const value=await call({path,method:path.endsWith('/state')?'GET':'POST',headers:{'X-Account-Admission':'forged','Authorization':'Bearer '+'a'.repeat(64)},body:JSON.stringify({principal:'github:900000001',approved:true,budget:{rowsRead:999999999},permit:{status:'granted'}})});assert.equal(value.status,503,path);assert.equal(JSON.parse(value.body).code,'finite_upstream_admission_unknown');untouched(value);}
 });
 test('native outer OAuth, owner, RPC, import-hint and legacy ingress deny before authentication lookup',async t=>{
  const call=await local(t);
