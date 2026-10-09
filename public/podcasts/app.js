@@ -1,5 +1,6 @@
 import {API_ORIGIN} from '/assets/config.js';
 import {STORAGE_KEY,AUDIO_CACHE,MAX_DOWNLOAD,categories,readState,keyOf,offlinePath,clock,minutes,size,resumePosition,nextQueued,shouldSleep,progressEntry,compactProgress,storedFeed,saveFeed} from './core.js';
+import {clientDirectory} from './directory.js';
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s || '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -52,45 +53,23 @@ for(const d of [$('sheet'),$('player')])d.addEventListener('click',e=>{if(e.targ
 
 async function api(path,params={},signal) {
   const url=new URL('/podcasts/'+path,API_ORIGIN);for(const [k,v] of Object.entries(params))url.searchParams.set(k,v);
-  const r=await fetch(url,{signal:AbortSignal.any([AbortSignal.timeout(25000),...(signal?[signal]:[])])});
+  const r=await fetch(url,{credentials:'omit',referrerPolicy:'no-referrer',signal:AbortSignal.any([AbortSignal.timeout(25000),...(signal?[signal]:[])])});
   let data;try{data=await r.json();}catch{throw Error('The podcast service returned an unreadable response.');}
   if(!r.ok)throw Error(data.error || 'The podcast service is unavailable.');return data;
-}
-function jsonpDirectory(query,signal,endpoint='https://itunes.apple.com/search') {
-  // Apple's documented JSONP API uses the listener's network, independent of
-  // a server region that is rate-limited. Its results are still escaped data.
-  return new Promise((resolve,reject)=>{
-    const name='__jarvis_podcast_'+crypto.randomUUID().replaceAll('-',''),script=document.createElement('script');
-    const url=new URL(endpoint);
-    for(const [k,v] of Object.entries({term:query,media:'podcast',entity:'podcast',limit:'36',country:state.country,callback:name}))url.searchParams.set(k,v);
-    let settled=false;
-    const cleanup=()=>{clearTimeout(timeout);signal?.removeEventListener('abort',abort);script.remove();window[name]=()=>{};setTimeout(()=>delete window[name],30000);};
-    const finish=(error,data)=>{if(settled)return;settled=true;cleanup();error?reject(error):resolve(data);};
-    const abort=()=>finish(new DOMException('Cancelled','AbortError'));
-    const timeout=setTimeout(()=>finish(Error('The podcast directory took too long.')),7000);
-    window[name]=data=>{if(!Array.isArray(data?.results)){finish(Error('Invalid directory results.'));return;}
-      finish(null,{shows:data.results.filter(s=>s.feedUrl&&s.collectionName).slice(0,36).map(s=>({id:String(s.collectionId),title:s.collectionName,author:s.artistName || '',feedUrl:safeURL(s.feedUrl),artwork:safeURL(s.artworkUrl600 || s.artworkUrl100),directoryUrl:safeURL(s.collectionViewUrl),genres:s.genres || []})).filter(s=>s.feedUrl)});};
-    script.onerror=()=>finish(Error('Could not reach the podcast directory.'));script.src=url.href;script.referrerPolicy='no-referrer';
-    if(signal?.aborted){abort();return;}signal?.addEventListener('abort',abort,{once:true});document.head.append(script);
-  });
-}
-async function clientDirectory(query,signal) {
-  try { return await jsonpDirectory(query,signal); }
-  catch(e) { if(signal?.aborted)throw e;return jsonpDirectory(query,signal,'https://itunes.apple.com/WebObjects/MZStoreServices.woa/ws/wsSearch'); }
 }
 async function searchDirectory(path,params,signal) {
   const key=JSON.stringify([path,params]),saved=directoryCache.get(key);
   if(saved?.expires>Date.now())return saved.data;
-  const controller=new AbortController(),combined=AbortSignal.any([signal,controller.signal]);
+  const controller=new AbortController(),combined=AbortSignal.any([...(signal?[signal]:[]),controller.signal]);
   const query=path==='search'?params.q:categories.find(c=>c[0]===params.category)?.[2] || 'podcast';
   let empty;
   const useful=data=>{if(!Array.isArray(data?.shows))throw Error('Invalid directory results.');if(!data.shows.length){empty=data;throw Error('No results from this directory.');}return data;};
   try {
-    const data=await Promise.any([api(path,params,combined).then(useful),clientDirectory(query,combined).then(useful)]);
+    const data=await Promise.any([api(path,params,combined).then(useful),clientDirectory(query,state.country,combined).then(useful)]);
     directoryCache.set(key,{data,expires:Date.now()+1800000});if(directoryCache.size>24)directoryCache.delete(directoryCache.keys().next().value);
     return data;
   }
-  catch{if(signal.aborted)throw new DOMException('Cancelled','AbortError');if(empty)return empty;throw Error('Podcast search is unavailable. Please try again.');}
+  catch{if(signal?.aborted)throw new DOMException('Cancelled','AbortError');if(empty)return empty;throw Error('Podcast search is unavailable. Please try again.');}
   finally{controller.abort();}
 }
 async function feed(url,{refresh=false,signal}={}) {
