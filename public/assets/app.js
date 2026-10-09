@@ -1,4 +1,4 @@
-import {icon as uiIcon, sheet, appViewport, autosize} from './ui.js';
+import {icon as uiIcon, sheet, appViewport, autosize, copyText} from './ui.js';
 import {conversation} from './conversation.js';
 import { apps, icon, loadPreferences, savePreferences, renderUtility } from './hub.js';
 import { API_ORIGIN } from './config.js';
@@ -8,6 +8,7 @@ import {createPublicReaderDeliveryStore, mergePublicReaderInbox} from './public-
 import { channelMessages } from './channels.js';
 import { OWNER_SESSION_KEY } from './relay-owner-api.js';
 import { createRelayOwnerController, createRelayOwnerUI } from './relay-owner-ui.js';
+import {createRelayTransferStore} from './relay-transfer.js';
 
 const $ = id => document.getElementById(id);
 const icons = {
@@ -26,7 +27,9 @@ catch (e) { storageError = e.message || 'Device storage is unavailable.'; }
 let route = getRoute(), chatUI;
 const ownerController = createRelayOwnerController({onModeChange:()=>{if(route==='chat')drawShell();}});
 const ownerUI = createRelayOwnerUI({controller:ownerController});
-ownerController.subscribe(updateConversationIdentity);
+let relayTransfers, transferNotice = '';
+try{relayTransfers=createRelayTransferStore();}catch{transferNotice='Could not read the transferred draft. Keep this tab open and allow browser storage.';}
+ownerController.subscribe(()=>{updateConversationIdentity();if(route==='chat'&&ownerUI.mode!=='public')drawTransferNotice();});
 appViewport();
 addEventListener('pagehide',()=>chatUI?.savePosition());
 const paths = { home: '/', chat: '/jarvis/', board: '/daily-board/', favorites: '/favorites/', settings: '/settings/', notes: '/notes/', tools: '/tools/', server: '/server/' };
@@ -130,10 +133,59 @@ function drawPage() {
   if (route === 'settings') { drawSettings(); return; }
   if (['notes','tools','server'].includes(route)) { renderUtility(route,$('content'),{notify,connection,showConnection,state,storageError,sync}); return; }
   // A damaged public store must not route private data through its recovery path.
-  if (route === 'chat' && ownerUI.mode !== 'public') { ownerUI.mount($('content')); return; }
-  if (storageError) { $('content').innerHTML = `<div class="empty"><h1>Unable to save on this device</h1><p>${escape(storageError)}</p><p>Existing data has not been changed. Allow browser storage, then reload.</p></div>`; return; }
+  if (route === 'chat' && ownerUI.mode !== 'public') { adoptRelayTransfer('owner',ownerController.snapshot().draft,value=>ownerController.setDraft(value));ownerUI.mount($('content'));drawTransferNotice();return; }
+  if (storageError) { $('content').innerHTML = `<div class="empty"><h1>Unable to save on this device</h1><p>${escape(storageError)}</p><p>Existing data has not been changed. Allow browser storage, then reload.</p></div>`;if(route==='chat')drawTransferNotice();return; }
   if (route === 'chat') drawChat();
   if (route === 'board') drawBoard();
+}
+function pendingTransfer(){try{return relayTransfers?.peek();}catch(error){transferNotice=error.message;return null;}}
+function openTransferDestination(destination){
+  try{if(pendingTransfer()?.legacy)relayTransfers.selectLegacy(destination);}
+  catch(error){transferNotice=error.message;notify(transferNotice);return;}
+  if(destination==='owner')ownerController.showOwner();else ownerController.showPublic();
+  if(route==='chat')drawShell();
+}
+function chooseTransferDestination(){sheet('Choose Relay destination',[
+  {label:'Owner chat · private',icon:'lock',action:()=>openTransferDestination('owner')},
+  {label:'Public Relay · shared',icon:'chat',action:()=>openTransferDestination('public')}
+]);}
+function adoptRelayTransfer(destination,draft,saveDraft){
+  if(!relayTransfers)return;
+  transferNotice='';
+  try{
+    const result=relayTransfers?.apply({destination,draft,saveDraft});
+    transferNotice={too_long:'Your existing draft and incoming draft exceed the message limit. Shorten your existing draft, then retry.',
+      draft_changed:'Your draft changed during transfer. The incoming draft is still saved; copy it to review both.',
+      storage_unavailable:'Could not retain the combined draft. The incoming draft is still saved.'}[result?.status]||'';
+  }catch(error){transferNotice=error.message;}
+}
+function dismissRelayTransfer(){
+  let review;try{review=relayTransfers.prepareDismissal();}catch(error){transferNotice=error.message;drawTransferNotice();return;}
+  const dialog=sheet('Dismiss saved transfer?',[
+    {label:'Keep saved transfer',icon:'close',action:()=>{}},
+    {label:'Dismiss saved transfer',icon:'check',action:()=>{
+      try{review.dismiss();transferNotice='';notify('Saved transfer dismissed. Your composer has not changed.');}
+      catch(error){transferNotice=error.message;}
+      drawTransferNotice();
+    }}
+  ]);
+  const context=document.createElement('p');context.className='sheet-context';
+  context.textContent='This removes the saved incoming transfer. Text in either Relay composer stays as it is. Copy the incoming draft first if you want to keep a separate copy.';
+  dialog.querySelector('.dialog-heading').after(context);
+}
+function drawTransferNotice(){
+  const content=$('content');if(!content)return;
+  $('relay-transfer-notice')?.remove();
+  const pending=pendingTransfer();if(!pending&&!transferNotice)return;
+  const node=document.createElement('div');node.id='relay-transfer-notice';node.className='conversation-notice';node.style.flexWrap='wrap';
+  const message=document.createElement('p');message.setAttribute('role','status');message.style.flexBasis='100%';
+  message.textContent=transferNotice||(pending.legacy?'Choose where to continue your saved Relay draft.':`Incoming draft kept for ${pending.destination==='owner'?'private owner chat':'public Relay'}.`);node.append(message);
+  const button=(label,action)=>{const b=document.createElement('button');b.type='button';b.className='text-button';b.textContent=label;b.onclick=action;node.append(b);};
+  if(pending?.legacy)button('Choose destination',chooseTransferDestination);
+  else if(pending)button(pending.destination==='owner'?'Review private draft':'Review public draft',()=>openTransferDestination(pending.destination));
+  if(pending){button('Copy incoming draft',async()=>notify(await copyText(pending.body)?'Incoming draft copied.':'Copy is unavailable. Your draft is still saved.'));
+    button('Dismiss saved transfer',dismissRelayTransfer);}
+  content.prepend(node);
 }
 function appRow(app) {
   return `<a class="app-row" href="${app.href}">${icon(app.icon)}<span><strong>${app.name}</strong><small>${app.description}</small></span>${icon('chevron')}</a>`;
@@ -178,7 +230,7 @@ function drawSettings() {
 function drawChat() {
   $('content').innerHTML = `<div class="conversation-search" id="chat-search-bar" hidden><label class="sr-only" for="conversation-search">Search messages</label><input id="conversation-search" type="search" placeholder="Search this conversation" autocomplete="off"><button class="icon-button" id="chat-search-close" type="button" aria-label="Close search">${uiIcon('close')}</button></div><section class="chat-panel"><div class="messages" id="messages" aria-label="Public Relay conversation"></div><div class="conversation-notice" id="relay-sync-notice" hidden><p id="relay-sync-error" role="status"></p><button class="text-button" type="button" id="relay-retry">Retry sync</button></div><form class="composer" id="message-form"><div class="composer-input"><label class="sr-only" for="message-text">Message Relay publicly</label><textarea id="message-text" rows="1" maxlength="4000" placeholder="Message Relay publicly…" required>${escape(state.composer || '')}</textarea><button class="primary send-icon" type="submit" id="send-message" aria-label="Send message">${uiIcon('send')}</button></div><div class="composer-bottom"><span id="relay-status" role="status">${API_ORIGIN?'Opening public inbox…':'Draft mode · saved on this device'}</span></div></form></section>`;
   const input=$('message-text');
-  const saveDraft=value=>{state={...state,composer:value};try{commit(state);}catch(error){storageError=error.message||'Could not save your draft. Copy your text before leaving.';}renderPublicStatus();};
+  const saveDraft=value=>{state={...state,composer:value};let saved=false;try{commit(state);saved=true;}catch(error){storageError=error.message||'Could not save your draft. Copy your text before leaving.';}renderPublicStatus();return saved;};
   input.oninput=()=>{saveDraft(input.value);autosize(input);};
   input.onkeydown=e=>{if(e.key==='Enter' && (e.ctrlKey||e.metaKey) && !e.isComposing){e.preventDefault();$('message-form').requestSubmit();}};
   $('message-form').onsubmit=e=>{e.preventDefault();submitMessage();};
@@ -187,8 +239,8 @@ function drawChat() {
   $('conversation-search').oninput=e=>chatUI.search(e.target.value);
   $('chat-search-close').onclick=()=>$('chat-search-toggle').click();
   $('relay-retry').onclick=sync;
-  const transferred=sessionStorage.getItem('jarvis.relay.transfer.v1');
-  if(transferred){input.value=(input.value?input.value+'\n\n':'')+transferred;input.value=input.value.slice(0,4000);saveDraft(input.value);sessionStorage.removeItem('jarvis.relay.transfer.v1');}
+  adoptRelayTransfer('public',input.value,value=>{const saved=saveDraft(value);if(saved)input.value=value;return saved;});
+  drawTransferNotice();
   autosize(input);
   renderPublicStatus();
 }
@@ -277,6 +329,10 @@ document.addEventListener('visibilitychange',updateClock);
 document.addEventListener('visibilitychange',()=>{ if(!document.hidden && API_ORIGIN && !busy && (!state.syncedAt || Date.now()-Date.parse(state.syncedAt)>60000)) sync(); });
 document.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>$(b.dataset.close).close());
 $('sync-now').onclick = sync;
+const initialTransfer=pendingTransfer();
+if(initialTransfer&&!initialTransfer.legacy&&route==='chat'){
+  if(initialTransfer.destination==='owner')ownerController.showOwner();else ownerController.showPublic();
+}
 drawShell();
 if (API_ORIGIN) sync();
 

@@ -31,7 +31,7 @@ async function savedMessage(h, owner, body) {
   return (await response.json()).entry;
 }
 
-test('private switches and late responses never fill public or Muse; expiry clears memory and remembered access', {timeout: 120000}, async t => {
+test('private switches and late responses never fill public or Muse; expiry clears history/access and keeps the tab draft', {timeout: 120000}, async t => {
   const j = await journey(t); if (!j) return;
   const {h, oauth, owner, open} = j;
   const privateBody = 'SYNTHETIC-PRIVATE-SWITCH-7261', privateReply = 'SYNTHETIC-PRIVATE-REPLY-3844', privateDraft = 'SYNTHETIC-PRIVATE-DRAFT-8916';
@@ -55,14 +55,14 @@ test('private switches and late responses never fill public or Muse; expiry clea
   await assertPrivateInvisible(page, [privateBody, privateReply, privateDraft]);
   await conversationMenu(page, 'Owner chat');
   await ownerInput(page).waitFor();
-  assert.equal(await ownerInput(page).inputValue(), privateDraft, 'Private draft survives an in-page switch only');
+  assert.equal(await ownerInput(page).inputValue(), privateDraft, 'Private draft survives an in-page switch');
   await conversationMenu(page, 'Public chat');
   assert.equal(await publicInput(page).inputValue(), publicDraft);
   await page.goto(MUSE_URL);
   await page.locator('#prompt').waitFor();
   await page.locator('#prompt').fill(museDraft);
   await assertPrivateInvisible(page, [privateBody, privateReply, privateDraft]);
-  await assertNoPrivatePersistence(page, [privateBody, privateReply, privateDraft]);
+  await assertNoPrivatePersistence(page, [privateBody, privateReply, privateDraft], {draft:privateDraft});
   await page.reload();
   await page.locator('#prompt').waitFor();
   assert.equal(await page.locator('#prompt').inputValue(), museDraft);
@@ -71,14 +71,14 @@ test('private switches and late responses never fill public or Muse; expiry clea
   assert.equal(await publicInput(page).inputValue(), publicDraft);
   await conversationMenu(page, 'Owner chat');
   await ownerInput(page).waitFor();
-  assert.equal(await ownerInput(page).inputValue(), '', 'Private draft is never recovered through persistent storage');
+  assert.equal(await ownerInput(page).inputValue(), privateDraft, 'Private draft is recovered only from this tab');
   await ownerInput(page).fill(privateDraft);
   h.ctx.storage.sql.exec('UPDATE relay_owner_sessions SET expires_ms=? WHERE device_id=?', Date.now() - 1, owner.device.id);
   await conversationMenu(page, 'Refresh private inbox');
   await page.waitForFunction(key => localStorage.getItem(key) === null, OWNER_KEY);
   assert.equal(await ownerInput(page).count(), 0, 'Expired access removes the private composer');
   await assertPrivateInvisible(page, [privateBody, privateReply, privateDraft]);
-  await assertNoPrivatePersistence(page, [privateBody, privateReply, privateDraft]);
+  await assertNoPrivatePersistence(page, [privateBody, privateReply, privateDraft], {draft:privateDraft});
   assert.deepEqual(publicWrites(phone), [], 'Failed private authorization must never invoke the public send adapter');
   await page.reload();
   await page.getByRole('button', {name: 'Conversation menu', exact: true}).waitFor();
@@ -537,7 +537,7 @@ test('an authenticated send response arriving after session expiry cannot repopu
   await publicInput(page).waitFor();
   assert.equal(await publicInput(page).inputValue(), '');
   await assertPrivateInvisible(page, [body]);
-  await assertNoPrivatePersistence(page, [body]);
+  await assertNoPrivatePersistence(page, [body], {draft:body});
   assert.deepEqual(publicWrites(phone), []);
   assertBrowserContained(phone);
 });
