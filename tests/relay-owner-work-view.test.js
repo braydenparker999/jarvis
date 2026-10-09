@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createConversationFixture, SITE, WORKER, OWNER_KEY} from './helpers/relay-conversation-browser-fixture.js';
 import {createRelayOwnerApi} from '../public/assets/relay-owner-api.js';
-import {createRelayOwnerController, ownerWorkStatus, ownerWorkAttention, groupOwnerWork} from '../public/assets/relay-owner-ui.js';
+import {createRelayOwnerController, ownerWorkStatus, ownerWorkAttention, ownerWorkActivity, ownerWorkPreview, groupOwnerWork} from '../public/assets/relay-owner-ui.js';
 import {relayOwnerJobTools} from '../backend/relay-owner-job-tools.js';
 import {RELAY_OWNER_INBOX} from '../backend/relay-common.js';
 
@@ -112,4 +112,21 @@ test('attention keeps owner input, unknown execution, failure, pending cancellat
   assert.equal(groupOwnerWork(jobs,{filter:'blocked',now}).length,5);assert.equal(ownerWorkStatus(jobs[6],now).attention,null);assert.equal(ownerWorkStatus(jobs[7],now).attention,null);
   assert.equal(ownerWorkStatus({...jobs[1],execution:null},now).attention,'execution_unknown');assert.equal(ownerWorkStatus({...jobs[1],execution:{leaseExpiresAt:'invalid'}},now).attention,'execution_unknown');
   assert.equal(ownerWorkStatus({...jobs[0],cancelRequested:true},now).attention,'cancellation_pending');
+});
+
+
+test('closed work previews and ordering use meaningful saved activity instead of heartbeats',()=>{
+  const earlier='2026-10-09T12:00:00.000Z',later='2026-10-09T12:00:01.000Z',heartbeat='2026-10-09T12:05:00.000Z',now=Date.parse(later);
+  const first={id:'first',rootJobId:'first',attempt:1,sequence:1,title:'Fictional work',actionKind:'read_only',createdAt:earlier,updatedAt:earlier,stage:'running',execution:{leaseExpiresAt:'2026-10-09T12:10:00.000Z'},presentation:{latestUpdate:{kind:'running',summary:'Checked two fictional notes.',createdAt:earlier}}};
+  const second={...first,id:'second',rootJobId:'second',sequence:2,presentation:{latestUpdate:{kind:'running',summary:'A later fictional note.',createdAt:later}}};
+  assert.equal(ownerWorkPreview(first,ownerWorkStatus(first,now)),'Checked two fictional notes.');assert.equal(ownerWorkActivity(first),earlier);
+  const renewed={...first,updatedAt:heartbeat,execution:{...first.execution,acknowledgedAt:heartbeat}};
+  assert.equal(ownerWorkActivity(renewed),earlier);assert.deepEqual(groupOwnerWork([renewed,second],{now}).map(task=>task.job.id),['second','first']);
+  const onlyHeartbeat={...renewed,presentation:{latestUpdate:{kind:'running',summary:'Authenticated execution progress acknowledged.',createdAt:heartbeat}}};
+  assert.equal(ownerWorkActivity(onlyHeartbeat),earlier);assert.equal(ownerWorkPreview(onlyHeartbeat,ownerWorkStatus(onlyHeartbeat,now)),'Execution acknowledged; awaiting a progress update.');
+  assert.match(ownerWorkPreview({...first,stage:'waiting_for_owner'},ownerWorkStatus({...first,stage:'waiting_for_owner'},now)),/Checked two fictional notes/);
+  assert.match(ownerWorkPreview({...first,cancelRequested:true}),/not been confirmed stopped/);
+  assert.match(ownerWorkPreview({...first,stage:'outcome_unknown',result:{body:'Fictional reply'}}),/completion is still unverified/);
+  const corrected={...first,stage:'completed',completion:{createdAt:later,summary:'Fictional completion.'},latestResult:{createdAt:heartbeat,correctionSummary:'Checked the fictional second source.'},presentation:{latestUpdate:{kind:'result_corrected',createdAt:heartbeat,summary:'Correction saved.'}}};
+  assert.equal(ownerWorkActivity(corrected),heartbeat);assert.equal(ownerWorkPreview(corrected),'Checked the fictional second source.');
 });
