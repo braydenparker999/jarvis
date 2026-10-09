@@ -379,27 +379,45 @@ export function ownerWorkAttention(tasks) {
 
 export function groupOwnerWork(jobs, {query='', filter='all', now=Date.now()}={}) {
   query=query.trim().toLowerCase();
-  const roots=new Map();
+  const roots=new Map(),activity=new Map();
   for(const job of jobs){const attempts=roots.get(job.rootJobId)||[];attempts.push(job);roots.set(job.rootJobId,attempts);}
   const tasks=[...roots.values()].map(attempts=>{
     attempts.sort((a,b)=>a.attempt-b.attempt||a.sequence-b.sequence);
-    const job=attempts.at(-1);return {job,attempts,status:ownerWorkStatus(job,now)};
+    const job=attempts.at(-1);activity.set(job.id,Date.parse(ownerWorkActivity(job)));return {job,attempts,status:ownerWorkStatus(job,now)};
   }).filter(({job,attempts})=>job.actionKind!=='unclassified'||job.attempt>1||attempts.some(attempt=>attempt.execution||attempt.completion))
     .filter(({status})=>filter==='all'||status.state===filter||status.attention===filter)
     .filter(({job})=>!query||[job.title,job.body,job.presentation?.projectTitle,job.presentation?.goalTitle,job.presentation?.latestUpdate?.summary,job.latestResult?.body||job.result?.body,job.latestResult?.correctionSummary].some(text=>text?.toLowerCase().includes(query)));
-  tasks.sort((a,b)=>b.job.updatedAt.localeCompare(a.job.updatedAt)||b.job.sequence-a.job.sequence);
+  tasks.sort((a,b)=>activity.get(b.job.id)-activity.get(a.job.id)||b.job.sequence-a.job.sequence);
   return tasks;
 }
 
 function meaningfulUpdate(job, events=[]) {
-  if(job.presentation?.latestUpdate)return job.presentation.latestUpdate;
+  const update=job.presentation?.latestUpdate;
+  if(update&&!(update.kind==='running'&&update.summary==='Authenticated execution progress acknowledged.'))return update;
   return events.filter(e=>e.authentication_source==='owner-oauth-mcp'
     &&['claimed','running','waiting_for_owner','failed','cancelled','work_completed','result_corrected'].includes(e.kind)
     &&!(e.kind==='running'&&e.summary==='Authenticated execution progress acknowledged.')).at(-1)||null;
 }
 
+// Activity comes from saved content and typed outcomes, not lease heartbeats.
+export function ownerWorkActivity(job) {
+  const candidates=[job.createdAt,meaningfulUpdate(job)?.createdAt,job.latestResult?.createdAt||job.result?.createdAt,job.completion?.createdAt,job.cancelRequestedAt,job.finishedAt];
+  return candidates.filter(value=>Number.isFinite(Date.parse(value))).sort((a,b)=>Date.parse(b)-Date.parse(a))[0]||job.createdAt;
+}
+
+export function ownerWorkPreview(job, status=ownerWorkStatus(job)) {
+  const update=meaningfulUpdate(job),latest=job.latestResult||job.result;
+  if(status.attention==='cancellation_pending')return 'Cancellation was requested; execution has not been confirmed stopped.';
+  if(status.attention==='failed')return job.failure?.message||update?.summary||'The execution reported failure. Review its evidence.';
+  if(status.attention==='waiting_for_owner')return update?.summary||'The execution needs your input before continuing.';
+  if(status.attention==='completion_unverified')return 'Reply saved; work completion is still unverified. Review the request evidence.';
+  if(status.attention==='execution_unknown')return 'The execution outcome is unconfirmed. Refresh or inspect the request evidence.';
+  if(update&&update.kind!=='claimed')return update.kind==='result_corrected'&&latest?.correctionSummary?latest.correctionSummary:update.summary;
+  return status.state==='queued'?'Waiting for an execution acknowledgement.':status.state==='working'?'Execution acknowledged; awaiting a progress update.':job.completion?.summary||'Cancellation was acknowledged by the execution.';
+}
+
 export function createRelayOwnerUI({ controller = createRelayOwnerController(), document: doc = globalThis.document } = {}) {
-  let root, timer, viewKey = '', chatNodes = null, pairLabel = '', pairRemember = false, readingAnchor=null, detailDialog=null, detailSignature='',detailFocus=null,connectionDialog=null,workSignature='',workVisible=50;
+  let root, timer, viewKey = '', chatNodes = null, pairLabel = '', pairRemember = false, readingAnchor=null, detailDialog=null, detailSignature='',detailFocus=null,connectionDialog=null,workSignature='',workVisible=50,workContext='',workOpen=new Map();
   const sensitiveInputs = new Set();
   function clearSensitiveFields() {
     for (const input of sensitiveInputs) { input.value = ''; if (input.type === 'checkbox') input.checked = false; }
@@ -551,8 +569,11 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
     const panel=chatNodes.messages,allTasks=groupOwnerWork(state.jobs),tasks=groupOwnerWork(state.jobs,{query:state.query,filter:state.workFilter}),attention=ownerWorkAttention(groupOwnerWork(state.jobs,{query:state.query}));
     const signature=JSON.stringify([state.jobs,state.query,state.workFilter,state.jobsError,state.syncStale,workVisible,tasks.map(t=>t.status),attention]);
     if(workSignature===signature)return;workSignature=signature;
-    const open=new Map([...panel.querySelectorAll?.('details[data-work-key]')||[]].map(n=>[n.dataset.workKey,n.open]));
-    const scroll=panel.scrollTop,focused=panel.contains?.(doc.activeElement)?doc.activeElement?.id:null;
+    for(const node of panel.querySelectorAll?.('details[data-work-key]')||[])workOpen.set(node.dataset.workKey,node.open);
+    const bounds=panel.getBoundingClientRect?.(),visible=bounds?[...panel.querySelectorAll?.('[data-work-anchor]')||[]].find(node=>{const rect=node.getBoundingClientRect();return rect.height>0&&rect.bottom>bounds.top&&rect.top<bounds.bottom;}):null;
+    const reading=visible?{id:visible.dataset.workAnchor,offset:visible.getBoundingClientRect().top-bounds.top}:null;
+    const context=JSON.stringify([state.query,state.workFilter]),contextChanged=context!==workContext;workContext=context;
+    const scroll=contextChanged?0:panel.scrollTop,focused=panel.contains?.(doc.activeElement)?doc.activeElement?.id:null;
     const body=make('section','','owner-work');body.id='relay-owner-current-work';body.setAttribute('aria-label','Private current work');
     body.append(make('h2','Current work'),make('p','Private · saved requests and authenticated execution updates','request-meta'));
     const filters=make('div','','owner-work-filters'),filterLabel=make('label','Status');filterLabel.htmlFor='relay-owner-work-filter';
@@ -563,21 +584,23 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
     if(state.syncStale||state.jobsError){const stale=make('p','Last known records · '+(state.jobsError||'refresh unavailable'),'relay-owner-note');stale.setAttribute('role','status');body.append(stale);}
     const needsAttention=attention.filter(item=>item.count);
     if(needsAttention.length){const summary=make('section','','owner-work-attention');summary.setAttribute('aria-label','Saved work needing attention');summary.append(make('h3','Needs attention'+(state.query?' · matching search':'')));const list=make('ul');for(const item of needsAttention){const row=make('li',item.label+' · '+item.count);row.dataset.attention=item.reason;list.append(row);}summary.append(list);body.append(summary);}
-    function disclosure(key,title,cls,initial=false){const n=make('details','',cls);n.dataset.workKey=key;n.open=open.has(key)?open.get(key):initial;const s=make('summary',title);s.id='owner-work-'+encodeURIComponent(key);n.append(s);return n;}
+    function disclosure(key,title,cls,initial=false){const n=make('details','',cls);n.dataset.workKey=key;n.open=workOpen.has(key)?workOpen.get(key):initial;const s=make('summary',title);s.id='owner-work-'+encodeURIComponent(key);n.append(s);return n;}
     function taskRow(task){
       const {job,status,attempts}=task,row=disclosure('task:'+job.id,'','owner-work-task');row.dataset.jobId=job.id;row.dataset.state=status.state;if(status.attention)row.dataset.attention=status.attention;
       row.firstChild.append(make('span',job.title,'owner-work-title'),make('span',status.label,'job-state'));
       row.append(make('p','Owner · You'+(job.execution?' · Owner-connected assistant':' · execution unacknowledged'),'request-meta'));
-      const update=meaningfulUpdate(job),latest=job.latestResult||job.result;
+      const update=meaningfulUpdate(job),latest=job.latestResult||job.result,preview=ownerWorkPreview(job,status);
+      const short=preview.length>240?preview.slice(0,237)+'…':preview;row.firstChild.dataset.workAnchor='task:'+job.id;
+      row.firstChild.append(make('span',short,'owner-work-preview'),make('span','Task activity · '+stamp(ownerWorkActivity(job)),'owner-work-time'));
       if(update)row.append(make('p',update.kind==='result_corrected'&&latest?.correctionSummary?latest.correctionSummary:update.summary,'request-body owner-work-update'),make('p','Execution update · '+stamp(update.createdAt),'request-meta'));
       if(status.state==='blocked')row.append(make('p',job.failure?.message||job.stage==='waiting_for_owner'&&update?.summary||job.cancelRequested&&'Cancellation was requested; execution has not been confirmed stopped.'||'Refresh or inspect the request evidence to check the current outcome.','request-body owner-work-blocker'));
-      row.append(make('p','Record updated · '+stamp(job.updatedAt),'request-meta'));
+      row.append(make('p','Task activity · '+stamp(ownerWorkActivity(job)),'request-meta'));
       if(latest){
         row.append(make('h3',job.resultVersion>1?'Corrected result · version '+job.resultVersion:job.completion?'Final result':'Saved reply · completion unverified'));
-        const result=make('div','','request-body rich-body');result.dataset.resultVersion=String(job.resultVersion||1);richText(result,latest.body);row.append(result);
+        const result=make('div','','request-body rich-body');result.dataset.resultVersion=String(job.resultVersion||1);result.dataset.workAnchor='result:'+job.id;richText(result,latest.body);row.append(result);
         if(job.completion)row.append(make('p','Completion reported · '+stamp(job.completion.createdAt)+' · reply version '+job.completion.resultVersion,'request-meta'));
       }
-      const evidence=action('Evidence and result',()=>controller.inspectJob(job.id),'text-button');evidence.id='owner-work-evidence-'+job.id;row.append(evidence);
+      const evidence=action('Evidence and result',()=>controller.inspectJob(job.id),'text-button');evidence.id='owner-work-evidence-'+job.id;evidence.dataset.workAnchor='evidence:'+job.id;row.append(evidence);
       if(attempts.length>1){const earlier=disclosure('attempts:'+job.rootJobId,'Earlier attempts · '+(attempts.length-1),'owner-work-attempts');for(const prior of attempts.slice(0,-1))earlier.append(action('Attempt '+prior.attempt+' · '+jobLabel(prior),()=>controller.inspectJob(prior.id),'text-button'));row.append(earlier);}
       return row;
     }
@@ -592,8 +615,9 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
     const current=tasks.filter(t=>t.status.state!=='finished'),finished=tasks.filter(t=>t.status.state==='finished');
     if(current.length)projects(current.slice(0,workVisible),body,'current');else if(!finished.length)body.append(make('p',state.busy&&!state.jobs.length?'Loading saved requests…':state.query||state.workFilter!=='all'?'No work matches this search and status.':'No current work is recorded.','relay-owner-note'));
     if(current.length>workVisible){const more=action('Show more current work ('+Math.min(workVisible,current.length)+' of '+current.length+')',()=>{workVisible+=50;renderMessages(controller.snapshot());},'text-button');body.append(more);}
-    if(finished.length){const done=disclosure('finished','Finished · '+finished.length,'owner-work-finished');if(state.query||state.workFilter==='finished')done.open=true;projects(finished.slice(0,workVisible),done,'finished');if(finished.length>workVisible)done.append(action('Show more finished work',()=>{workVisible+=50;renderMessages(controller.snapshot());},'text-button'));body.append(done);}
+    if(finished.length){const done=disclosure('finished','Finished · '+finished.length,'owner-work-finished');if((contextChanged||!workOpen.has('finished'))&&(state.query||state.workFilter==='finished'))done.open=true;projects(finished.slice(0,workVisible),done,'finished');if(finished.length>workVisible)done.append(action('Show more finished work',()=>{workVisible+=50;renderMessages(controller.snapshot());},'text-button'));body.append(done);}
     panel.replaceChildren(body);panel.scrollTop=scroll;
+    if(reading&&!contextChanged&&scroll>0){const anchor=[...panel.querySelectorAll?.('[data-work-anchor]')||[]].find(node=>node.dataset.workAnchor===reading.id);if(anchor)panel.scrollTop+=anchor.getBoundingClientRect().top-panel.getBoundingClientRect().top-reading.offset;}
     if(focused)[...panel.querySelectorAll?.('[id]')||[]].find(n=>n.id===focused)?.focus({preventScroll:true});
   }
   function renderMessages(state) {
@@ -646,8 +670,10 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
     chatNodes.notice.hidden=!state.error;chatNodes.retry.textContent=state.sendUnconfirmed?'Retry private send':'Retry private sync';chatNodes.retry.disabled=state.busy||state.sending;
   }
   function render() {
-    if (!root?.isConnected || controller.mode === 'public') { clearSensitiveFields(); return; }
     const state = controller.snapshot();
+    // The subscription also runs while private UI is hidden or unmounted.
+    if(state.status!=='approved'){readingAnchor=null;workOpen.clear();workContext='';workSignature='';workVisible=50;}
+    if (!root?.isConnected || controller.mode === 'public') { clearSensitiveFields(); return; }
     if(connectionDialog&&(state.status!=='approved'||state.mode!=='owner')){connectionDialog.close?.();connectionDialog.remove?.();connectionDialog=null;}
     renderInspector(state);
     const key = state.mode === 'owner' && state.status === 'approved' ? 'chat' : state.mode + ':' + state.status;
@@ -657,7 +683,6 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
     // Preserve unsent setup choices when a status repaint follows network work.
     if (root.contains(active) && active?.id === 'relay-owner-label') pairLabel = active.value;
     if(chatNodes)readingAnchor=position(chatNodes.messages);
-    if(state.status!=='approved')readingAnchor=null;
     clearSensitiveFields(); root.classList.add('relay-owner-content'); root.replaceChildren(); viewKey = key; chatNodes = null;
     const section = make('section', '', 'relay-owner-panel'); root.append(section);
     if (key !== 'chat' && state.draft) section.append(make('p', 'Your unsent private draft is kept in this tab. Sign in to review it.', 'relay-owner-notice'));
