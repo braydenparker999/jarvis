@@ -86,6 +86,36 @@ test('Quick AI transfers use explicit private/public destinations, retain drafts
     await page.locator('#message-text').fill('Shortened existing draft');await page.getByRole('button',{name:'Review public draft',exact:true}).click();
     assert.equal(await page.locator('#message-text').inputValue(),'Shortened existing draft\n\n'+incoming.body);assert.deepEqual(writes(phone),[]);contained(phone);
   });
+  for(const destination of ['owner','public'])await t.test(`${destination} edited interrupted transfer needs explicit dismissal; cancellation or changed journal preserves every draft`,async()=>{
+    const phone=await open(),{page}=phone,incoming=quickAITransfer(question,answer,destination),edited='User edited '+destination+' draft during recovery';
+    await page.evaluate(async({incoming,edited,existingPrivate,existingPublic,OWNER_DRAFT_KEY})=>{
+      const manager=(await import('/assets/relay-transfer.js')).createRelayTransferStore();manager.stage(incoming);
+      manager.apply({destination:incoming.destination,draft:incoming.destination==='owner'?existingPrivate:existingPublic,saveDraft:()=>false});
+      if(incoming.destination==='owner')sessionStorage.setItem(OWNER_DRAFT_KEY,JSON.stringify({body:edited}));
+      else{const shared=JSON.parse(localStorage.getItem('jarvis.shared.v1'));shared.composer=edited;localStorage.setItem('jarvis.shared.v1',JSON.stringify(shared));}
+    },{incoming,edited,existingPrivate,existingPublic,OWNER_DRAFT_KEY});
+    await page.goto(RELAY_URL);
+    const input=page.locator(destination==='owner'?'#relay-owner-message-text':'#message-text');await input.waitFor();assert.equal(await input.inputValue(),edited);
+    assert.match(await page.locator('#relay-transfer-notice').textContent(),/draft changed/);
+    await page.locator('#relay-transfer-notice').getByRole('button',{name:'Dismiss saved transfer',exact:true}).click();
+    await page.getByRole('button',{name:'Keep saved transfer',exact:true}).click();
+    assert.equal(await page.evaluate(key=>JSON.parse(sessionStorage.getItem(key)).pending.id,RELAY_TRANSFER_KEY),incoming.id);
+    assert.equal(await input.inputValue(),edited);assert.deepEqual(writes(phone),[]);
+    await page.locator('#relay-transfer-notice').getByRole('button',{name:'Dismiss saved transfer',exact:true}).click();
+    await page.evaluate(key=>{const record=JSON.parse(sessionStorage.getItem(key));record.application=null;sessionStorage.setItem(key,JSON.stringify(record));},RELAY_TRANSFER_KEY);
+    await page.locator('dialog.app-sheet').getByRole('button',{name:'Dismiss saved transfer',exact:true}).click();
+    assert.match(await page.locator('#relay-transfer-notice').textContent(),/saved transfer changed/);
+    assert.equal(await page.evaluate(key=>JSON.parse(sessionStorage.getItem(key)).pending.id,RELAY_TRANSFER_KEY),incoming.id);assert.equal(await input.inputValue(),edited);
+    await page.locator('#relay-transfer-notice').getByRole('button',{name:'Dismiss saved transfer',exact:true}).click();
+    await page.locator('dialog.app-sheet').getByRole('button',{name:'Dismiss saved transfer',exact:true}).click();
+    assert.equal(await page.evaluate(key=>sessionStorage.getItem(key),RELAY_TRANSFER_KEY),null);assert.equal(await input.inputValue(),edited);
+    assert.equal(await page.evaluate(key=>JSON.parse(sessionStorage.getItem(key)).body,OWNER_DRAFT_KEY),destination==='owner'?edited:existingPrivate);
+    assert.equal(await page.evaluate(()=>JSON.parse(localStorage.getItem('jarvis.shared.v1')).composer),destination==='public'?edited:existingPublic);
+    assert.equal(await page.evaluate(()=>JSON.parse(localStorage.getItem('jarvis.quick-ai.v1')).chats[0].draft),sourceDraft);
+    assert.deepEqual(writes(phone),[]);contained(phone);
+    await page.evaluate(async incoming=>(await import('/assets/relay-transfer.js')).createRelayTransferStore().stage(incoming),quickAITransfer(question,'Next answer',destination));
+    assert.deepEqual(writes(phone),[]);
+  });
   await t.test('expired owner access retains the transfer and existing draft through reload and genuine synthetic re-pairing; sending still requires a click',async()=>{
     const phone=await open(),{page}=phone;
     h.ctx.storage.sql.exec('UPDATE relay_owner_sessions SET expires_ms=? WHERE device_id=?',Date.now()-1,owner.device.id);
