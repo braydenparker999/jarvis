@@ -23,9 +23,10 @@ const PASSWORD = 'Mocked-browser-password-243619';
 const NEXT_PASSWORD = 'Mocked-new-browser-password-591632';
 const PRIVATE_BODY = 'PASSWORD-LOGIN-PRIVATE-MESSAGE-662914';
 const PRIVATE_DRAFT = 'PASSWORD-LOGIN-PRIVATE-DRAFT-308861';
+const NEW_PRIVATE_DRAFT = 'PASSWORD-LOGIN-NEW-PRIVATE-DRAFT-825177';
 const ROOT = resolve(fileURLToPath(new URL('../public/', import.meta.url)));
 const mime = {'.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2'};
-const secrets = [USERNAME, PASSWORD, NEXT_PASSWORD, PRIVATE_BODY, PRIVATE_DRAFT];
+const secrets = [USERNAME, PASSWORD, NEXT_PASSWORD, PRIVATE_BODY, PRIVATE_DRAFT, NEW_PRIVATE_DRAFT];
 
 async function harness(t) {
   const fixture = createRelayFixture({env: {RELAY_MCP_ORIGIN: WORKER, RELAY_OWNER_ENABLED: 'true'}});
@@ -219,9 +220,13 @@ async function typeLogin(page, password, {remember = false, label = 'Recovered b
   await page.locator('#relay-owner-login-label').fill(label);
   if (remember) await page.locator('#relay-owner-login-remember').check();
 }
-async function assertIsolation(phone) {
+async function assertIsolation(phone, {draft} = {}) {
   const data = await phone.page.evaluate(() => ({local: Object.fromEntries(Object.entries(localStorage)), session: Object.fromEntries(Object.entries(sessionStorage)), history: history.state}));
-  if(data.session['jarvis.relay.owner-draft.v1']){assert.deepEqual(JSON.parse(data.session['jarvis.relay.owner-draft.v1']),{body:PRIVATE_DRAFT});delete data.session['jarvis.relay.owner-draft.v1'];}
+  const savedDraft = data.session['jarvis.relay.owner-draft.v1'];
+  if (draft !== undefined) {
+    assert.deepEqual(JSON.parse(savedDraft), {body: draft}, 'Only this phase\'s unsent draft may survive in tab storage');
+    delete data.session['jarvis.relay.owner-draft.v1'];
+  } else assert.equal(savedDraft, undefined, 'No previous private draft survives deliberate browser-data erasure');
   for (const secret of secrets) assert.equal(JSON.stringify(data).includes(secret), false, 'Credentials and private content never enter browser storage/history');
   if (data.local[OWNER_SESSION_KEY]) assert.deepEqual(Object.keys(JSON.parse(data.local[OWNER_SESSION_KEY])).sort(), ['device_id', 'device_token']);
   assert.equal(await phone.page.locator('.relay-owner-content a, .relay-owner-content iframe').count(), 0);
@@ -258,8 +263,12 @@ test('real browser configures, clears site data, signs in and changes password e
   await page.getByText(/Account sign-in saved/).waitFor(); await page.getByRole('button', {name: 'Cancel / owner chat', exact: true}).click(); await ownerReady(page);
   assert.equal((await h.phone('/session', undefined, h.token)).status, 200);
   await page.locator('#relay-owner-message-text').fill(PRIVATE_BODY); await page.getByRole('button', {name: 'Send private message', exact: true}).click(); await page.getByText(PRIVATE_BODY, {exact: true}).waitFor();
-  await page.locator('#relay-owner-message-text').fill(PRIVATE_DRAFT); await assertIsolation(phone);
-  await phone.cdp.send('Storage.clearDataForOrigin', {origin: SITE, storageTypes: 'all'}); await phone.context.clearCookies();
+  await page.locator('#relay-owner-message-text').fill(PRIVATE_DRAFT); await assertIsolation(phone, {draft: PRIVATE_DRAFT});
+  await phone.cdp.send('Storage.clearDataForOrigin', {origin: SITE, storageTypes: 'all'});
+  // Explicitly model the user's full data erasure across browser versions,
+  // including the tab draft. Ordinary remembered-session reload is separate.
+  await page.evaluate(() => sessionStorage.clear()); await phone.context.clearCookies();
+  assert.equal(await page.evaluate(() => sessionStorage.getItem('jarvis.relay.owner-draft.v1')), null);
   await page.reload(); await page.locator('#message-text').waitFor(); assert.equal(await session(page), null);
   await menu(page, 'Connect this phone');
   assert.equal(await page.locator('#relay-owner-login-username').inputValue(), ''); assert.equal(await page.locator('#relay-owner-login-remember').isChecked(), false);
@@ -274,9 +283,12 @@ test('real browser configures, clears site data, signs in and changes password e
   await Promise.allSettled([...phone.pending]); await page.locator('#message-text').waitFor(); assert.equal(await session(page), null, 'A closed login must not remember late access');
   await menu(page, 'Connect this phone'); await typeLogin(page, PASSWORD, {remember: true}); await page.getByRole('button', {name: 'Sign in', exact: true}).click(); await ownerReady(page);
   const saved = JSON.parse(await session(page)); assert.notEqual(saved.device_token, h.token); assert.notEqual(saved.device_id, h.id);
-  await page.getByText(PRIVATE_BODY, {exact: true}).waitFor(); await assertIsolation(phone);
+  assert.equal(await page.locator('#relay-owner-message-text').inputValue(), '', 'Deliberate browser data erasure removes the previous unsent draft');
+  await page.locator('#relay-owner-message-text').fill(NEW_PRIVATE_DRAFT);
+  await page.getByText(PRIVATE_BODY, {exact: true}).waitFor(); await assertIsolation(phone, {draft: NEW_PRIVATE_DRAFT});
   await page.reload(); await ownerReady(page); assert.equal(JSON.parse(await session(page)).device_token, saved.device_token);
-  assert.equal(await page.locator('#relay-owner-message-text').inputValue(), PRIVATE_DRAFT, 'The unsent draft survives only in this tab');
+  assert.equal(await page.locator('#relay-owner-message-text').inputValue(), NEW_PRIVATE_DRAFT, 'The new unsent draft survives an ordinary remembered-session reload in this tab');
+  await assertIsolation(phone, {draft: NEW_PRIVATE_DRAFT});
   await accountForm(page); assert.equal(await page.locator('#relay-owner-current-password').inputValue(), '');
   await typeCredentials(page, NEXT_PASSWORD, {currentPassword: 'Incorrect-fixture-password'}); await page.getByRole('button', {name: 'Save account changes', exact: true}).click();
   await page.getByText('The username or password could not be verified. Check them and try again.', {exact: true}).waitFor(); assert.equal(JSON.parse(await session(page)).device_token, saved.device_token);
@@ -284,7 +296,7 @@ test('real browser configures, clears site data, signs in and changes password e
   await typeCredentials(page, NEXT_PASSWORD, {currentPassword: PASSWORD});
   await page.getByRole('button', {name: 'Save account changes', exact: true}).click(); await page.getByText(/Account sign-in saved/).waitFor();
   assert.equal((await h.phone('/session', undefined, h.token)).status, 200); assert.equal((await h.phone('/session', undefined, saved.device_token)).status, 200);
-  await phone.cdp.send('Storage.clearDataForOrigin', {origin: SITE, storageTypes: 'all'}); await phone.context.clearCookies(); await page.reload(); await page.locator('#message-text').waitFor();
+  await phone.cdp.send('Storage.clearDataForOrigin', {origin: SITE, storageTypes: 'all'}); await page.evaluate(() => sessionStorage.clear()); await phone.context.clearCookies(); await page.reload(); await page.locator('#message-text').waitFor();
   await menu(page, 'Connect this phone'); await typeLogin(page, NEXT_PASSWORD); await page.getByRole('button', {name: 'Sign in', exact: true}).click(); await ownerReady(page);
   assert.equal(await session(page), null, 'Unchecked remember gives only a page session');
   await page.reload(); await page.getByRole('heading', {name: 'Owner chat', exact: true}).waitFor();
