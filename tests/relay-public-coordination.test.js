@@ -23,7 +23,10 @@ function add(h,body=MUSE_PREFIX+'Fictional artifact request',id=uuid()){
   assert.equal(sharedStore(h.ctx,'/internal/shared/message',{id,body}).status,201);return id;
 }
 async function importEvents(h,comments,now=Date.now()){
-  await syncPublications(h.ctx,async()=>Response.json(comments),now);
+  await syncPublications(h.ctx,async url=>{
+    const page=Number(new URL(url).searchParams.get('page'));
+    return Response.json(comments.slice((page-1)*100,page*100));
+  },now);
   return h.rows('SELECT * FROM public_coordination_events ORDER BY seq');
 }
 

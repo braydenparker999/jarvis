@@ -319,6 +319,26 @@ export function createRelayOwnerApi({ fetcher = globalThis.fetch, origin = API_O
       if(data.nextCursor!==null&&(!jobs.length||Number(data.nextCursor)!==jobs.at(-1).sequence))throw new OwnerApiError('invalid');
       return {jobs,nextCursor:data.nextCursor};
     },
+    async jobChanges(after='0',through=null){
+      const position=value=>typeof value==='string'&&/^\d{1,15}$/.test(value)&&Number.isSafeInteger(Number(value));
+      if(!position(after)||through!==null&&(!position(through)||Number(through)<Number(after)))throw new OwnerApiError('invalid');
+      let data;
+      try{data=await authenticated('/relay/owner/jobs/changes?after='+encodeURIComponent(after)+'&limit=50'+(through===null?'':'&through='+encodeURIComponent(through)));}
+      catch(error){if(error instanceof OwnerApiError&&error.status===409)error.jobCursorReset=true;throw error;}
+      if(!Array.isArray(data.changes)||data.changes.length>50||!position(data.cursor)||!position(data.through)
+        ||Number(data.cursor)<Number(after)||Number(data.cursor)>Number(data.through)||typeof data.bootstrapPending!=='boolean'
+        ||through!==null&&data.through!==through
+        ||!(data.nextCursor===null||position(data.nextCursor)&&data.nextCursor===data.cursor&&Number(data.cursor)<Number(data.through)))throw new OwnerApiError('invalid');
+      const changes=data.changes.map((change,i)=>{
+        if(!change||!position(change.cursor)||Number(change.cursor)<=Number(after)||Number(change.cursor)>Number(data.cursor)
+          ||i>0&&Number(change.cursor)<=Number(data.changes[i-1].cursor))throw new OwnerApiError('invalid');
+        return {cursor:change.cursor,job:privateJob(change.job)};
+      });
+      if(new Set(changes.map(change=>change.job.id)).size!==changes.length
+        ||data.nextCursor!==null&&(!changes.length||changes.at(-1).cursor!==data.cursor)
+        ||data.nextCursor===null&&data.cursor!==data.through)throw new OwnerApiError('invalid');
+      return {changes,cursor:data.cursor,through:data.through,nextCursor:data.nextCursor,bootstrapPending:data.bootstrapPending};
+    },
     async jobDetail(id){
       if(!jobIdentifier(id))throw new OwnerApiError('invalid');
       const data=await authenticated('/relay/owner/jobs/detail?job_id='+encodeURIComponent(id));

@@ -33,7 +33,12 @@ export function decodeCoordination(value) {
 }
 
 const rows = (ctx, query, ...values) => [...ctx.storage.sql.exec(query, ...values)];
+const schemas = new WeakSet();
+const metadata = (ctx, key) => JSON.parse(rows(ctx, 'SELECT value FROM shared_meta WHERE key=?', key)[0]?.value || 'null');
+const saveMetadata = (ctx, key, value) => ctx.storage.sql.exec('INSERT OR REPLACE INTO shared_meta VALUES(?,?)', key, JSON.stringify(value));
+export const PUBLIC_BACKFILL_LIMIT = 100;
 export function coordinationSchema(ctx) {
+  if (schemas.has(ctx)) return;
   const sql = ctx.storage.sql;
   sql.exec(`CREATE TABLE IF NOT EXISTS public_coordination_events (
     seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE,
@@ -48,13 +53,64 @@ export function coordinationSchema(ctx) {
     seq INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, item_id TEXT NOT NULL,
     request_id TEXT, UNIQUE(kind,item_id))`);
   sql.exec('CREATE INDEX IF NOT EXISTS public_changes_request ON public_changes(request_id, seq)');
-  if (!rows(ctx, "SELECT value FROM shared_meta WHERE key='public-changes-backfilled'").length) {
-    ctx.storage.transactionSync(() => {
-      sql.exec(`INSERT OR IGNORE INTO public_changes(kind,item_id,request_id)
-        SELECT 'entry',id,CASE WHEN kind='user' THEN id ELSE reply_to END FROM shared_entries ORDER BY seq`);
-      sql.exec("INSERT OR REPLACE INTO shared_meta VALUES('public-changes-backfilled','true')");
-    });
+  sql.exec(`CREATE TABLE IF NOT EXISTS public_artifact_state (
+    request_id TEXT NOT NULL, attempt_id TEXT NOT NULL, artifact_id TEXT NOT NULL,
+    result_version INTEGER NOT NULL, artifact TEXT NOT NULL, PRIMARY KEY(request_id,attempt_id,artifact_id))`);
+  if ((!metadata(ctx, 'public-changes-backfilled') || !metadata(ctx, 'public-artifacts-backfilled')) && !metadata(ctx, 'public-changes-backfill')) {
+    const throughEntry = rows(ctx, 'SELECT COALESCE(MAX(seq),0) AS n FROM shared_entries')[0].n;
+    const throughEvent = rows(ctx, 'SELECT COALESCE(MAX(seq),0) AS n FROM public_coordination_events')[0].n;
+    if (!throughEntry && !throughEvent) {
+      saveMetadata(ctx, 'public-changes-backfilled', true);
+      saveMetadata(ctx, 'public-artifacts-backfilled', true);
+    } else saveMetadata(ctx, 'public-changes-backfill', {entryAfter: metadata(ctx, 'public-changes-backfilled') ? throughEntry : 0,
+      eventAfter: 0, throughEntry, throughEvent});
   }
+  schemas.add(ctx);
+}
+// Freeze v2 cursor publication until the cold snapshot is completely indexed.
+// Live inserts are indexed atomically, including late legacy user messages, so
+// neither an incomplete page nor a new write can be hidden behind a watermark.
+export function publicChangesReady(ctx) {
+  return !!metadata(ctx, 'public-changes-backfilled') && !!metadata(ctx, 'public-artifacts-backfilled') && metadata(ctx, 'legacy-inbox-initialized') !== false;
+}
+function retainArtifacts(ctx, payload) {
+  for (const item of payload.artifacts) ctx.storage.sql.exec(`INSERT INTO public_artifact_state VALUES(?,?,?,?,?)
+    ON CONFLICT(request_id,attempt_id,artifact_id) DO UPDATE SET result_version=excluded.result_version,artifact=excluded.artifact
+    WHERE excluded.result_version>public_artifact_state.result_version`, payload.requestId, payload.attemptId,
+    item.id, payload.resultVersion, canonical(item));
+}
+export function backfillPublicChanges(ctx, limit = PUBLIC_BACKFILL_LIMIT) {
+  limit = Math.min(PUBLIC_BACKFILL_LIMIT, Math.max(0, Number.isSafeInteger(limit) ? limit : 0));
+  coordinationSchema(ctx);
+  const checkpoint = metadata(ctx, 'public-changes-backfill');
+  if (!checkpoint) return {examined: 0, complete: publicChangesReady(ctx)};
+  return ctx.storage.transactionSync(() => {
+    let examined = 0;
+    for (const [kind, table, afterKey, throughKey] of [
+      ['entry', 'shared_entries', 'entryAfter', 'throughEntry'],
+      ['event', 'public_coordination_events', 'eventAfter', 'throughEvent']
+    ]) {
+      if (checkpoint[afterKey] >= checkpoint[throughKey] || examined >= limit) continue;
+      const page = rows(ctx, `SELECT ${kind === 'event' ? 'seq,payload,disposition' : 'seq'} FROM ${table} WHERE seq>? AND seq<=? ORDER BY seq LIMIT ?`,
+        checkpoint[afterKey], checkpoint[throughKey], limit - examined);
+      if (page.length) {
+        const through = page.at(-1).seq;
+        ctx.storage.sql.exec(kind === 'entry' ? `INSERT OR IGNORE INTO public_changes(kind,item_id,request_id)
+          SELECT 'entry',id,CASE WHEN kind='user' THEN id ELSE reply_to END FROM shared_entries WHERE seq>? AND seq<=? ORDER BY seq`
+          : `INSERT OR IGNORE INTO public_changes(kind,item_id,request_id)
+          SELECT 'event',event_id,request_id FROM public_coordination_events WHERE seq>? AND seq<=? ORDER BY seq`, checkpoint[afterKey], through);
+        checkpoint[afterKey] = through;
+        examined += page.length;
+        if (kind === 'event') for (const event of page) if (event.disposition === 'accepted') retainArtifacts(ctx, JSON.parse(event.payload));
+      } else checkpoint[afterKey] = checkpoint[throughKey];
+    }
+    if (checkpoint.entryAfter >= checkpoint.throughEntry && checkpoint.eventAfter >= checkpoint.throughEvent) {
+      saveMetadata(ctx, 'public-changes-backfilled', true);
+      saveMetadata(ctx, 'public-artifacts-backfilled', true);
+      ctx.storage.sql.exec("DELETE FROM shared_meta WHERE key='public-changes-backfill'");
+    } else saveMetadata(ctx, 'public-changes-backfill', checkpoint);
+    return {examined, complete: publicChangesReady(ctx)};
+  });
 }
 export function recordPublicEntry(ctx, id) {
   ctx.storage.sql.exec(`INSERT OR IGNORE INTO public_changes(kind,item_id,request_id)
@@ -63,12 +119,12 @@ export function recordPublicEntry(ctx, id) {
 const publicEntry = row => ({id: row.id, body: row.body, createdAt: row.created_at,
   ...(row.kind === 'briefing' ? {title: row.title} : {role: row.kind === 'user' ? 'user' : 'assistant'}),
   ...(row.kind === 'reply' ? {kind: 'reply', replyTo: row.reply_to} : {})});
-export function publicEvent(ctx, row) {
-  const original = rows(ctx, "SELECT body FROM shared_entries WHERE id=? AND kind='user'", row.request_id)[0];
+export function publicEvent(ctx, row, originalBody = undefined) {
+  if (originalBody === undefined) originalBody = rows(ctx, "SELECT body FROM shared_entries WHERE id=? AND kind='user'", row.request_id)[0]?.body;
   return {...JSON.parse(row.payload), sequence: row.seq, recordedAt: row.recorded_at,
     provenance: JSON.parse(row.provenance), disposition: row.disposition,
     ...(row.error_code ? {errorCode: row.error_code} : {}),
-    destination: row.request_id === 'f62e9e27-d106-465c-a2e7-c4dd64323040' || original?.body.startsWith('[Jarvis Muse v1]\n') ? 'muse' : 'jarvis',
+    destination: row.request_id === 'f62e9e27-d106-465c-a2e7-c4dd64323040' || originalBody?.startsWith('[Jarvis Muse v1]\n') ? 'muse' : 'jarvis',
     visibility: 'public', author_authenticated: false, execution_authorized: false};
 }
 
@@ -91,6 +147,7 @@ export function appendCoordination(ctx, payload, provenance, now = Date.now()) {
     const attempt = rows(ctx, 'SELECT request_id FROM public_coordination_events WHERE attempt_id=? LIMIT 1', payload.attemptId)[0];
     if (attempt && attempt.request_id !== payload.requestId) conflict = 'attempt_request_conflict';
     if (payload.stage === 'correction') {
+      if (!metadata(ctx, 'public-artifacts-backfilled')) return Response.json({error: 'Artifact history is still being indexed', code: 'predecessor_pending'}, {status: 425});
       const prior = rows(ctx, 'SELECT * FROM public_coordination_events WHERE event_id=?', payload.supersedesEventId)[0];
       if (!prior) return Response.json({error: 'Predecessor not yet imported', code: 'predecessor_pending'}, {status: 425});
       if (prior.request_id !== payload.requestId || prior.attempt_id !== payload.attemptId || prior.disposition !== 'accepted' ||
@@ -98,13 +155,10 @@ export function appendCoordination(ctx, payload, provenance, now = Date.now()) {
       else {
         // Removal from one version does not reset a stable artifact's revision.
         // Retain the latest historical revision when a later correction restores it.
-        const oldArtifacts = new Map();
-        for(const previous of rows(ctx,"SELECT payload FROM public_coordination_events WHERE request_id=? AND attempt_id=? AND disposition='accepted' AND result_version<? ORDER BY result_version DESC",
-          payload.requestId,payload.attemptId,payload.resultVersion)) {
-          for(const item of JSON.parse(previous.payload).artifacts)if(!oldArtifacts.has(item.id))oldArtifacts.set(item.id,item);
-        }
         for (const item of payload.artifacts) {
-          const old = oldArtifacts.get(item.id);
+          const encoded = rows(ctx, 'SELECT artifact FROM public_artifact_state WHERE request_id=? AND attempt_id=? AND artifact_id=?',
+            payload.requestId, payload.attemptId, item.id)[0]?.artifact;
+          const old = encoded ? JSON.parse(encoded) : null;
           if (old && (item.revision < old.revision || item.revision === old.revision && canonical(item) !== canonical(old))) conflict = 'artifact_revision_conflict';
         }
       }
@@ -117,6 +171,7 @@ export function appendCoordination(ctx, payload, provenance, now = Date.now()) {
       VALUES(?,?,?,?,?,?,?,?,?,?)`, payload.eventId, payload.requestId, payload.attemptId, payload.stage,
       payload.resultVersion ?? null, conflict ? 'conflict' : 'accepted', conflict, encoded, JSON.stringify(provenance), recordedAt);
     ctx.storage.sql.exec("INSERT INTO public_changes(kind,item_id,request_id) VALUES('event',?,?)", payload.eventId, payload.requestId);
+    if (!conflict && payload.resultVersion !== undefined) retainArtifacts(ctx, payload);
     // A first final also supplies the single immutable reply for v1 readers and
     // pending queues. Later reports/corrections never change that accepted row.
     if (!conflict && payload.stage === 'final' && !rows(ctx, 'SELECT id FROM shared_entries WHERE reply_to=?', payload.requestId).length &&
@@ -131,33 +186,64 @@ export function appendCoordination(ctx, payload, provenance, now = Date.now()) {
   });
 }
 
-function pageBounds(ctx, params, requestId) {
+function pageSyntax(params, requestId) {
   const prefix=requestId?'pr2:'+requestId+':':'pc2:';
   const value = params.get('cursor') ?? prefix+'0';
   const match = new RegExp('^'+prefix+'(0|[1-9]\\d{0,14})(?::(0|[1-9]\\d{0,14}))?$').exec(value);
-  const max = rows(ctx, 'SELECT COALESCE(MAX(seq),0) AS n FROM public_changes')[0].n;
-  const after = match ? Number(match[1]) : -1, through = match?.[2] === undefined ? max : Number(match[2]);
+  const after = match ? Number(match[1]) : -1, through = match?.[2] === undefined ? null : Number(match[2]);
   const limitText = params.get('limit') ?? '100', limit = Number(limitText);
-  if (!match || after > through || through > max || !/^[1-9]\d{0,2}$/.test(limitText) || limit > 100) return null;
+  if (!match || through !== null && after > through || !/^[1-9]\d{0,2}$/.test(limitText) || limit > 100) return null;
   return {after, through, limit, prefix};
+}
+export function validatePublicCoordinationRead(ctx, path, params) {
+  const exact = path.endsWith('/result'), requestId = params.get('requestId');
+  if (exact && !uuid(requestId)) return Response.json({error: 'Invalid request ID'}, {status: 400});
+  const bounds = pageSyntax(params, exact ? requestId : null);
+  if (!bounds) return Response.json({error: 'Invalid public change cursor or limit'}, {status: 400});
+  const max = rows(ctx, 'SELECT COALESCE(MAX(seq),0) AS n FROM public_changes')[0].n;
+  if (bounds.after > max || bounds.through !== null && bounds.through > max)
+    return Response.json({error: 'Invalid public change cursor or limit'}, {status: 400});
+  return null;
+}
+function pageBounds(ctx, params, requestId) {
+  const bounds = pageSyntax(params, requestId);
+  if (!bounds) return null;
+  const max = rows(ctx, 'SELECT COALESCE(MAX(seq),0) AS n FROM public_changes')[0].n;
+  const through = bounds.through ?? max;
+  return bounds.after <= through && through <= max ? {...bounds, through} : null;
 }
 export function readPublicCoordination(ctx, path, params) {
   const requestId = params.get('requestId');
   const exact = path.endsWith('/result');
   if (exact && !uuid(requestId)) return Response.json({error: 'Invalid request ID'}, {status: 400});
+  if (!publicChangesReady(ctx)) return Response.json({error: 'Public history is still being indexed; retry later', code: 'public_history_initializing', readiness: false,
+    mode: 'github-publications', serviceVersion: 7, coordinationVersion: 1,
+    public_inbox: true, author_authenticated: false, execution_authorized: false}, {status: 503, headers: {'Retry-After': '60'}});
   const bounds = pageBounds(ctx, params, exact?requestId:null);
   if (!bounds) return Response.json({error: 'Invalid public change cursor or limit'}, {status: 400});
   const {after, through, limit, prefix} = bounds;
   const message = exact ? rows(ctx, "SELECT * FROM shared_entries WHERE id=? AND kind='user'", requestId)[0] : null;
   if (exact && !message) return Response.json({error: 'Public original message not found'}, {status: 404});
-  const page = rows(ctx, `SELECT * FROM public_changes WHERE seq>? AND seq<=?${exact ? " AND request_id=? AND kind='event'" : ''} ORDER BY seq LIMIT ?`,
+  const page = rows(ctx, `SELECT c.*, s.id AS entry_id,s.kind AS entry_kind,s.body AS entry_body,s.title AS entry_title,
+    s.created_at AS entry_created,s.reply_to AS entry_reply_to,e.seq AS event_seq,e.payload AS event_payload,
+    e.provenance AS event_provenance,e.disposition AS event_disposition,e.error_code AS event_error_code,
+    e.recorded_at AS event_recorded_at,e.request_id AS event_request_id,u.body AS original_body
+    FROM public_changes c LEFT JOIN shared_entries s ON c.kind='entry' AND s.id=c.item_id
+    LEFT JOIN public_coordination_events e ON c.kind='event' AND e.event_id=c.item_id
+    LEFT JOIN shared_entries u ON u.id=e.request_id AND u.kind='user'
+    WHERE c.seq>? AND c.seq<=?${exact ? " AND c.request_id=? AND c.kind='event'" : ''} ORDER BY c.seq LIMIT ?`,
     after, through, ...(exact ? [requestId] : []), limit + 1);
   const selected = page.slice(0, limit);
   const changes = selected.map(change => ({sequence: change.seq, kind: change.kind,
-    ...(change.kind === 'event' ? {event: publicEvent(ctx, rows(ctx, 'SELECT * FROM public_coordination_events WHERE event_id=?', change.item_id)[0])}
-      : {entry: publicEntry(rows(ctx, 'SELECT * FROM shared_entries WHERE id=?', change.item_id)[0])})}));
+    ...(change.kind === 'event' ? {event: publicEvent(ctx, {seq: change.event_seq,payload: change.event_payload,
+      provenance: change.event_provenance,disposition: change.event_disposition,error_code: change.event_error_code,
+      recorded_at: change.event_recorded_at,request_id: change.event_request_id}, change.original_body ?? null)}
+      : {entry: publicEntry({id: change.entry_id,kind: change.entry_kind,body: change.entry_body,title: change.entry_title,
+        created_at: change.entry_created,reply_to: change.entry_reply_to})})}));
   const reply = exact ? rows(ctx, "SELECT * FROM shared_entries WHERE reply_to=? AND kind='reply'", requestId)[0] : null;
-  return Response.json({mode: 'github-publications', coordinationVersion: 2,
+  const publisher = metadata(ctx, 'publisher-status') || {ok: false, error: 'Publication sync has not run yet'};
+  return Response.json({mode: 'github-publications', serviceVersion: 7, coordinationVersion: 2,
+    publisher: {source: 'GitHub issue #2 → Cloudflare', ...publisher},
     ...(exact ? {message: publicEntry(message), reply: reply ? publicEntry(reply) : null, events: changes.map(change => change.event)} : {changes}),
     cursor: prefix + through, nextCursor: page.length > limit ? `${prefix}${selected.at(-1).seq}:${through}` : null,
     public_inbox: true, author_authenticated: false, execution_authorized: false});

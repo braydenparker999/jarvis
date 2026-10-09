@@ -41,7 +41,7 @@ async function send(page, channel, body) {
   await page.locator(channel === 'muse' ? '#send' : '#send-message').click();
 }
 async function refresh(phone, channel) {
-  const response = phone.page.waitForResponse(response => new URL(response.url()).pathname === '/shared/state' && response.request().method() === 'GET');
+  const response = phone.page.waitForResponse(response => new URL(response.url()).pathname === '/shared/changes' && response.request().method() === 'GET');
   await phone.page.evaluate(() => dispatchEvent(new Event('online')));
   await response; await idle(phone.page, channel);
 }
@@ -54,7 +54,7 @@ test('public and Muse messages queued during the initial slow GET remain visible
   const j = await journey(t); if (!j) return;
   for (const channel of channels) await t.test(channel, async () => {
     const phone = await j.open(), {page} = phone, body = `Fictional ${channel} message queued during a slow initial read`;
-    const initial = phone.hold(record => record.path === '/shared/state' && record.method === 'GET');
+    const initial = phone.hold(record => record.path === '/shared/changes' && record.method === 'GET');
     await ready(phone, channel); await initial.entered;
     await send(page, channel, body);
     const queued = (await state(page, channel)).outbox.find(item => item.body === scopedBody(channel, body));
@@ -92,7 +92,7 @@ test('lost public and Muse POST receipts preserve the same UUID whether the serv
     assert.equal(j.h.rows('SELECT COUNT(*) AS n FROM shared_entries WHERE id=?', original.id)[0].n, accepted ? 1 : 0);
     await page.reload(); await input(page, channel).waitFor(); await idle(page, channel);
     const restored = await state(page, channel), posts = writes(phone).map(record => JSON.parse(record.body));
-    assert.equal(posts.length, accepted ? 1 : 2, 'A complete fresh read confirms an accepted UUID before resending');
+    assert.equal(posts.length, accepted ? 1 : 2, 'A fresh exact target read confirms an accepted UUID before resending');
     assert.ok(posts.every(item => item.id === original.id && item.body === original.body));
     assert.equal(restored.outbox.some(item => item.id === original.id), false);
     assert.equal(restored.messages.find(item => item.id === original.id)?.body, original.body);
@@ -132,15 +132,18 @@ test('an accepted exact public or Muse POST entry survives stale paginated reads
     const phone = await j.open(), {page} = phone, body = `Fictional ${channel} exact POST with stale paginated reads`;
     await ready(phone, channel); await idle(page, channel);
     let posted = null;
+    const staleThrough = (await state(page, channel)).publicReader.cursor.split(':')[1];
     phone.rule(record => record.path === '/shared/messages' && record.method === 'POST', async ({record, forward}) => {
       const response = await forward(); assert.equal(response.status, 201);
       const receipt = await response.clone().json(); posted = JSON.parse(record.body);
       assert.equal(receipt.entry.id, posted.id); assert.equal(receipt.entry.body, posted.body);
       return response;
     });
-    phone.rule(record => !!posted && record.path === '/shared/state' && record.method === 'GET', async ({forward}) => {
-      const response = await forward(), remote = await response.json();
-      return Response.json({...remote, messages: remote.messages.filter(item => item.id !== posted.id)}, {status: response.status, headers: response.headers});
+    phone.rule(record => !!posted && record.path === '/shared/changes' && record.method === 'GET', async ({record}) => {
+      // Use a real earlier fenced snapshot. Removing the newly accepted entry
+      // from a current snapshot would be malformed pagination, not a stale read.
+      const after = new URL(record.url).searchParams.get('cursor').split(':')[1];
+      return j.h.fixture.request('/shared/changes?cursor=' + encodeURIComponent(`pc2:${after}:${staleThrough}`), {headers: {Origin: SITE}});
     }, Infinity);
     await send(page, channel, body); await idle(page, channel);
     assert.ok(posted);
@@ -151,7 +154,7 @@ test('an accepted exact public or Muse POST entry survives stale paginated reads
     await refresh(phone, channel);
     assert.equal((await state(page, channel)).messages.find(item => item.id === posted.id)?.body, posted.body);
     assert.equal(writes(phone).length, 1);
-    assert.ok(phone.records.some(record => record.path === '/shared/state' && new URL(record.url).searchParams.get('after') !== '0'), 'The fixture exercises a later history page');
+    assert.ok(phone.records.some(record => record.path === '/shared/changes' && new URL(record.url).searchParams.get('cursor').split(':').length === 3), 'The fixture exercises a later fenced history page');
     await writeSyntheticEvidence(phone, `current-${channel}-accepted-stale-pagination-390x844`, {exactPostAccepted: true, completePaginationExercised: true});
     assertPublicOnly(phone);
   });
@@ -186,7 +189,7 @@ test('complete online history beyond the local cache bound retains the oldest me
     assert.equal(await panel.locator(`[data-message-id="${oldest.id}"]`).count(), 1);
     assert.equal(await panel.locator(`[data-message-id="${more.id}"]`).count(), 1);
     assert.ok(await panel.locator('[data-message-id]').count() >= 303);
-    assert.ok(phone.records.filter(record => record.path === '/shared/state' && new URL(record.url).searchParams.get('after') !== '0').length >= 3);
+    assert.ok(phone.records.filter(record => record.path === '/shared/changes' && new URL(record.url).searchParams.get('cursor').split(':').length === 3).length >= 3);
     await writeSyntheticEvidence(phone, `current-${channel}-full-online-history-390x844`, {before, after, onlineRows: await panel.locator('[data-message-id]').count(), serializedRows: (await state(page, channel)).messages.length});
     assertPublicOnly(phone);
   });
@@ -197,7 +200,7 @@ test('a public or Muse UUID collision with different content stays unconfirmed t
   for (const channel of channels) await t.test(channel, async () => {
     const phone = await j.open(), {page} = phone, body = `Fictional ${channel} collision payload to preserve`;
     await ready(phone, channel); await idle(page, channel);
-    const beforeSend = phone.hold(record => record.path === '/shared/state' && record.method === 'GET');
+    const beforeSend = phone.hold(record => record.path === '/shared/changes' && record.method === 'GET');
     await page.evaluate(() => dispatchEvent(new Event('online'))); await beforeSend.entered;
     await send(page, channel, body);
     const original = (await state(page, channel)).outbox.find(item => item.body === scopedBody(channel, body));
@@ -321,7 +324,7 @@ test('a permanent public or Muse UUID conflict preserves its payload while unrel
   for (const channel of channels) await t.test(channel, async () => {
     const phone = await j.open(), {page} = phone, body = `Fictional ${channel} permanent conflict kept for inspection`;
     await ready(phone, channel); await idle(page, channel);
-    const held = phone.hold(record => record.path === '/shared/state' && record.method === 'GET');
+    const held = phone.hold(record => record.path === '/shared/changes' && record.method === 'GET');
     await page.evaluate(() => dispatchEvent(new Event('online'))); await held.entered;
     await send(page, channel, body);
     const original = (await state(page, channel)).outbox.find(item => item.body === scopedBody(channel, body));

@@ -103,12 +103,21 @@ attestation rules are unchanged. Public text cannot authorize privileged work.
   completed cursor. Deduplicate by event/request identity, never response order.
   `pc2` cursors are separate from callback delivery `relay1` cursors.
 
-The browser keeps only a complete in-memory change checkpoint, reads all existing
-history pages and never changes the current POST receipt/conflict semantics.
-Reload starts a fresh complete read. The existing 30-second visible polling,
+The browser atomically persists a complete validated `pc2` cache with its completed
+cursor. Warm polls and reloads read deltas from that checkpoint; errors and partial
+pages preserve the previous complete cache and cursor. At cold bootstrap, an
+explicit `503 public_history_initializing` permits one complete legacy snapshot
+while later refreshes check v2 readiness. A known `pc2` cache is never downgraded.
+The retained cache remains unbounded, and validation/materialization requires at
+least O(n) work over its entries/events; it does not provide constant memory.
+The current POST receipt/conflict semantics, 30-second visible polling,
 visibility/online recovery and manual refresh remain; this is not background
 execution or a push guarantee. Legacy backends without `coordinationVersion: 2`
 continue using their original frontend adapter/fallback.
+The adapter commits legacy mode only after the complete snapshot validates.
+A failed legacy read lets the next normal refresh negotiate again. An established
+legacy session that receives an explicit v2 state marker makes one immediate
+changes probe; a failed probe ends that refresh without alternating read loops.
 
 ## Supported Lucy read/wake integration after review
 
@@ -150,6 +159,16 @@ Callback 2xx is delivery receipt only. Neither callback receipt nor public final
 text attests authenticated private execution or host execution. A live lifecycle
 must be independently approved and verified before claiming Lucy/Muse wake-up
 works in production. No direct push to Muse is promised.
+
+Internal wake admission retains at most 256 ordinary reservations and one
+aggregate alarm recovery row. A due alarm acknowledges its recovery wake before
+either bounded lane runs, even when ordinary admission is full. Ordinary ingress
+reclaims expired slots before checking capacity. Interrupted retries preserve
+the original five-minute orphan deadline; successful retries cannot renew it.
+A still-running handler retains its own five-minute lease when an older orphan
+expires, including an acknowledgment that crosses that deadline. The recovery
+adjustment adds no table, index, KV key, public execution authority or external
+schedule change.
 
 ## Credential-free import acceleration
 

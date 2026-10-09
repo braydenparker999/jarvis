@@ -18,7 +18,7 @@ export function setup() {
         async get(k){return structuredClone(kv.get(k));},async put(k,v){kv.set(k,structuredClone(v));},
         transactionSync(fn){db.exec('BEGIN');try{const r=fn();db.exec('COMMIT');return r;}catch(e){db.exec('ROLLBACK');throw e;}},
         transaction(fn){const next=queue.then(()=>fn(storage));queue=next.catch(()=>{});return next;}};
-      objects.set(name,new Hub({storage}));
+      objects.set(name,new Hub({storage},env));
     }return objects.get(name);
   }}};
   const fetcher=(url,opts)=>worker.fetch(new Request(url,opts),env);

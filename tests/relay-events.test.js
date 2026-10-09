@@ -17,7 +17,7 @@ function setup() {
         async get(k) {return structuredClone(values.get(k));}, async put(k, v) {values.set(k, structuredClone(v));}, async transaction(fn) {return fn(storage);},
         transactionSync(fn) {db.exec('BEGIN'); try {const r = fn(); db.exec('COMMIT'); return r;} catch (e) {db.exec('ROLLBACK'); throw e;}},
         async setAlarm(t) {alarm = t;}, async deleteAlarm() {alarm = null;}, async getAlarm() {return alarm;}};
-      objects.set(name, new Hub({storage}, env));
+      objects.set(name, new Hub({storage}, env, {publicationFetcher:async()=>Response.json([])}));
     }
     return objects.get(name);
   }}};

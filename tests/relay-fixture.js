@@ -1,8 +1,13 @@
 import {DatabaseSync} from 'node:sqlite';
 import worker, {Hub} from '../backend/worker.js';
+import {COMMENTS_URL} from '../backend/publications.js';
 
 // Real SQLite + worker/Hub routing, with only the Durable Object host emulated.
-export function createRelayFixture({env: overrides = {}} = {}) {
+export function createRelayFixture({env: overrides = {}, publicationFetcher = async (input,init={}) => {
+  const url=new URL(typeof input==='string'||input instanceof URL ? input : input.url);
+  if(url.origin+url.pathname!==COMMENTS_URL||(init.method||'GET')!=='GET')throw Error('Unexpected fictional publication request');
+  return Response.json([]);
+}} = {}) {
   const objects = new Map();
   const env = {
     RELAY_MCP_ENABLED: 'true',
@@ -39,7 +44,7 @@ export function createRelayFixture({env: overrides = {}} = {}) {
       async deleteAlarm() { alarm = null; },
     };
     const ctx = {storage, blockConcurrencyWhile: fn => fn(), waitUntil() {}};
-    const result = {ctx, hub: new Hub(ctx, env), db, values, alarms};
+    const result = {ctx, hub: new Hub(ctx, env, {publicationFetcher}), db, values, alarms};
     objects.set(name, result);
     return result;
   }
