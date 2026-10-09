@@ -131,3 +131,7 @@ body:is(.relay-page,.muse-page) .rich-body .code-block pre{padding-top:60px}
 .owner-work-filters{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;margin:12px 0}
 .owner-work-filters label{font-size:13px;color:var(--muted)}
 .owner-work-filters select{min-width:0;max-width:100%;min-height:48px;font-size:14px;padding:10px 12px}
+
+.owner-work-attention{margin:12px 0 16px;border-bottom:1px solid #ffffff0c;padding-bottom:12px}
+.owner-work-attention h3{margin:0 0 6px}
+.owner-work-attention ul{display:flex;flex-wrap:wrap;gap:4px 16px;list-style:none;padding:0;margin:0;font-size:12px;line-height:20px;color:#cdb99a}
