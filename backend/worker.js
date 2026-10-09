@@ -1,6 +1,6 @@
 import {connector,oauthStore} from './connector.js';
 import {sharedStore,sharedSchema,SHARED_OBJECT,validateSharedRead,readLegacyInboxPage} from './shared.js';
-import {syncPublications,importPublicationHint} from './publications.js';
+import {syncPublications,importPublicationHint,seedPublicationReconciliation,nextPublicationReconciliationAt,publicationReadNeedsWake} from './publications.js';
 import {PRIMARY_SITE,FRONTEND_ORIGINS} from './origins.js';
 import {songsterr} from './songsterr.js';
 import {music} from './music.js';
@@ -8,7 +8,8 @@ import {nativeMusic} from './music-upload.js';
 import {podcasts} from './podcasts.js';
 import {relayConnector,relayRpc} from './relay-connector.js';
 import {relayOAuthStore} from './relay-oauth.js';
-import {drainRelayOutbox,scheduleRelayAlarm,enqueueRelayOwnerMessage} from './relay-events.js';
+import {drainRelayOutbox,scheduleRelayAlarm,enqueueRelayOwnerMessage,webhookTransport} from './relay-events.js';
+import {reserveRelayCoreWake,releaseRelayCoreWake,beginRelayCoreAlarm} from './relay-core-alarm.js';
 import {relayOwnerPublic,relayOwnerStore} from './relay-owner.js';
 import {RelayError,boundedText} from './relay-common.js';
 const paths = new Set(['/v1/state', '/v1/messages', '/v1/board', '/v1/responder/connect', '/v1/responder/revoke', '/v1/agent/inbox', '/v1/agent/replies', '/v1/agent/board']);
@@ -107,8 +108,46 @@ export default {
   }
 };
 export class Hub {
-  constructor(ctx,env){this.ctx=ctx;this.env=env||{};}
-  async alarm(){await drainRelayOutbox(this.ctx,this.env);}
+  constructor(ctx,env,runtime={}){
+    this.ctx=ctx;this.env=env||{};
+    // Resolve the production global at call time; local fixtures may supply a
+    // fictional responder without changing environment or authorization state.
+    this.publicationFetcher=runtime.publicationFetcher||((...args)=>fetch(...args));
+  }
+  async withCoreWake(operation){
+    const wake=await reserveRelayCoreWake(this.ctx);
+    try{return await operation();}
+    finally{
+      releaseRelayCoreWake(this.ctx,wake);
+      // A committed save keeps its receipt even if this fine-grained setter
+      // fails. Its earlier durable precommit wake remains available for repair.
+      try{await scheduleRelayAlarm(this.ctx);}catch{}
+    }
+  }
+  async syncPublicRead(){
+    sharedSchema(this.ctx);
+    if(!this.publicationSync)this.publicationSync=(async()=>{
+      const now=Date.now();let wake=null;
+      if(publicationReadNeedsWake(this.ctx,now,this.env))wake=await reserveRelayCoreWake(this.ctx,now);
+      try{await syncPublications(this.ctx,this.publicationFetcher,Date.now(),this.env);}
+      finally{
+        releaseRelayCoreWake(this.ctx,wake);
+        try{await scheduleRelayAlarm(this.ctx);}catch{}
+      }
+    })().finally(()=>{this.publicationSync=null;});
+    return this.publicationSync;
+  }
+  async alarm(){
+    // Keep a durable retry before any import or callback await. The two lanes
+    // perform bounded work, then one compositor selects their shared next wake.
+    const wake=await beginRelayCoreAlarm(this.ctx);
+    const due=nextPublicationReconciliationAt(this.ctx);
+    if(due!==null&&due<=Date.now())await syncPublications(this.ctx,this.publicationFetcher,Date.now(),this.env);
+    const transport=webhookTransport(this.env);
+    await drainRelayOutbox(this.ctx,this.env,transport,Date.now(),{schedule:false});
+    releaseRelayCoreWake(this.ctx,wake);
+    await scheduleRelayAlarm(this.ctx,Date.now(),transport?0:60000);
+  }
   async fetch(request){
     const path=new URL(request.url).pathname;
     if(path==='/internal/relay/oauth')return relayOAuthStore(this.ctx,await request.json());
@@ -117,48 +156,41 @@ export class Hub {
         const body=await request.json();
         // The shared journal can replay both inbox kinds even on a fresh owner-only object.
         sharedSchema(this.ctx);
-        // Persist wake before the atomic message/event insertion; failed requests
-        // are cleaned up by the ordinary scheduler without a busy loop.
-        if(['message','job_create','job_retry','delivery_retry'].includes(body?.op)&&this.ctx.storage.setAlarm)await this.ctx.storage.setAlarm(Date.now()+100);
-        const response=await relayOwnerStore(this.ctx,this.env,body,enqueueRelayOwnerMessage);
-        // The pre-commit wake is durable even if rescheduling fails after a save.
-        if(['message','job_create','job_retry','delivery_retry'].includes(body?.op))try{await scheduleRelayAlarm(this.ctx);}catch{}
-        return response;
+        const operation=()=>relayOwnerStore(this.ctx,this.env,body,enqueueRelayOwnerMessage);
+        return ['message','job_create','job_retry','delivery_retry'].includes(body?.op)?await this.withCoreWake(operation):await operation();
       } catch { return json({error:'Owner Relay storage unavailable'},503); }
     }
     if(path==='/internal/relay/rpc'){
-      try{const {principal,rpc}=await request.json();return json({result:await relayRpc(this.ctx,this.env,principal,rpc)});}
+      try{const {principal,rpc}=await request.json();return json({result:await relayRpc(this.ctx,this.env,principal,rpc,{syncPublicRead:()=>this.syncPublicRead()})});}
       catch(error){return json({error:{code:error instanceof RelayError?error.code:-32603,message:error instanceof RelayError?error.message:'Relay storage unavailable',...(error instanceof RelayError&&error.data?{data:error.data}:{})}});}
     }
     if(path.startsWith('/internal/shared/')) {
       if(path==='/internal/shared/legacy-page')return request.method==='GET'?readLegacyInboxPage(this.ctx,new URL(request.url).searchParams):json({error:'Method not allowed'},405);
       if(path==='/internal/shared/reconcile-legacy'){
-        await syncPublications(this.ctx,fetch,Date.now(),this.env);
+        await this.syncPublicRead();
         return json({ok:true});
       }
       if(path==='/internal/shared/import-hint'){
-        if(this.ctx.storage.setAlarm)await this.ctx.storage.setAlarm(Date.now()+100);
-        const response=await importPublicationHint(this.ctx,await request.json());
-        try{await scheduleRelayAlarm(this.ctx);}catch{}
-        return response;
+        return this.withCoreWake(async()=>{
+          const response=await importPublicationHint(this.ctx,await request.json());
+          if(response.status!==400)seedPublicationReconciliation(this.ctx,Date.now(),this.env);
+          return response;
+        });
       }
       // Persist the wake before committing a new message/event, so a crash after
       // commit cannot strand its outbox. SQLite and normal Durable Object storage
       // share the same object; old imported rows never become live events.
-      if(path==='/internal/shared/message'&&this.ctx.storage.setAlarm)await this.ctx.storage.setAlarm(Date.now()+100);
+      if(path==='/internal/shared/message')return this.withCoreWake(async()=>{
+        const response=sharedStore(this.ctx,path,await request.json());
+        if(response.ok)seedPublicationReconciliation(this.ctx,Date.now(),this.env,{initialAlarmDelay:300000});
+        return response;
+      });
       if(['/internal/shared/state','/internal/shared/changes','/internal/shared/result'].includes(path)) {
         const validation=validateSharedRead(this.ctx,path,new URL(request.url).searchParams);
         if(validation)return validation;
-        // Final/correction notifications commit with imported public results.
-        // Persist a wake before import, using the existing callback scheduler.
-        if(this.ctx.storage.setAlarm)await this.ctx.storage.setAlarm(Date.now()+100);
-        // A single in-flight importer for the shared object, across all phones.
-        if(!this.publicationSync)this.publicationSync=syncPublications(this.ctx,fetch,Date.now(),this.env).finally(()=>{this.publicationSync=null;});
-        await this.publicationSync;
-        try{await scheduleRelayAlarm(this.ctx);}catch{}
+        await this.syncPublicRead();
       }
       const response=sharedStore(this.ctx,path,request.method==='POST'?await request.json():{},new URL(request.url).searchParams);
-      if(path==='/internal/shared/message')try{await scheduleRelayAlarm(this.ctx);}catch{}
       return response;
     }
     if(path==='/internal/oauth-store')return oauthStore(this.ctx.storage,await request.json());

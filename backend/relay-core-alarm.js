@@ -1,4 +1,4 @@
-import * as publications from './publications.js';
+import {nextPublicationReconciliationAt} from './publications.js';
 
 // Alarm I/O yields. Serialize its read/compose/write boundaries so a stale
 // scheduler cannot erase a wake recorded by a concurrent request.
@@ -73,9 +73,8 @@ export async function scheduleRelayCoreAlarm(ctx, nextDelivery, now=Date.now()) 
   if (!ctx.storage.setAlarm) return null;
   return serialized(ctx,async()=>{
     const current=ctx.storage.getAlarm ? await ctx.storage.getAlarm() : null;
-    // Evaluate sources after the await, inside the serialized setter. The
-    // publication helper is absent only on the pre-reconciliation module set.
-    const publication=publications.nextPublicationReconciliationAt?.(ctx,now) ?? null;
+    // Evaluate sources after the await, inside the serialized setter.
+    const publication=nextPublicationReconciliationAt(ctx,now);
     const delivery=typeof nextDelivery==='function' ? nextDelivery() : nextDelivery;
     const times=[publication,delivery,nextReserved(ctx)].filter(validTime);
     const next=times.length ? Math.max(now+50,Math.min(...times)) : null;
