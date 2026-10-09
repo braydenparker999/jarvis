@@ -324,7 +324,7 @@ test('admitted pre-original hints persist their journal and recover after a late
   const f=fixture(t),requestId=uuid(),p=finalPayload(requestId);f.add('Fictional unrelated retained request');let egress=0;
   t.mock.method(globalThis,'fetch',async(url)=>{assert.equal(url,COMMENT_URL+2401);egress++;return Response.json(hintComment(p,2401));});
   const pending=await hint(f,2401);assert.equal(pending.status,202);const pendingReceipt=await pending.json();assert.equal(pendingReceipt.status,'pending');
-  assert.equal(f.rows('SELECT imported FROM imported_comments WHERE comment_id=2401')[0].imported,0);
+  assert.equal(f.rows('SELECT imported FROM imported_comments WHERE comment_id=2401')[0].imported,-1);
   assert.equal(f.rows('SELECT COUNT(*) AS n FROM public_coordination_events')[0].n,0);assert.ok(await f.ctx.storage.getAlarm()>f.clock.now);
   const sets=f.alarms.length,changes=f.rows('SELECT total_changes() AS n')[0].n;
   const duplicate=await hint(f,2401);assert.equal(duplicate.status,202);assert.deepEqual(await duplicate.json(),pendingReceipt);

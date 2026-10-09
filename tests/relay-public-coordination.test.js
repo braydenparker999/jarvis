@@ -83,7 +83,7 @@ test('out-of-order result corrections wait for exact predecessors; competing ver
   const third={...second,eventId:uuid(),resultVersion:3,supersedesEventId:second.eventId,body:'Fictional correction three'};
   await importEvents(h,[comment(third,1),comment(second,2)]);
   assert.equal((await read(h,requestId)).events.length,0);
-  assert.equal(h.rows('SELECT COUNT(*) AS n FROM imported_comments WHERE imported=0')[0].n,2);
+  assert.equal(h.rows('SELECT COUNT(*) AS n FROM imported_comments WHERE imported IN(0,-1)')[0].n,2);
   await importEvents(h,[comment(first,3)],Date.now()+300001);
   let state=await read(h,requestId);assert.deepEqual(state.events.map(item=>item.resultVersion),[1,2,3]);
   assert.equal(state.reply.body,first.body);

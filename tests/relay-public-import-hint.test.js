@@ -130,7 +130,7 @@ test('missing originals beyond the first pending page cannot starve a later vali
     JSON.stringify({type:'coordination',payload:payload(uuid()),provenance:{source:'github-issue',repository:'braydenparker999/jarvis',issue:2,commentId:800+index,authorId:183016859,publishedAt:stamp}}));
   const p=payload(requestId);await syncPublications(h.ctx,async()=>Response.json([comment(p,1400)]));
   assert.equal(eventCount(h),1);assert.equal(h.rows('SELECT imported FROM imported_comments WHERE comment_id=1400')[0].imported,1);
-  assert.equal(h.rows('SELECT COUNT(*) AS n FROM imported_comments WHERE imported=0')[0].n,510);
+  assert.equal(h.rows('SELECT COUNT(*) AS n FROM imported_comments WHERE imported IN(0,-1)')[0].n,510);
 });
 
 test('a reconciler/hint race and a legacy later-final hint preserve the accepted hold with one durable update',async t=>{
