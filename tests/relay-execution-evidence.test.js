@@ -36,10 +36,26 @@ test('evidence refuses bodies/secrets/URLs, unsafe identifiers and unbounded or 
     assert.throws(() => validateEvidence(evidence));
   }
   for (const variation of [{operation: 'send-secret'}, {elapsedMs: -1}, {sqliteReturnedRows: Infinity}, {sqliteChangedRows: -1},
-    {sqlStatements: 1.5}, {ids: {secret: 'PRIVATE_SENTINEL'}}, {workerdRowsRead: 1},
+    {sqlStatements: 1.5}, {ids: {secret: 'PRIVATE_SENTINEL'}}, {workerdRowsRead: 1}, {transportFailed: 'yes'}, {fixtureWorkerCommitObserved: 1},
     {clock: 'real-wall-real-monotonic'}, {startedAt: '2026-10-09T00:00:02.000Z', finishedAt: '2026-10-09T00:00:01.000Z', clock: 'real-wall-real-monotonic'}])
     assert.throws(() => validateEvidence(envelope({...record(), costs: [{...cost, ...variation}]})));
   assert.equal(validateEvidence(envelope()).cases[0].scope, 'loopback-fixture');
+});
+
+test('post-commit transport loss is a fixture observation without an invented received HTTP response', () => {
+  const item = record(); item.costs = [{...cost, transportFailed: true, fixtureWorkerCommitObserved: true,
+    ids: {requestId: id(1), runId: id(2), eventId: id(3)}}];
+  const evidence = validateEvidence(envelope(item));
+  assert.equal(evidence.cases[0].costs[0].httpStatus, undefined);
+  assert.equal(evidence.cases[0].costs[0].transportFailed, true);
+  for (const changes of [{httpStatus: 200}, {transportFailed: false}, {ids: {requestId: id(1)}}]) {
+    const contradicted = structuredClone(item); Object.assign(contradicted.costs[0], changes);
+    assert.throws(() => validateEvidence(envelope(contradicted)));
+  }
+  for (const scope of ['genuine-host', 'inherited-report']) {
+    const promoted = structuredClone(item); promoted.scope = scope;
+    assert.throws(() => validateEvidence(envelope(promoted)), /fixture commit observation scope mismatch/);
+  }
 });
 
 test('callback/reply/producer reports and fixture passes cannot satisfy genuine execution gates', () => {

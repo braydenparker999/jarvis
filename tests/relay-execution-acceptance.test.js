@@ -25,10 +25,13 @@ function dumpCosts(t, h) {
   const scenarioByName = [
     ['HTTP/MCP contract:', 'contract', 'cross-channel'], ['Lucy fixture: callback', 'lucy-absent-phone', 'lucy-private'],
     ['Muse fixture: lost hint', 'muse-lost-hint-mcp', 'muse-public'], ['Muse fixture: independent host HTTP', 'muse-lost-hint-http', 'muse-public'],
+    ['Muse fixture: changes-only', 'muse-lost-hint-changes', 'muse-public'],
     ['MCP duplicate', 'duplicate-races', 'lucy-private'], ['Lucy fixture: later correction', 'later-correction', 'lucy-private'],
     ['expired', 'subscription-expired', 'lucy-private'], ['http410', 'subscription-410', 'lucy-private'], ['http413', 'subscription-413', 'lucy-private'],
     ['recovery after expired consequential', 'consequential-reconciliation', 'lucy-private'],
     ['lost claim response', 'claim-response-recovery', 'lucy-private'],
+    ['lost completion response', 'completion-response-recovery', 'lucy-private'],
+    ['cancellation before', 'cancellation-before-effect', 'lucy-private'], ['cancellation after', 'cancellation-after-effect', 'lucy-private'],
     ['transient delivery', 'delivery-recovery', 'lucy-private'], ['public final/correction', 'public-result-notification', 'muse-public'],
     ['warmed exact', 'steady-cost', 'cross-channel'],
   ];
@@ -131,6 +134,48 @@ boundedTest('Muse fixture: lost hint and absent phone recover through host MCP r
   const legacyRead = await h.rpc(h.auth, 'tools/call', {name: 'relay_read_conversation', arguments: {inbox_id: RELAY_INBOX, message_id: requestId}});
   assert.ok(legacyRead.data.result.content.some(item => item.text?.includes('Later public coordination reports')));
   assert.equal(h.rows('SELECT COUNT(*) AS n FROM relay_owner_jobs')[0].n, 0, 'Public Muse reports never authenticate a private execution');
+});
+
+boundedTest('Muse fixture: changes-only MCP recovery imports a lost final and later correction across every cursor page', async t => {
+  const h = await harness(t), requestId = uuid();
+  assert.equal((await h.http('/shared/messages', {id: requestId, body: MUSE_PREFIX + 'Fictional changes-only recovery.'})).status, 201);
+  const first = report(requestId); h.publish(first, 91201);
+  await h.restart(); h.clearMeasurements();
+  const args = {inbox_id: RELAY_INBOX, limit: 1};
+  const initial = await h.call(h.auth, 'relay_read_public_changes', args);
+  assert.equal(h.rows('SELECT COUNT(*) AS n FROM public_coordination_events')[0].n, 1,
+    'Changes-only MCP must import the lost final on a fresh fixture; no exact-result/HTTP/state/hint reader may supply it');
+  assert.ok(initial.nextCursor, 'The imported final must be observed through the complete changes pagination');
+  const collect = async firstPage => {
+    const changes = [...firstPage.changes]; let page = firstPage, pages = 1;
+    while (page.nextCursor) {
+      assert.ok(pages++ < 20, 'Fixture changes pagination must terminate');
+      page = await h.call(h.auth, 'relay_read_public_changes', {...args, cursor: page.nextCursor});
+      changes.push(...page.changes);
+    }
+    return {changes, cursor: page.cursor, pages};
+  };
+  const final = await collect(initial);
+  assert.ok(final.pages > 1);
+  assert.deepEqual(final.changes.filter(item => item.kind === 'event').map(item => item.event.eventId), [first.eventId]);
+  const finalEvent = final.changes.find(item => item.event?.eventId === first.eventId).event;
+  assert.equal(finalEvent.requestId, requestId); assert.equal(finalEvent.attemptId, first.attemptId);
+  assert.equal(finalEvent.execution_authorized, false); assert.equal(finalEvent.author_authenticated, false);
+  const second = {...first, eventId: uuid(), stage: 'correction', resultVersion: 2,
+    supersedesEventId: first.eventId, body: 'Fictional correction discovered only by the changes cursor.'};
+  h.publish(second, 91202); h.advance(300001); await h.restart();
+  const corrected = await collect(await h.call(h.auth, 'relay_read_public_changes', {...args, cursor: final.cursor}));
+  assert.deepEqual(corrected.changes.filter(item => item.kind === 'event').map(item => item.event.eventId), [second.eventId]);
+  const correction = corrected.changes.find(item => item.event?.eventId === second.eventId).event;
+  assert.equal(correction.resultVersion, 2); assert.equal(correction.supersedesEventId, first.eventId);
+  assert.equal(correction.attemptId, first.attemptId);
+  const immutable = h.rows("SELECT id,body FROM shared_entries WHERE reply_to=? AND kind='reply'", requestId);
+  assert.deepEqual(immutable.map(item => ({...item})), [{id: first.eventId, body: first.body}]);
+  assert.equal(h.rows('SELECT COUNT(*) AS n FROM public_coordination_events')[0].n, 2);
+  assert.ok(h.measurements.every(item => item.operation === 'relay_read_public_changes'),
+    'Only the changes MCP tool may drive this isolated import; exact readers and phone/import hints remain absent');
+  assert.equal(h.measurements.filter(item => item.upstreamRequests === 1).length, 2);
+  assert.equal(h.rows('SELECT COUNT(*) AS n FROM relay_owner_jobs')[0].n, 0);
 });
 
 boundedTest('Muse fixture: independent host HTTP read reconciles a lost hint and preserves later corrected results', async t => {
@@ -291,14 +336,25 @@ boundedTest('transient delivery recovery is idempotent metadata recovery and doe
   await h.performFixtureWork(job.id); assert.equal(h.effectCount(job.id), 1);
 });
 
-boundedTest('lost claim response survives executor ledger restart; an expired unused run cannot start consequential work', async t => {
+boundedTest('lost claim response survives a real post-commit socket drop and executor restart; expired unused work stays blocked', async t => {
   const h = await harness(t), {job} = await h.createJob({action_kind: 'consequential'}); h.sources.set(job.id, uuid());
-  const pending = await h.performFixtureWork(job.id, {stopAfterClaim: true});
+  h.dropNextRpcResponse('relay_owner_job_claim', job.id);
+  await assert.rejects(() => h.performFixtureWork(job.id), error => error instanceof TypeError && error.cause?.code === 'UND_ERR_SOCKET');
+  assert.equal(h.droppedResponses.length, 1);
+  const pending = h.fixtureIntent(job.id);
+  assert.equal(h.droppedResponses[0].runId, pending.runId); assert.equal(h.droppedResponses[0].eventId, pending.claimEventId);
+  const lost = h.measurements.find(item => item.operation === 'relay_owner_job_claim' && item.transportFailed);
+  assert.equal(lost.fixtureWorkerCommitObserved, true); assert.equal(lost.httpStatus, undefined, 'Client received no response status or body');
+  assert.equal(lost.ids.eventId, pending.claimEventId);
   assert.equal(h.effectCount(job.id), 0);
   const before = (await h.read(job.id)).job.execution;
+  assert.equal(before.runId, pending.runId);
+  assert.equal((await h.read(job.id)).events.filter(event => event.kind === 'claimed')[0].id, pending.claimEventId);
   h.advance(1000); await h.restart();
+  assert.deepEqual(h.fixtureIntent(job.id), pending);
   const resumed = await h.performFixtureWork(job.id);
   assert.equal(resumed.job.completion.runId, pending.runId);
+  assert.equal(resumed.claimNewWrite, false, 'Same persisted claim/event retries after ambiguous delivery');
   assert.deepEqual(resumed.job.execution, before);
   assert.equal(h.effectCount(job.id), 1);
   assert.equal((await h.read(job.id)).events.filter(event => event.kind === 'claimed').length, 1);
@@ -309,6 +365,94 @@ boundedTest('lost claim response survives executor ledger restart; an expired un
   assert.equal(h.effectCount(unused.job.id), 0);
   assert.equal((await h.read(unused.job.id)).job.stage, 'outcome_unknown');
   assert.equal((await h.read(unused.job.id)).job.completion, null);
+});
+
+boundedTest('lost completion response replays the persisted exact payload after a socket drop, correction and restart', async t => {
+  const h = await harness(t), {job} = await h.createJob({action_kind: 'consequential'}); h.sources.set(job.id, uuid());
+  h.dropNextRpcResponse('relay_owner_job_update', job.id, 'completed');
+  await assert.rejects(() => h.performFixtureWork(job.id), error => error instanceof TypeError && error.cause?.code === 'UND_ERR_SOCKET');
+  const intent = h.fixtureIntent(job.id), payload = intent.completionPayload;
+  assert.ok(payload); assert.equal(h.droppedResponses.length, 1);
+  assert.equal(payload.inbox_id, RELAY_OWNER_INBOX); assert.equal(payload.job_id, job.id);
+  assert.equal(h.droppedResponses[0].eventId, payload.event_id);
+  const lost = h.measurements.find(item => item.operation === 'relay_owner_job_update' && item.transportFailed);
+  assert.equal(lost.fixtureWorkerCommitObserved, true); assert.equal(lost.httpStatus, undefined);
+  assert.equal(lost.ids.eventId, payload.event_id); assert.equal(h.effectCount(job.id), 1);
+  const accepted = (await h.read(job.id)).job;
+  assert.equal(accepted.completion.eventId, payload.event_id); assert.equal(accepted.completion.runId, payload.run_id);
+  assert.equal(accepted.completion.replyId, payload.expected_reply_id); assert.equal(accepted.completion.resultVersion, payload.expected_version);
+  await h.ownerCall('relay_owner_job_result_correct', {job_id: job.id, event_id: uuid(), expected_reply_id: payload.expected_reply_id,
+    expected_version: 1, body: 'Fictional harmless late correction after the dropped terminal response.', correction_summary: 'Fictional independent recheck.'});
+  h.advance(300001); await h.restart();
+  assert.deepEqual(h.fixtureIntent(job.id), intent, 'Disk ledger preserves the full terminal payload and original result version');
+  const recovered = await h.performFixtureWork(job.id);
+  assert.equal(recovered.executed, false); assert.equal(recovered.completionNewWrite, false);
+  assert.equal(h.effectCount(job.id), 1); assert.deepEqual(recovered.job.execution, accepted.execution);
+  assert.deepEqual(recovered.job.completion, accepted.completion); assert.equal(recovered.job.resultVersion, 2);
+  const replay = h.measurements.filter(item => item.operation === 'relay_owner_job_update').at(-1);
+  assert.equal(replay.ids.eventId, payload.event_id); assert.equal(replay.ids.completionResultVersion, 1);
+  const journal = (await h.read(job.id)).events;
+  assert.equal(journal.filter(event => event.kind === 'claimed').length, 1);
+  assert.equal(journal.filter(event => event.kind === 'work_completed').length, 1);
+  assert.equal(h.rows('SELECT COUNT(*) AS n FROM relay_owner_jobs')[0].n, 1);
+});
+
+boundedTest('cancellation before the effect is acknowledged by the owning run after restart with zero execution', async t => {
+  const h = await harness(t), {job} = await h.createJob({action_kind: 'consequential'}); h.sources.set(job.id, uuid());
+  const started = await h.performFixtureWork(job.id, {stopAfterClaim: true});
+  const claimed = (await h.read(job.id)).job.execution;
+  assert.equal(h.effectCount(job.id), 0);
+  const cancel = await h.phone('/jobs/cancel', {job_id: job.id});
+  assert.equal(cancel.status, 201); assert.equal(cancel.data.job.cancelRequested, true);
+  assert.equal(cancel.data.job.stage, 'running', 'Running alone cannot allow an executor to ignore cancellation');
+  const requestedAt = cancel.data.job.cancelRequestedAt;
+  await rejectCall(h, 'relay_owner_job_update', {job_id: job.id, run_id: started.runId, event_id: uuid(), stage: 'cancelled',
+    summary: 'Fictional wrong grant cannot attest a stopped run.', outcome: 'not_started'}, await h.grant());
+  h.advance(1000); await h.restart();
+  const stopped = await h.performFixtureWork(job.id);
+  assert.equal(stopped.executed, false); assert.equal(stopped.cancellationNewWrite, true);
+  assert.equal(stopped.job.stage, 'cancelled');
+  assert.equal(h.rows('SELECT outcome FROM relay_owner_jobs WHERE id=?', job.id)[0].outcome, 'not_started');
+  assert.ok(Number.isFinite(Date.parse(claimed.leaseExpiresAt)));
+  assert.equal(stopped.job.execution.runId, started.runId); assert.equal(stopped.job.execution.leaseExpiresAt, claimed.leaseExpiresAt);
+  assert.equal(stopped.job.cancelRequested, true); assert.equal(stopped.job.cancelRequestedAt, requestedAt);
+  assert.equal(stopped.job.result, null); assert.equal(stopped.job.completion, null); assert.equal(h.effectCount(job.id), 0);
+  const intent = h.fixtureIntent(job.id);
+  assert.equal(intent.cancellationPayload.run_id, started.runId); assert.equal(intent.cancellationPayload.outcome, 'not_started');
+  const beforeReplay = durableSnapshot(h); await h.restart();
+  const replay = await h.performFixtureWork(job.id);
+  assert.equal(replay.executed, false); assert.equal(replay.cancellationNewWrite, false);
+  assert.deepEqual(h.fixtureIntent(job.id), intent); assert.deepEqual(durableSnapshot(h), beforeReplay);
+  assert.equal(h.effectCount(job.id), 0);
+  const events = (await h.read(job.id)).events;
+  assert.equal(events.filter(event => event.kind === 'claimed').length, 1);
+  assert.equal(events.filter(event => event.kind === 'cancellation_requested').length, 1);
+  assert.equal(events.filter(event => event.kind === 'cancelled').length, 1);
+});
+
+boundedTest('cancellation after the effect reconciles known completion without repeating work or clearing cancellation history', async t => {
+  const h = await harness(t), {job} = await h.createJob({action_kind: 'consequential'}); h.sources.set(job.id, uuid());
+  const performed = await h.performFixtureWork(job.id, {stopAfterEffect: true});
+  const execution = (await h.read(job.id)).job.execution;
+  assert.equal(h.effectCount(job.id), 1);
+  const cancel = await h.phone('/jobs/cancel', {job_id: job.id});
+  assert.equal(cancel.status, 201); const requestedAt = cancel.data.job.cancelRequestedAt;
+  h.advance(300001); await h.restart();
+  const known = await h.performFixtureWork(job.id);
+  assert.equal(known.executed, false); assert.equal(known.job.stage, 'completed');
+  assert.equal(h.rows('SELECT outcome FROM relay_owner_jobs WHERE id=?', job.id)[0].outcome, 'known');
+  assert.equal(known.job.completion.runId, performed.runId); assert.deepEqual(known.job.execution, execution);
+  assert.equal(known.job.cancelRequested, true); assert.equal(known.job.cancelRequestedAt, requestedAt);
+  assert.equal(known.job.retryAllowed, false); assert.equal(h.effectCount(job.id), 1);
+  await h.restart(); const replay = await h.performFixtureWork(job.id);
+  assert.equal(replay.executed, false); assert.equal(replay.completionNewWrite, false);
+  assert.deepEqual(replay.job.completion, known.job.completion); assert.equal(h.effectCount(job.id), 1);
+  const events = (await h.read(job.id)).events;
+  assert.equal(events.filter(event => event.kind === 'claimed').length, 1);
+  assert.equal(events.filter(event => event.kind === 'cancellation_requested').length, 1);
+  assert.equal(events.filter(event => event.kind === 'cancelled').length, 0);
+  assert.equal(events.filter(event => event.kind === 'work_completed').length, 1);
+  assert.equal(h.rows('SELECT COUNT(*) AS n FROM relay_owner_jobs')[0].n, 1);
 });
 
 boundedTest('public final/correction notifications are updates only and never wake the original message subscription', async t => {
@@ -338,12 +482,20 @@ boundedTest('warmed exact HTTP/MCP reads have stable operation counts without im
   const h = await harness(t), {job} = await h.createJob();
   const requestId = uuid(); await h.http('/shared/messages', {id: requestId, body: MUSE_PREFIX + 'Fictional warmed exact result.'});
   const first = report(requestId); h.publish(first, 93001);
+  const second = {...first, eventId: uuid(), stage: 'correction', resultVersion: 2,
+    supersedesEventId: first.eventId, body: 'Fictional warmed corrected result.'};
+  h.publish(second, 93002);
   const imported = await h.http('/shared/result?requestId=' + requestId);
   assert.equal(imported.data.reply.id, first.eventId, 'The HTTP importer must be warmed independently of the MCP projection');
-  await h.call(h.auth, 'relay_read_public_result', resultArgs(requestId));
+  const populatedRead = async () => {
+    const result = await h.call(h.auth, 'relay_read_public_result', {...resultArgs(requestId), limit: 100});
+    assert.equal(result.reply.id, first.eventId);
+    assert.deepEqual(result.events.map(item => [item.eventId, item.resultVersion]), [[first.eventId, 1], [second.eventId, 2]]);
+  };
+  await populatedRead();
   await h.read(job.id); h.clearMeasurements();
   for (let attempt = 0; attempt < 3; attempt++) {
-    await h.read(job.id); await h.call(h.auth, 'relay_read_public_result', resultArgs(requestId));
+    await h.read(job.id); await populatedRead();
   }
   const before = h.measurements.map(({elapsedMs, requestBytes, responseBytes, ...counts}) => counts);
   // Seed only background history, outside the measured boundary. The exact
@@ -353,10 +505,11 @@ boundedTest('warmed exact HTTP/MCP reads have stable operation counts without im
   h.rows("INSERT INTO imported_comments(comment_id,publication,imported) WITH RECURSIVE n(v) AS (VALUES(100000) UNION ALL SELECT v+1 FROM n WHERE v<100000+?) SELECT v,'{}',1 FROM n", hostRows - 1);
   h.clearMeasurements();
   for (let attempt = 0; attempt < 3; attempt++) {
-    await h.read(job.id); await h.call(h.auth, 'relay_read_public_result', resultArgs(requestId));
+    await h.read(job.id); await populatedRead();
   }
   const after = h.measurements.map(({elapsedMs, requestBytes, responseBytes, ...counts}) => counts);
   assert.deepEqual(after, before, 'Stable statement/returned-row/change/egress counts at 0 and 2500 processed comments');
   assert.equal(h.measurements.some(item => item.upstreamRequests), false);
+  assert.ok(h.measurements.every(item => item.sqlStatements > 0 && item.sqliteReturnedRows > 0), 'Cost samples must contain real database work');
   assert.ok(h.measurements.every(item => item.sqliteChangedRows < 12 && item.sqliteReturnedRows < 100));
 });

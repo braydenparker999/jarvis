@@ -4,16 +4,38 @@ import {readFileSync, writeFileSync, mkdirSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {resolve} from 'node:path';
 import {createHash, randomUUID} from 'node:crypto';
+import {execFileSync} from 'node:child_process';
 import {build} from 'esbuild';
 import {Miniflare, convertV4MiniflareOptions} from 'miniflare';
 import {RELAY_OWNER_INBOX, RELAY_INBOX, RELAY_VERSION} from '../backend/relay-common.js';
 import {PRIMARY_SITE} from '../backend/origins.js';
+
+function metric(headers, name, minimum = 0) {
+  const raw = headers.get(name);
+  assert.equal(typeof raw, 'string', 'Required workerd counter header is missing');
+  assert.match(raw, /^(0|[1-9]\d*)$/, 'Workerd counter must be a nonnegative integer');
+  const value = Number(raw);
+  assert.ok(Number.isSafeInteger(value) && value >= minimum, 'Workerd counter must be finite and meet its positive-work requirement');
+  return value;
+}
+
+test('workerd accounting refuses absent, malformed and zero-work read counters', () => {
+  for (const raw of [null, '', 'NaN', 'Infinity', '-1', '1.5', '01', '1 1', '9007199254740992']) {
+    const headers = new Headers(); if (raw !== null) headers.set('X-Fixture-Counter', raw);
+    assert.throws(() => metric(headers, 'X-Fixture-Counter'));
+  }
+  assert.equal(metric(new Headers({'X-Fixture-Counter': '0'}), 'X-Fixture-Counter'), 0);
+  assert.throws(() => metric(new Headers({'X-Fixture-Counter': '0'}), 'X-Fixture-Counter', 1));
+  assert.equal(metric(new Headers({'X-Fixture-Counter': '1'}), 'X-Fixture-Counter', 1), 1);
+});
 
 test('actual local workerd HTTP/MCP boundaries record stable rows-read/written costs with 5000 background rows', {timeout: 30000}, async () => {
   const config = JSON.parse(readFileSync(new URL('../backend/wrangler.jsonc', import.meta.url), 'utf8'));
   const bundle = await build({entryPoints: [fileURLToPath(new URL('./helpers/relay-execution-cost-worker.js', import.meta.url))],
     bundle: true, write: false, format: 'esm', platform: 'browser', target: 'es2022', external: ['node:crypto']});
   const sourceSha256 = createHash('sha256').update(bundle.outputFiles[0].text).digest('hex');
+  const sourceCommit = execFileSync('git', ['rev-parse', 'HEAD'], {cwd: fileURLToPath(new URL('..', import.meta.url)), encoding: 'utf8'}).trim();
+  const costHarnessSha256 = createHash('sha256').update(readFileSync(fileURLToPath(import.meta.url))).update(bundle.outputFiles[0].text).digest('hex');
   let egress = 0;
   const mf = new Miniflare(convertV4MiniflareOptions({name: 'local-relay-execution-cost', modules: true, script: bundle.outputFiles[0].text,
     compatibilityDate: config.compatibility_date, compatibilityFlags: config.compatibility_flags || [], cf: false, telemetry: {enabled: false},
@@ -28,8 +50,8 @@ test('actual local workerd HTTP/MCP boundaries record stable rows-read/written c
     const text = await response.text();
     if (operation !== 'setup') measurements.push({operation, elapsedMs: Number((performance.now() - started).toFixed(3)),
       status: response.status, requestBytes: Buffer.byteLength(payload || ''), responseBytes: Buffer.byteLength(text),
-      sqlStatements: Number(response.headers.get('X-Fixture-Sql-Statements')), rowsRead: Number(response.headers.get('X-Fixture-Rows-Read')),
-      rowsWritten: Number(response.headers.get('X-Fixture-Rows-Written'))});
+      sqlStatements: metric(response.headers, 'X-Fixture-Sql-Statements', 1), rowsRead: metric(response.headers, 'X-Fixture-Rows-Read', 1),
+      rowsWritten: metric(response.headers, 'X-Fixture-Rows-Written')});
     assert.equal(response.status < 400, true, 'Fixture cost boundary must succeed');
     return JSON.parse(text);
   };
@@ -47,22 +69,48 @@ test('actual local workerd HTTP/MCP boundaries record stable rows-read/written c
     const requestId = randomUUID();
     const created = await request('/relay/owner/jobs', {id: requestId, title: 'Fictional cost request', body: 'Read the isolated fixture.', action_kind: 'read_only'}, pair.device_token);
     assert.equal(created.job.id, requestId);
+    const runId = randomUUID();
+    await rpc('relay_owner_job_claim', {inbox_id: RELAY_OWNER_INBOX, job_id: requestId, run_id: runId, event_id: randomUUID()});
+    const reply = await rpc('relay_owner_reply', {inbox_id: RELAY_OWNER_INBOX, message_id: requestId, body: 'Fictional populated cost result.'});
+    await rpc('relay_owner_job_update', {inbox_id: RELAY_OWNER_INBOX, job_id: requestId, run_id: runId, event_id: randomUUID(),
+      stage: 'completed', expected_reply_id: reply.entry.id, expected_version: 1, summary: 'Fictional fixture result for local cost accounting.', outcome: 'known'});
+    const ownerCorrectionId = randomUUID();
+    await rpc('relay_owner_job_result_correct', {inbox_id: RELAY_OWNER_INBOX, job_id: requestId, event_id: ownerCorrectionId,
+      expected_reply_id: reply.entry.id, expected_version: 1, body: 'Fictional populated cost correction.', correction_summary: 'Fictional cost fixture recheck.'});
     const publicId = randomUUID(); await request('/shared/messages', {id: publicId, body: 'Fictional public cost request.'});
+    const finalEventId = randomUUID(), correctionEventId = randomUUID(), publicationAttemptId = randomUUID();
+    await request('/__fixture/public-result-history', {requestId: publicId, finalEventId, correctionEventId, attemptId: publicationAttemptId});
     // Explicit warm/cooldown setup: an eventual MCP importer repair must not
     // turn this steady-state cost profile into a cold upstream request sample.
     await request('/__fixture/publication-cooldown');
-    const ownerArgs = {inbox_id: RELAY_OWNER_INBOX, job_id: requestId}, publicArgs = {inbox_id: RELAY_INBOX, message_id: publicId, limit: 1};
+    const ownerArgs = {inbox_id: RELAY_OWNER_INBOX, job_id: requestId}, publicArgs = {inbox_id: RELAY_INBOX, message_id: publicId, limit: 100};
+    const ownerRead = async (measured = false) => {
+      const read = await rpc('relay_owner_job_read', ownerArgs, measured);
+      assert.equal(read.job.completion.runId, runId); assert.equal(read.job.completion.resultVersion, 1);
+      assert.equal(read.job.result.replyId, reply.entry.id);
+      assert.deepEqual(read.resultHistory.map(item => [item.id, item.version]), [[reply.entry.id, 1], [ownerCorrectionId, 2]]);
+    };
+    const publicRead = async (measured = false) => {
+      const read = await rpc('relay_read_public_result', publicArgs, measured);
+      assert.equal(read.reply.id, finalEventId); assert.equal(read.nextCursor, null);
+      assert.deepEqual(read.events.map(item => [item.eventId, item.resultVersion]), [[finalEventId, 1], [correctionEventId, 2]]);
+    };
+    const phoneRead = async (measured = false) => {
+      const read = await request('/relay/owner/jobs/detail?job_id=' + requestId, undefined, pair.device_token, measured ? 'phone_exact_job' : 'setup');
+      assert.equal(read.job.result.replyId, reply.entry.id); assert.equal(read.job.latestResult.id, ownerCorrectionId);
+      assert.equal(read.job.resultVersion, 2); assert.equal(read.job.completion.resultVersion, 1);
+    };
     const warm = async () => {
-      await rpc('relay_owner_job_read', ownerArgs);
-      await rpc('relay_read_public_result', publicArgs);
-      await request('/relay/owner/jobs/detail?job_id=' + requestId, undefined, pair.device_token);
+      await ownerRead();
+      await publicRead();
+      await phoneRead();
     };
     await warm();
     const sample = async () => {
       for (let repeat = 0; repeat < 3; repeat++) {
-        await rpc('relay_owner_job_read', ownerArgs, true);
-        await rpc('relay_read_public_result', publicArgs, true);
-        await request('/relay/owner/jobs/detail?job_id=' + requestId, undefined, pair.device_token, 'phone_exact_job');
+        await ownerRead(true);
+        await publicRead(true);
+        await phoneRead(true);
       }
     };
     await sample();
@@ -76,8 +124,9 @@ test('actual local workerd HTTP/MCP boundaries record stable rows-read/written c
       assert.ok(record.rowsWritten < 20, record.operation + ' exceeds warmed-write rows budget');
     }
     assert.equal(egress, 0);
-    const report = {schema: 'relay-workerd-boundary-cost-v1', scope: 'local-workerd-fixture', sourceSha256, nodeVersion: process.version,
-      compatibilityDate: config.compatibility_date, backgroundRows: 5000, requestId, publicRequestId: publicId, before, after, egress};
+    const report = {schema: 'relay-workerd-boundary-cost-v1', scope: 'local-workerd-fixture', sourceCommit, sourceSha256, costHarnessSha256, nodeVersion: process.version,
+      compatibilityDate: config.compatibility_date, backgroundRows: 5000, requestId, runId, originalReplyId: reply.entry.id, ownerCorrectionId,
+      publicRequestId: publicId, finalEventId, correctionEventId, publicationAttemptId, resultVersions: [1, 2], before, after, egress};
     process.stdout.write('LOCAL_BOUNDARY_COST ' + JSON.stringify(report) + '\n');
     if (process.env.RELAY_EXECUTION_COST_DIR) {
       mkdirSync(resolve(process.env.RELAY_EXECUTION_COST_DIR), {recursive: true});
