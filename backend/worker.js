@@ -9,7 +9,7 @@ import {podcasts} from './podcasts.js';
 import {relayConnector,relayRpc} from './relay-connector.js';
 import {relayOAuthStore} from './relay-oauth.js';
 import {drainRelayOutbox,scheduleRelayAlarm,enqueueRelayOwnerMessage,webhookTransport} from './relay-events.js';
-import {reserveRelayCoreWake,releaseRelayCoreWake,assertRelayCoreWake,beginRelayCoreAlarm} from './relay-core-alarm.js';
+import {reserveRelayCoreWake,releaseRelayCoreWake,assertRelayCoreWake,beginRelayCoreAlarm,abandonRelayCoreAlarm} from './relay-core-alarm.js';
 import {relayOwnerPublic,relayOwnerStore} from './relay-owner.js';
 import {RelayError,boundedText} from './relay-common.js';
 const paths = new Set(['/v1/state', '/v1/messages', '/v1/board', '/v1/responder/connect', '/v1/responder/revoke', '/v1/agent/inbox', '/v1/agent/replies', '/v1/agent/board']);
@@ -141,12 +141,14 @@ export class Hub {
     // Keep a durable retry before any import or callback await. The two lanes
     // perform bounded work, then one compositor selects their shared next wake.
     const wake=await beginRelayCoreAlarm(this.ctx);
-    const due=nextPublicationReconciliationAt(this.ctx);
-    if(due!==null&&due<=Date.now())await syncPublications(this.ctx,this.publicationFetcher,Date.now(),this.env);
-    const transport=webhookTransport(this.env);
-    await drainRelayOutbox(this.ctx,this.env,transport,Date.now(),{schedule:false});
-    releaseRelayCoreWake(this.ctx,wake);
-    await scheduleRelayAlarm(this.ctx,Date.now(),transport?0:60000);
+    try{
+      const due=nextPublicationReconciliationAt(this.ctx);
+      if(due!==null&&due<=Date.now())await syncPublications(this.ctx,this.publicationFetcher,Date.now(),this.env);
+      const transport=webhookTransport(this.env);
+      await drainRelayOutbox(this.ctx,this.env,transport,Date.now(),{schedule:false});
+      releaseRelayCoreWake(this.ctx,wake);
+      await scheduleRelayAlarm(this.ctx,Date.now(),transport?0:60000);
+    }catch(error){abandonRelayCoreAlarm(this.ctx,wake);throw error;}
   }
   async fetch(request){
     const path=new URL(request.url).pathname;

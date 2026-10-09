@@ -23,6 +23,9 @@ export function createDirectApi(fetcher=fetch,origin=API_ORIGIN) {
     const messages=[],posts=[],seen=new Set();let cursor='0',state=first;
     do {
       state=state||await cloud('/shared/state?after='+encodeURIComponent(cursor));
+      if(state?.mode==='github-publications'&&state.coordinationVersion===2){
+        const error=Error('The public inbox changed history protocol. Your drafts are safe.');error.upgraded=true;throw error;
+      }
       if(!legacyPage(state)||state.messages.length+state.posts.length>200)throw Error('Cloud inbox returned invalid data. Your drafts are safe.');
       for(const entry of [...state.messages,...state.posts])validatePublicEntry(entry);
       if(state.messages.some(entry=>!entry.role)||state.posts.some(entry=>entry.role))throw Error('Cloud inbox returned invalid data. Your drafts are safe.');
@@ -43,7 +46,13 @@ export function createDirectApi(fetcher=fetch,origin=API_ORIGIN) {
   async function loadNow(savedCache) {
     const previous=mergePublicReaderCaches(publicReader,savedCache,origin);
     if(previous)protocol=2;
-    if(protocol==='legacy')return loadLegacy();
+    let upgraded=false;
+    if(protocol==='legacy'){
+      // A failed snapshot must leave the next refresh free to negotiate again.
+      // An upgraded state page permits one v2 probe in this refresh.
+      try{return await loadLegacy();}
+      catch(error){protocol=null;if(!error.upgraded)throw error;upgraded=true;}
+    }
     let first;
     try {
       const updates=await readPublicPages(async path=>{
@@ -61,15 +70,16 @@ export function createDirectApi(fetcher=fetch,origin=API_ORIGIN) {
       return publicReaderInbox(next);
     }catch(error){
       const initializing=error.status===503&&error.initializing;
-      if(!previous&&[null,'initializing'].includes(protocol)&&initializing){
+      if(!upgraded&&!previous&&[null,'initializing'].includes(protocol)&&initializing){
         // The older snapshot remains usable while a bounded backend upgrade is
         // in progress. Read it once; existing refreshes probe v2 readiness.
         legacySnapshot=legacySnapshot||await loadLegacy();protocol='initializing';return structuredClone(legacySnapshot);
       }
-      if(protocol!==null||previous||!(error.unsupported||[404,405,501].includes(error.status)))throw error;
-      first=error.legacyPage;protocol='legacy';
+      if(upgraded||protocol!==null||previous||!(error.unsupported||[404,405,501].includes(error.status)))throw error;
+      first=error.legacyPage;
     }
-    return loadLegacy(first);
+    // Commit fallback only after the entire immutable snapshot validates.
+    const legacy=await loadLegacy(first);protocol='legacy';return legacy;
   }
   function load(savedCache) {
     const result=reads.then(()=>loadNow(savedCache));reads=result.catch(()=>{});return result;

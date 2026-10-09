@@ -8,7 +8,7 @@ import {relayOAuthStore} from '../backend/relay-oauth.js';
 import {relayOwnerSchema} from '../backend/relay-owner.js';
 import {relaySubscribe,relayUnsubscribe,scheduleRelayAlarm,drainRelayOutbox,enqueueRelayOwnerMessage,EVENT_RETENTION_MS} from '../backend/relay-events.js';
 import {PUBLIC_RESULT_EVENT} from '../backend/public-coordination-tools.js';
-import {RELAY_ALARM_RETRY_MS,RELAY_PRECOMMIT_EXPIRY_MS} from '../backend/relay-core-alarm.js';
+import {reserveRelayCoreWake,RELAY_ALARM_RETRY_MS,RELAY_PRECOMMIT_EXPIRY_MS} from '../backend/relay-core-alarm.js';
 import {RELAY_VERSION,RELAY_INBOX,RELAY_OWNER,RELAY_OWNER_SCOPE,RELAY_OWNER_INBOX,RELAY_OWNER_EVENT,RELAY_EVENT,RELAY_CALLBACK,random,hash,challenge} from '../backend/relay-common.js';
 
 const uuid=()=>crypto.randomUUID(),stamp='2026-10-08T00:00:00Z';
@@ -427,4 +427,56 @@ test('an interrupted alarm keeps a bounded retry and later clears expired recove
   const expiry=await f.ctx.storage.getAlarm();assert.ok(expiry>retry+1000,'Abandoned recovery does not create a rapid no-work loop');
   f.clock.now=expiry;await restarted.alarm();assert.equal(await f.ctx.storage.getAlarm(),null);
   assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')[0].n,0);
+});
+
+test('a saturated first-due restarted Hub imports a final and delivers FIFO without starving either lane',async t=>{
+  const deliveries=[];localTransport(t,deliveries);
+  const f=fixture(t,{env:transportEnv}),auth=await grant(f),first=f.add(),second=f.add(),payload=finalPayload(first);
+  await f.tool(auth,'relay_read_public_result',{inbox_id:RELAY_INBOX,message_id:first});
+  const sub=await (await f.rpc(auth,'events/subscribe',{name:RELAY_EVENT,arguments:{inbox_id:RELAY_INBOX},delivery,cursor:'relay1:0'})).json();
+  assert.ok(sub.result.id);assert.equal(f.calls.length,1);assert.equal(deliveries.length,0);
+  const initial=f.clock.now,due=initial+100,expiry=initial+RELAY_PRECOMMIT_EXPIRY_MS;
+  await reserveRelayCoreWake(f.ctx,initial,100);
+  for(let index=1;index<256;index++)f.ctx.storage.sql.exec('INSERT INTO relay_core_alarm_wakes VALUES(?,?,?)','saturated-'+index,due,expiry);
+  for(const key of ['publisher-next-attempt','publisher-local-next-attempt'])f.ctx.storage.sql.exec('INSERT OR REPLACE INTO shared_meta VALUES(?,?)',key,JSON.stringify(due));
+  f.state.response=async()=>Response.json([comment(payload,2701)]);
+  f.clock.now=due;const before=f.alarms.length;await f.restart().alarm();
+  assert.equal(f.calls.length,2,'The publication lane runs at the first due alarm, before admission expiry');
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM public_coordination_events WHERE event_id=?',payload.eventId)[0].n,1);
+  assert.deepEqual(deliveries.map(item=>item.data.message_id),[first]);
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')[0].n,256,'Recovery does not discard live request admissions');
+  assert.ok(f.alarms.length-before<=2);const next=await f.ctx.storage.getAlarm();assert.ok(next>due&&next<expiry);
+  f.clock.now=next;await f.restart().alarm();
+  assert.deepEqual(deliveries.map(item=>item.data.message_id),[first,second]);assert.equal(f.calls.length,2);
+  const sets=f.alarms.length;
+  await assert.rejects(reserveRelayCoreWake(f.ctx,f.clock.now),/admission is busy/);assert.equal(f.alarms.length,sets);
+  assert.equal(await f.ctx.storage.getAlarm(),expiry,'After FIFO drains, orphan cleanup retains one bounded expiry wake');
+  f.clock.now=expiry;await f.restart().alarm();
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')[0].n,0);
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM public_coordination_events WHERE event_id=?',payload.eventId)[0].n,1);
+  assert.deepEqual(deliveries.map(item=>item.data.message_id),[first,second]);
+  assert.ok(await f.ctx.storage.getAlarm()>expiry);
+});
+
+test('a saturated alarm survives final compositor rejection after releasing recovery without repeating imports or FIFO occurrences',async t=>{
+  const deliveries=[];localTransport(t,deliveries);
+  const f=fixture(t,{env:transportEnv}),auth=await grant(f),first=f.add(),second=f.add(),payload=finalPayload(first);
+  await f.tool(auth,'relay_read_public_result',{inbox_id:RELAY_INBOX,message_id:first});
+  const sub=await (await f.rpc(auth,'events/subscribe',{name:RELAY_EVENT,arguments:{inbox_id:RELAY_INBOX},delivery,cursor:'relay1:0'})).json();assert.ok(sub.result.id);
+  const initial=f.clock.now,due=initial+100,expiry=initial+RELAY_PRECOMMIT_EXPIRY_MS;
+  await reserveRelayCoreWake(f.ctx,initial,100);
+  for(let index=1;index<256;index++)f.ctx.storage.sql.exec('INSERT INTO relay_core_alarm_wakes VALUES(?,?,?)','rejected-final-'+index,due,expiry);
+  for(const key of ['publisher-next-attempt','publisher-local-next-attempt'])f.ctx.storage.sql.exec('INSERT OR REPLACE INTO shared_meta VALUES(?,?)',key,JSON.stringify(due));
+  f.state.response=async()=>Response.json([comment(payload,2702)]);
+  const set=f.ctx.storage.setAlarm;let setters=0;
+  f.ctx.storage.setAlarm=async value=>{if(++setters===2)throw Error('Fictional post-release compositor rejection');return set(value);};
+  f.clock.now=due;await assert.rejects(f.restart().alarm(),/post-release compositor rejection/);
+  assert.equal(setters,2);assert.equal(f.calls.length,2);assert.deepEqual(deliveries.map(item=>item.data.message_id),[first]);
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')[0].n,256,'The recovery row was released before the rejected composition');
+  const retry=await f.ctx.storage.getAlarm();assert.equal(retry,due+RELAY_ALARM_RETRY_MS);assert.ok(retry<expiry);
+  f.ctx.storage.setAlarm=set;f.clock.now=retry;await f.restart().alarm();
+  assert.deepEqual(deliveries.map(item=>item.data.message_id),[first,second]);assert.equal(f.calls.length,2);
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM public_coordination_events WHERE event_id=?',payload.eventId)[0].n,1);
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_events WHERE message_id=?','public-result:'+payload.eventId)[0].n,1);
+  assert.equal(await f.ctx.storage.getAlarm(),expiry);
 });
