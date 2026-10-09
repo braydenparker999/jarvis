@@ -77,6 +77,24 @@ export function accountAdmissionPreparationIds(value, scope) {
   const state = instances.get(value)?.snapshot;
   return state && label(scope) ? state.entries.filter(entry => entry.receipt.scope === scope && entry.receipt.lane === 'preparation').map(entry => entry.id) : [];
 }
+// This is a separate logical KV-operation ceiling for successful provisioning,
+// accepted reservations (including FINAL), charged rejections and one terminal
+// revocation. KV operations are NOT native SQL billing rows. Exact duplicates,
+// exhausted refusals, inspections, failed/cold probes and runtime invocations
+// remain outside this ceiling; no finite upstream/billing proof is installed.
+export function accountAdmissionCoordinationEnvelope(value) {
+  const state = instances.get(value)?.snapshot;
+  if (!state) return null;
+  const grants = state.plan.coordination.maxReservations, rejections = state.plan.coordination.maxRejections;
+  return freeze({units: 'logical_KV_operations', provision: {kvGets: 2, kvPuts: 2},
+    acceptedReservations: {maximum: grants, kvGets: 2 * grants, kvPuts: grants},
+    chargedRejections: {maximum: rejections, kvGets: 2 * rejections, kvPuts: rejections},
+    terminalRevocation: {maximum: 1, kvGets: 2, kvPuts: 1},
+    admittedTotal: {kvGets: 4 + 2 * (grants + rejections), kvPuts: 3 + grants + rejections},
+    ledgerJSONBytes: LIMITS.ledgerBytes, sealJSONBytes: LIMITS.sealBytes,
+    providerBillingMapping: 'unknown', upstreamInvocationBound: 'unknown',
+    excluded: ['duplicate', 'exhausted', 'inspection', 'failed_or_cold_probe', 'platform_invocation']});
+}
 export function consumeRelayAccountReservation(receipt, binding, now = Date.now()) {
   const known = object(receipt) ? receipts.get(receipt) : null;
   if (known) receipts.delete(receipt);

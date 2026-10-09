@@ -25,7 +25,7 @@ async function finalInput(p, receipts) {
     reportsHash: await hash(reports), reports, constructionCost: cost(2 * p.scopes.length, 2 * p.scopes.length, 2 * p.scopes.length)};
 }
 const fixture = `
-import {RelayAccountAdmission,RELAY_ACCOUNT_ADMISSION_KEYS as KEYS,consumeRelayAccountReservation,accountAdmissionPlan} from './backend/relay-account-admission.js';
+import {RelayAccountAdmission,RELAY_ACCOUNT_ADMISSION_KEYS as KEYS,consumeRelayAccountReservation,accountAdmissionPlan,accountAdmissionCoordinationEnvelope} from './backend/relay-account-admission.js';
 const binding=r=>Object.fromEntries(['planId','day','scope','lane','id','payloadHash','sourceHash','catalogHash','reportsHash'].map(k=>[k,r[k]]));
 export class AllocatorFixture {
  constructor(ctx){
@@ -65,7 +65,7 @@ export class AllocatorFixture {
    this.fail=true;result=await this.engine.reserve(input.input,now);
   }else if(input.op==='revoke')result=await this.engine.revoke(now);
   const state=await this.ctx.storage.get(KEYS.ledger);
-  return Response.json({result,metrics:this.metrics,cache:accountAdmissionPlan(this.engine),ledgerBytes:state?new TextEncoder().encode(JSON.stringify(state)).byteLength:0});
+  return Response.json({result,metrics:this.metrics,cache:accountAdmissionPlan(this.engine),coordinationEnvelope:accountAdmissionCoordinationEnvelope(this.engine),ledgerBytes:state?new TextEncoder().encode(JSON.stringify(state)).byteLength:0});
  }
 }
 export default {fetch(request,env){const name=new URL(request.url).pathname.slice(1)||'fictional';return env.ALLOCATOR.get(env.ALLOCATOR.idFromName(name)).fetch(request);}};
@@ -135,6 +135,8 @@ test('native finite ordinary flood leaves all mandatory preparation and FINAL ca
   const input = await finalInput(p, receipts); const zero = structuredClone(input); zero.constructionCost = cost(0, 0, 0);
   const zeroDenied = await n.call('final', {input: zero}); assert.equal(zeroDenied.result.status, 'blocked'); assert.equal(zeroDenied.metrics.kvGets, 0); assert.equal(zeroDenied.metrics.kvPuts, 0);
   const final = await n.call('final', {input}); assert.equal(final.result.status, 'granted'); assert.equal(final.cache.counters.reservations, 8);
+  assert.deepEqual(final.coordinationEnvelope.admittedTotal, {kvGets: 28, kvPuts: 15});
+  assert.equal(final.coordinationEnvelope.providerBillingMapping, 'unknown');
   assert.equal(final.cache.spent.rowsRead, 13); assert.equal(final.metrics.kvGets, 2); assert.equal(final.metrics.kvPuts, 1); assert.ok(final.ledgerBytes <= LIMITS.ledgerBytes);
   const duplicate = await n.call('final', {input}); assert.equal(duplicate.result.status, 'duplicate'); assert.equal(duplicate.metrics.kvPuts, 0);
   t.diagnostic(JSON.stringify({fixture: 'local fictional legacy-KV Durable Object', provision: {gets: 2, puts: 2}, accepted: {gets: 2, puts: 1}, final: {gets: final.metrics.kvGets, puts: final.metrics.kvPuts, ledgerJsonBytes: final.ledgerBytes}, duplicate: {gets: duplicate.metrics.kvGets, puts: duplicate.metrics.kvPuts}, sqlAccess: 0, egress: 0, platformInvocationBound: 'unknown; activation closed'}));

@@ -4,6 +4,7 @@ import {
   RelayAccountAdmission, RELAY_ACCOUNT_ADMISSION_KEYS as KEYS,
   RELAY_ACCOUNT_ADMISSION_LIMITS as LIMITS, relayAccountAdmissionHash as hash,
   relayAccountAdmissionPlanProblem, accountAdmissionPlan, accountAdmissionPreparationIds,
+  accountAdmissionCoordinationEnvelope,
   consumeRelayAccountReservation, isRelayAccountAdmission,
 } from '../backend/relay-account-admission.js';
 
@@ -160,4 +161,15 @@ test('charged rejection cap is finite; exhausted and exact duplicate calls add n
   for (let n = 0; n < 2; n++) assert.equal((await s.engine.reserve(reservation(p, 'bad_' + n, 'not_in_plan'), NOW)).reason, 'account_scope_unknown');
   const before = s.metrics.put; assert.equal((await s.engine.reserve(reservation(p, 'bad_more', 'not_in_plan'), NOW)).reason, 'account_rejection_exhausted');
   assert.equal((await s.engine.reserve(reservation(p, r.id), NOW)).status, 'duplicate'); assert.equal(s.metrics.put, before);
+});
+test('admitted coordinator KV ceiling includes provision, FINAL, charged rejection and terminal revoke separately from SQL rows', async () => {
+  const s = store(), p = plan(); assert.equal(accountAdmissionCoordinationEnvelope(s.engine), null);
+  await s.engine.provision(p, NOW); const envelope = accountAdmissionCoordinationEnvelope(s.engine);
+  assert.deepEqual(envelope.admittedTotal, {kvGets: 52, kvPuts: 27});
+  assert.deepEqual(envelope.provision, {kvGets: 2, kvPuts: 2});
+  assert.deepEqual(envelope.acceptedReservations, {maximum: 16, kvGets: 32, kvPuts: 16});
+  assert.deepEqual(envelope.chargedRejections, {maximum: 8, kvGets: 16, kvPuts: 8});
+  assert.equal(envelope.providerBillingMapping, 'unknown'); assert.equal(envelope.upstreamInvocationBound, 'unknown');
+  assert.deepEqual(envelope.excluded, ['duplicate', 'exhausted', 'inspection', 'failed_or_cold_probe', 'platform_invocation']);
+  assert.equal(accountAdmissionPlan(s.engine).spent.rowsRead, 0); assert.equal(accountAdmissionPlan(s.engine).spent.rowsWritten, 0);
 });
