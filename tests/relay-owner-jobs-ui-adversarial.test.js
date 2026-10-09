@@ -291,3 +291,26 @@ test('a failed conversation read marks retained jobs stale while local title val
   assert.equal(c.snapshot().jobDetailStale, false);
   assert.equal(JSON.stringify([...f.values.values()]).includes('PRIVATE-BLANK-TITLE-DRAFT-6925'), false);
 });
+
+
+test('nonempty private work search is cleared on authorization loss and session replacement',async t=>{
+  for(const transition of ['disconnect','expired','revoked','unauthorized','replacement','removal'])await t.test(transition,async t=>{
+    const f=await client(t),saved=await job(f,{title:'Fictional private search target'}),draft='Fictional unsent private draft';
+    const c=createRelayOwnerController({api:f.api,draftStore:{read:()=>'',save:()=>true}});await c.refresh();c.toggleRequests();c.setQuery('Fictional prior project progress and result search');c.setWorkFilter('queued');c.setDraft(draft);
+    assert.equal(c.snapshot().jobsEnabled,true);assert.equal(c.snapshot().requestsOnly,true);assert.notEqual(c.snapshot().query,'');assert.equal(c.snapshot().jobs[0].id,saved.id);
+    if(transition==='disconnect')await c.disconnect();
+    else if(transition==='replacement'){
+      const replacement=await f.h.pair(f.owner,'Fictional replacement phone');f.values.set(OWNER_KEY,JSON.stringify({device_token:replacement.device_token,device_id:replacement.device.id}));await c.storedSessionChanged();assert.equal(c.snapshot().device.id,replacement.device.id);assert.equal(c.status,'approved');
+    }else if(transition==='removal'){f.values.delete(OWNER_KEY);await c.storedSessionChanged();assert.equal(c.status,'none');}
+    else{
+      if(transition==='expired')f.h.ctx.storage.sql.exec('UPDATE relay_owner_sessions SET expires_ms=? WHERE device_id=?',Date.now()-1,f.phone.device.id);
+      if(transition==='revoked')f.h.ctx.storage.sql.exec('UPDATE relay_owner_sessions SET revoked_ms=? WHERE device_id=?',Date.now(),f.phone.device.id);
+      if(transition==='unauthorized')f.h.ctx.storage.sql.exec('DELETE FROM relay_owner_sessions WHERE device_id=?',f.phone.device.id);
+      await c.refresh();assert.notEqual(c.status,'approved');
+    }
+    const state=c.snapshot();assert.equal(state.query,'','A private search cannot cross a session boundary');assert.equal(state.requestsOnly,false);assert.equal(state.workFilter,'all');assert.equal(state.jobDetail,null);
+    assert.equal(state.draft,transition==='expired'?draft:'','Only expiry preserves the explicitly intended unsent draft');
+    if(transition!=='replacement'){assert.deepEqual(state.jobs,[]);assert.deepEqual(state.messages,[]);}
+    assert.equal(f.calls.some(call=>call.path==='/shared/messages'||call.path==='/v1/messages'),false);
+  });
+});

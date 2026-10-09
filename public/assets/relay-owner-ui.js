@@ -17,7 +17,7 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), draftS
   const mode = next => { if (next !== state.mode) { state.mode = next; onModeChange(next); } emit(); };
   function clearPrivate({preserveDraft = false} = {}) { state.loginDevices = []; accountConsent = null; state.account = null; state.accountReady = false; state.accountNotice = ''; state.messages = []; if (!preserveDraft) {state.draft = '';draftStore.save('');} state.devices = []; state.device = null; failedSend = null; cursor = '0';
     jobCursor='0';jobFence=null;jobChangesSupported=typeof api.jobChanges==='function';jobResetCache=null;jobReading=null;
-    ++detailEpoch;retryAttempts.clear();state.jobsEnabled=false;state.jobs=[];state.jobsError='';state.syncStale=false;state.jobMode=false;state.jobTitle='';state.jobKind='consequential';state.jobProject='';state.jobGoal='';state.requestsOnly=false;state.workFilter='all';state.sendUnconfirmed=false;state.sendNotice='';state.jobDetailId=null;state.jobDetail=null;state.jobDetailBusy=false;state.jobDetailError='';state.jobDetailStale=false;state.jobBusy=false; }
+    ++detailEpoch;retryAttempts.clear();state.jobsEnabled=false;state.jobs=[];state.jobsError='';state.syncStale=false;state.query='';state.jobMode=false;state.jobTitle='';state.jobKind='consequential';state.jobProject='';state.jobGoal='';state.requestsOnly=false;state.workFilter='all';state.sendUnconfirmed=false;state.sendNotice='';state.jobDetailId=null;state.jobDetail=null;state.jobDetailBusy=false;state.jobDetailError='';state.jobDetailStale=false;state.jobBusy=false; }
   function failure(error) {
     const safe = error instanceof OwnerApiError ? error : new OwnerApiError('network');
     state.error = safe.message;
