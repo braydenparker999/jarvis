@@ -226,8 +226,9 @@ async function pairPhone(phone, h, oauth, label, remember) {
 }
 async function assertPrivateStorage(phone) {
   const storage = await phone.page.evaluate(() => ({local: Object.fromEntries(Object.entries(localStorage)), session: Object.fromEntries(Object.entries(sessionStorage))}));
+  if(storage.session['jarvis.relay.owner-draft.v1']){assert.deepEqual(JSON.parse(storage.session['jarvis.relay.owner-draft.v1']),{body:PRIVATE_DRAFT});delete storage.session['jarvis.relay.owner-draft.v1'];}
   const raw = JSON.stringify(storage);
-  for (const text of PRIVATE_TEXT) assert.equal(raw.includes(text), false, 'Private body, reply and draft must stay out of browser storage');
+  for (const text of PRIVATE_TEXT) assert.equal(raw.includes(text), false, 'Private history and draft must stay out of other browser storage');
   const publicState = JSON.parse(storage.local[PUBLIC_KEY]);
   assert.deepEqual(publicState.outbox, []);
   assert.equal(publicState.composer, phone.publicDraft || '');
@@ -313,13 +314,13 @@ test('two phone browsers stay on approved Relay URL through polling, reload, pri
   for (const text of PRIVATE_TEXT) assert.equal(await one.page.getByText(text, {exact: true}).count(), 0);
   await menu(one.page, 'Owner chat');
   await waitOwner(one.page);
-  assert.equal(await one.page.locator('#relay-owner-message-text').inputValue(), PRIVATE_DRAFT, 'Mode switch should keep a private draft only in memory');
+  assert.equal(await one.page.locator('#relay-owner-message-text').inputValue(), PRIVATE_DRAFT, 'Mode switch keeps the private draft isolated');
   const storedBefore = await stored(one.page), beforeReload = one.records.length;
   await one.page.reload();
   await waitOwner(one.page);
   await one.page.getByText(PRIVATE_REPLY, {exact: true}).waitFor();
   assert.equal(await stored(one.page), storedBefore, 'Reload must retain the approved token');
-  assert.equal(await one.page.locator('#relay-owner-message-text').inputValue(), '', 'Private drafts must not survive reload through storage');
+  assert.equal(await one.page.locator('#relay-owner-message-text').inputValue(), PRIVATE_DRAFT, 'The unsent private draft survives in this tab');
   assert.ok(one.records.slice(beforeReload).some(r => r.path === '/relay/owner/session' && r.status === 200), 'Reload must revalidate access with the server');
 
   await one.page.locator('#relay-owner-message-text').fill(PRIVATE_DRAFT);
