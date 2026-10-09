@@ -1,10 +1,26 @@
 import {icon, richText, sheet, appViewport, autosize, el as uiEl} from './ui.js';
 import {MODELS,STORAGE_KEY,parseHistory,selectedMessages,chatUsage,streamReply,imageDB,prepareImage,blobData,cleanURL} from './quick-ai-core.js';
+import {createRelayTransferStore,quickAITransfer} from './relay-transfer.js';
 const $=id=>document.getElementById(id),db=imageDB();let state,storageOK=true,run=null,preparing=false,keys={},ready={};let pending=[];
 appViewport();
 document.querySelectorAll('[data-icon]').forEach(n=>n.innerHTML=icon(n.dataset.icon));
 document.querySelectorAll('[data-close]').forEach(n=>n.onclick=()=>$(n.dataset.close).close());
 function warn(s){$('storage-status').hidden=false;$('storage-status').textContent=s;}
+function continueInRelay(question,answer){
+  sheet('Choose Relay destination',[
+    {label:'Owner chat · private',icon:'lock',action:()=>transferToRelay(question,answer,'owner')},
+    {label:'Public Relay · shared',icon:'chat',action:()=>transferToRelay(question,answer,'public')}
+  ]);
+}
+function transferToRelay(question,answer,destination){
+  if(!save()){
+    warn('Could not save this Quick AI chat. It is still open; copy new messages and your draft before leaving. No Relay draft was prepared.');
+    $('status').textContent='Relay transfer paused: save or copy your Quick AI content before leaving.';
+    return;
+  }
+  try{createRelayTransferStore().stage(quickAITransfer(question,answer,destination));location.href='/jarvis/';}
+  catch(error){$('status').textContent=error.message||'Could not prepare a Relay draft.';}
+}
 try{state=parseHistory(localStorage.getItem(STORAGE_KEY));}catch{state=parseHistory(null);storageOK=false;warn('Saved chats could not be read. This session will not overwrite them.');}
 function save(){if(!storageOK)return false;try{localStorage.setItem(STORAGE_KEY,JSON.stringify(state));return true;}catch{storageOK=false;warn('Storage is full or blocked. Existing chats will not be overwritten; copy new messages before leaving.');return false;}}
 const current=()=>state.chats.find(c=>c.id===state.active);
@@ -38,7 +54,7 @@ function messageElement(m){const article=text('article','','ai-message '+m.role)
   if(m.role==='assistant'&&m.status!=='streaming'){
     if(m.status!=='complete'||m.truncated)article.append(text('p',m.truncated?'Reply reached its length limit. Ask to continue.':'Reply interrupted. Tap Retry.','message-note'));
     if(m.content){const b=text('button','Copy','text-button copy');b.onclick=async()=>{try{await navigator.clipboard.writeText(m.content);b.textContent='Copied';}catch{b.textContent='Select text to copy';}};article.append(b);
-      const menu=text('button','More','text-button reply-menu');menu.setAttribute('aria-label','Reply actions');menu.onclick=()=>sheet('Reply actions',[{label:'Continue answer',icon:'chat',disabled:!!run,action:()=>{$('prompt').value='Continue your previous answer.';$('prompt').dispatchEvent(new Event('input'));$('composer').requestSubmit();}},{label:'Continue in Relay',icon:'quote',action:()=>{const i=current().messages.indexOf(m);const question=current().messages.slice(0,i).findLast(x=>x.role==='user')?.content||'';try{sessionStorage.setItem('jarvis.relay.transfer.v1',('Please continue this conversation.\n\nMy question: '+question+'\n\nQuick AI answer:\n'+m.content).slice(0,3500));location.href='/jarvis/';}catch{$('status').textContent='Could not prepare a Relay draft.';}}}]);article.append(menu);}
+      const menu=text('button','More','text-button reply-menu');menu.setAttribute('aria-label','Reply actions');menu.onclick=()=>sheet('Reply actions',[{label:'Continue answer',icon:'chat',disabled:!!run,action:()=>{$('prompt').value='Continue your previous answer.';$('prompt').dispatchEvent(new Event('input'));$('composer').requestSubmit();}},{label:'Continue in Relay',icon:'quote',action:()=>{const i=current().messages.indexOf(m);const question=current().messages.slice(0,i).findLast(x=>x.role==='user')?.content||'';continueInRelay(question,m.content);}}]);article.append(menu);}
   }return article;}
 let renderedChat;
 function render(){const panel=$('messages'),oldScroll=panel.scrollTop,nearBottom=panel.scrollHeight-panel.clientHeight-panel.scrollTop<100;const c=current(),changed=renderedChat!==c.id;renderedChat=c.id;$('history').replaceChildren(...state.chats.map(chat=>{const o=document.createElement('option');o.value=chat.id;o.textContent=chat.title;return o;}));$('history').value=c.id;$('model').value=c.provider;$('search').checked=c.search;$('search-row').hidden=!c.search;$('prompt').value=c.draft;
