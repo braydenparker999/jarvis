@@ -39,6 +39,18 @@ export class EventCostFixture {
   async fetch(request){
     const u=new URL(request.url),path=u.pathname;
     if(path==='/seed'){this.seed(Number(u.searchParams.get('count')||6000),u.searchParams.get('mode')||'sparse',u.searchParams.get('legacy')==='1');return Response.json({fictional:true,seeded:this.count});}
+    if(path==='/schema-rollback'){
+      const sql=this.ctx.storage.sql,rollback=Error('Fictional rolled-back event schema');
+      const abort=()=>{try{this.ctx.storage.transactionSync(()=>{relayEventSchema(this.ctx);throw rollback;});}catch(error){if(error!==rollback)throw error;return;}throw Error('Expected fictional rollback');};
+      abort();
+      const firstAbsent=[...sql.exec("SELECT name FROM sqlite_master WHERE name='relay_events'")].length===0;
+      relayEventSchema(this.ctx);sql.exec('DROP INDEX relay_event_kind_seq');sql.exec('DROP TABLE relay_subscription_scans');
+      abort();
+      const upgradeAbsent=[...sql.exec("SELECT name FROM sqlite_master WHERE name IN ('relay_event_kind_seq','relay_subscription_scans')")].length===0;
+      relayEventSchema(this.ctx);this.cursors=[];relayEventSchema(this.ctx);
+      const queries=this.cursors.map(({query,cursor})=>({query,rowsRead:cursor.rowsRead,rowsWritten:cursor.rowsWritten}));
+      return Response.json({fictional:true,firstAbsent,upgradeAbsent,rowsRead:queries.reduce((n,q)=>n+q.rowsRead,0),rowsWritten:queries.reduce((n,q)=>n+q.rowsWritten,0),queries});
+    }
     if(path==='/unicode'){
       this.seed(3,'unicode',false);
       const nulBody='Fictional '+String.fromCharCode(0)+' KELVIN after nul',sql=this.ctx.storage.sql;
@@ -76,6 +88,8 @@ export class EventCostFixture {
     }else if(path==='/warm'){
       this.now+=50;await drainRelayOutbox(this.ctx,this.env,fetcher,this.now,{schedule:false});
       next=relayNextAlarmTime(this.ctx,this.now);await scheduleRelayAlarm(this.ctx,this.now);
+    }else if(path==='/schema-warm'){
+      relayEventSchema(this.ctx);
     }else if(path==='/empty'){
       this.ctx.storage.sql.exec('DELETE FROM relay_subscriptions');this.ctx.storage.sql.exec('DELETE FROM relay_outbox');this.cursors=[];
       await drainRelayOutbox(this.ctx,this.env,null,this.now,{schedule:false});next=relayNextAlarmTime(this.ctx,this.now);
@@ -106,10 +120,16 @@ test('native workerd cold/warm refill budgets stay page-bound for dense, sparse,
     assert.equal(unicode.nativeNulBody,'Fictional \u0000 KELVIN after nul','Native workerd TEXT preserves embedded NUL and the following Unicode text');
     assert.deepEqual(unicode.queuedSeq,[1,3],'Unchanged native SQL and JS pruning retain both Kelvin matches, including after NUL');
     assert.deepEqual(unicode.acceptedCursors,['relay1:1','relay1:3']);assert.equal(unicode.ack,3);
+    const rollback=await request('schema-rollback','/schema-rollback');
+    assert.equal(rollback.firstAbsent,true);assert.equal(rollback.upgradeAbsent,true);
+    assert.equal(rollback.rowsRead,1);assert.equal(rollback.rowsWritten,0);
+    assert.equal(rollback.queries.find(query=>query.query.includes('LIMIT 0')).rowsRead,0);
+    assert.ok(!rollback.queries.some(({query})=>/json_extract|sqlite_master|\bCREATE\b/i.test(query)));
     const measured={};
     for(const mode of ['sparse','dense','cross']){
       await request(mode,'/seed',{mode,count:6000});measured[mode+'Cold']=await request(mode,'/cold');measured[mode+'Warm']=await request(mode,'/warm');
     }
+    measured.schemaWarm=await request('dense','/schema-warm');
     for(let n=0;n<7;n++)measured.denseBackpressure=await request('dense','/warm');
     measured.denseFull=await request('dense','/warm');
     await request('flood','/seed',{mode:'flood',count:300});measured.floodCold=await request('flood','/cold');
@@ -121,6 +141,9 @@ test('native workerd cold/warm refill budgets stay page-bound for dense, sparse,
     for(const [name,result] of Object.entries(measured))if(result.rowsRead>2500||result.rowsWritten>1350)
       process.stdout.write('FICTIONAL_NATIVE_EVENT_COST_QUERIES '+JSON.stringify({name,queries:result.queries.filter(q=>q.rowsRead>200||q.rowsWritten>200)})+'\n');
     assert.equal(measured.sparseCold.examined,250);assert.equal(measured.sparseWarm.examined,500);assert.equal(measured.sparseWarm.ack,0);
+    assert.equal(measured.schemaWarm.rowsRead,1);assert.equal(measured.schemaWarm.rowsWritten,0);assert.equal(measured.schemaWarm.alarmWrites,0);assert.equal(measured.schemaWarm.sqlCalls,2);
+    assert.equal(measured.schemaWarm.queries.find(query=>query.query.includes('LIMIT 0')).rowsRead,0);
+    assert.ok(!measured.schemaWarm.queries.some(({query})=>/json_extract|sqlite_master|\bCREATE\b/i.test(query)));
     assert.equal(measured.denseCold.pending,250);assert.equal(measured.denseWarm.pending,499);assert.equal(measured.denseFull.pending,1999);
     assert.equal(measured.crossCold.examined,6000);assert.equal(measured.crossWarm.examined,6000);
     assert.ok(measured.sparseCold.rowsRead<1700);assert.ok(measured.sparseWarm.rowsRead<1700);

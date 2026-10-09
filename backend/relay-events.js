@@ -17,6 +17,16 @@ const MAX_QUEUED = 2000;
 export const RELAY_REFILL_PAGE_SIZE = 250;
 const rows = (ctx, q, ...v) => [...ctx.storage.sql.exec(q, ...v)];
 const initializedEventSchemas=new WeakSet();
+const eventSchemaTables=new Set(['relay_events','relay_subscriptions','relay_subscription_scans','relay_outbox',
+  'relay_delivery_receipts','relay_outbox_recoveries','relay_verified','relay_activations','relay_event_meta','relay_owner_event_bodies']);
+const eventSchemaIndices=new Set(['relay_event_created_seq','relay_event_kind_seq','relay_outbox_due','relay_outbox_event','relay_outbox_unsettled']);
+const eventSchemaProbe=`SELECT e.seq,c.created_ms,s.id,x.examined_seq,o.event_seq,d.next_attempt_ms,i.subscription_id,
+  r.accepted_ms,h.recoveries,v.verified_until,a.revision,m.value,b.body
+  FROM relay_events e INDEXED BY relay_event_kind_seq,relay_events c INDEXED BY relay_event_created_seq,
+  relay_subscriptions s,relay_subscription_scans x,relay_outbox o INDEXED BY relay_outbox_unsettled,
+  relay_outbox d INDEXED BY relay_outbox_due,relay_outbox i INDEXED BY relay_outbox_event,
+  relay_delivery_receipts r,relay_outbox_recoveries h,relay_verified v,relay_activations a,
+  relay_event_meta m,relay_owner_event_bodies b WHERE o.status IN ('pending','failed') LIMIT 0`;
 const eventName = event => {const data=JSON.parse(event.data);return data.inbox_id === RELAY_OWNER_INBOX ? RELAY_OWNER_EVENT : data.coordination_event_id ? PUBLIC_RESULT_EVENT : RELAY_EVENT;};
 // Keep the routing expression identical in the index and the refill predicate.
 // Journal data is server-created; the expression also preserves the original
@@ -28,6 +38,21 @@ const eventEnabled = (env, name) => relayEnabled(env) && (name !== RELAY_OWNER_E
 const subscriptionActive = (ctx, env, sub) => eventEnabled(env, sub.name) && relayGrantActiveInStore(ctx, env, sub.grant_id, eventScope(sub.name));
 export function relayEventSchema(ctx) {
   const sql = ctx.storage.sql;
+  if(initializedEventSchemas.has(ctx)){
+    // Initialization can happen inside a transaction that later rolls back.
+    // Confirm every dependency without reading rows or reissuing the routing
+    // index's JSON expression on warm write/read paths.
+    let intact=false;
+    try{rows(ctx,eventSchemaProbe);intact=true;}
+    catch(error){
+      const missing=/^no such (table|index): ([a-z_]+)(?:: SQLITE_ERROR)?$/.exec(error?.message||'');
+      if(!missing||!(missing[1]==='table'?eventSchemaTables:eventSchemaIndices).has(missing[2]))throw error;
+    }
+    // This is the same one-row checkpoint read as the uncached schema path.
+    // Its absence also recovers backfill rolled back on preexisting tables.
+    if(intact&&rows(ctx,"SELECT value FROM relay_event_meta WHERE key='receipts-backfilled'").length)return;
+    initializedEventSchemas.delete(ctx);
+  }
   sql.exec(`CREATE TABLE IF NOT EXISTS relay_events (
     seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE,
     message_id TEXT NOT NULL UNIQUE, occurred_at TEXT NOT NULL, created_ms INTEGER NOT NULL, data TEXT NOT NULL)`);
