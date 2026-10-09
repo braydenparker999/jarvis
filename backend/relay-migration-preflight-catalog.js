@@ -4,7 +4,7 @@
 const freezeRows = rows => Object.freeze(rows.map(row => Object.freeze(row)));
 export const RELAY_MIGRATION_CATALOG = Object.freeze({
   sourceCommit: 'c4d62409a3b67e4e5dac88809c6a4a0290b6e39e',
-  candidateCommit: 'bb29214aa7081b8d8b26937b7eff07fea199c8f7',
+  candidateCommit: 'ed7bbd436689be3ac9cca1ab5f111341dd690b80',
   compatibilityDate: '2026-09-19',
   sourceFiles: Object.freeze({
     "backend/shared.js": "528e100b60f221f5cf7bacdd4eedc21c89b6bb6c62c52797f3c2fb31c435ea0a",

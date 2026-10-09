@@ -6,7 +6,7 @@ import {RELAY_MIGRATION_CATALOG as CATALOG, relayMigrationSchemaSql} from './rel
 export const RELAY_MIGRATION_PREFLIGHT_PLAN = Object.freeze({
   revision: 'relay-storage-c4-combined-core-v3',
   sourceCommit: 'c4d62409a3b67e4e5dac88809c6a4a0290b6e39e',
-  candidateCommit: 'bb29214aa7081b8d8b26937b7eff07fea199c8f7',
+  candidateCommit: 'ed7bbd436689be3ac9cca1ab5f111341dd690b80',
   maxBatch: 250, maxScopes: 16, evidenceMaxAgeMs: 300000, reportMaxAgeMs: 30000,
   installSourcesPerStep: 8,
   // Reserve a whole invocation before starting it, including tiny checkpoint
