@@ -81,17 +81,24 @@ function mcp(env,access){return new Request(env.RELAY_MCP_ORIGIN+'/relay/mcp',{m
 export default {async fetch(request,env){
   const path=new URL(request.url).pathname,shared=env.HUBS.get(env.HUBS.idFromName(SHARED_OBJECT)),legacy=env.HUBS.get(env.HUBS.idFromName(await hash(PUBLIC_KEY)));
   if(path==='/seed'){const response=await fixture(shared,'seed');return response;}
-  if(!['/read','/alarm','/reconcile'].includes(path))return new Response('Unknown fictional cost case',{status:404});
+  if(!['/read','/alarm','/reconcile','/write'].includes(path))return new Response('Unknown fictional cost case',{status:404});
   const {access}=await (await fixture(shared,'auth')).json();
   if(path==='/reconcile'){await fixture(legacy,'legacy-seed');await fixture(shared,'due');}
   await Promise.all([shared,legacy].map(object=>fixture(object,'reset')));
   let response,result;
   if(path==='/alarm'){response=await fixture(shared,'alarm');result=await response.json();}
+  else if(path==='/write'){
+    response=await worker.fetch(new Request(env.RELAY_MCP_ORIGIN+'/shared/messages',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({id:'00000000-0000-4000-8000-000000990001',body:'Fictional public mutation cost'})}),env);
+    const data=await response.json();result={entryId:data.entry?.id,error:data.error||null};
+  }
   else {response=await worker.fetch(mcp(env,access),env);const data=await response.json();result={messages:data.result?.structuredContent?.messages.length,error:data.error||null};}
   const details=await Promise.all([shared,legacy].map(async(object)=> (await fixture(object,'costs')).json()));
   const total=Object.fromEntries(['rowsRead','rowsWritten','egress','sets','deletes','kvReads','kvReadJsonBytes','kvWrites','kvWriteJsonBytes','kvDeletes'].map(key=>[key,details.reduce((n,data)=>n+data[key],0)]));
+  const queries=details.flatMap(data=>data.queries),reservation=queries.filter(query=>query.query.includes('relay_core_alarm_wakes'));
   return Response.json({status:response.status,result,...total,alarmSets:total.sets,alarmDeletes:total.deletes,
-    objects:details.map(({queries,...cost},i)=>({kind:i?'legacy':'shared-oauth',...cost})),queries:details.flatMap(data=>data.queries)});
+    reservationRowsRead:reservation.reduce((n,q)=>n+q.rowsRead,0),reservationRowsWritten:reservation.reduce((n,q)=>n+q.rowsWritten,0),
+    objects:details.map(({queries,...cost},i)=>({kind:i?'legacy':'shared-oauth',...cost})),queries});
 }};
 `;
 
@@ -106,16 +113,23 @@ test('native local fictional MCP and alarm costs stay bounded with 5000 retained
     durableObjects:{HUBS:{className:'CoreAlarmCostFixture',useSQLite:true}},outboundService(){external++;throw Error('No external fixture requests');}}));
   try{
     assert.equal((await mf.dispatchFetch('https://cost.example.test/seed')).status,200);
-    const results={};for(const name of ['read','alarm','reconcile','read']){const result=await (await mf.dispatchFetch('https://cost.example.test/'+name)).json();results[name]=result;
-      assert.equal(result.status,200);assert.ok(result.rowsRead<600,'Whole fixture request must not scan retained history');
+    const results={};for(const name of ['read','alarm','reconcile','read','write']){const result=await (await mf.dispatchFetch('https://cost.example.test/'+name)).json();results[name]=result;
+      assert.equal(result.status,name==='write'?201:200);assert.ok(result.rowsRead<600,'Whole fixture request must not scan retained history');
       if(name==='read'){assert.equal(result.result.messages,10);assert.equal(result.result.error,null);assert.equal(result.egress,0);assert.equal(result.rowsWritten,0);assert.equal(result.alarmSets,0);assert.equal(result.alarmDeletes,0);assert.equal(result.kvReads,0);}
       else if(name==='alarm'){assert.equal(result.egress,0);assert.ok(result.rowsWritten<=10);assert.ok(result.alarmSets<=2);assert.equal(result.alarmDeletes,0);}
+      else if(name==='write'){
+        assert.equal(result.result.entryId,'00000000-0000-4000-8000-000000990001');assert.equal(result.result.error,null);
+        assert.equal(result.egress,0);assert.equal(result.kvReads,0);assert.equal(result.kvWrites,0);
+        assert.ok(result.rowsWritten<40);assert.equal(result.reservationRowsWritten,5);
+        assert.equal(result.alarmSets,2);assert.equal(result.alarmDeletes,0);
+      }
       else {assert.equal(result.egress,1);assert.equal(result.kvReads,1);assert.ok(result.kvReadJsonBytes>1000);assert.equal(result.kvWrites,0);assert.ok(result.rowsWritten<300);assert.ok(result.alarmSets<=2);}
     }
     process.stdout.write('LOCAL_FICTIONAL_CORE_NATIVE_COST '+JSON.stringify(Object.fromEntries(Object.entries(results).map(([name,result])=>[name,
       {scope:'whole worker request across shared OAuth and legacy objects',rowsRead:result.rowsRead,rowsWritten:result.rowsWritten,
         kvReads:result.kvReads,kvReadJsonBytes:result.kvReadJsonBytes,kvWrites:result.kvWrites,kvWriteJsonBytes:result.kvWriteJsonBytes,
-        egress:result.egress,alarmSets:result.alarmSets,alarmDeletes:result.alarmDeletes}])) )+'\n');
+        egress:result.egress,alarmSets:result.alarmSets,alarmDeletes:result.alarmDeletes,
+        reservationRowsRead:result.reservationRowsRead,reservationRowsWritten:result.reservationRowsWritten}])) )+'\n');
     assert.equal(external,0);
   }finally{await mf.dispose();}
 });

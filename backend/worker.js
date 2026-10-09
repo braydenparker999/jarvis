@@ -174,7 +174,7 @@ export class Hub {
         return this.withCoreWake(async wake=>{
           const data=await request.json();assertRelayCoreWake(this.ctx,wake);
           const response=await importPublicationHint(this.ctx,data);
-          if(response.status!==400)seedPublicationReconciliation(this.ctx,Date.now(),this.env);
+          if(response.status!==400)seedPublicationReconciliation(this.ctx,Date.now());
           return response;
         });
       }
