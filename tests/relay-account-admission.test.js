@@ -104,12 +104,28 @@ test('observed ledger loss, revocation and commit failure invalidate outstanding
     else if (kind === 'revoke') assert.equal((await s.engine.revoke(NOW)).status, 'revoked');
     else {s.state.failCommit = true; assert.equal((await s.engine.reserve(reservation(p, 'failed'), NOW)).reason, 'account_storage_unavailable'); assert.equal(s.data.get(KEYS.ledger).counters.reservations, 1);}
     assert.equal(accountAdmissionPlan(s.engine), null); assert.equal(consumeRelayAccountReservation(r, binding(r), NOW).status, 'blocked');
+    assert.equal(accountAdmissionCoordinationEnvelope(s.engine), null); assert.deepEqual(accountAdmissionPreparationIds(s.engine, p.scopes[0].id), []);
   }
 });
 test('failed provision ACK cannot leave a cached provisioned plan', async () => {
   const s = store(); s.state.failCommit = true; assert.equal((await s.engine.provision(plan(), NOW)).reason, 'account_storage_unavailable');
   assert.equal(accountAdmissionPlan(s.engine), null); assert.equal(s.data.size, 0);
   assert.equal((await s.engine.inspect(NOW)).reason, 'account_state_unknown');
+});
+test('committed revocation refuses cached authority during awaited revocation finalization', async () => {
+  const s = store(), p = plan(); await s.engine.provision(p, NOW);
+  const r = await s.engine.reserve(reservation(p, 'outstanding'), NOW);
+  const original = s.engine._state.bind(s.engine); let observed, release;
+  const reached = new Promise(resolve => {observed = resolve;});
+  const held = new Promise(resolve => {release = resolve;});
+  // Hold the post-commit await boundary, before revoke() clears its snapshot.
+  s.engine._state = async (...args) => {const result = await original(...args); if (result.status === 'revoked') {observed(); await held;} return result;};
+  const pending = s.engine.revoke(NOW); await reached;
+  assert.equal(s.data.get(KEYS.ledger).revoked, true);
+  assert.equal(accountAdmissionPlan(s.engine), null); assert.equal(accountAdmissionCoordinationEnvelope(s.engine), null);
+  assert.deepEqual(accountAdmissionPreparationIds(s.engine, p.scopes[0].id), []);
+  assert.equal(consumeRelayAccountReservation(r, binding(r), NOW).status, 'blocked');
+  release(); assert.equal((await pending).status, 'revoked');
 });
 test('strict durable hydration refuses corrupt/extra receipt fields, counters, attempts, costs and plan seal', async () => {
   for (const mutate of [state => state.entries[0].receipt.extra = true, state => state.entries[0].receipt.attempt = 8,

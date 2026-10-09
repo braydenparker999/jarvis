@@ -69,12 +69,16 @@ export function relayAccountAdmissionPlanProblem(plan, now = Date.now()) {
 }
 
 export function isRelayAccountAdmission(value) {return instances.has(value);}
+function confidentState(value) {
+  const local = instances.get(value);
+  return local && !local.blocked && local.snapshot && !local.snapshot.revoked ? local.snapshot : null;
+}
 export function accountAdmissionPlan(value) {
-  const state = instances.get(value)?.snapshot;
+  const state = confidentState(value);
   return state ? copy({...state.plan, signature: state.signature, counters: state.counters, spent: state.spent, scopesSpent: state.scopesSpent}) : null;
 }
 export function accountAdmissionPreparationIds(value, scope) {
-  const state = instances.get(value)?.snapshot;
+  const state = confidentState(value);
   return state && label(scope) ? state.entries.filter(entry => entry.receipt.scope === scope && entry.receipt.lane === 'preparation').map(entry => entry.id) : [];
 }
 // This is a separate logical KV-operation ceiling for successful provisioning,
@@ -83,7 +87,7 @@ export function accountAdmissionPreparationIds(value, scope) {
 // exhausted refusals, inspections, failed/cold probes and runtime invocations
 // remain outside this ceiling; no finite upstream/billing proof is installed.
 export function accountAdmissionCoordinationEnvelope(value) {
-  const state = instances.get(value)?.snapshot;
+  const state = confidentState(value);
   if (!state) return null;
   const grants = state.plan.coordination.maxReservations, rejections = state.plan.coordination.maxRejections;
   return freeze({units: 'logical_KV_operations', provision: {kvGets: 2, kvPuts: 2},

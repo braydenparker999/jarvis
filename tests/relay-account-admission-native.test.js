@@ -121,6 +121,7 @@ test('native loss/corruption/revocation refuse existing receipts and never recre
   for (const op of ['lose', 'corrupt', 'revoke']) {
     await n.call('provision', {plan: p}, op); await n.call('reserve', {input: reservation(p, 'outstanding')}, op);
     const denied = await n.call(op, {}, op); assert.equal(denied.cache, null);
+    assert.equal(denied.coordinationEnvelope, null);
     assert.equal((await n.call('consume', {id: 'outstanding'}, op)).result.status, 'blocked');
     assert.equal((await n.call('provision', {plan: p}, op)).result.reason, 'account_already_provisioned');
     const warm = await n.call('inspect', {}, op); assert.equal(warm.metrics.kvGets, 0); assert.equal(warm.metrics.kvPuts, 0);
