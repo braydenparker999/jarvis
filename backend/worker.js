@@ -1,5 +1,5 @@
 import {connector,oauthStore} from './connector.js';
-import {sharedStore,sharedSchema,SHARED_OBJECT,PUBLIC_KEY} from './shared.js';
+import {sharedStore,sharedSchema,SHARED_OBJECT,validateSharedRead,readLegacyInboxPage} from './shared.js';
 import {syncPublications,importPublicationHint} from './publications.js';
 import {PRIMARY_SITE,FRONTEND_ORIGINS} from './origins.js';
 import {songsterr} from './songsterr.js';
@@ -56,8 +56,6 @@ export default {
         try{const b=JSON.parse(new TextDecoder().decode(bytes));data={id:b.id,body:b.body};}catch{return reply({error:'Invalid JSON'},400);}
       }
       try {
-        // Legacy migration must not gate current writes or erase current reads.
-        if(request.method==='GET')try{await syncShared(env);}catch{}
         const suffix=request.method==='GET'?path.slice('/shared'.length)+new URL(request.url).search:'/message';
         const response=await sharedInternal(env,suffix,data);
         return new Response(response.body,{status:response.status,headers:{...headers,'Content-Type':'application/json'}});
@@ -133,6 +131,11 @@ export class Hub {
       catch(error){return json({error:{code:error instanceof RelayError?error.code:-32603,message:error instanceof RelayError?error.message:'Relay storage unavailable',...(error instanceof RelayError&&error.data?{data:error.data}:{})}});}
     }
     if(path.startsWith('/internal/shared/')) {
+      if(path==='/internal/shared/legacy-page')return request.method==='GET'?readLegacyInboxPage(this.ctx,new URL(request.url).searchParams):json({error:'Method not allowed'},405);
+      if(path==='/internal/shared/reconcile-legacy'){
+        await syncPublications(this.ctx,fetch,Date.now(),this.env);
+        return json({ok:true});
+      }
       if(path==='/internal/shared/import-hint'){
         if(this.ctx.storage.setAlarm)await this.ctx.storage.setAlarm(Date.now()+100);
         const response=await importPublicationHint(this.ctx,await request.json());
@@ -144,13 +147,13 @@ export class Hub {
       // share the same object; old imported rows never become live events.
       if(path==='/internal/shared/message'&&this.ctx.storage.setAlarm)await this.ctx.storage.setAlarm(Date.now()+100);
       if(['/internal/shared/state','/internal/shared/changes','/internal/shared/result'].includes(path)) {
-        const validation=sharedStore(this.ctx,path,{},new URL(request.url).searchParams);
-        if(!validation.ok)return validation;
+        const validation=validateSharedRead(this.ctx,path,new URL(request.url).searchParams);
+        if(validation)return validation;
         // Final/correction notifications commit with imported public results.
         // Persist a wake before import, using the existing callback scheduler.
         if(this.ctx.storage.setAlarm)await this.ctx.storage.setAlarm(Date.now()+100);
         // A single in-flight importer for the shared object, across all phones.
-        if(!this.publicationSync)this.publicationSync=syncPublications(this.ctx).finally(()=>{this.publicationSync=null;});
+        if(!this.publicationSync)this.publicationSync=syncPublications(this.ctx,fetch,Date.now(),this.env).finally(()=>{this.publicationSync=null;});
         await this.publicationSync;
         try{await scheduleRelayAlarm(this.ctx);}catch{}
       }
@@ -204,11 +207,8 @@ export async function sharedInternal(env,path,body) {
   return env.HUBS.get(env.HUBS.idFromName(SHARED_OBJECT)).fetch(new Request('https://internal/internal/shared'+path,{method:body?'POST':'GET',body:body?JSON.stringify(body):undefined}));
 }
 export async function syncShared(env) {
-  // Keep importing old user messages during the transition. Old assistant rows
-  // are untrusted and never imported. No old inbox data is deleted.
-  const old=await env.HUBS.get(env.HUBS.idFromName(await digest(PUBLIC_KEY))).fetch(new Request('https://internal/v1/state'));
-  if(!old.ok)throw Error('Legacy inbox unavailable');
-  const imported=await sharedInternal(env,'/import',await old.json());
-  if(!imported.ok)throw Error('Inbox migration failed');
+  // All callers share the durable bounded importer and its persisted cooldown.
+  const imported=await sharedInternal(env,'/reconcile-legacy');
+  if(!imported.ok)throw Error('Inbox reconciliation unavailable');
 }
 
