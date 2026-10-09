@@ -5,7 +5,7 @@ import {relayTokenActiveInStore} from './relay-oauth.js';
 import {relayOwnerDelivery,recoverRelayOwnerDelivery,relayOwnerSubscriptionStatus} from './relay-events.js';
 import {FRONTEND_ORIGINS} from './origins.js';
 import {relayOwnerPasswordSchema, relayOwnerPasswordStore} from './relay-owner-password.js';
-import {relayOwnerJobSchema, relayOwnerJobEnsure, relayOwnerJobSpecification, relayOwnerJobSpecify, relayOwnerJobRead, relayOwnerJobsList, relayOwnerJobCancel, relayOwnerJobRetryPrepare, relayOwnerJobRetryLink, relayOwnerJobReplyCheck, relayOwnerJobReplySaved, relayOwnerJobValidateRpc, relayOwnerJobRpc} from './relay-owner-jobs.js';
+import {relayOwnerJobSchema, relayOwnerJobEnsure, relayOwnerJobSpecification, relayOwnerJobSpecify, relayOwnerJobRead, relayOwnerJobsList, relayOwnerJobsChanges, relayOwnerJobCancel, relayOwnerJobRetryPrepare, relayOwnerJobRetryLink, relayOwnerJobReplyCheck, relayOwnerJobReplySaved, relayOwnerJobValidateRpc, relayOwnerJobRpc} from './relay-owner-jobs.js';
 
 export {RELAY_OWNER_SCOPE, RELAY_OWNER_INBOX};
 export const RELAY_OWNER_SESSION_MS = 365 * 86400000;
@@ -208,7 +208,7 @@ export async function relayOwnerStore(ctx, env, body, enqueueOwnerMessage = () =
     const allowed = {
       pair_status: ['request_id'], session: [], messages_list: ['after', 'limit'], message: ['id', 'body'],
       conversation: ['message_id'], delivery_list: ['message_ids'], delivery_retry: ['message_id'], devices_list: [], device_revoke: ['device_id'],
-      jobs_list: ['after', 'limit'], job_read: ['job_id'], job_create: ['id', 'title', 'body', 'action_kind'], job_cancel: ['job_id'], job_retry: ['job_id', 'id', 'confirm_duplicate_risk'],
+      jobs_list: ['after', 'limit'], jobs_changes: ['after', 'limit', 'through'], job_read: ['job_id'], job_create: ['id', 'title', 'body', 'action_kind'], job_cancel: ['job_id'], job_retry: ['job_id', 'id', 'confirm_duplicate_risk'],
     };
     if (!body || !Object.hasOwn(allowed, body.op)) fail(400, 'Invalid owner operation');
     const required = ['pair_status', 'message', 'conversation', 'device_revoke', 'delivery_list', 'delivery_retry', 'job_read', 'job_create', 'job_cancel', 'job_retry'].includes(body.op)
@@ -236,6 +236,7 @@ export async function relayOwnerStore(ctx, env, body, enqueueOwnerMessage = () =
       if (body.op === 'conversation') result = conversation(ctx, body.message_id,env);
       if (body.op === 'message') result = insertMessage(ctx, session, body, enqueueOwnerMessage, now,env);
       if (body.op === 'jobs_list') result = relayOwnerJobsList(ctx, env, body.after, body.limit, now);
+      if (body.op === 'jobs_changes') result = relayOwnerJobsChanges(ctx, env, body.after, body.limit, body.through, now);
       if (body.op === 'job_read') result = relayOwnerJobRead(ctx, env, body.job_id, now);
       if (body.op === 'job_create') {
         const specification = relayOwnerJobSpecification(body);
@@ -376,11 +377,11 @@ export async function relayOwnerPublic(request, env) {
   try {
     const routes = {'/pair/start': ['POST', 'pair_start'], '/pair/status': ['POST', 'pair_status'], '/session': ['GET', 'session'], '/messages': [request.method === 'POST' ? 'POST' : 'GET', request.method === 'POST' ? 'message' : 'messages_list'], '/conversation': ['GET', 'conversation'], '/devices': ['GET', 'devices_list'], '/devices/revoke': ['POST', 'device_revoke'], '/delivery': ['POST','delivery_list'], '/delivery/retry': ['POST','delivery_retry'],
       '/credentials': [request.method === 'POST' ? 'POST' : 'GET', request.method === 'POST' ? 'credentials_save' : 'credentials_status'], '/credentials/prepare': ['POST', 'credentials_prepare'], '/login': ['POST', 'password_login'],
-      '/jobs': [request.method === 'POST' ? 'POST' : 'GET', request.method === 'POST' ? 'job_create' : 'jobs_list'], '/jobs/detail': ['GET', 'job_read'], '/jobs/cancel': ['POST', 'job_cancel'], '/jobs/retry': ['POST', 'job_retry']};
+      '/jobs': [request.method === 'POST' ? 'POST' : 'GET', request.method === 'POST' ? 'job_create' : 'jobs_list'], '/jobs/changes': ['GET', 'jobs_changes'], '/jobs/detail': ['GET', 'job_read'], '/jobs/cancel': ['POST', 'job_cancel'], '/jobs/retry': ['POST', 'job_retry']};
     const suffix = path.slice('/relay/owner'.length), route = Object.hasOwn(routes, suffix) ? routes[suffix] : null;
     if (!route) return wrap(json({error: 'Not found'}, 404));
     if (request.method !== route[0]) return wrap(json({error: 'Method not allowed'}, 405, {Allow: route[0] + ', OPTIONS'}));
-    const queryFields = ['messages_list', 'jobs_list'].includes(route[1]) ? ['after', 'limit'] : route[1] === 'conversation' ? ['message_id'] : route[1] === 'job_read' ? ['job_id'] : [];
+    const queryFields = route[1] === 'jobs_changes' ? ['after', 'limit', 'through'] : ['messages_list', 'jobs_list'].includes(route[1]) ? ['after', 'limit'] : route[1] === 'conversation' ? ['message_id'] : route[1] === 'job_read' ? ['job_id'] : [];
     if ([...url.searchParams.keys()].some(k => !queryFields.includes(k) || url.searchParams.getAll(k).length !== 1)) fail(400, 'Invalid owner query');
     let body = {};
     if (request.method === 'POST') {
@@ -399,7 +400,7 @@ export async function relayOwnerPublic(request, env) {
       if (!token) fail(401, 'Owner device bearer required');
       input.token_hash = await hash(token);
     }
-    if (['messages_list', 'jobs_list'].includes(route[1])) {
+    if (['messages_list', 'jobs_list', 'jobs_changes'].includes(route[1])) {
       if (url.searchParams.has('after')) input.after = url.searchParams.get('after');
       if (url.searchParams.has('limit')) {
         const limit = url.searchParams.get('limit');
@@ -407,6 +408,7 @@ export async function relayOwnerPublic(request, env) {
         input.limit = Number(limit);
       }
     }
+    if (route[1] === 'jobs_changes' && url.searchParams.has('through')) input.through = url.searchParams.get('through');
     if (route[1] === 'conversation') input.message_id = url.searchParams.get('message_id');
     if (route[1] === 'job_read') input.job_id = url.searchParams.get('job_id');
     const response = await env.HUBS.get(env.HUBS.idFromName(RELAY_OAUTH_OBJECT)).fetch(new Request('https://internal/internal/relay/owner', {method: 'POST', body: JSON.stringify(input)}));

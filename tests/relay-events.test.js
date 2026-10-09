@@ -4,7 +4,7 @@ import {DatabaseSync} from 'node:sqlite';
 import {createHmac} from 'node:crypto';
 import worker, {Hub} from '../backend/worker.js';
 import {sharedStore, SHARED_OBJECT, PUBLIC_KEY} from '../backend/shared.js';
-import {relaySubscribe, relayUnsubscribe, drainRelayOutbox, webhookTransport, EVENT_RETENTION_MS, relayEventSchema,enqueueRelayMessage} from '../backend/relay-events.js';
+import {relaySubscribe, relayUnsubscribe, drainRelayOutbox, scheduleRelayAlarm, webhookTransport, EVENT_RETENTION_MS, relayEventSchema,enqueueRelayMessage} from '../backend/relay-events.js';
 import {relayOAuthStore} from '../backend/relay-oauth.js';
 import {RELAY_OWNER, RELAY_INBOX, RELAY_EVENT, RELAY_CALLBACK, RELAY_VERSION, hash, challenge, random, RelayError} from '../backend/relay-common.js';
 const BASE = 'https://jarvis-hub-api.braydenparker999.workers.dev';
@@ -17,7 +17,7 @@ function setup() {
         async get(k) {return structuredClone(values.get(k));}, async put(k, v) {values.set(k, structuredClone(v));}, async transaction(fn) {return fn(storage);},
         transactionSync(fn) {db.exec('BEGIN'); try {const r = fn(); db.exec('COMMIT'); return r;} catch (e) {db.exec('ROLLBACK'); throw e;}},
         async setAlarm(t) {alarm = t;}, async deleteAlarm() {alarm = null;}, async getAlarm() {return alarm;}};
-      objects.set(name, new Hub({storage}, env));
+      objects.set(name, new Hub({storage}, env, {publicationFetcher:async()=>Response.json([])}));
     }
     return objects.get(name);
   }}};
@@ -128,6 +128,36 @@ test('retry preserves event ID/body, refresh does not skip pending cursor, and a
   await drainRelayOutbox(s.ctx, s.env, r.fetcher, t + 2000); const second = r.calls.at(-1);
   assert.equal(first.body, second.body); assert.equal(first.headers['webhook-id'], second.headers['webhook-id']); assert.notEqual(first.headers['webhook-timestamp'], second.headers['webhook-timestamp']);
   const count = r.calls.length; await drainRelayOutbox(s.ctx, s.env, r.fetcher, t + 10000); assert.equal(r.calls.length, count);
+});
+test('FIFO head backoff controls alarms while later queued occurrences remain due and recover in order',async t=>{
+  const now=Date.now();t.mock.method(Date,'now',()=>now);
+  const s=setup(),auth=await grant(s),key=secret(),r=receiver(key,[503,204,204]);
+  await relaySubscribe(s.ctx,auth,params(key),s.env,r.fetcher,now);
+  const first=await s.add('Fictional deferred head'),second=await s.add('Fictional later occurrence');
+  await drainRelayOutbox(s.ctx,s.env,r.fetcher,now+50);
+  const head=s.rows("SELECT * FROM relay_outbox WHERE status='pending' ORDER BY event_seq")[0];
+  assert.equal(head.attempts,1);assert.equal(head.next_attempt_ms,now+1050);
+  assert.equal(await s.ctx.storage.getAlarm(),head.next_attempt_ms,'Do not wake at 50ms for a later blocked item');
+  await drainRelayOutbox(s.ctx,s.env,r.fetcher,now+100);
+  assert.equal(r.calls.length,2,'An early wake cannot deliver the head or skip to its successor');
+  assert.equal(await s.ctx.storage.getAlarm(),head.next_attempt_ms);
+  await drainRelayOutbox(s.ctx,s.env,r.fetcher,head.next_attempt_ms);
+  assert.equal(s.rows('SELECT ack_seq FROM relay_subscriptions')[0].ack_seq,1);
+  assert.equal(await s.ctx.storage.getAlarm(),head.next_attempt_ms+50,'An eligible next occurrence still gets an immediate wake');
+  await drainRelayOutbox(s.ctx,s.env,r.fetcher,head.next_attempt_ms+50);
+  assert.deepEqual(r.calls.slice(1).map(call=>JSON.parse(call.body).data.message_id),[first.id,first.id,second.id]);
+  assert.equal(r.calls[1].body,r.calls[2].body,'Head retry preserves its exact occurrence');
+  assert.equal(s.rows('SELECT ack_seq FROM relay_subscriptions')[0].ack_seq,2);
+  assert.equal(s.rows("SELECT COUNT(*) AS n FROM relay_outbox WHERE status='delivered'")[0].n,2);
+});
+test('failed FIFO head blocks later pending alarm time without deleting queued recovery work',async t=>{
+  const now=Date.now();t.mock.method(Date,'now',()=>now);
+  const s=setup(),auth=await grant(s),key=secret(),r=receiver(key);await relaySubscribe(s.ctx,auth,params(key),s.env,r.fetcher,now);
+  await s.add('Fictional failed head');await s.add('Fictional blocked successor');
+  s.ctx.storage.sql.exec("UPDATE relay_outbox SET status='failed' WHERE event_seq=1");
+  await scheduleRelayAlarm(s.ctx,now);
+  assert.ok(await s.ctx.storage.getAlarm()>now+60000,'A blocked successor cannot generate a 50ms wake loop');
+  assert.deepEqual(s.rows('SELECT event_seq,status FROM relay_outbox ORDER BY event_seq').map(row=>[row.event_seq,row.status]),[[1,'failed'],[2,'pending']]);
 });
 test('expiration/null TTL, secret rotation, unsubscribe cleanup and account revocation', async testContext => {
   const clock=Date.now();testContext.mock.method(Date,'now',()=>clock);

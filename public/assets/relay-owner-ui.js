@@ -8,6 +8,7 @@ import { createOwnerDraftStore } from './relay-draft-store.js';
 export function createRelayOwnerController({ api = createRelayOwnerApi(), draftStore = createOwnerDraftStore(), uuid = () => crypto.randomUUID(), onModeChange = () => {} } = {}) {
   const listeners = new Set();
   let generation = 0, reading = null, failedSend = null, cursor = '0', accountConsent = null, detailEpoch = 0;
+  let jobCursor='0',jobFence=null,jobChangesSupported=typeof api.jobChanges==='function',jobResetCache=null,jobReading=null;
   const retryAttempts=new Map();
   let state = { mode: api.selectedMode==='owner'||(api.selectedMode===undefined&&api.hasCredential)?'owner':'public', status: api.hasCredential ? 'unknown' : 'none',
     messages: [], draft: draftStore.read(), devices: [], device: null, pairing: null, error: '', warning: '', busy: false, sending: false, query: '', authenticating: false, account: null, accountReady: false, accountNotice: '', loginDevices: [],
@@ -15,6 +16,7 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), draftS
   const emit = () => { for (const listener of listeners) listener(); };
   const mode = next => { if (next !== state.mode) { state.mode = next; onModeChange(next); } emit(); };
   function clearPrivate({preserveDraft = false} = {}) { state.loginDevices = []; accountConsent = null; state.account = null; state.accountReady = false; state.accountNotice = ''; state.messages = []; if (!preserveDraft) {state.draft = '';draftStore.save('');} state.devices = []; state.device = null; failedSend = null; cursor = '0';
+    jobCursor='0';jobFence=null;jobChangesSupported=typeof api.jobChanges==='function';jobResetCache=null;jobReading=null;
     ++detailEpoch;retryAttempts.clear();state.jobsEnabled=false;state.jobs=[];state.jobsError='';state.syncStale=false;state.jobMode=false;state.jobTitle='';state.jobKind='consequential';state.requestsOnly=false;state.sendUnconfirmed=false;state.sendNotice='';state.jobDetailId=null;state.jobDetail=null;state.jobDetailBusy=false;state.jobDetailError='';state.jobDetailStale=false;state.jobBusy=false; }
   function failure(error) {
     const safe = error instanceof OwnerApiError ? error : new OwnerApiError('network');
@@ -67,19 +69,63 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), draftS
     }
   }
   async function readJobs(epoch){
-    if(!state.jobsEnabled||!api.jobs)return;
-    // Job creation positions are immutable; progress is mutable. Start at zero
-    // on each refresh and consume every bounded page before replacing evidence.
-    let after='0';const seen=new Set([after]),jobs=new Map();
+    if(jobReading?.epoch===epoch){await jobReading.promise;if(epoch!==generation)return;return readJobs(epoch);}
+    const reading={epoch,promise:null};jobReading=reading;reading.promise=readJobPages(epoch);
+    try{return await reading.promise;}finally{if(jobReading===reading)jobReading=null;}
+  }
+  async function readJobPages(epoch){
+    if(!state.jobsEnabled||!api.jobs&&!api.jobChanges)return;
     try{
-      do{
-        const data=await api.jobs(after);if(epoch!==generation)return;
-        for(const job of data.jobs)jobs.set(job.id,normalizeOwnerJobCompletion(job));
-        if(data.nextCursor!==null){const next=String(data.nextCursor);if(seen.has(next)||Number(next)<=Number(after))throw new OwnerApiError('invalid');seen.add(next);after=next;}else after=null;
-      }while(after!==null);
-      state.jobs=[...jobs.values()].sort((a,b)=>a.sequence-b.sequence);state.jobsError='';state.syncStale=false;
+      if(jobChangesSupported){
+        const seen=new Set();let complete=false,resetOnce=false;
+        // Cache and committed cursor stay together in this private closure. A
+        // reload starts from zero; a failed page resumes from the last good one.
+        // Bound one refresh even while a large migration or active writers run.
+        for(let page=0;page<20;++page){
+          const position=jobCursor+':'+(jobFence??'fresh');
+          if(seen.has(position))throw new OwnerApiError('invalid');seen.add(position);
+          let data;
+          try{data=await api.jobChanges(jobCursor,jobFence);}
+          catch(error){
+            if(epoch!==generation)return;
+            if(error instanceof OwnerApiError&&[404,405].includes(error.status)){jobChangesSupported=false;return readJobPages(epoch);}
+            if(error?.jobCursorReset&&!resetOnce){resetOnce=true;jobCursor='0';jobFence=null;jobResetCache=new Map();seen.clear();continue;}
+            throw error;
+          }
+          if(epoch!==generation)return;
+          const valid=value=>typeof value==='string'&&/^\d{1,15}$/.test(value)&&Number.isSafeInteger(Number(value));
+          if(!data||!Array.isArray(data.changes)||data.changes.length>50||!valid(data.cursor)||!valid(data.through)
+            ||Number(data.cursor)<Number(jobCursor)||Number(data.cursor)>Number(data.through)||typeof data.bootstrapPending!=='boolean'
+            ||jobFence!==null&&data.through!==jobFence
+            ||!(data.nextCursor===null&&data.cursor===data.through||data.nextCursor===data.cursor&&Number(data.cursor)<Number(data.through)))throw new OwnerApiError('invalid');
+          const updates=data.changes.map((change,i)=>{
+            if(!change||!valid(change.cursor)||Number(change.cursor)<=Number(jobCursor)||Number(change.cursor)>Number(data.cursor)
+              ||i>0&&Number(change.cursor)<=Number(data.changes[i-1].cursor))throw new OwnerApiError('invalid');
+            return normalizeOwnerJobCompletion(change.job);
+          });
+          if(new Set(updates.map(job=>job.id)).size!==updates.length
+            ||data.nextCursor!==null&&(!updates.length||data.changes.at(-1).cursor!==data.cursor))throw new OwnerApiError('invalid');
+          const jobs=new Map(jobResetCache??state.jobs.map(job=>[job.id,job]));
+          for(const job of updates)jobs.set(job.id,job);
+          if(jobResetCache)jobResetCache=jobs;else state.jobs=[...jobs.values()].sort((a,b)=>a.sequence-b.sequence);
+          jobCursor=data.cursor;jobFence=data.nextCursor===null?null:data.through;
+          if(data.nextCursor===null&&!data.bootstrapPending){complete=true;break;}
+        }
+        if(!complete){state.jobsError='Private request history is still refreshing. Refresh again to continue.';state.syncStale=true;return;}
+        if(jobResetCache){state.jobs=[...jobResetCache.values()].sort((a,b)=>a.sequence-b.sequence);jobResetCache=null;}
+      }else{
+        // Restored older services retain their original creation-page contract.
+        let after='0';const seen=new Set([after]),jobs=new Map();
+        do{
+          const data=await api.jobs(after);if(epoch!==generation)return;
+          for(const job of data.jobs)jobs.set(job.id,normalizeOwnerJobCompletion(job));
+          if(data.nextCursor!==null){const next=String(data.nextCursor);if(seen.has(next)||Number(next)<=Number(after))throw new OwnerApiError('invalid');seen.add(next);after=next;}else after=null;
+        }while(after!==null);
+        state.jobs=[...jobs.values()].sort((a,b)=>a.sequence-b.sequence);
+      }
+      state.jobsError='';state.syncStale=false;
       if(state.jobDetailId)await controller.inspectJob(state.jobDetailId,{refresh:true});
-    }catch(error){if(epoch!==generation)return;const safe=error instanceof OwnerApiError?error:new OwnerApiError('network');if(['expired','revoked','unauthorized'].includes(safe.kind))failure(safe);else state.jobsError=safe.message;}
+    }catch(error){if(epoch!==generation)return;const safe=error instanceof OwnerApiError?error:new OwnerApiError('network');if(['expired','revoked','unauthorized'].includes(safe.kind))failure(safe);else{state.jobsError=safe.message;state.syncStale=true;}}
   }
   function mergeJob(job){const jobs=new Map(state.jobs.map(j=>[j.id,j]));jobs.set(job.id,normalizeOwnerJobCompletion(job));state.jobs=[...jobs.values()].sort((a,b)=>a.sequence-b.sequence);}
   const controller = {

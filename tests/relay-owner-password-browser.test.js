@@ -11,6 +11,7 @@ import {SHARED_OBJECT} from '../backend/shared.js';
 import {COMMENTS_URL} from '../backend/publications.js';
 import {createRelayOwnerApi, OWNER_SESSION_KEY, OWNER_MODE_KEY} from '../public/assets/relay-owner-api.js';
 import {createRelayOwnerController} from '../public/assets/relay-owner-ui.js';
+import {createInterceptionCancellationTracker} from './helpers/browser-interception-cancellation.js';
 
 // All passwords, sessions and accounts in this file belong only to ephemeral
 // fixtures. No production credential, owner pairing, account or network call.
@@ -149,6 +150,7 @@ async function openBrowser(browser, h) {
   page.on('console', message => { for (const secret of secrets) if (message.text().includes(secret)) errors.push('Sensitive fixture text reached browser console'); });
   page.on('framenavigated', frame => {if (frame === page.mainFrame()) navigations.push(frame.url());});
   await cdp.send('Network.enable'); await cdp.send('Network.setCacheDisabled', {cacheDisabled: true});
+  const confirmCancelledRead = createInterceptionCancellationTracker(cdp);
   cdp.on('Network.loadingFailed', event => {if (event.canceled === true) cancelledRequests.add(event.requestId);});
   async function bridge(event) {
     const request = event.request, url = new URL(request.url);
@@ -157,9 +159,17 @@ async function openBrowser(browser, h) {
     async function fulfill(status, responseHeaders, body = '') {
       record.status = status; record.responseHeaders = responseHeaders;
       if (event.networkId && cancelledRequests.has(event.networkId)) {record.cancelledByBrowser = true; return;}
-      await cdp.send('Fetch.fulfillRequest', {requestId: event.requestId, responseCode: status,
-        responseHeaders: Object.entries(responseHeaders).map(([name, value]) => ({name, value: String(value)})),
-        body: (Buffer.isBuffer(body) ? body : Buffer.from(body)).toString('base64')});
+      try {
+        await cdp.send('Fetch.fulfillRequest', {requestId: event.requestId, responseCode: status,
+          responseHeaders: Object.entries(responseHeaders).map(([name, value]) => ({name, value: String(value)})),
+          body: (Buffer.isBuffer(body) ? body : Buffer.from(body)).toString('base64')});
+      } catch (error) {
+        // The route and response are already validated. Chrome can report the
+        // stale GET interception just before its exact loadingFailed event.
+        const proof = await confirmCancelledRead({event, error, command: 'Fetch.fulfillRequest', validated: true});
+        if (!proof) throw error;
+        record.cancelledByBrowser = true; record.cancellation = proof;
+      }
     }
     try {
       if (url.origin === SITE) {

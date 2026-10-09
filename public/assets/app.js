@@ -4,7 +4,7 @@ import { apps, icon, loadPreferences, savePreferences, renderUtility } from './h
 import { API_ORIGIN } from './config.js';
 import { request } from './shared-api.js';
 import { STORAGE_KEY, readState, mergeState } from './shared-store.js';
-import {createPublicDeliveryStore} from './public-delivery-store.js';
+import {createPublicReaderDeliveryStore, mergePublicReaderInbox} from './public-reader-cache.js';
 import { channelMessages } from './channels.js';
 import { OWNER_SESSION_KEY } from './relay-owner-api.js';
 import { createRelayOwnerController, createRelayOwnerUI } from './relay-owner-ui.js';
@@ -22,7 +22,7 @@ const icons = {
 };
 const svg = name => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name]}</svg>`;
 let state, deliveryStore, storageError = '', syncError = '', busy = false, toastTimer;
-try { deliveryStore=createPublicDeliveryStore({storage:localStorage,tabStorage:sessionStorage,key:STORAGE_KEY,read:readState});state=deliveryStore.restore();state=deliveryStore.commit(state); }
+try { deliveryStore=createPublicReaderDeliveryStore({storage:localStorage,tabStorage:sessionStorage,key:STORAGE_KEY,read:readState});state=deliveryStore.restore();state=deliveryStore.commit(state); }
 catch (e) { storageError = e.message || 'Device storage is unavailable.'; }
 let route = getRoute(), chatUI;
 const ownerController = createRelayOwnerController({onModeChange:()=>{if(route==='chat')drawShell();}});
@@ -291,17 +291,17 @@ async function sync() {
   $('connection-button').lastElementChild.textContent = connection();
   let sending;
   try {
-    // A lost POST response may already have saved the UUID. Confirm first so a
-    // retry sends only entries still missing from the complete public history.
-    const inbox=await request('/shared/state');commit(mergeState(state,inbox));
+    // Resume the complete public checkpoint; history alone cannot confirm a
+    // pending send. Lost responses are recovered by an exact request probe.
+    const inbox=await request('/shared/state',{publicReader:state.publicReader});commit(mergePublicReaderInbox(state,inbox,mergeState));
     while(state.outbox.some(item=>item.sendState!=='conflict')){
       const item=state.outbox.find(item=>item.sendState!=='conflict');sending=item;setPublicSendState(item.id,'sending');
       try{
-        const remote=await request('/shared/messages',{id:item.id,body:item.body});commit(mergeState(state,remote));
+        const remote=await request('/shared/messages',{id:item.id,body:item.body,retry:['unknown','sending','rejected'].includes(item.sendState)});commit(mergePublicReaderInbox(state,remote,mergeState));
         if(state.outbox.some(m=>m.id===item.id))throw Error('Message acceptance could not be confirmed. The original text and ID remain queued.');
       }catch(error){if(error.status!==409)throw error;setPublicSendState(item.id,'conflict');}
     }
-    if(sending){const latest=await request('/shared/state');commit(mergeState(state,latest));}
+    if(sending){const latest=await request('/shared/state',{publicReader:state.publicReader});commit(mergePublicReaderInbox(state,latest,mergeState));}
     if(state.outbox.some(m=>m.sendState==='conflict'))syncError='A queued message has an ID conflict. Its original text stays here; other messages can still sync.';
   } catch (e) { if(sending&&state.outbox.some(m=>m.id===sending.id)){try{setPublicSendState(sending.id,e.status===409?'conflict':e.status>=400&&e.status<500?'rejected':'unknown');}catch{}}syncError = e.message || 'Cloud unavailable. Your drafts are safe.'; notify(syncError); }
   finally {

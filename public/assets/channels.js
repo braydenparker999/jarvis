@@ -8,7 +8,7 @@ export function isMuseMessage(message) {
 export function channelMessages(messages, channel = 'jarvis') {
   const targets = new Set([MUSE_TEST_ID, ...messages.filter(isMuseMessage).map(m => m.id)]);
   return messages.filter(m => {
-    const muse = m.role === 'user' ? isMuseMessage(m) : targets.has(m.replyTo);
+    const muse = m.role === 'user' ? isMuseMessage(m) : m.kind==='coordination'&&['muse','jarvis'].includes(m.destination)?m.destination==='muse':targets.has(m.replyTo);
     return channel === 'muse' ? muse : !muse;
   });
 }
