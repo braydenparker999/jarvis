@@ -7,6 +7,7 @@ const rows = (ctx, query, ...values) => [...ctx.storage.sql.exec(query, ...value
 const validTime = value => typeof value === 'number' && Number.isFinite(value);
 const MAX_RESERVATIONS = 256;
 export const RELAY_ALARM_RETRY_MS = 60000;
+export const RELAY_PRECOMMIT_EXPIRY_MS = 300000;
 
 function serialized(ctx, operation) {
   const previous = writes.get(ctx) || Promise.resolve();
@@ -16,8 +17,9 @@ function serialized(ctx, operation) {
 }
 function wakeSchema(ctx) {
   if (wakeTables.has(ctx)) return;
-  ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS relay_core_alarm_wakes (id TEXT PRIMARY KEY,due_ms INTEGER NOT NULL)');
+  ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS relay_core_alarm_wakes (id TEXT PRIMARY KEY,due_ms INTEGER NOT NULL,expires_ms INTEGER NOT NULL)');
   ctx.storage.sql.exec('CREATE INDEX IF NOT EXISTS relay_core_alarm_due ON relay_core_alarm_wakes(due_ms)');
+  ctx.storage.sql.exec('CREATE INDEX IF NOT EXISTS relay_core_alarm_expiry ON relay_core_alarm_wakes(expires_ms)');
   wakeTables.add(ctx);
 }
 function hasWakeTable(ctx) {
@@ -38,7 +40,7 @@ async function reserve(ctx, now, delay, ignoreElapsed) {
   if (rows(ctx,'SELECT id FROM relay_core_alarm_wakes LIMIT ?',MAX_RESERVATIONS).length >= MAX_RESERVATIONS)
     throw Error('Relay alarm admission is busy');
   const id=crypto.randomUUID();
-  ctx.storage.sql.exec('INSERT INTO relay_core_alarm_wakes VALUES(?,?)',id,now+delay);
+  ctx.storage.sql.exec('INSERT INTO relay_core_alarm_wakes VALUES(?,?,?)',id,now+delay,now+Math.max(delay,RELAY_PRECOMMIT_EXPIRY_MS));
   try {
     await serialized(ctx,async()=>{
       const current=ctx.storage.getAlarm ? await ctx.storage.getAlarm() : null;
@@ -55,9 +57,13 @@ export function reserveRelayCoreWake(ctx, now=Date.now(), delay=100) {
   return reserve(ctx,now,delay,false);
 }
 export async function beginRelayCoreAlarm(ctx, now=Date.now()) {
-  // A fired/abandoned precommit reservation gets one recovery pass. It cannot
-  // leave a permanent 50ms wake after a rejected or interrupted request.
-  if (hasWakeTable(ctx)) ctx.storage.sql.exec('DELETE FROM relay_core_alarm_wakes WHERE due_ms<=?',now);
+  // A fired wake does not prove that its request has committed. Retain a single
+  // conservative recovery at its bounded expiry until the owner releases it.
+  // A restart loses the promise, but keeps this recovery without a 50ms loop.
+  if (hasWakeTable(ctx)) {
+    ctx.storage.sql.exec('DELETE FROM relay_core_alarm_wakes WHERE expires_ms<=?',now);
+    ctx.storage.sql.exec('UPDATE relay_core_alarm_wakes SET due_ms=expires_ms WHERE due_ms<=?',now);
+  }
   return reserve(ctx,now,RELAY_ALARM_RETRY_MS,true);
 }
 
