@@ -160,12 +160,17 @@ export async function applyPendingPublications(ctx,{now=Date.now(),work={pending
   }
   return {examined,progressed,more:!!meta(ctx,'publisher-pending-cursor')||conflictTail(ctx)>Number(meta(ctx,'publisher-conflict-cursor')||0)||!!meta(ctx,'publisher-recovery-cursor')};
 }
-export function seedPublicationReconciliation(ctx,now=Date.now(),env=null) {
+export function seedPublicationReconciliation(ctx,now=Date.now(),env=null,{initialAlarmDelay=0}={}) {
   publicationSchema(ctx);
   if(!meta(ctx,'publisher-reconciliation-enabled')){
     putMeta(ctx,'publisher-reconciliation-enabled',true);
     if(meta(ctx,'publisher-next-attempt')===null)putMeta(ctx,'publisher-next-attempt',now);
     if(meta(ctx,'publisher-local-next-attempt')===null)putMeta(ctx,'publisher-local-next-attempt',now);
+    // A first public write seeds maintenance without displacing a nearer Relay
+    // delivery retry. This affects scheduling only; an explicit read can still
+    // admit immediate bounded reconciliation and clear this one-time marker.
+    if(Number.isSafeInteger(initialAlarmDelay)&&initialAlarmDelay>0)
+      putMeta(ctx,'publisher-initial-alarm-not-before',now+Math.min(INTERVAL,initialAlarmDelay));
   }
   if(env?.HUBS)seedLegacyInbox(ctx,now);
 }
@@ -178,7 +183,7 @@ export function nextPublicationReconciliationAt(ctx,now=Date.now()) {
     catch(error){if(/\bno such table:\s*(?:main\.)?shared_meta\b/i.test(error?.message||''))return null;throw error;}
   }
   if(!meta(ctx,'publisher-reconciliation-enabled'))return null;
-  const blocked=Number(meta(ctx,'publisher-pass-not-before')||0);
+  const blocked=Math.max(Number(meta(ctx,'publisher-pass-not-before')||0),Number(meta(ctx,'publisher-initial-alarm-not-before')||0));
   const main=Math.max(Number(meta(ctx,'publisher-next-attempt')||now),Number(meta(ctx,'publisher-upstream-not-before')||0));
   const times=[main,meta(ctx,'publisher-local-next-attempt'),nextLegacyInboxAt(ctx)].filter(x=>x!==null);
   return Math.max(blocked,Math.min(...times));
@@ -214,6 +219,8 @@ async function reconcile(ctx,fetcher,now,env) {
   const legacyDue=env?.HUBS&&now>=Number(nextLegacyInboxAt(ctx));
   if(!localDue&&!networkDue&&!legacyDue||now<Number(meta(ctx,'publisher-pass-not-before')||0)||!takePass(ctx,now))return;
   const sql=ctx.storage.sql,work={pending:600,conflicts:100};
+  if(meta(ctx,'publisher-initial-alarm-not-before')!==null)
+    sql.exec("DELETE FROM shared_meta WHERE key='publisher-initial-alarm-not-before'");
   let localMore=false;
   // Persist all cooldowns before asynchronous work; process loss never rewinds a
   // committed page, and shared-object concurrency cannot multiply this pass.

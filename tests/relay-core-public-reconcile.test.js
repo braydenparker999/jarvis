@@ -85,6 +85,28 @@ test('initialized private scheduling neither creates public schema nor advances 
   }
 });
 
+test('initial public-write maintenance delay preserves nearer delivery wakes but first explicit read reconciles immediately',async t=>{
+  const h=fixture(t);sharedStore(h.ctx,'/internal/shared/message',user(1));
+  seedPublicationReconciliation(h.ctx,NOW,h.env,{initialAlarmDelay:300000});
+  assert.equal(nextPublicationReconciliationAt(h.ctx,NOW),NOW+300000);
+  assert.equal(h.fallbackFetches,0);assert.equal(h.internalReads,0,'Write seeding does not import the legacy inbox');
+  assert.equal(Math.min(NOW+1050,nextPublicationReconciliationAt(h.ctx,NOW)),NOW+1050,'An earlier FIFO retry remains the alarm target');
+  seedPublicationReconciliation(h.ctx,NOW+60000,h.env,{initialAlarmDelay:300000});
+  assert.equal(nextPublicationReconciliationAt(h.ctx,NOW+60000),NOW+300000,'Later writes cannot push the first maintenance wake');
+  h.restart();assert.equal(nextPublicationReconciliationAt(h.ctx,NOW+1),NOW+300000,'Initial maintenance delay is durable');
+  assert.equal(publicationReadNeedsWake(h.ctx,NOW+1,h.env),true,'A legitimate explicit read can admit local/network work immediately');
+  const final=event(id(1));let calls=0;
+  await syncPublications(h.ctx,async()=>{calls++;return Response.json([comment(final,9001)]);},NOW+1,h.env);
+  assert.equal(calls,1);assert.equal(h.internalReads,1);assert.equal(h.meta('publisher-initial-alarm-not-before'),null);
+  assert.equal(h.rows('SELECT body FROM shared_entries WHERE reply_to=?',id(1))[0].body,final.body);
+  const due=nextPublicationReconciliationAt(h.ctx,NOW+1);
+  seedPublicationReconciliation(h.ctx,NOW+60000,h.env,{initialAlarmDelay:300000});
+  assert.equal(nextPublicationReconciliationAt(h.ctx,NOW+60000),due,'Later write seeds cannot reintroduce or reset the marker');
+  assert.equal(h.meta('publisher-initial-alarm-not-before'),null);
+  const ordinary=fixture(t);seedPublicationReconciliation(ordinary.ctx,NOW);
+  assert.equal(nextPublicationReconciliationAt(ordinary.ctx,NOW),NOW,'Existing three-argument read seeding remains immediate');
+});
+
 test('cold indexing is checkpointed, keeps v1 usable, withholds v2 cursors, and resumes without skipping concurrent entries',async t=>{
   const h=fixture(t,{cold:251});sharedSchema(h.ctx);
   assert.equal(h.rows('SELECT COUNT(*) AS n FROM public_changes')[0].n,0,'Schema construction does no history backfill');
