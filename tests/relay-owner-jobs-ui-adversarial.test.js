@@ -296,7 +296,7 @@ test('a failed conversation read marks retained jobs stale while local title val
 test('nonempty private work search is cleared on authorization loss and session replacement',async t=>{
   for(const transition of ['disconnect','expired','revoked','unauthorized','replacement','removal'])await t.test(transition,async t=>{
     const f=await client(t),saved=await job(f,{title:'Fictional private search target'}),draft='Fictional unsent private draft';
-    const c=createRelayOwnerController({api:f.api,draftStore:{read:()=>'',save:()=>true}});await c.refresh();c.toggleRequests();c.setQuery('Fictional prior project progress and result search');c.setWorkFilter('queued');c.setDraft(draft);
+    const c=createRelayOwnerController({api:f.api,draftStore:{read:()=>'',save:()=>true}});await c.refresh();assert.equal(c.beginTask({projectTitle:'Fictional private prefill project',goalTitle:'Fictional private prefill goal'}),true);c.setJobTitle('Fictional private prefill title');c.toggleRequests();c.setQuery('Fictional prior project progress and result search');c.setWorkFilter('queued');c.setDraft(draft);
     assert.equal(c.snapshot().jobsEnabled,true);assert.equal(c.snapshot().requestsOnly,true);assert.notEqual(c.snapshot().query,'');assert.equal(c.snapshot().jobs[0].id,saved.id);
     if(transition==='disconnect')await c.disconnect();
     else if(transition==='replacement'){
@@ -309,6 +309,7 @@ test('nonempty private work search is cleared on authorization loss and session 
       await c.refresh();assert.notEqual(c.status,'approved');
     }
     const state=c.snapshot();assert.equal(state.query,'','A private search cannot cross a session boundary');assert.equal(state.requestsOnly,false);assert.equal(state.workFilter,'all');assert.equal(state.jobDetail,null);
+    assert.equal(state.jobMode,false);assert.equal(state.jobTitle,'');assert.equal(state.jobProject,'');assert.equal(state.jobGoal,'');assert.equal(state.sendNotice,'','Private composer prefills and notices cannot cross a session boundary');
     assert.equal(state.draft,transition==='expired'?draft:'','Only expiry preserves the explicitly intended unsent draft');
     if(transition!=='replacement'){assert.deepEqual(state.jobs,[]);assert.deepEqual(state.messages,[]);}
     assert.equal(f.calls.some(call=>call.path==='/shared/messages'||call.path==='/v1/messages'),false);
