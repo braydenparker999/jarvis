@@ -37,7 +37,8 @@ test('podcast mobile flows, real offline audio, seeking, timers and queue',{skip
  const browser=await chromium.launch({executablePath:chrome,headless:true,args:['--no-sandbox']});
  const context=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true}),page=await context.newPage(),errors=[];
  await page.clock.install();
- await context.route('https://itunes.apple.com/search?**',async route=>{const u=new URL(route.request().url()),term=u.searchParams.get('term');const shows=term==='empty'?[]:[show,{...show,id:'two',title:'Science in motion',feedUrl:'https://feeds.example.org/science.xml'}];await route.fulfill({contentType:'text/javascript',body:u.searchParams.get('callback')+'('+JSON.stringify({results:shows.map(s=>({collectionId:s.id,collectionName:s.title,artistName:s.author,feedUrl:s.feedUrl}))})+');'});});
+ const directoryRequests=[];
+ await context.route('https://itunes.apple.com/**',async route=>{const request=route.request(),u=new URL(request.url()),term=u.searchParams.get('term');directoryRequests.push(request);assert.equal(request.resourceType(),'fetch');assert.equal(u.searchParams.has('callback'),false);assert.equal(request.headers().authorization,undefined);assert.equal(request.headers().referer,undefined);const shows=term==='empty'?[]:[show,{...show,id:'two',title:'Science in motion',feedUrl:'https://feeds.example.org/science.xml'}];await route.fulfill({contentType:'text/javascript; charset=utf-8',headers:{'Access-Control-Allow-Origin':'*'},body:JSON.stringify({results:shows.map(s=>({collectionId:s.id,collectionName:s.title,artistName:s.author,feedUrl:s.feedUrl}))})});});
  page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(m.type()==='error'&&m.text().includes('Content Security Policy'))errors.push(m.text());});
  const stored=()=>page.evaluate(()=>JSON.parse(localStorage.getItem('jarvis.podcasts.v1')));
  const shot=async name=>{if(process.env.JARVIS_SCREENSHOT_DIR){await mkdir(process.env.JARVIS_SCREENSHOT_DIR,{recursive:true});await page.screenshot({path:join(process.env.JARVIS_SCREENSHOT_DIR,'podcasts-'+name+'.png'),animations:'disabled'});}};
@@ -93,6 +94,13 @@ test('podcast mobile flows, real offline audio, seeking, timers and queue',{skip
   });
   await t.test('empty server results do not beat a matching client directory response',async()=>{
    await page.goto(origin+'/podcasts/#search=race');await page.locator('.show-tile').first().waitFor();assert.equal(await page.locator('.show-tile').count(),2);assert.equal(await page.getByRole('heading',{name:'No shows found'}).count(),0);
+  });
+  await t.test('directory requests stay data-only and never expose a remembered owner bearer',async()=>{
+   const marker='fixture-owner-token-'+ 'a'.repeat(40);await page.evaluate(value=>localStorage.setItem('jarvis.relay.owner-session.v1',JSON.stringify({device_token:value,device_id:'fixture-device'})),marker);
+   await page.goto(origin+'/podcasts/#search=history');await page.locator('.show-tile').first().waitFor();
+   assert.ok(directoryRequests.length);assert.equal(await page.locator('script[src^="https://itunes.apple.com"]').count(),0);
+   assert.equal(await page.evaluate(()=>Object.keys(window).some(key=>key.startsWith('__jarvis_podcast_'))),false);
+   for(const request of directoryRequests)assert.equal(JSON.stringify({url:request.url(),headers:request.headers(),body:request.postData()}).includes(marker),false);
   });
   await t.test('failed audio resolves from the publisher and preserves the saved position',async()=>{
    await context.route('https://audio.example.org/4.wav',route=>route.fulfill({contentType:'audio/wav',headers:{'Access-Control-Allow-Origin':'*','Accept-Ranges':'bytes'},body:audioBytes}));
