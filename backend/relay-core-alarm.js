@@ -38,11 +38,31 @@ function hasWakeTable(ctx) {
 function nextReserved(ctx) {
   return hasWakeTable(ctx) ? rows(ctx,'SELECT MIN(due_ms) AS n FROM relay_core_alarm_wakes')[0].n : null;
 }
+function recoveryGroup(ctx) {
+  let group=recoveries.get(ctx);
+  if(!group){
+    const saved=rows(ctx,'SELECT due_ms,expires_ms FROM relay_core_alarm_wakes WHERE id=?',RECOVERY_ID)[0];
+    group={handles:new Map(),orphan:saved?{due:saved.due_ms,expires:saved.expires_ms}:null};
+    recoveries.set(ctx,group);
+  }
+  return group;
+}
+function sweepRecovery(group, now) {
+  let changed=false;
+  if(group.orphan?.expires<=now){group.orphan=null;changed=true;}
+  for(const [id,lease] of group.handles){
+    if(lease.expires<=now){group.handles.delete(id);changed=true;}
+  }
+  return changed;
+}
 function pruneExpiredWakes(ctx, now) {
   const expiry=rows(ctx,'SELECT MIN(expires_ms) AS n FROM relay_core_alarm_wakes')[0].n;
   if(expiry!==null&&expiry<=now){
-    ctx.storage.sql.exec('DELETE FROM relay_core_alarm_wakes WHERE expires_ms<=?',now);
-    if(recoveries.get(ctx)?.expires<=now)recoveries.delete(ctx);
+    ctx.storage.sql.exec('DELETE FROM relay_core_alarm_wakes WHERE expires_ms<=? AND id<>?',now,RECOVERY_ID);
+    // The aggregate's older orphan can expire while its cached live pass is
+    // still running. Promote that pass instead of deleting its durable wake.
+    const group=recoveryGroup(ctx);
+    if(sweepRecovery(group,now))saveRecovery(ctx,group);
   }
 }
 function saveRecovery(ctx, group) {
@@ -51,11 +71,14 @@ function saveRecovery(ctx, group) {
     ctx.storage.sql.exec('DELETE FROM relay_core_alarm_wakes WHERE id=?',RECOVERY_ID);
     recoveries.delete(ctx);return;
   }
-  group.expires=Math.max(...leases.map(lease=>lease.expires));
+  // A process can terminate between ACK and release. Persist the orphan's
+  // original cap throughout retries, so restart cannot renew abandonment.
+  // Once it expires, a still-live cached handle keeps its own remaining TTL.
+  const expiry=group.orphan?.expires??Math.max(...leases.map(lease=>lease.expires));
   ctx.storage.sql.exec(`INSERT INTO relay_core_alarm_wakes VALUES(?,?,?) ON CONFLICT(id) DO UPDATE
     SET due_ms=excluded.due_ms,expires_ms=excluded.expires_ms
     WHERE due_ms<>excluded.due_ms OR expires_ms<>excluded.expires_ms`,RECOVERY_ID,
-    Math.min(...leases.map(lease=>lease.due)),group.expires);
+    Math.min(...leases.map(lease=>lease.due)),expiry);
 }
 async function acknowledgeWake(ctx, now, ignoreElapsed) {
   await serialized(ctx,async()=>{
@@ -71,6 +94,7 @@ async function acknowledgeWake(ctx, now, ignoreElapsed) {
 function releaseRecovery(ctx, id, completed) {
   const group=recoveries.get(ctx);
   if(!group?.handles.delete(id))return;
+  sweepRecovery(group,Date.now());
   if(completed&&group.orphan)group.orphan.due=group.orphan.expires;
   saveRecovery(ctx,group);
 }
@@ -82,16 +106,21 @@ export function abandonRelayCoreAlarm(ctx, id) {
   const group=recoveries.get(ctx),lease=group?.handles.get(id);
   if(!lease)return;
   group.handles.delete(id);
+  const now=Date.now();sweepRecovery(group,now);
   // One failed alarm's earlier retry also recovers work from later failures.
   // Preserve the earliest abandonment expiry; successful retries never renew it.
-  group.orphan=group.orphan?{due:Math.min(group.orphan.due,lease.due),expires:Math.min(group.orphan.expires,lease.expires)}:lease;
+  if(lease.expires>now)
+    group.orphan=group.orphan?{due:Math.min(group.orphan.due,lease.due),expires:Math.min(group.orphan.expires,lease.expires)}:lease;
   saveRecovery(ctx,group);
 }
 export function assertRelayCoreWake(ctx, id, now=Date.now()) {
   if (!id) return;
   if(id.startsWith('alarm:')){
-    const lease=recoveries.get(ctx)?.handles.get(id);
+    const group=recoveries.get(ctx),lease=group?.handles.get(id);
     if(!lease||lease.expires<=now)throw Error('Relay alarm admission expired');
+    // The required alarm ACK may finish after an older orphan's cap. Only an
+    // acknowledged, still-live handle may promote the aggregate at this point.
+    if(sweepRecovery(group,now))saveRecovery(ctx,group);
     id=RECOVERY_ID;
   }
   const wake=rows(ctx,'SELECT expires_ms FROM relay_core_alarm_wakes WHERE id=?',id)[0];
@@ -122,25 +151,20 @@ export async function beginRelayCoreAlarm(ctx, now=Date.now()) {
   if(!hasWakeTable(ctx))wakeSchema(ctx);
   pruneExpiredWakes(ctx,now);
   ctx.storage.sql.exec('UPDATE relay_core_alarm_wakes SET due_ms=expires_ms WHERE due_ms<=?',now);
-  let group=recoveries.get(ctx);
-  if(!group){
-    const saved=rows(ctx,'SELECT due_ms,expires_ms FROM relay_core_alarm_wakes WHERE id=?',RECOVERY_ID)[0];
-    group={handles:new Map(),orphan:saved?{due:saved.due_ms,expires:saved.expires_ms}:null};
-    recoveries.set(ctx,group);
-  }
-  if(group.orphan?.expires<=now)group.orphan=null;
+  const group=recoveryGroup(ctx);sweepRecovery(group,now);
   if(group.orphan?.due<=now)group.orphan.due=group.orphan.expires;
-  for(const [id,lease] of group.handles){
-    if(lease.expires<=now)group.handles.delete(id);
-    else if(lease.due<=now)lease.due=lease.expires;
-  }
+  for(const lease of group.handles.values())if(lease.due<=now)lease.due=lease.expires;
   const id='alarm:'+crypto.randomUUID(),lease={due:now+RELAY_ALARM_RETRY_MS,expires:now+RELAY_PRECOMMIT_EXPIRY_MS};
-  group.handles.set(id,lease);saveRecovery(ctx,group);
+  group.handles.set(id,lease);
   try{
+    saveRecovery(ctx,group);
     await acknowledgeWake(ctx,now,true);
     assertRelayCoreWake(ctx,id);
     return id;
-  }catch(error){releaseRecovery(ctx,id,false);throw error;}
+  }catch(error){
+    try{releaseRecovery(ctx,id,false);}catch{}
+    throw error;
+  }
 }
 
 export async function scheduleRelayCoreAlarm(ctx, nextDelivery, now=Date.now()) {

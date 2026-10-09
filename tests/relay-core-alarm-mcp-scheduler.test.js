@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {createRelayFixture} from './relay-fixture.js';
 import {publicationSchema} from '../backend/publications.js';
 import {SHARED_OBJECT} from '../backend/shared.js';
-import {scheduleRelayCoreAlarm,reserveRelayCoreWake,releaseRelayCoreWake,beginRelayCoreAlarm,abandonRelayCoreAlarm,RELAY_ALARM_RETRY_MS,RELAY_PRECOMMIT_EXPIRY_MS} from '../backend/relay-core-alarm.js';
+import {scheduleRelayCoreAlarm,reserveRelayCoreWake,releaseRelayCoreWake,assertRelayCoreWake,beginRelayCoreAlarm,abandonRelayCoreAlarm,RELAY_ALARM_RETRY_MS,RELAY_PRECOMMIT_EXPIRY_MS} from '../backend/relay-core-alarm.js';
 
 function fixture(t) {
   const f=createRelayFixture();t.after(()=>f.close());
@@ -204,4 +204,66 @@ test('a stale composer cannot erase concurrent recovery and the final ordinary s
   releaseRelayCoreWake(f.ctx,recovery);await scheduleRelayCoreAlarm(f.ctx,()=>null,now+100);
   assert.equal(await get(),now+RELAY_PRECOMMIT_EXPIRY_MS);
   assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')[0].n,255);
+});
+
+test('termination during acknowledged retries preserves the original cohort expiry across later successful restart',async t=>{
+  const f=fixture(t),initial=Date.now(),clock={now:initial};t.mock.method(Date,'now',()=>clock.now);
+  const first=await beginRelayCoreAlarm(f.ctx);abandonRelayCoreAlarm(f.ctx,first);
+  const expiry=initial+RELAY_PRECOMMIT_EXPIRY_MS;
+  for(let index=0;index<3;index++){
+    clock.now+=RELAY_ALARM_RETRY_MS;
+    await beginRelayCoreAlarm({storage:f.ctx.storage});
+    // This acknowledged handler is terminated without running catch/release.
+    assert.equal(f.rows("SELECT expires_ms FROM relay_core_alarm_wakes WHERE id='alarm:recovery'")[0].expires_ms,expiry);
+  }
+  clock.now+=RELAY_ALARM_RETRY_MS;const restarted={storage:f.ctx.storage},recovered=await beginRelayCoreAlarm(restarted);
+  releaseRelayCoreWake(restarted,recovered);await scheduleRelayCoreAlarm(restarted,()=>null);
+  assert.equal(await f.ctx.storage.getAlarm(),expiry);
+  clock.now=expiry;const owning={storage:f.ctx.storage},last=await beginRelayCoreAlarm(owning);
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')[0].n,1);
+  releaseRelayCoreWake(owning,last);await scheduleRelayCoreAlarm(owning,()=>null);
+  assert.equal(await f.ctx.storage.getAlarm(),null);
+});
+
+test('ordinary admission reclaims a full cohort at its original expiry after ten interrupted restarts',async t=>{
+  const f=fixture(t),initial=Date.now(),clock={now:initial};t.mock.method(Date,'now',()=>clock.now);
+  const first=await beginRelayCoreAlarm(f.ctx);abandonRelayCoreAlarm(f.ctx,first);
+  const expiry=initial+RELAY_PRECOMMIT_EXPIRY_MS;
+  for(let index=0;index<256;index++)f.ctx.storage.sql.exec('INSERT INTO relay_core_alarm_wakes VALUES(?,?,?)','restart-cohort-'+index,initial+100,expiry);
+  for(let index=0;index<10;index++){
+    clock.now+=20000;await beginRelayCoreAlarm({storage:f.ctx.storage});
+    assert.equal(f.rows("SELECT expires_ms FROM relay_core_alarm_wakes WHERE id='alarm:recovery'")[0].expires_ms,expiry);
+    assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')[0].n,257);
+  }
+  clock.now=expiry;const restarted={storage:f.ctx.storage},admission=await reserveRelayCoreWake(restarted);
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')[0].n,1);
+  releaseRelayCoreWake(restarted,admission);await scheduleRelayCoreAlarm(restarted,()=>null);
+  assert.equal(await f.ctx.storage.getAlarm(),null);
+});
+
+test('expiring an older orphan during ordinary admission preserves a still-live alarm handle',async t=>{
+  const f=fixture(t),initial=Date.now(),clock={now:initial};t.mock.method(Date,'now',()=>clock.now);
+  const first=await beginRelayCoreAlarm(f.ctx);abandonRelayCoreAlarm(f.ctx,first);
+  const expiry=initial+RELAY_PRECOMMIT_EXPIRY_MS;
+  clock.now+=4*RELAY_ALARM_RETRY_MS;const active=await beginRelayCoreAlarm(f.ctx),activeExpiry=clock.now+RELAY_PRECOMMIT_EXPIRY_MS;
+  assert.equal(f.rows("SELECT expires_ms FROM relay_core_alarm_wakes WHERE id='alarm:recovery'")[0].expires_ms,expiry);
+  clock.now=expiry;const ordinary=await reserveRelayCoreWake(f.ctx);
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')[0].n,2);assertRelayCoreWake(f.ctx,active);
+  assert.equal(f.rows("SELECT expires_ms FROM relay_core_alarm_wakes WHERE id='alarm:recovery'")[0].expires_ms,activeExpiry);
+  releaseRelayCoreWake(f.ctx,ordinary);await scheduleRelayCoreAlarm(f.ctx,()=>null);
+  assert.ok(await f.ctx.storage.getAlarm()>clock.now,'The live pass keeps a durable wake after the orphan expires');
+  releaseRelayCoreWake(f.ctx,active);await scheduleRelayCoreAlarm(f.ctx,()=>null);
+  assert.equal(await f.ctx.storage.getAlarm(),null);
+});
+
+test('a late acknowledged retry promotes only its expired orphan cap before admitting live work',async t=>{
+  const f=fixture(t),initial=Date.now(),clock={now:initial};t.mock.method(Date,'now',()=>clock.now);
+  const first=await beginRelayCoreAlarm(f.ctx);abandonRelayCoreAlarm(f.ctx,first);
+  clock.now=initial+RELAY_PRECOMMIT_EXPIRY_MS-1000;const admittedAt=clock.now,set=f.ctx.storage.setAlarm;let acknowledged=false;
+  f.ctx.storage.setAlarm=async value=>{await set(value);clock.now+=2000;acknowledged=true;};
+  const active=await beginRelayCoreAlarm(f.ctx,admittedAt);assert.equal(acknowledged,true);assertRelayCoreWake(f.ctx,active);
+  assert.equal(f.rows("SELECT expires_ms FROM relay_core_alarm_wakes WHERE id='alarm:recovery'")[0].expires_ms,admittedAt+RELAY_PRECOMMIT_EXPIRY_MS);
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')[0].n,1);
+  f.ctx.storage.setAlarm=set;releaseRelayCoreWake(f.ctx,active);await scheduleRelayCoreAlarm(f.ctx,()=>null);
+  assert.equal(await f.ctx.storage.getAlarm(),null);
 });

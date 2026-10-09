@@ -14,13 +14,13 @@ import {sharedStore,SHARED_OBJECT,PUBLIC_KEY} from './shared.js';
 import {COMMENTS_URL} from './publications.js';
 import {relayOAuthStore} from './relay-oauth.js';
 import {relaySubscribe} from './relay-events.js';
-import {reserveRelayCoreWake,releaseRelayCoreWake,beginRelayCoreAlarm,scheduleRelayCoreAlarm,RELAY_PRECOMMIT_EXPIRY_MS} from './relay-core-alarm.js';
+import {reserveRelayCoreWake,releaseRelayCoreWake,assertRelayCoreWake,beginRelayCoreAlarm,abandonRelayCoreAlarm,scheduleRelayCoreAlarm,RELAY_PRECOMMIT_EXPIRY_MS} from './relay-core-alarm.js';
 import {RELAY_OWNER,RELAY_CALLBACK,RELAY_INBOX,RELAY_EVENT,random,hash,challenge} from './relay-common.js';
 const first='00000000-0000-4000-8000-000000000801',second='00000000-0000-4000-8000-000000000802',eventId='00000000-0000-4000-8000-000000000803';
 const bytes=value=>value===undefined?0:new TextEncoder().encode(JSON.stringify(value)).length;
 export class SaturatedAlarmFixture extends Hub {
   constructor(ctx,env){
-    const state={comments:[],egress:0,interrupt:false,rejectCompose:false};
+    const state={comments:[],egress:0,interrupt:false,rejectCompose:false,lateAckAt:null};
     super(ctx,env,{publicationFetcher:async(url,init={})=>{
       if(new URL(url).origin+new URL(url).pathname!==COMMENTS_URL||(init.method||'GET')!=='GET'||init.redirect!=='manual'||init.headers?.Authorization||init.headers?.Cookie)
         throw Error('Unexpected fictional publication request');
@@ -37,7 +37,8 @@ export class SaturatedAlarmFixture extends Hub {
       if(key==='setAlarm')return async value=>{
         counters.alarmSets++;
         if(state.rejectCompose&&counters.alarmSets===2){state.rejectCompose=false;throw Error('Fictional native post-release compositor rejection');}
-        return target.setAlarm(value);
+        await target.setAlarm(value);
+        if(state.lateAckAt!==null){this.now=state.lateAckAt;state.lateAckAt=null;}
       };
       if(key==='deleteAlarm')return async()=>{counters.alarmDeletes++;return target.deleteAlarm();};
       if(key==='get')return async name=>{const value=await target.get(name);counters.kvReads++;counters.kvReadJsonBytes+=bytes(value);return value;};
@@ -113,6 +114,48 @@ export class SaturatedAlarmFixture extends Hub {
       releaseRelayCoreWake(restarted,second);await scheduleRelayCoreAlarm(restarted,()=>null,this.now);
       return {during,heldUntil,expected,remaining:[...this.raw.sql.exec('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')][0].n,...this.costs()};
     }));
+    if(path==='/fixture/cohort-restarts')return Response.json(await this.clock(async()=>{
+      const initial=this.now,expiry=initial+RELAY_PRECOMMIT_EXPIRY_MS;
+      const first=await beginRelayCoreAlarm(this.ctx);abandonRelayCoreAlarm(this.ctx,first);
+      this.raw.sql.exec("INSERT INTO relay_core_alarm_wakes WITH RECURSIVE slots(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM slots WHERE n<256) SELECT printf('fictional-restart-%03d',n),?,? FROM slots",initial+100,expiry);
+      this.reset();const history=[];
+      for(let index=0;index<10;index++){
+        this.now+=20000;await beginRelayCoreAlarm({storage:this.ctx.storage});
+        // Terminate each acknowledged context without catch/release. Raw
+        // observations do not contribute to the production cursor accounting.
+        history.push([...this.raw.sql.exec("SELECT expires_ms FROM relay_core_alarm_wakes WHERE id='alarm:recovery'")][0].expires_ms);
+      }
+      const interrupted={during:[...this.raw.sql.exec('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')][0].n,...this.costs()};
+      this.now+=20000;this.reset();const restarted={storage:this.ctx.storage},recovered=await beginRelayCoreAlarm(restarted);
+      releaseRelayCoreWake(restarted,recovered);await scheduleRelayCoreAlarm(restarted,()=>null);
+      const successful={nextAlarm:await this.raw.getAlarm(),...this.costs()};
+      this.now=expiry;this.reset();const admitted={storage:this.ctx.storage},ordinary=await reserveRelayCoreWake(admitted);
+      const during=[...this.raw.sql.exec('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')][0].n;
+      releaseRelayCoreWake(admitted,ordinary);await scheduleRelayCoreAlarm(admitted,()=>null);
+      const cleanup={during,remaining:[...this.raw.sql.exec('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')][0].n,nextAlarm:await this.raw.getAlarm(),...this.costs()};
+      return {expiry,history,interrupted,successful,cleanup};
+    }));
+    if(path==='/fixture/live-expiry'||path==='/fixture/late-ack')return Response.json(await this.clock(async()=>{
+      const expiry=this.now+RELAY_PRECOMMIT_EXPIRY_MS;
+      const first=await beginRelayCoreAlarm(this.ctx);abandonRelayCoreAlarm(this.ctx,first);
+      this.now=expiry-10;const started=this.now;
+      if(path==='/fixture/late-ack'){
+        this.state.lateAckAt=expiry+10;this.reset();
+        const active=await beginRelayCoreAlarm(this.ctx);assertRelayCoreWake(this.ctx,active);
+        const storedExpiry=[...this.raw.sql.exec("SELECT expires_ms FROM relay_core_alarm_wakes WHERE id='alarm:recovery'")][0].expires_ms;
+        releaseRelayCoreWake(this.ctx,active);await scheduleRelayCoreAlarm(this.ctx,()=>null);
+        return {storedExpiry,expectedExpiry:started+RELAY_PRECOMMIT_EXPIRY_MS,remaining:[...this.raw.sql.exec('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')][0].n,
+          nextAlarm:await this.raw.getAlarm(),...this.costs()};
+      }
+      const active=await beginRelayCoreAlarm(this.ctx);this.now=expiry;this.reset();
+      const ordinary=await reserveRelayCoreWake(this.ctx);assertRelayCoreWake(this.ctx,active);
+      const during=[...this.raw.sql.exec('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')][0].n;
+      releaseRelayCoreWake(this.ctx,ordinary);await scheduleRelayCoreAlarm(this.ctx,()=>null);
+      const heldUntil=await this.raw.getAlarm();
+      releaseRelayCoreWake(this.ctx,active);await scheduleRelayCoreAlarm(this.ctx,()=>null);
+      return {during,heldUntil,expected:started+60000,remaining:[...this.raw.sql.exec('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')][0].n,
+        nextAlarm:await this.raw.getAlarm(),...this.costs()};
+    }));
     return super.fetch(request);
   }
 }
@@ -132,7 +175,7 @@ export default {async fetch(request,env){
     return Response.json({result,...Object.fromEntries(keys.map(key=>[key,objects.reduce((sum,cost)=>sum+cost[key],0)])),queries:objects.flatMap(cost=>cost.queries)});
   }
   if(path==='seed')return fixture(shared,'seed');
-  if(['expired-admission','overlap'].includes(path))return fixture(env.HUBS.get(env.HUBS.idFromName('fictional-'+path)),path);
+  if(['expired-admission','overlap','cohort-restarts','live-expiry','late-ack'].includes(path))return fixture(env.HUBS.get(env.HUBS.idFromName('fictional-'+path)),path);
   if(!['first','second','expiry'].includes(path))return new Response('Unknown fictional case',{status:404});
   await Promise.all([shared,legacy].map(object=>fixture(object,'reset')));
   const response=await fixture(shared,path),result=await response.json();
@@ -209,9 +252,28 @@ test('native restarted saturated alarms run both lanes with bounded rows, alarm 
     for(const result of [second,interruptedFinished,repaired]){
       assert.equal(result.result.outbox.length,2);assert.ok(result.result.outbox.every(item=>item.status==='delivered'&&item.attempts===1));
     }
+    const restarts=await run('cohort-restarts');assert.equal(restarts.history.length,10);
+    assert.ok(restarts.history.every(expiry=>expiry===restarts.expiry),'Native restarted contexts cannot renew the abandoned cohort');
+    assert.equal(restarts.interrupted.during,257);assert.equal(restarts.successful.nextAlarm,restarts.expiry);
+    assert.equal(restarts.cleanup.during,1);assert.equal(restarts.cleanup.remaining,0);assert.equal(restarts.cleanup.nextAlarm,null);
+    assert.ok(restarts.interrupted.rowsRead<=1100);assert.ok(restarts.interrupted.rowsWritten<=1100);assert.equal(restarts.interrupted.alarmSets,10);
+    assert.ok(restarts.successful.rowsRead<=32);assert.ok(restarts.successful.rowsWritten<=16);assert.ok(restarts.successful.alarmSets<=2);
+    assert.ok(restarts.cleanup.rowsRead<=280);assert.ok(restarts.cleanup.rowsWritten<=790);assert.equal(restarts.cleanup.alarmSets,1);assert.equal(restarts.cleanup.alarmDeletes,1);
+    const live=await run('live-expiry');assert.equal(live.during,2);assert.equal(live.heldUntil,live.expected);assert.equal(live.remaining,0);assert.equal(live.nextAlarm,null);
+    const late=await run('late-ack');assert.equal(late.storedExpiry,late.expectedExpiry);assert.equal(late.remaining,0);assert.equal(late.nextAlarm,null);
+    for(const result of [restarts.interrupted,restarts.successful,restarts.cleanup,live,late]){
+      assert.equal(result.kvWrites,0);assert.equal(result.kvDeletes,0);assert.equal(result.egress??result.publisherFetches,0);
+    }
+    for(const result of [restarts,live,late])assert.equal(result.callbackTransportRequests,0);
+    for(const result of [live,late]){assert.ok(result.rowsRead<=32);assert.ok(result.rowsWritten<=32);assert.ok(result.alarmSets<=2);assert.equal(result.alarmDeletes,1);}
     const compact=({queries,result,...cost})=>({scope:'native whole restarted Hub.alarm across shared and legacy objects; setup/observation excluded',...cost});
     process.stdout.write('LOCAL_FICTIONAL_SATURATED_ALARM_NATIVE_COST '+JSON.stringify({first:compact(first),second:compact(second),cleanup:compact(cleanup),
       expiredAdmission:{...compact(admission),scope:'native ordinary admission after all 256 slots expired'},overlap:{...compact(overlap),scope:'native overlapping alarm reservation/composition at 256 ordinary slots'},
-      interrupted:compact(interrupted),recovered:compact(recovered),recoveredSecond:compact(recoveredSecond),interruptedCleanup:compact(interruptedCleanup),interruptedFinished:compact(interruptedFinished),rejected:compact(rejected),repaired:compact(repaired)})+'\n');
+      interrupted:compact(interrupted),recovered:compact(recovered),recoveredSecond:compact(recoveredSecond),interruptedCleanup:compact(interruptedCleanup),interruptedFinished:compact(interruptedFinished),rejected:compact(rejected),repaired:compact(repaired),
+      interruptedRestarts:{...compact(restarts.interrupted),scope:'native production recovery helpers across ten terminated context identities at 256 ordinary slots',expiry:restarts.expiry,history:restarts.history},
+      restartedSuccess:{...compact(restarts.successful),scope:'native production recovery helper successful restart after ten terminated contexts'},
+      restartedCleanup:{...compact(restarts.cleanup),scope:'native ordinary admission/release/composition at original cohort expiry'},
+      liveExpiry:{...compact(live),scope:'native ordinary admission expires an orphan while a cached pass remains live'},
+      lateAck:{...compact(late),scope:'native recovery admission ACK crosses older orphan expiry; assertion and completion cleanup'}})+'\n');
   }finally{await mf.dispose();}
 });
