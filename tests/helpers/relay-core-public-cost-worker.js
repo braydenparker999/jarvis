@@ -1,6 +1,8 @@
 // Local workerd cost fixture only. No application entrypoint or live transport.
 import {sharedSchema,sharedStore,validateSharedRead,readLegacyInboxPage} from '../../backend/shared.js';
 import {publicationSchema,syncPublications,nextPublicationReconciliationAt} from '../../backend/publications.js';
+import {relayOwnerSchema} from '../../backend/relay-owner.js';
+import {relayEventSchema} from '../../backend/relay-events.js';
 
 const id=n=>'00000000-0000-4000-8000-'+String(n).padStart(12,'0');
 const stamp='2026-10-08T00:00:00Z';
@@ -19,6 +21,7 @@ export class CorePublicCostFixture {
   meta(key){return JSON.parse([...this.ctx.storage.sql.exec('SELECT value FROM shared_meta WHERE key=?',key)][0]?.value||'null');}
   async seed(mode,count){
     this.now=Date.now();this.mode=mode;
+    if(mode==='private'){relayOwnerSchema(this.ctx);relayEventSchema(this.ctx);return;}
     const sql=this.ctx.storage.sql;
     if(mode==='cold'){
       sql.exec(`CREATE TABLE shared_entries(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NULL UNIQUE,kind TEXT NOT NULL,
@@ -53,7 +56,9 @@ export class CorePublicCostFixture {
     if(url.pathname==='/seed'){await this.seed(mode,Number(url.searchParams.get('count')||5000));return Response.json({ok:true});}
     this.cursors=[];this.egress=0;this.legacyReads=0;let result;
     const fetcher=()=>{this.egress++;return Response.json([]);};
-    if(url.pathname==='/warm-state'||url.pathname==='/warm-changes'){
+    if(url.pathname==='/private-next'){
+      const next=nextPublicationReconciliationAt(this.ctx,this.now);result={status:200,next};
+    }else if(url.pathname==='/warm-state'||url.pathname==='/warm-changes'){
       const path=url.pathname.endsWith('state')?'/internal/shared/state':'/internal/shared/changes';
       const params=new URLSearchParams(path.endsWith('state')?{after:'2000'}:{cursor:'pc2:2000'});
       const validation=validateSharedRead(this.ctx,path,params);if(validation)throw Error('Fictional read invalid');

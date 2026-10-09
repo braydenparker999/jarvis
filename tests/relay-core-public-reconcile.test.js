@@ -4,6 +4,8 @@ import {DatabaseSync} from 'node:sqlite';
 import {Hub} from '../backend/worker.js';
 import {sharedSchema,sharedStore,PUBLIC_KEY,readLegacyInboxPage,validateSharedRead} from '../backend/shared.js';
 import {backfillPublicChanges,publicChangesReady} from '../backend/public-coordination.js';
+import {relayOwnerSchema} from '../backend/relay-owner.js';
+import {relayEventSchema,scheduleRelayAlarm} from '../backend/relay-events.js';
 import {syncPublications,publicationSchema,decodePublication,takePublicationFetch,seedPublicationReconciliation,
   nextPublicationReconciliationAt,publicationReadNeedsWake,PUBLICATION_LIMITS,COMMENTS_URL} from '../backend/publications.js';
 
@@ -52,6 +54,36 @@ function fixture(t,{cold=0,messages=[]}={}) {
 }
 async function empty(url){assert.equal(new URL(url).origin+new URL(url).pathname,COMMENTS_URL);return Response.json([]);}
 const changes=h=>sharedStore(h.ctx,'/internal/shared/changes').json();
+
+test('unseeded and private-only next-alarm lookup is pure, catches only missing metadata, and sees a later public seed',async t=>{
+  const raw=fixture(t),tables=()=>raw.rows("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name");
+  assert.deepEqual(tables(),[]);raw.queries.length=0;
+  for(let n=0;n<3;n++)assert.equal(nextPublicationReconciliationAt(raw.ctx,NOW),null);
+  assert.deepEqual(tables(),[]);assert.ok(raw.queries.every(q=>q==='SELECT value FROM shared_meta LIMIT 0'));
+  assert.equal(raw.fallbackFetches,0);assert.equal(raw.internalReads,0);
+  seedPublicationReconciliation(raw.ctx,NOW);assert.equal(nextPublicationReconciliationAt(raw.ctx,NOW),NOW,
+    'An earlier absent-table probe must not cache the missing lane');
+  const failure=fixture(t);t.mock.method(failure.storage.sql,'exec',()=>{throw Error('Fictional SQLITE storage failure');});
+  assert.throws(()=>nextPublicationReconciliationAt(failure.ctx,NOW),/Fictional SQLITE storage failure/,'Real storage errors propagate');
+});
+
+test('initialized private scheduling neither creates public schema nor advances an unseeded cold public checkpoint',async t=>{
+  for(const cold of [0,251]){
+    const h=fixture(t,{cold});if(cold)sharedSchema(h.ctx);relayOwnerSchema(h.ctx);relayEventSchema(h.ctx);
+    const beforeTables=h.rows("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name");
+    const beforeChanges=h.rows('SELECT total_changes() AS n')[0].n;
+    const beforeMeta=cold?h.rows('SELECT * FROM shared_meta ORDER BY key'):null;
+    h.queries.length=0;
+    assert.equal(nextPublicationReconciliationAt(h.ctx,NOW),null);await scheduleRelayAlarm(h.ctx,NOW);
+    assert.equal(nextPublicationReconciliationAt(h.ctx,NOW),null);
+    assert.equal(h.rows('SELECT total_changes() AS n')[0].n,beforeChanges,'Scheduler lookup must do no schema/migration writes');
+    assert.deepEqual(h.rows("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"),beforeTables);
+    if(cold)assert.deepEqual(h.rows('SELECT * FROM shared_meta ORDER BY key'),beforeMeta);
+    else assert.equal(beforeTables.some(r=>r.name.startsWith('shared_')||r.name.startsWith('public_')||r.name==='imported_comments'),false);
+    assert.equal(h.fallbackFetches,0);assert.equal(h.internalReads,0);
+    assert.equal(h.queries.some(q=>/\b(?:CREATE|INSERT|UPDATE|DELETE)\b/.test(q)&&/shared_|public_|imported_comments/.test(q)),false);
+  }
+});
 
 test('cold indexing is checkpointed, keeps v1 usable, withholds v2 cursors, and resumes without skipping concurrent entries',async t=>{
   const h=fixture(t,{cold:251});sharedSchema(h.ctx);

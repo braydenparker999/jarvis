@@ -16,9 +16,10 @@ test('local workerd measures bounded cold/pending passes, warm reads, idle polli
   try{
     const request=async(path,mode)=>{const response=await mf.dispatchFetch('https://cost.example.test/'+path+'?mode='+mode+'&count=5000');
       assert.equal(response.status,200);return response.json();};
-    for(const mode of ['warm','cold','pending','legacy'])await request('seed',mode);
+    for(const mode of ['warm','cold','pending','legacy','private'])await request('seed',mode);
     const results={state:await request('warm-state','warm'),changes:await request('warm-changes','warm'),
-      cold:await request('pass','cold'),pending:await request('pass','pending'),legacy:await request('pass','legacy'),idle:await request('idle','warm')};
+      cold:await request('pass','cold'),pending:await request('pass','pending'),legacy:await request('pass','legacy'),idle:await request('idle','warm'),
+      private:await request('private-next','private')};
     process.stdout.write('LOCAL_CORE_PUBLIC_COST '+JSON.stringify(Object.fromEntries(Object.entries(results).map(([name,r])=>[name,
       {rowsRead:r.rowsRead,rowsWritten:r.rowsWritten,egress:r.egress,legacyFullKVReads:r.legacyFullKVReads,legacyFullKVBytes:r.legacyFullKVBytes,...r.result}])) )+'\n');
     assert.equal(results.state.result.count,200);assert.equal(results.state.egress,0);assert.equal(results.state.rowsWritten,0);
@@ -34,6 +35,8 @@ test('local workerd measures bounded cold/pending passes, warm reads, idle polli
       'A bounded output page still reads the entire fixed old KV blob');
     assert.ok(results.legacy.rowsRead<600);assert.ok(results.legacy.rowsWritten<600);assert.equal(results.legacy.egress,1);
     assert.equal(results.idle.egress,1);assert.ok(results.idle.rowsRead<120);assert.ok(results.idle.rowsWritten<40);
+    assert.equal(results.private.result.next,null);assert.equal(results.private.rowsRead,0);assert.equal(results.private.rowsWritten,0);
+    assert.equal(results.private.egress,0);assert.equal(results.private.legacyFullKVReads,0);
     assert.equal(external,0,'All provider responses are fictional');
   }finally{await mf.dispose();}
 });

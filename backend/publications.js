@@ -10,7 +10,7 @@ export const PUBLICATION_LIMITS=Object.freeze({intervalMs:INTERVAL,continuationM
   reconcileFetchesPerHour:36,reconcileFetchesPerDay:288,hintFetchesPerHour:12,totalFetchesPerHour:48,
   passesPerDay:480,pendingPerHour:7200,pendingPerDay:28800,conflictsPerHour:1200,conflictsPerDay:4800,
   backfillPerHour:6000,backfillPerDay:12000});
-const schemas=new WeakSet(),inFlight=new WeakMap();
+const schemas=new WeakSet(),sharedMetadata=new WeakSet(),inFlight=new WeakMap();
 const GITHUB_HEADERS={Accept:'application/vnd.github+json','User-Agent':'Jarvis-publications','X-GitHub-Api-Version':'2022-11-28'};
 const uuid=x=>typeof x==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(x);
 const nonempty=(x,max)=>typeof x==='string'&&x.trim().length>0&&x.length<=max;
@@ -38,6 +38,7 @@ async function boundedJson(response,limit=2000000) {
 export function publicationSchema(ctx) {
   if(schemas.has(ctx))return;
   sharedSchema(ctx);
+  sharedMetadata.add(ctx);
   ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS imported_comments (comment_id INTEGER PRIMARY KEY, publication TEXT NOT NULL, imported INTEGER NOT NULL DEFAULT 0, error TEXT)');
   ctx.storage.sql.exec('CREATE INDEX IF NOT EXISTS imported_comments_status ON imported_comments(imported,comment_id)');
   ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS publication_recovery (comment_id INTEGER PRIMARY KEY)');
@@ -169,7 +170,13 @@ export function seedPublicationReconciliation(ctx,now=Date.now(),env=null) {
   if(env?.HUBS)seedLegacyInbox(ctx,now);
 }
 export function nextPublicationReconciliationAt(ctx,now=Date.now()) {
-  publicationSchema(ctx);
+  // Private delivery scheduling must not initialize a public lane. Probe the
+  // table itself without reading rows or scanning the schema catalog; cache only
+  // positive existence so a later legitimate public seed is immediately visible.
+  if(!sharedMetadata.has(ctx)){
+    try{ctx.storage.sql.exec('SELECT value FROM shared_meta LIMIT 0');sharedMetadata.add(ctx);}
+    catch(error){if(/\bno such table:\s*(?:main\.)?shared_meta\b/i.test(error?.message||''))return null;throw error;}
+  }
   if(!meta(ctx,'publisher-reconciliation-enabled'))return null;
   const blocked=Number(meta(ctx,'publisher-pass-not-before')||0);
   const main=Math.max(Number(meta(ctx,'publisher-next-attempt')||now),Number(meta(ctx,'publisher-upstream-not-before')||0));
