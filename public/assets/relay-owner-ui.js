@@ -380,7 +380,7 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
     const remember = make('label', '', 'relay-owner-remember'), checkbox = make('input');
     checkbox.type = 'checkbox'; checkbox.id = 'relay-owner-login-remember'; checkbox.checked = false;
     remember.append(checkbox, make('span', 'Remember this device session on this browser'));
-    const notice = make('p', 'If checked, this browser saves only a device token and device ID. Access expires after exactly 365 days of inactivity and renews on authenticated use. Scripts on this shared website origin can read the token. Anyone using this browser can use this access. Your account username and password, private messages and drafts are not saved by Relay in browser storage. Clearing browser data ends this device session; sign in here again with your account credentials.', 'relay-owner-note');
+    const notice = make('p', 'If checked, this browser saves only a device token and device ID. Access expires after exactly 365 days of inactivity and renews on authenticated use. Scripts on this shared website origin can read the token. Anyone using this browser can use this access. Your account username and password and private history are not saved by Relay in browser storage. Unsent drafts are kept in this tab, separate from public Relay drafts. Clearing browser data ends this device session; sign in here again with your account credentials.', 'relay-owner-note');
     notice.id = 'relay-owner-login-storage-notice'; checkbox.setAttribute('aria-describedby', notice.id);
     let replacementSelect = null, replacementConsent = null;
     if (state.loginDevices.length) {
