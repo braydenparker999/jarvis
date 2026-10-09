@@ -208,11 +208,11 @@ export async function relayOwnerStore(ctx, env, body, enqueueOwnerMessage = () =
     const allowed = {
       pair_status: ['request_id'], session: [], messages_list: ['after', 'limit'], message: ['id', 'body'],
       conversation: ['message_id'], delivery_list: ['message_ids'], delivery_retry: ['message_id'], devices_list: [], device_revoke: ['device_id'],
-      jobs_list: ['after', 'limit'], jobs_changes: ['after', 'limit', 'through'], job_read: ['job_id'], job_create: ['id', 'title', 'body', 'action_kind'], job_cancel: ['job_id'], job_retry: ['job_id', 'id', 'confirm_duplicate_risk'],
+      jobs_list: ['after', 'limit'], jobs_changes: ['after', 'limit', 'through'], job_read: ['job_id'], job_create: ['id', 'title', 'body', 'action_kind', 'project_title', 'goal_title'], job_cancel: ['job_id'], job_retry: ['job_id', 'id', 'confirm_duplicate_risk'],
     };
     if (!body || !Object.hasOwn(allowed, body.op)) fail(400, 'Invalid owner operation');
     const required = ['pair_status', 'message', 'conversation', 'device_revoke', 'delivery_list', 'delivery_retry', 'job_read', 'job_create', 'job_cancel', 'job_retry'].includes(body.op)
-      ? allowed[body.op].filter(key => key !== 'confirm_duplicate_risk') : [];
+      ? allowed[body.op].filter(key => !['confirm_duplicate_risk', 'project_title', 'goal_title'].includes(key)) : [];
     fields(body, ['op', 'token_hash', ...allowed[body.op]], ['op', 'token_hash', ...required]);
     if (!hex(body.token_hash)) fail(401, 'Owner device authentication required');
     return ctx.storage.transactionSync(() => {
@@ -235,15 +235,15 @@ export async function relayOwnerStore(ctx, env, body, enqueueOwnerMessage = () =
       if (body.op === 'messages_list') result = listMessages(ctx, body.after, body.limit,false,env);
       if (body.op === 'conversation') result = conversation(ctx, body.message_id,env);
       if (body.op === 'message') result = insertMessage(ctx, session, body, enqueueOwnerMessage, now,env);
-      if (body.op === 'jobs_list') result = relayOwnerJobsList(ctx, env, body.after, body.limit, now);
-      if (body.op === 'jobs_changes') result = relayOwnerJobsChanges(ctx, env, body.after, body.limit, body.through, now);
-      if (body.op === 'job_read') result = relayOwnerJobRead(ctx, env, body.job_id, now);
+      if (body.op === 'jobs_list') result = relayOwnerJobsList(ctx, env, body.after, body.limit, now, true);
+      if (body.op === 'jobs_changes') result = relayOwnerJobsChanges(ctx, env, body.after, body.limit, body.through, now, true);
+      if (body.op === 'job_read') result = relayOwnerJobRead(ctx, env, body.job_id, now, true);
       if (body.op === 'job_create') {
         const specification = relayOwnerJobSpecification(body);
         result = insertMessage(ctx, session, body, enqueueOwnerMessage, now, env, specification);
-        result.job = relayOwnerJobRead(ctx, env, body.id, now).job;
+        result.job = relayOwnerJobRead(ctx, env, body.id, now, true).job;
       }
-      if (body.op === 'job_cancel') result = relayOwnerJobCancel(ctx, env, body.job_id, session, now);
+      if (body.op === 'job_cancel') result = relayOwnerJobCancel(ctx, env, body.job_id, session, now, true);
       if (body.op === 'job_retry') {
         const prepared = relayOwnerJobRetryPrepare(ctx, env, body, session, now);
         if (prepared.existing) result = {entry: entry(rows(ctx, 'SELECT * FROM relay_owner_entries WHERE id=?', body.id)[0], ctx, env), newWrite: false};
@@ -251,7 +251,7 @@ export async function relayOwnerStore(ctx, env, body, enqueueOwnerMessage = () =
           result = insertMessage(ctx, session, {id: body.id, body: prepared.request.body}, enqueueOwnerMessage, now, env);
           relayOwnerJobRetryLink(ctx, prepared.parent, rows(ctx, 'SELECT * FROM relay_owner_entries WHERE id=?', body.id)[0], session, body.confirm_duplicate_risk, now);
         }
-        result.job = relayOwnerJobRead(ctx, env, body.id, now).job;
+        result.job = relayOwnerJobRead(ctx, env, body.id, now, true).job;
       }
       if(body.op==='delivery_list'){
         if(!Array.isArray(body.message_ids)||body.message_ids.length>50||body.message_ids.some(id=>!uuid(id))||new Set(body.message_ids).size!==body.message_ids.length)fail(400,'Invalid delivery message IDs');
@@ -391,8 +391,8 @@ export async function relayOwnerPublic(request, env) {
     }
     const inputFields = {pair_start: ['label'], pair_status: ['request_id'], message: ['id', 'body'], delivery_list:['message_ids'], delivery_retry:['message_id'], device_revoke: ['device_id'],
       credentials_prepare: ['purpose'], credentials_save: ['username', 'password', 'password_confirmation', 'current_password', 'consent_token', 'confirm', 'access_days', 'preserve_existing_sessions'], password_login: ['username', 'password', 'label', 'replace_device_id', 'confirm_replacement'],
-      job_create: ['id', 'title', 'body', 'action_kind'], job_cancel: ['job_id'], job_retry: ['job_id', 'id', 'confirm_duplicate_risk']};
-    fields(body, inputFields[route[1]] || [], (inputFields[route[1]] || []).filter(k => !['current_password', 'replace_device_id', 'confirm_replacement', 'confirm_duplicate_risk'].includes(k)));
+      job_create: ['id', 'title', 'body', 'action_kind', 'project_title', 'goal_title'], job_cancel: ['job_id'], job_retry: ['job_id', 'id', 'confirm_duplicate_risk']};
+    fields(body, inputFields[route[1]] || [], (inputFields[route[1]] || []).filter(k => !['current_password', 'replace_device_id', 'confirm_replacement', 'confirm_duplicate_risk', 'project_title', 'goal_title'].includes(k)));
     const input = {op: route[1], ...body};
     if (['pair_start', 'password_login'].includes(route[1])) input.rate_hash = await hash('owner-' + route[1] + '-ip:' + (request.headers.get('CF-Connecting-IP') || 'unknown'));
     else {

@@ -242,7 +242,36 @@ function resultBody(value) {
 }
 export function relayOwnerJobSpecification(input) {
   if (!ACTION_KINDS.includes(input.action_kind)) fail(400, 'Invalid job action kind');
-  return {title: title(input.title), actionKind: input.action_kind};
+  const projectTitle = input.project_title === undefined ? null : title(input.project_title);
+  const goalTitle = input.goal_title === undefined ? null : title(input.goal_title);
+  if (goalTitle && !projectTitle) fail(400, 'A goal requires a project');
+  return {title: title(input.title), actionKind: input.action_kind, projectTitle, goalTitle};
+}
+
+function organization(ctx, row) {
+  if (!row.specified) return {projectTitle: null, goalTitle: null};
+  const record = rows(ctx, "SELECT argument_json FROM relay_owner_job_events WHERE id=? AND job_id=? AND kind='specified'",
+    'specified:' + row.root_job_id, row.root_job_id)[0];
+  try {
+    const value = record ? JSON.parse(record.argument_json).organization : null;
+    if (!value) return {projectTitle: null, goalTitle: null};
+    const projectTitle = title(value.projectTitle), goalTitle = value.goalTitle === null ? null : title(value.goalTitle);
+    return {projectTitle, goalTitle};
+  } catch { fail(503, 'Private project metadata unavailable'); }
+}
+
+// Presentation reads use the existing job/event indexes and change feed. These
+// labels and summaries do not alter execution evidence or the cached MCP shape.
+function presentation(ctx, row) {
+  const update = rows(ctx, `SELECT id,kind,summary,created_ms FROM relay_owner_job_events
+    WHERE job_id=? AND authentication_source='owner-oauth-mcp'
+    AND writer_id!='accepted-owner-reply'
+    AND kind IN ('claimed','running','waiting_for_owner','failed','cancelled','work_completed','result_corrected')
+    AND NOT(kind='running' AND summary='Authenticated execution progress acknowledged.')
+    ORDER BY seq DESC LIMIT 1`, row.id)[0];
+  return {...organization(ctx, row), latestUpdate: update ? {id: update.id, jobId: row.id, kind: update.kind,
+    summary: update.summary, createdAt: iso(update.created_ms), authentication_source: 'owner-oauth-mcp',
+    author_authenticated: true, visibility: 'private'} : null};
 }
 function appendEvent(ctx, {id, jobId, kind, message, now, source, arguments: argumentsValue = {}, writer}) {
   ctx.storage.sql.exec('INSERT INTO relay_owner_job_events(id,job_id,kind,summary,created_ms,authentication_source,argument_json,writer_id) VALUES(?,?,?,?,?,?,?,?)',
@@ -288,13 +317,16 @@ export function relayOwnerJobEnsure(ctx, request) {
 export function relayOwnerJobSpecify(ctx, request, specification, now) {
   const row = relayOwnerJobEnsure(ctx, request);
   if (row.specified) {
-    if (row.title !== specification.title || row.action_kind !== specification.actionKind) fail(409, 'Private job ID conflict');
+    const labels = organization(ctx, row);
+    if (row.title !== specification.title || row.action_kind !== specification.actionKind
+      || labels.projectTitle !== specification.projectTitle || labels.goalTitle !== specification.goalTitle) fail(409, 'Private job ID conflict');
     return row;
   }
   if (row.stage !== 'queued' || savedReply(ctx, row) || row.cancel_requested_ms !== null || row.parent_job_id !== null || row.lease_run_id !== null) fail(409, 'Private job can no longer be classified');
   ctx.storage.sql.exec('UPDATE relay_owner_jobs SET title=?,action_kind=?,specified=1,updated_ms=? WHERE id=?', specification.title, specification.actionKind, now, row.id);
   appendEvent(ctx, {id: 'specified:' + row.id, jobId: row.id, kind: 'specified', message: 'Owner supplied the request title and action classification.', now,
-    source: request.authentication_source, writer: request.device_id});
+    source: request.authentication_source, writer: request.device_id,
+    arguments: specification.projectTitle ? {organization: {projectTitle: specification.projectTitle, goalTitle: specification.goalTitle}} : {}});
   return jobRow(ctx, row.id);
 }
 
@@ -372,7 +404,7 @@ function resultHistory(ctx, row, reply) {
   return [originalResult, ...corrections.map(result => ({...provenance, id: result.id, version: result.version, body: result.body,
     createdAt: iso(result.created_ms), correctionSummary: result.correction_summary}))];
 }
-function present(ctx, env, row, now) {
+function present(ctx, env, row, now, includePresentation = false) {
   const request = original(ctx, row.request_id), reply = savedReply(ctx, row);
   if (row.result_reply_id && (!reply || reply.id !== row.result_reply_id)) fail(503, 'Private job result unavailable');
   const completion = completionEvidence(ctx, row), stage = effectiveStage(ctx, row, now, completion);
@@ -400,20 +432,20 @@ function present(ctx, env, row, now) {
       : stage === 'outcome_unknown' ? {code: 'lease_expired', message: 'Execution acknowledgement expired; the outcome is unknown.', outcome: 'unknown'}
       : row.failure_code ? {code: row.failure_code, message: row.failure_message, outcome: row.outcome} : null,
     retryAllowed: canRetry(ctx, row, now) && !child, retryRequiresConfirmation: requiresRetryConfirmation(ctx, row, now), retryJobId: child?.id ?? null,
-    delivery};
+    delivery, ...(includePresentation ? {presentation: presentation(ctx, row)} : {})};
 }
-export function relayOwnerJobRead(ctx, env, id, now = Date.now()) {
+export function relayOwnerJobRead(ctx, env, id, now = Date.now(), includePresentation = false) {
   const row = relayOwnerJobEnsure(ctx, original(ctx, id));
-  return {job: present(ctx, env, row, now), resultHistory: resultHistory(ctx, row, savedReply(ctx, row)), events: rows(ctx, 'SELECT id,job_id,kind,summary,created_ms,authentication_source,writer_id FROM relay_owner_job_events WHERE job_id=? ORDER BY seq', id)
+  return {job: present(ctx, env, row, now, includePresentation), resultHistory: resultHistory(ctx, row, savedReply(ctx, row)), events: rows(ctx, 'SELECT id,job_id,kind,summary,created_ms,authentication_source,writer_id FROM relay_owner_job_events WHERE job_id=? ORDER BY seq', id)
     .map(event => ({id: event.id, jobId: event.job_id, kind: event.kind === 'completed' && event.writer_id === 'accepted-owner-reply' ? 'result_saved' : event.kind,
       summary: event.summary, createdAt: iso(event.created_ms), authentication_source: event.authentication_source}))};
 }
-export function relayOwnerJobsList(ctx, env, after, limit, now = Date.now()) {
+export function relayOwnerJobsList(ctx, env, after, limit, now = Date.now(), includePresentation = false) {
   const start = cursor(after) || 0;
   if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 50)) fail(400, 'Invalid job page size');
   const size = limit ?? 20;
   const selected = rows(ctx, "SELECT * FROM relay_owner_entries WHERE kind='user' AND principal=? AND seq>? ORDER BY seq LIMIT ?", RELAY_OWNER, start, size + 1);
-  const jobs = selected.slice(0, size).map(request => present(ctx, env, relayOwnerJobEnsure(ctx, request), now));
+  const jobs = selected.slice(0, size).map(request => present(ctx, env, relayOwnerJobEnsure(ctx, request), now, includePresentation));
   return {jobs, nextCursor: selected.length > size ? String(selected[size - 1].seq) : null};
 }
 
@@ -421,7 +453,7 @@ export function relayOwnerJobsList(ctx, env, after, limit, now = Date.now()) {
 // advances at most one page's worth of migration/deadline/configuration work.
 // Replaced versions beyond a fence remain visible after its committed cursor;
 // this is a current-state feed, not an immutable snapshot of every transition.
-export function relayOwnerJobsChanges(ctx, env, after, limit, through, now = Date.now()) {
+export function relayOwnerJobsChanges(ctx, env, after, limit, through, now = Date.now(), includePresentation = false) {
   const start = cursor(after) ?? 0, requestedFence = cursor(through);
   if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 50)) fail(400, 'Invalid job page size');
   const size = limit ?? 20, watermark = changeWatermark(ctx);
@@ -431,19 +463,19 @@ export function relayOwnerJobsChanges(ctx, env, after, limit, through, now = Dat
   if (requestedFence === null) advanceChanges(ctx, env, size, now);
   const fence = requestedFence ?? changeWatermark(ctx);
   const selected = rows(ctx, 'SELECT cursor,job_id FROM relay_owner_job_changes WHERE cursor>? AND cursor<=? ORDER BY cursor LIMIT ?', start, fence, size + 1);
-  const changes = selected.slice(0, size).map(change => ({cursor: String(change.cursor), job: present(ctx, env, relayOwnerJobEnsure(ctx, original(ctx, change.job_id)), now)}));
+  const changes = selected.slice(0, size).map(change => ({cursor: String(change.cursor), job: present(ctx, env, relayOwnerJobEnsure(ctx, original(ctx, change.job_id)), now, includePresentation)}));
   const more = selected.length > size, committed = more ? changes.at(-1).cursor : String(fence);
   const pending = refreshPending(ctx, now) || rows(ctx, 'SELECT cursor FROM relay_owner_job_changes WHERE cursor>? LIMIT 1', fence).length > 0;
   return {changes, cursor: committed, through: String(fence), nextCursor: more ? committed : null, bootstrapPending: pending};
 }
-export function relayOwnerJobCancel(ctx, env, id, session, now) {
+export function relayOwnerJobCancel(ctx, env, id, session, now, includePresentation = false) {
   const row = relayOwnerJobEnsure(ctx, original(ctx, id));
-  if (row.cancel_requested_ms !== null) return {job: present(ctx, env, row, now), newWrite: false};
+  if (row.cancel_requested_ms !== null) return {job: present(ctx, env, row, now, includePresentation), newWrite: false};
   if (['completed', 'failed', 'cancelled'].includes(effectiveStage(ctx, row, now))) fail(409, 'Private job already has a final state');
   ctx.storage.sql.exec('UPDATE relay_owner_jobs SET cancel_requested_ms=?,updated_ms=? WHERE id=?', now, now, id);
   appendEvent(ctx, {id: 'cancel:' + id, jobId: id, kind: 'cancellation_requested', message: 'Owner requested cancellation; execution has not acknowledged it.', now,
     source: session.authentication_source, writer: session.device_id});
-  return {job: present(ctx, env, jobRow(ctx, id), now), newWrite: true};
+  return {job: present(ctx, env, jobRow(ctx, id), now, includePresentation), newWrite: true};
 }
 
 export function relayOwnerJobRetryPrepare(ctx, env, input, session, now) {

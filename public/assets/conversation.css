@@ -101,6 +101,28 @@ body:is(.relay-page,.muse-page) .rich-body .code-copy{min-height:48px}
 body:is(.relay-page,.muse-page) .rich-body .code-block pre{padding-top:60px}
 .owner-request-detail .request-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:20px}
 .owner-request-detail .request-actions button{min-height:48px}
+.owner-job-organization{grid-column:1/-1}
+.owner-job-organization summary{min-height:48px;padding:12px 0;cursor:pointer;color:#c4beb5;font-size:13px;line-height:24px}
+.owner-job-labels{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px}
+/* Keep private chat inside a shrinking viewport while its resize event is pending. */
+.relay-page[data-conversation-mode=owner] .workspace{max-height:100dvh}
+.owner-work{width:100%;max-width:640px;margin:0 auto}
+.owner-work h2{font-size:20px;line-height:28px;margin:0 0 8px}
+.owner-work h3{font-size:14px;line-height:22px;margin:16px 0 8px}
+.owner-work .request-meta{font-size:12px;line-height:20px;color:#b6aea2;margin:8px 0;overflow-wrap:anywhere}
+.owner-work .request-body{font-size:14px;line-height:22px;white-space:pre-wrap;overflow-wrap:anywhere;margin:8px 0}
+.owner-work summary{min-height:48px;cursor:pointer;overflow-wrap:anywhere;padding:12px 0;font-size:14px;line-height:24px}
+.owner-work summary:focus-visible,.owner-job-organization summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+.owner-work-project{margin:12px 0;border-top:1px solid #ffffff0c}
+.owner-work-goal{padding-left:12px;border-left:1px solid #ffffff0c}
+.owner-work-task{padding:0 0 8px;border-bottom:1px solid #ffffff0c}
+.owner-work-task>summary{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px}
+.owner-work-title{flex:1 1 160px}
+.owner-work .job-state{font-size:12px;line-height:20px;color:#c2b6a2}
+.owner-work-task[data-state=finished] .job-state{color:#a4c8b1}
+.owner-work-blocker{border-left:2px solid #a77b40;padding-left:12px;color:#cdb99a}
+.owner-work .text-button{min-height:48px;font-size:12px;padding:8px 0}
+.owner-work-attempts .text-button{display:block;text-align:left}
 @media(max-width:370px){body:is(.relay-page,.muse-page) .topbar{padding-inline:8px;gap:4px}body:is(.relay-page,.muse-page) .messages{padding-inline:16px}body:is(.relay-page,.muse-page) .composer{padding-inline:12px}.conversation-visibility{font-size:11px}.composer-mode-button{font-size:11px;max-width:126px}.relay-page .relay-owner-content .relay-owner-panel{padding-inline:16px}.relay-page .relay-owner-content .relay-owner-chat{padding:0}}
 @media(max-height:600px){body:is(.relay-page,.muse-page) .topbar{min-height:calc(64px + env(safe-area-inset-top))}body:is(.relay-page,.muse-page) .messages{padding-top:16px}body:is(.relay-page,.muse-page) .composer-input textarea{max-height:96px}body:is(.relay-page,.muse-page) .chat-empty{padding-block:24px}.owner-job-fields{gap:6px}.owner-job-fields p{display:none}}
 @media(min-width:800px){body:is(.relay-page,.muse-page) .workspace{border-inline:1px solid #ffffff0a}body:is(.relay-page,.muse-page) .messages{padding-inline:32px}body:is(.relay-page,.muse-page) .composer{padding-inline:28px}body:is(.relay-page,.muse-page) .app-sheet{bottom:24px;border-radius:12px}}
