@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {createRelayFixture} from './relay-fixture.js';
 import {publicationSchema} from '../backend/publications.js';
 import {SHARED_OBJECT} from '../backend/shared.js';
-import {scheduleRelayCoreAlarm,reserveRelayCoreWake,releaseRelayCoreWake,beginRelayCoreAlarm,RELAY_ALARM_RETRY_MS,RELAY_PRECOMMIT_EXPIRY_MS} from '../backend/relay-core-alarm.js';
+import {scheduleRelayCoreAlarm,reserveRelayCoreWake,releaseRelayCoreWake,beginRelayCoreAlarm,abandonRelayCoreAlarm,RELAY_ALARM_RETRY_MS,RELAY_PRECOMMIT_EXPIRY_MS} from '../backend/relay-core-alarm.js';
 
 function fixture(t) {
   const f=createRelayFixture();t.after(()=>f.close());
@@ -108,4 +108,100 @@ test('failed wake admission removes only its reservation and bounds stalled conc
   const recovery=await beginRelayCoreAlarm(f.ctx,now+RELAY_PRECOMMIT_EXPIRY_MS);
   assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')[0].n,1);
   releaseRelayCoreWake(f.ctx,recovery);
+});
+
+test('a saturated restarted alarm recovers at the first due time without consuming ordinary admission capacity',async t=>{
+  const f=fixture(t),now=Date.now();
+  await reserveRelayCoreWake(f.ctx,now,100);
+  for(let index=1;index<256;index++)f.ctx.storage.sql.exec('INSERT INTO relay_core_alarm_wakes VALUES(?,?,?)','orphan-'+index,now+100,now+RELAY_PRECOMMIT_EXPIRY_MS);
+  const restarted={storage:f.ctx.storage},recovery=await beginRelayCoreAlarm(restarted,now+100);
+  assert.equal(await f.ctx.storage.getAlarm(),now+100+RELAY_ALARM_RETRY_MS);
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')[0].n,257);
+  const sets=f.alarms.length;
+  await assert.rejects(reserveRelayCoreWake(restarted,now+100,100),/admission is busy/);
+  assert.equal(f.alarms.length,sets,'Saturation rejects new ordinary admission before alarm I/O');
+  releaseRelayCoreWake(restarted,recovery);
+  await scheduleRelayCoreAlarm(restarted,()=>null,now+100);
+  assert.equal(await f.ctx.storage.getAlarm(),now+RELAY_PRECOMMIT_EXPIRY_MS);
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')[0].n,256);
+});
+
+test('ordinary admission reclaims expired slots even when no alarm has run',async t=>{
+  const f=fixture(t),now=Date.now();
+  await reserveRelayCoreWake(f.ctx,now,100);
+  for(let index=1;index<256;index++)f.ctx.storage.sql.exec('INSERT INTO relay_core_alarm_wakes VALUES(?,?,?)','expired-'+index,now+100,now+RELAY_PRECOMMIT_EXPIRY_MS);
+  const restarted={storage:f.ctx.storage},at=now+RELAY_PRECOMMIT_EXPIRY_MS;
+  const admission=await reserveRelayCoreWake(restarted,at,100);
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')[0].n,1);
+  const alarm=await f.ctx.storage.getAlarm();assert.ok(alarm>=at+50&&alarm<=at+100);
+  releaseRelayCoreWake(restarted,admission);
+});
+
+test('overlapping alarms share one recovery row while each unfinished alarm retains a durable deadline',async t=>{
+  const f=fixture(t),now=Date.now();
+  const first=await beginRelayCoreAlarm(f.ctx,now),second=await beginRelayCoreAlarm(f.ctx,now+1000);
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')[0].n,1);
+  assert.equal(f.rows('SELECT expires_ms FROM relay_core_alarm_wakes')[0].expires_ms,now+1000+RELAY_PRECOMMIT_EXPIRY_MS);
+  releaseRelayCoreWake(f.ctx,first);
+  await scheduleRelayCoreAlarm(f.ctx,()=>null,now+1000);
+  assert.equal(await f.ctx.storage.getAlarm(),now+1000+RELAY_ALARM_RETRY_MS,'An earlier success cannot erase the other alarm while it awaits');
+  releaseRelayCoreWake(f.ctx,second);await scheduleRelayCoreAlarm(f.ctx,()=>null,now+1000);
+  assert.equal(await f.ctx.storage.getAlarm(),null);
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')[0].n,0);
+});
+
+test('recovery retries never renew abandoned expiry and a stale handle cannot release a later generation',async t=>{
+  const f=fixture(t),now=Date.now(),first=await beginRelayCoreAlarm(f.ctx,now);
+  abandonRelayCoreAlarm(f.ctx,first);
+  const second=await beginRelayCoreAlarm(f.ctx,now+RELAY_ALARM_RETRY_MS);
+  abandonRelayCoreAlarm(f.ctx,second);
+  const third=await beginRelayCoreAlarm(f.ctx,now+2*RELAY_ALARM_RETRY_MS);
+  releaseRelayCoreWake(f.ctx,third);await scheduleRelayCoreAlarm(f.ctx,()=>null,now+2*RELAY_ALARM_RETRY_MS);
+  assert.equal(await f.ctx.storage.getAlarm(),now+RELAY_PRECOMMIT_EXPIRY_MS);
+  const later=await beginRelayCoreAlarm(f.ctx,now+RELAY_PRECOMMIT_EXPIRY_MS);
+  releaseRelayCoreWake(f.ctx,first);releaseRelayCoreWake(f.ctx,second);releaseRelayCoreWake(f.ctx,third);
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')[0].n,1);
+  releaseRelayCoreWake(f.ctx,later);await scheduleRelayCoreAlarm(f.ctx,()=>null,now+RELAY_PRECOMMIT_EXPIRY_MS);
+  assert.equal(await f.ctx.storage.getAlarm(),null);
+});
+
+test('a successful early retry retires the failed retry deadline while preserving original abandonment expiry',async t=>{
+  const f=fixture(t),now=Date.now(),first=await beginRelayCoreAlarm(f.ctx,now);abandonRelayCoreAlarm(f.ctx,first);
+  const retry=await beginRelayCoreAlarm(f.ctx,now+2000);releaseRelayCoreWake(f.ctx,retry);
+  await scheduleRelayCoreAlarm(f.ctx,()=>null,now+2000);
+  assert.equal(await f.ctx.storage.getAlarm(),now+RELAY_PRECOMMIT_EXPIRY_MS);
+  const restarted={storage:f.ctx.storage},later=await beginRelayCoreAlarm(restarted,now+3000);releaseRelayCoreWake(restarted,later);
+  await scheduleRelayCoreAlarm(restarted,()=>null,now+3000);
+  assert.equal(await f.ctx.storage.getAlarm(),now+RELAY_PRECOMMIT_EXPIRY_MS,'Restart cannot renew the failed handler expiry');
+});
+
+test('a rejected recovery acknowledgement at saturation preserves every live request admission',async t=>{
+  const f=fixture(t),now=Date.now();await reserveRelayCoreWake(f.ctx,now,100);
+  for(let index=1;index<256;index++)f.ctx.storage.sql.exec('INSERT INTO relay_core_alarm_wakes VALUES(?,?,?)','held-'+index,now+100,now+RELAY_PRECOMMIT_EXPIRY_MS);
+  const set=f.ctx.storage.setAlarm;
+  f.ctx.storage.setAlarm=async()=>{throw Error('Fictional saturated recovery rejection');};
+  const restarted={storage:f.ctx.storage};await assert.rejects(beginRelayCoreAlarm(restarted,now+100),/saturated recovery rejection/);
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')[0].n,256);
+  assert.equal(f.rows('SELECT MIN(expires_ms) AS n FROM relay_core_alarm_wakes')[0].n,now+RELAY_PRECOMMIT_EXPIRY_MS);
+  f.ctx.storage.setAlarm=set;
+  const recovered=await beginRelayCoreAlarm(restarted,now+100);releaseRelayCoreWake(restarted,recovered);
+  await scheduleRelayCoreAlarm(restarted,()=>null,now+100);
+  assert.equal(await f.ctx.storage.getAlarm(),now+RELAY_PRECOMMIT_EXPIRY_MS);
+});
+
+test('a stale composer cannot erase concurrent recovery and the final ordinary slot',async t=>{
+  const f=fixture(t),now=Date.now();await reserveRelayCoreWake(f.ctx,now,100);
+  for(let index=1;index<255;index++)f.ctx.storage.sql.exec('INSERT INTO relay_core_alarm_wakes VALUES(?,?,?)','concurrent-'+index,now+100,now+RELAY_PRECOMMIT_EXPIRY_MS);
+  const entered=deferred(),resume=deferred(),get=f.ctx.storage.getAlarm;let held=true;
+  f.ctx.storage.getAlarm=async()=>{if(held){held=false;entered.resolve();await resume.promise;}return get();};
+  const composing=scheduleRelayCoreAlarm(f.ctx,()=>null,now);await entered.promise;
+  const recovering=beginRelayCoreAlarm(f.ctx,now+100),admitting=reserveRelayCoreWake(f.ctx,now+100,100);
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')[0].n,257);
+  resume.resolve();await composing;const recovery=await recovering,admission=await admitting;
+  assert.equal(await get(),now+200);
+  releaseRelayCoreWake(f.ctx,admission);await scheduleRelayCoreAlarm(f.ctx,()=>null,now+100);
+  assert.equal(await get(),now+100+RELAY_ALARM_RETRY_MS,'Releasing the request cannot erase the concurrent alarm handle');
+  releaseRelayCoreWake(f.ctx,recovery);await scheduleRelayCoreAlarm(f.ctx,()=>null,now+100);
+  assert.equal(await get(),now+RELAY_PRECOMMIT_EXPIRY_MS);
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')[0].n,255);
 });
