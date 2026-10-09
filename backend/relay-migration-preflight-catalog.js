@@ -1,12 +1,19 @@
 // Inactive construction manifest, derived from fictional native schema helpers
-// at the pinned source and target. This file is imported only by the inactive
-// preflight and its local regressions; it exposes no route or private data.
+// at the pinned SQL source and target. The schema basis remains c4 to ed7;
+// sourceFiles now cover the separate inactive wrapper runtime. That coverage is
+// not a claim that the modified Worker is ed7 or an approved deployed artifact.
+// The account ingress exposes no migration route or private diagnostics.
 const freezeRows = rows => Object.freeze(rows.map(row => Object.freeze(row)));
 export const RELAY_MIGRATION_CATALOG = Object.freeze({
   sourceCommit: 'c4d62409a3b67e4e5dac88809c6a4a0290b6e39e',
   candidateCommit: 'ed7bbd436689be3ac9cca1ab5f111341dd690b80',
+  schemaBasis: Object.freeze({sourceCommit: 'c4d62409a3b67e4e5dac88809c6a4a0290b6e39e', candidateCommit: 'ed7bbd436689be3ac9cca1ab5f111341dd690b80'}),
+  runtimeArtifact: 'separate immutable artifact review and upstream transport required; inactive',
   compatibilityDate: '2026-09-19',
   sourceFiles: Object.freeze({
+    "backend/relay-migration-preflight.js": "d69ec78837712c0fe32cfac68539d88f0afbd84ee672937e214ff3b134e4d518",
+    "backend/relay-account-admission.js": "953db6bc350ba34ca25b3cd5162c9a9ad4ab351c481fd2946c5fc18abc99381a",
+    "backend/relay-account-ingress.js": "27d79fbe98ab34b7fa1b6960aaf13828c62fb8a4d8fd9aef649216997cec132c",
     "backend/shared.js": "528e100b60f221f5cf7bacdd4eedc21c89b6bb6c62c52797f3c2fb31c435ea0a",
     "backend/publications.js": "3c1b18920391f855168a0348bf4574bb0db1421df710bcfef22a16585b420d81",
     "backend/public-coordination.js": "b299572d09d1451aa16ae4af2d37ec1edd1a6bf5b0ca0b93ea0debde9e04a23d",
@@ -17,7 +24,7 @@ export const RELAY_MIGRATION_CATALOG = Object.freeze({
     "backend/relay-owner-password.js": "0d56aaabcd516b494ca3cea4e0ffbb3eb8f0199bd6d99029ab52cedfbb435f93",
     "backend/relay-core-alarm.js": "9d09aedc621bca2b14c27543458dce38d364edf1676c9e39c1b28a6de980c189",
     "backend/relay-common.js": "5a9ef7d4082efcf4fc94f7773e9b5325b65f5eac840a756872997a365ef19fd1",
-    "backend/worker.js": "e8dfc4632fc777e9a2013e4001a016d417465720ca0fc6385a166b988a58e25a",
+    "backend/worker.js": "9aad71e4b33720e912cc43efbf62df38fe17391293780fd6de731b80a275bcbd",
     "backend/relay-connector.js": "374b038037f5b8748aa4a1e05b93a9276daac5982cb56cb24ee78c2a927ced94",
     "backend/connector.js": "3d8277cf6ce0e4c0944501832ac6ed4c964d31ef796e87258dca8b446e61dae7",
     "public/content/jarvis.json": "305cc39ffc9b47567b36a4b7835ab912446074c0446281f11b54fafd109b54e8"

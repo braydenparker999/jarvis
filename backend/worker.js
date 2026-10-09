@@ -1,3 +1,4 @@
+import {relayAccountHubPath,relayAccountRequestGate,relayAccountOperationDenial,relayAccountDenialResponse,assertRelayAccountOperationAllowed} from './relay-account-ingress.js';
 import {connector,oauthStore} from './connector.js';
 import {sharedStore,sharedSchema,SHARED_OBJECT,validateSharedRead,readLegacyInboxPage} from './shared.js';
 import {syncPublications,importPublicationHint,seedPublicationReconciliation,nextPublicationReconciliationAt,publicationReadNeedsWake} from './publications.js';
@@ -20,6 +21,7 @@ const publicState = state => ({messages:state.messages, posts:state.posts});
 const unanswered = state => state.messages.filter(m=>m.role==='user' && !state.messages.some(r=>r.kind==='reply' && r.replyTo===m.id));
 export default {
   async fetch(request, env) {
+    if(relayAccountHubPath(new URL(request.url).pathname)){const admission=await relayAccountRequestGate(request,env);if(admission.response)return admission.response;request=admission.request;}
     const relay=await relayConnector(request,env);if(relay)return relay;
     const owner=await relayOwnerPublic(request,env);if(owner)return owner;
     const native=await nativeMusic(request,env);if(native)return native;
@@ -110,11 +112,13 @@ export default {
 export class Hub {
   constructor(ctx,env,runtime={}){
     this.ctx=ctx;this.env=env||{};
+    this.accountAdmissionRuntime=runtime.accountAdmission;
     // Resolve the production global at call time; local fixtures may supply a
     // fictional responder without changing environment or authorization state.
     this.publicationFetcher=runtime.publicationFetcher||((...args)=>fetch(...args));
   }
   async withCoreWake(operation){
+    assertRelayAccountOperationAllowed(this.env,this.accountAdmissionRuntime);
     const wake=await reserveRelayCoreWake(this.ctx);
     try{return await operation(wake);}
     finally{
@@ -125,6 +129,7 @@ export class Hub {
     }
   }
   async syncPublicRead(){
+    assertRelayAccountOperationAllowed(this.env,this.accountAdmissionRuntime);
     sharedSchema(this.ctx);
     if(!this.publicationSync)this.publicationSync=(async()=>{
       const now=Date.now();let wake=null;
@@ -138,6 +143,10 @@ export class Hub {
     return this.publicationSync;
   }
   async alarm(){
+    // No unreserved alarm storage or retry wake. Pending data stays untouched;
+    // an independently admitted future resume must restore its wake. Returning
+    // avoids a platform retry loop while the upstream admission hold is closed.
+    const denied=relayAccountOperationDenial(this.env,this.accountAdmissionRuntime);if(denied)return denied;
     // Keep a durable retry before any import or callback await. The two lanes
     // perform bounded work, then one compositor selects their shared next wake.
     const wake=await beginRelayCoreAlarm(this.ctx);
@@ -151,6 +160,7 @@ export class Hub {
     }catch(error){abandonRelayCoreAlarm(this.ctx,wake);throw error;}
   }
   async fetch(request){
+    const admission=await relayAccountRequestGate(request,this.env,this.accountAdmissionRuntime);if(admission.response)return admission.response;request=admission.request;
     const path=new URL(request.url).pathname;
     if(path==='/internal/relay/oauth')return relayOAuthStore(this.ctx,await request.json());
     if(path==='/internal/relay/owner'){
@@ -242,6 +252,7 @@ export class Hub {
   }
 }
 export async function sharedInternal(env,path,body) {
+  const denied=relayAccountOperationDenial(env);if(denied)return relayAccountDenialResponse(denied);
   return env.HUBS.get(env.HUBS.idFromName(SHARED_OBJECT)).fetch(new Request('https://internal/internal/shared'+path,{method:body?'POST':'GET',body:body?JSON.stringify(body):undefined}));
 }
 export async function syncShared(env) {
