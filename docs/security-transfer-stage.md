@@ -42,7 +42,11 @@ the complete source chat and its unsent draft remain in Quick AI. A pending
 transfer cannot be overwritten by another one. A write-ahead before/after
 record makes interrupted draft adoption recoverable without appending twice.
 If text changed after an interrupted write, the transfer remains pending for
-manual review rather than overwriting the edit.
+manual review rather than overwriting the edit. The user can copy the incoming
+text and explicitly dismiss its saved transfer in a confirmation sheet. The
+confirmation is bound to the complete unchanged transfer journal. Dismissal
+never changes either composer or the source chat; cancellation and copying
+leave the transfer saved.
 
 Unsent private composer text now survives navigation and confirmed session
 expiry in **sessionStorage for this tab**, under a separate owner-draft key.
@@ -54,6 +58,11 @@ store or public composer. Revocation, deliberate disconnect and a credential
 replacement reported by another tab clear the private draft and history.
 Successful explicit sending clears the draft. Closing the tab ends ordinary
 tab storage; browser session restoration behavior is browser-controlled.
+Expiry preservation covers the tab receiving the confirmed expiry response.
+Another tab removing or replacing the shared remembered credential still
+triggers the existing isolation rule and clears this tab's private draft.
+Distinguishing expiry elsewhere from deliberate logout or replacement requires
+a separately reviewed cross-tab session policy.
 
 ## Security decisions requiring separate approval
 

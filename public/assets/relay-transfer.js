@@ -55,6 +55,28 @@ export function createRelayTransferStore({storage = globalThis.sessionStorage} =
       if (!valid(pending)) throw Error('Choose a Relay destination.');
       write({version: 2, pending, application: null, legacyBody: saved.body});
     },
+    prepareDismissal() {
+      const record = read(), pending = record?.pending || legacy();
+      if (!pending) throw Error('There is no saved Relay transfer to dismiss.');
+      let raw, legacyRaw;
+      try { raw = storage.getItem(RELAY_TRANSFER_KEY); legacyRaw = storage.getItem(LEGACY_TRANSFER_KEY); }
+      catch { throw unreadable(); }
+      // Bind the user's review to the entire saved journal, including any
+      // interrupted adoption. Never dismiss a newer or changed transfer.
+      return {pending, dismiss() {
+        let current, currentLegacy;
+        try { current = storage.getItem(RELAY_TRANSFER_KEY); currentLegacy = storage.getItem(LEGACY_TRANSFER_KEY); }
+        catch { throw unreadable(); }
+        if (current !== raw || currentLegacy !== legacyRaw) throw Error('The saved transfer changed. Review it again before dismissing it.');
+        try {
+          if (record) {
+            if (record.legacyBody && legacyRaw === record.legacyBody) storage.removeItem(LEGACY_TRANSFER_KEY);
+            storage.removeItem(RELAY_TRANSFER_KEY);
+          } else storage.removeItem(LEGACY_TRANSFER_KEY);
+        } catch { throw unreadable(); }
+        return true;
+      }};
+    },
     apply({destination, draft, saveDraft}) {
       const record = read(); if (!record) return {status: legacy() ? 'choose_destination' : 'none'};
       if (record.pending.destination !== destination) return {status: 'different_destination'};

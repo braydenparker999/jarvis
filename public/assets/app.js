@@ -159,17 +159,32 @@ function adoptRelayTransfer(destination,draft,saveDraft){
       storage_unavailable:'Could not retain the combined draft. The incoming draft is still saved.'}[result?.status]||'';
   }catch(error){transferNotice=error.message;}
 }
+function dismissRelayTransfer(){
+  let review;try{review=relayTransfers.prepareDismissal();}catch(error){transferNotice=error.message;drawTransferNotice();return;}
+  const dialog=sheet('Dismiss saved transfer?',[
+    {label:'Keep saved transfer',icon:'close',action:()=>{}},
+    {label:'Dismiss saved transfer',icon:'check',action:()=>{
+      try{review.dismiss();transferNotice='';notify('Saved transfer dismissed. Your composer has not changed.');}
+      catch(error){transferNotice=error.message;}
+      drawTransferNotice();
+    }}
+  ]);
+  const context=document.createElement('p');context.className='sheet-context';
+  context.textContent='This removes the saved incoming transfer. Text in either Relay composer stays as it is. Copy the incoming draft first if you want to keep a separate copy.';
+  dialog.querySelector('.dialog-heading').after(context);
+}
 function drawTransferNotice(){
   const content=$('content');if(!content)return;
   $('relay-transfer-notice')?.remove();
   const pending=pendingTransfer();if(!pending&&!transferNotice)return;
-  const node=document.createElement('div');node.id='relay-transfer-notice';node.className='conversation-notice';
-  const message=document.createElement('p');message.setAttribute('role','status');
+  const node=document.createElement('div');node.id='relay-transfer-notice';node.className='conversation-notice';node.style.flexWrap='wrap';
+  const message=document.createElement('p');message.setAttribute('role','status');message.style.flexBasis='100%';
   message.textContent=transferNotice||(pending.legacy?'Choose where to continue your saved Relay draft.':`Incoming draft kept for ${pending.destination==='owner'?'private owner chat':'public Relay'}.`);node.append(message);
   const button=(label,action)=>{const b=document.createElement('button');b.type='button';b.className='text-button';b.textContent=label;b.onclick=action;node.append(b);};
   if(pending?.legacy)button('Choose destination',chooseTransferDestination);
-  else if(pending){button(pending.destination==='owner'?'Review private draft':'Review public draft',()=>openTransferDestination(pending.destination));
-    button('Copy incoming draft',async()=>notify(await copyText(pending.body)?'Incoming draft copied.':'Copy is unavailable. Your draft is still saved.'));}
+  else if(pending)button(pending.destination==='owner'?'Review private draft':'Review public draft',()=>openTransferDestination(pending.destination));
+  if(pending){button('Copy incoming draft',async()=>notify(await copyText(pending.body)?'Incoming draft copied.':'Copy is unavailable. Your draft is still saved.'));
+    button('Dismiss saved transfer',dismissRelayTransfer);}
   content.prepend(node);
 }
 function appRow(app) {

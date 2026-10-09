@@ -65,6 +65,42 @@ test('long Quick AI answers carry an explicit shortening notice and remain revie
   const data = quickAITransfer('Question', 'a'.repeat(5000), 'owner');assert.ok(data.body.length <= 4000);assert.match(data.body,/Text shortened/);
   assert.deepEqual(Object.keys(data).sort(), ['body','destination','id','version','visibility']);
 });
+for (const destination of ['owner', 'public']) test(`${destination} reviewed dismissal resolves an edited interrupted transfer without changing its composer`, () => {
+  const store=storage(), manager=createRelayTransferStore({storage:store}), incoming=transfer(destination);manager.stage(incoming);
+  let draft='Existing unsent draft';
+  assert.equal(manager.apply({destination,draft,saveDraft:()=>false}).status,'storage_unavailable');
+  draft='User edited draft during recovery';
+  assert.equal(manager.apply({destination,draft,saveDraft:()=>assert.fail('Preserve the edit')}).status,'draft_changed');
+  const review=manager.prepareDismissal();assert.deepEqual(review.pending,incoming);
+  assert.throws(()=>manager.stage(transfer(destination)),/already waiting/);
+  assert.deepEqual(manager.peek(),incoming,'Opening a confirmation must keep the saved incoming text');
+  assert.equal(review.dismiss(),true);assert.equal(manager.peek(),null);assert.equal(draft,'User edited draft during recovery');
+  const next=transfer(destination);manager.stage(next);assert.deepEqual(manager.peek(),next);
+});
+test('dismissal is bound to the full journal, including changes with the same transfer ID and body', () => {
+  const store=storage(),manager=createRelayTransferStore({storage:store}),incoming=transfer('owner');manager.stage(incoming);
+  const review=manager.prepareDismissal();
+  assert.equal(manager.apply({destination:'owner',draft:'Existing draft',saveDraft:()=>false}).status,'storage_unavailable');
+  const changed=store.getItem(RELAY_TRANSFER_KEY);assert.throws(()=>review.dismiss(),/changed/);
+  assert.equal(store.getItem(RELAY_TRANSFER_KEY),changed);assert.deepEqual(manager.peek(),incoming);
+  manager.prepareDismissal().dismiss();assert.equal(manager.peek(),null);
+});
+test('dismissal fails closed when storage cannot be re-read or removed', () => {
+  for(const failure of ['read','remove']){
+    const store=storage();let fail=false;
+    const manager=createRelayTransferStore({storage:{...store,getItem:key=>{if(fail&&failure==='read')throw Error('Blocked');return store.getItem(key);},
+      removeItem:key=>{if(fail&&failure==='remove')throw Error('Blocked');return store.removeItem(key);}}});
+    manager.stage(transfer('public'));const before=store.getItem(RELAY_TRANSFER_KEY),review=manager.prepareDismissal();fail=true;
+    assert.throws(()=>review.dismiss(),/retain/);assert.equal(store.getItem(RELAY_TRANSFER_KEY),before);
+  }
+});
+test('legacy dismissal removes only the reviewed incoming text, and never an unrelated legacy transfer', () => {
+  const store=storage(),manager=createRelayTransferStore({storage:store});store.setItem(LEGACY_TRANSFER_KEY,'Reviewed legacy draft');
+  manager.selectLegacy('owner');manager.prepareDismissal().dismiss();assert.equal(manager.peek(),null);
+  manager.stage(transfer('owner'));store.setItem(LEGACY_TRANSFER_KEY,'Unrelated legacy incoming draft');
+  manager.prepareDismissal().dismiss();assert.deepEqual(manager.peek(),{legacy:true,body:'Unrelated legacy incoming draft'});
+  manager.prepareDismissal().dismiss();assert.equal(manager.peek(),null);
+});
 test('an unreadable private draft is not overwritten when an incoming transfer is prepared',()=>{
   const tab=storage();tab.setItem(OWNER_DRAFT_KEY,'{corrupted-existing-draft');const draftStore=createOwnerDraftStore({storage:tab});
   assert.equal(draftStore.read(),'');assert.equal(draftStore.save('Incoming text'),false);assert.equal(tab.getItem(OWNER_DRAFT_KEY),'{corrupted-existing-draft');
