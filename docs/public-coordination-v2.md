@@ -114,6 +114,10 @@ The current POST receipt/conflict semantics, 30-second visible polling,
 visibility/online recovery and manual refresh remain; this is not background
 execution or a push guarantee. Legacy backends without `coordinationVersion: 2`
 continue using their original frontend adapter/fallback.
+The adapter commits legacy mode only after the complete snapshot validates.
+A failed legacy read lets the next normal refresh negotiate again. An established
+legacy session that receives an explicit v2 state marker makes one immediate
+changes probe; a failed probe ends that refresh without alternating read loops.
 
 ## Supported Lucy read/wake integration after review
 
