@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import {createRelayFixture} from './relay-fixture.js';
 import {Hub} from '../backend/worker.js';
 import {sharedStore,SHARED_OBJECT} from '../backend/shared.js';
-import {publicationSchema,COMMENTS_URL,nextPublicationReconciliationAt} from '../backend/publications.js';
+import {publicationSchema,COMMENTS_URL,COMMENT_URL,ISSUE_URL,nextPublicationReconciliationAt} from '../backend/publications.js';
 import {relayOAuthStore} from '../backend/relay-oauth.js';
 import {relayOwnerSchema} from '../backend/relay-owner.js';
-import {relaySubscribe,relayUnsubscribe,scheduleRelayAlarm,drainRelayOutbox,enqueueRelayOwnerMessage} from '../backend/relay-events.js';
+import {relaySubscribe,relayUnsubscribe,scheduleRelayAlarm,drainRelayOutbox,enqueueRelayOwnerMessage,EVENT_RETENTION_MS} from '../backend/relay-events.js';
 import {PUBLIC_RESULT_EVENT} from '../backend/public-coordination-tools.js';
 import {RELAY_ALARM_RETRY_MS,RELAY_PRECOMMIT_EXPIRY_MS} from '../backend/relay-core-alarm.js';
 import {RELAY_VERSION,RELAY_INBOX,RELAY_OWNER,RELAY_OWNER_SCOPE,RELAY_OWNER_INBOX,RELAY_OWNER_EVENT,RELAY_EVENT,RELAY_CALLBACK,random,hash,challenge} from '../backend/relay-common.js';
@@ -14,6 +14,10 @@ import {RELAY_VERSION,RELAY_INBOX,RELAY_OWNER,RELAY_OWNER_SCOPE,RELAY_OWNER_INBO
 const uuid=()=>crypto.randomUUID(),stamp='2026-10-08T00:00:00Z';
 const meta={'io.modelcontextprotocol/protocolVersion':RELAY_VERSION,'io.modelcontextprotocol/clientCapabilities':{}};
 const comment=(payload,id)=>({id,user:{id:183016859},body:JSON.stringify(payload),created_at:stamp,updated_at:stamp});
+const hintComment=(payload,id)=>({...comment(payload,id),issue_url:ISSUE_URL});
+const finalPayload=requestId=>({schema:'jarvis-coordination-v2',eventId:uuid(),requestId,attemptId:uuid(),stage:'final',
+  resultVersion:1,body:'Fictional durably admitted hint result',artifacts:[]});
+const hint=(f,commentId)=>f.request('/shared/import-hint',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({commentId})});
 function deferred(){let resolve;const promise=new Promise(done=>{resolve=done;});return {promise,resolve};}
 async function grant(f,scope='relay:read relay:reply relay:events') {
   const client=random(),grantId=random(),code=random(),access=random(),accessHash=await hash(access),resource=f.env.RELAY_MCP_ORIGIN+'/relay/mcp';
@@ -204,13 +208,14 @@ test('actual worker precommit wake survives a fired alarm, late message commit, 
   assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_events WHERE message_id=?',requestId)[0].n,1);
 });
 
-test('a body held beyond admission expiry fails before message or hint mutation and a stable-ID retry re-admits once',async t=>{
+test('a message body held beyond admission expiry fails before mutation and a stable-ID retry re-admits once',async t=>{
   let hintEgress=0;t.mock.method(globalThis,'fetch',async()=>{hintEgress++;throw Error('Expired fictional hint must not fetch');});
-  for(const path of ['/shared/messages','/shared/import-hint']){
+  {
+    const path='/shared/messages';
     const f=fixture(t),requestId=uuid(),entered=deferred(),set=f.ctx.storage.setAlarm;let controller,hold=true;
     publicationSchema(f.ctx);
     f.ctx.storage.setAlarm=async value=>{await set(value);entered.resolve();};
-    const payload=path==='/shared/messages'?{id:requestId,body:'Fictional expired admission'}:{commentId:42};
+    const payload={id:requestId,body:'Fictional expired admission'};
     const encoded=JSON.stringify(payload),body=new ReadableStream({start(value){controller=value;value.enqueue(new TextEncoder().encode(encoded.slice(0,-1)));}});
     const fetch=f.hub.fetch.bind(f.hub);
     t.mock.method(f.hub,'fetch',request=>{
@@ -229,15 +234,149 @@ test('a body held beyond admission expiry fails before message or hint mutation 
     assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_events')[0].n,0);
     assert.equal(f.rows('SELECT COUNT(*) AS n FROM imported_comments')[0].n,0);
     assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')[0].n,0);
-    assert.equal(f.calls.length,0);assert.equal(hintEgress,0,'Expired hint admission is rejected before importer fetch');
-    if(path==='/shared/messages'){
-      assert.equal((await f.request(path,{method:'POST',headers:{'Content-Type':'application/json'},body:encoded})).status,201);
-      assert.equal((await f.request(path,{method:'POST',headers:{'Content-Type':'application/json'},body:encoded})).status,200);
-      assert.equal(f.rows('SELECT COUNT(*) AS n FROM shared_entries WHERE id=?',requestId)[0].n,1);
-      assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_events WHERE message_id=?',requestId)[0].n,1);
-      assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')[0].n,0);
-    }
+    assert.equal(f.calls.length,0);assert.equal(hintEgress,0,'Expired message admission never invokes the importer');
+    assert.equal((await f.request(path,{method:'POST',headers:{'Content-Type':'application/json'},body:encoded})).status,201);
+    assert.equal((await f.request(path,{method:'POST',headers:{'Content-Type':'application/json'},body:encoded})).status,200);
+    assert.equal(f.rows('SELECT COUNT(*) AS n FROM shared_entries WHERE id=?',requestId)[0].n,1);
+    assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_events WHERE message_id=?',requestId)[0].n,1);
+    assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')[0].n,0);
   }
+});
+
+test('rejected or expired hint precommit acknowledgements cannot mutate publication or event data',async t=>{
+  for(const mode of ['rejected','expired'])await t.test(mode,async sub=>{
+    const f=fixture(sub),requestId=f.add(),p=finalPayload(requestId),entered=deferred(),resume=deferred(),set=f.ctx.storage.setAlarm;
+    let egress=0;
+    sub.mock.method(globalThis,'fetch',async(url,init)=>{
+      assert.equal(url,COMMENT_URL+2101);assert.equal(init.redirect,'manual');assert.equal(init.headers.Authorization,undefined);
+      assert.equal(init.headers.Cookie,undefined);egress++;return Response.json(hintComment(p,2101));
+    });
+    f.ctx.storage.setAlarm=async value=>{
+      if(mode==='rejected')throw Error('Fictional hint precommit setter rejection');
+      await set(value);entered.resolve();await resume.promise;
+    };
+    const saving=hint(f,2101);
+    if(mode==='expired'){
+      await entered.promise;f.clock.now+=RELAY_PRECOMMIT_EXPIRY_MS+1;resume.resolve();
+    }
+    assert.equal((await saving).status,503);assert.equal(egress,1);
+    assert.equal(f.rows('SELECT COUNT(*) AS n FROM imported_comments')[0].n,0);
+    assert.equal(f.rows('SELECT COUNT(*) AS n FROM public_coordination_events')[0].n,0);
+    assert.equal(f.rows("SELECT COUNT(*) AS n FROM relay_events WHERE message_id LIKE 'public-result:%'")[0].n,0);
+    assert.equal(f.rows("SELECT value FROM shared_meta WHERE key='publisher-reconciliation-enabled'").length,0);
+    assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')[0].n,0);
+    f.ctx.storage.setAlarm=set;
+    if(mode==='expired'){
+      await f.restart().alarm();
+      assert.equal(await f.ctx.storage.getAlarm(),f.rows('SELECT created_ms FROM relay_events WHERE message_id=?',requestId)[0].created_ms+EVENT_RETENTION_MS,
+        'Only the previously retained original event keeps its independent maintenance wake');
+      const retry=await hint(f,2101);assert.equal(retry.status,200);assert.equal(egress,2);
+      assert.equal(f.rows('SELECT COUNT(*) AS n FROM public_coordination_events WHERE event_id=?',p.eventId)[0].n,1);
+      assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_events WHERE message_id=?','public-result:'+p.eventId)[0].n,1);
+      const receipt=await retry.json(),sets=f.alarms.length;
+      const duplicate=await hint(f,2101);assert.equal(duplicate.status,200);assert.deepEqual(await duplicate.json(),receipt);
+      assert.equal(egress,2);assert.equal(f.alarms.length,sets);
+    }
+  });
+});
+
+test('an exact stored legacy-final recovery requires durable admission while its receipts remain read-only',async t=>{
+  const f=fixture(t),requestId=f.add(),holdId=uuid(),lateId=uuid(),set=f.ctx.storage.setAlarm;
+  sharedStore(f.ctx,'/internal/shared/reply',{id:holdId,replyTo:requestId,body:'Fictional immutable held reply'});
+  publicationSchema(f.ctx);
+  f.ctx.storage.sql.exec('INSERT INTO imported_comments VALUES(?,?,2,?)',2201,JSON.stringify({type:'reply',id:lateId,replyTo:requestId,
+    body:'Fictional exact retained legacy final',createdAt:stamp}),'Conflicting publication; original kept');
+  t.mock.method(globalThis,'fetch',()=>assert.fail('Exact stored final never needs upstream egress'));
+  f.ctx.storage.setAlarm=async()=>{throw Error('Fictional recovery wake rejection');};
+  assert.equal((await hint(f,2201)).status,503);
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM public_coordination_events')[0].n,0);
+  assert.equal(f.rows("SELECT value FROM shared_meta WHERE key='publisher-work:conflicts'").length,0);
+  assert.equal(f.rows("SELECT value FROM shared_meta WHERE key='publisher-reconciliation-enabled'").length,0);
+  f.ctx.storage.setAlarm=set;
+  const recovered=await hint(f,2201);assert.equal(recovered.status,200);const receipt=await recovered.json();assert.equal(receipt.status,'update-imported');
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM public_coordination_events WHERE event_id=?',lateId)[0].n,1);
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_events WHERE message_id=?','public-result:'+lateId)[0].n,1);
+  const sets=f.alarms.length,changes=f.rows('SELECT total_changes() AS n')[0].n;
+  const duplicate=await hint(f,2201);assert.equal(duplicate.status,200);assert.deepEqual(await duplicate.json(),receipt);
+  assert.equal(f.alarms.length,sets);assert.equal(f.rows('SELECT total_changes() AS n')[0].n,changes);
+  assert.equal(f.rows('SELECT id,body FROM shared_entries WHERE reply_to=?',requestId)[0].id,holdId);
+  assert.equal(f.rows('SELECT body FROM shared_entries WHERE reply_to=?',requestId)[0].body,'Fictional immutable held reply');
+});
+
+test('a hint committed before rejected final composition recovers from its precommit wake and keeps exact retry receipts',async t=>{
+  const f=fixture(t),requestId=f.add(),p=finalPayload(requestId),set=f.ctx.storage.setAlarm;let egress=0,setters=0;
+  t.mock.method(globalThis,'fetch',async(url)=>{assert.equal(url,COMMENT_URL+2301);egress++;return Response.json(hintComment(p,2301));});
+  f.ctx.storage.setAlarm=async value=>{if(++setters===2)throw Error('Fictional hint final compose rejection');return set(value);};
+  const accepted=await hint(f,2301);assert.equal(accepted.status,200);const receipt=await accepted.json();assert.equal(receipt.execution_authorized,false);
+  const recovery=await f.ctx.storage.getAlarm();assert.ok(recovery>f.clock.now);assert.equal(setters,2);
+  const changes=f.rows('SELECT total_changes() AS n')[0].n;
+  const duplicate=await hint(f,2301);assert.equal(duplicate.status,200);assert.deepEqual(await duplicate.json(),receipt);
+  assert.equal(egress,1);assert.equal(setters,2);assert.equal(f.rows('SELECT total_changes() AS n')[0].n,changes);
+  assert.equal(await f.ctx.storage.getAlarm(),recovery);
+  f.ctx.storage.setAlarm=set;f.clock.now=recovery;await f.restart().alarm();
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM imported_comments WHERE comment_id=2301 AND imported=1')[0].n,1);
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM public_coordination_events WHERE event_id=?',p.eventId)[0].n,1);
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_events WHERE message_id=?','public-result:'+p.eventId)[0].n,1);
+  assert.ok(await f.ctx.storage.getAlarm()>f.clock.now);assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')[0].n,0);
+});
+
+test('admitted pre-original hints persist their journal and recover after a later original without retry amplification',async t=>{
+  const f=fixture(t),requestId=uuid(),p=finalPayload(requestId);f.add('Fictional unrelated retained request');let egress=0;
+  t.mock.method(globalThis,'fetch',async(url)=>{assert.equal(url,COMMENT_URL+2401);egress++;return Response.json(hintComment(p,2401));});
+  const pending=await hint(f,2401);assert.equal(pending.status,202);const pendingReceipt=await pending.json();assert.equal(pendingReceipt.status,'pending');
+  assert.equal(f.rows('SELECT imported FROM imported_comments WHERE comment_id=2401')[0].imported,0);
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM public_coordination_events')[0].n,0);assert.ok(await f.ctx.storage.getAlarm()>f.clock.now);
+  const sets=f.alarms.length,changes=f.rows('SELECT total_changes() AS n')[0].n;
+  const duplicate=await hint(f,2401);assert.equal(duplicate.status,202);assert.deepEqual(await duplicate.json(),pendingReceipt);
+  assert.equal(egress,1);assert.equal(f.alarms.length,sets);assert.equal(f.rows('SELECT total_changes() AS n')[0].n,changes);
+  assert.equal((await f.request('/shared/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:requestId,body:'Fictional later original'})})).status,201);
+  f.clock.now=await f.ctx.storage.getAlarm();await f.restart().alarm();
+  assert.equal(f.rows('SELECT imported FROM imported_comments WHERE comment_id=2401')[0].imported,1);
+  const accepted=await hint(f,2401);assert.equal(accepted.status,200);const receipt=await accepted.json();assert.equal(receipt.publicationId,p.eventId);
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM shared_entries WHERE id=?',requestId)[0].n,1);
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM public_coordination_events WHERE event_id=?',p.eventId)[0].n,1);
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_events WHERE message_id=?','public-result:'+p.eventId)[0].n,1);
+  assert.equal(egress,1);assert.equal(receipt.execution_authorized,false);
+});
+
+test('an awaited hint fetch has no core wake and validates under a fresh admission after it resolves',async t=>{
+  const f=fixture(t),requestId=f.add(),p=finalPayload(requestId),entered=deferred(),resume=deferred();let egress=0;
+  const timeout=AbortSignal.timeout.bind(AbortSignal),timeouts=[];
+  t.mock.method(AbortSignal,'timeout',value=>{timeouts.push(value);return timeout(value);});
+  t.mock.method(globalThis,'fetch',async(url,init)=>{
+    assert.equal(url,COMMENT_URL+2501);assert.equal(init.redirect,'manual');assert.equal(init.headers.Authorization,undefined);assert.equal(init.headers.Cookie,undefined);
+    assert.ok(init.signal instanceof AbortSignal);egress++;entered.resolve();await resume.promise;return Response.json(hintComment(p,2501));
+  });
+  const saving=hint(f,2501);await entered.promise;
+  assert.equal(await f.ctx.storage.getAlarm(),null);assert.equal(f.alarms.length,0);
+  assert.equal(f.rows("SELECT name FROM sqlite_master WHERE name='relay_core_alarm_wakes'").length,0);
+  assert.equal(f.rows("SELECT value FROM shared_meta WHERE key='publisher-reconciliation-enabled'").length,0);
+  const concurrent=await hint(f,2501);assert.equal(concurrent.status,202);assert.equal((await concurrent.json()).status,'fetching');assert.equal(egress,1);
+  assert.equal(await f.ctx.storage.getAlarm(),null);assert.equal(f.alarms.length,0);
+  // Move the fictional clock, without waiting on an actual network timeout.
+  // No expired request reservation exists while the fixed GET is in flight.
+  f.clock.now+=RELAY_PRECOMMIT_EXPIRY_MS+1;resume.resolve();
+  const accepted=await saving;assert.equal(accepted.status,200);assert.deepEqual(timeouts,[3500]);
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM public_coordination_events WHERE event_id=?',p.eventId)[0].n,1);
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_events WHERE message_id=?','public-result:'+p.eventId)[0].n,1);
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM relay_core_alarm_wakes')[0].n,0);assert.ok(await f.ctx.storage.getAlarm()>f.clock.now);
+  const receipt=await accepted.json(),sets=f.alarms.length;
+  const duplicate=await hint(f,2501);assert.equal(duplicate.status,200);assert.deepEqual(await duplicate.json(),receipt);
+  assert.equal(egress,1);assert.equal(f.alarms.length,sets);
+});
+
+test('unvalidated anonymous hints and burst-limited retries never seed publication maintenance',async t=>{
+  const f=fixture(t);let egress=0;
+  t.mock.method(globalThis,'fetch',async(url)=>{
+    egress++;if(url===COMMENT_URL+2601)return Response.json({},{status:404});
+    assert.equal(url,COMMENT_URL+2602);return Response.json(hintComment({...finalPayload(uuid()),execution_authorized:true},2602));
+  });
+  assert.equal((await hint(f,2601)).status,422);assert.equal((await hint(f,2601)).status,422);
+  assert.equal((await hint(f,2602)).status,422);const limited=await hint(f,2603);assert.equal(limited.status,429);assert.equal((await limited.json()).reason,'hint_burst');
+  assert.equal(egress,2);assert.equal(f.alarms.length,0);assert.equal(await f.ctx.storage.getAlarm(),null);
+  assert.equal(f.rows("SELECT name FROM sqlite_master WHERE name='relay_core_alarm_wakes'").length,0);
+  assert.equal(f.rows("SELECT value FROM shared_meta WHERE key='publisher-reconciliation-enabled'").length,0);
+  assert.equal(f.rows('SELECT COUNT(*) AS n FROM imported_comments')[0].n,0);assert.equal(f.rows('SELECT COUNT(*) AS n FROM public_coordination_events')[0].n,0);
 });
 
 test('authenticated private conversation exposes only transport route diagnostics in the existing lifecycle block',async t=>{

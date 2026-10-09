@@ -171,12 +171,14 @@ export class Hub {
         return json({ok:true});
       }
       if(path==='/internal/shared/import-hint'){
-        return this.withCoreWake(async wake=>{
-          const data=await request.json();assertRelayCoreWake(this.ctx,wake);
-          const response=await importPublicationHint(this.ctx,data);
-          if(response.status!==400)seedPublicationReconciliation(this.ctx,Date.now());
-          return response;
-        });
+        const data=await request.json();
+        return importPublicationHint(this.ctx,data,fetch,Date.now(),operation=>this.withCoreWake(async wake=>{
+          assertRelayCoreWake(this.ctx,wake);
+          // Seed before the journal's first await so interrupted admitted work
+          // retains reconciliation independently of its callback/receipt.
+          seedPublicationReconciliation(this.ctx,Date.now());
+          return operation();
+        }));
       }
       // Persist the wake before committing a new message/event, so a crash after
       // commit cannot strand its outbox. SQLite and normal Durable Object storage

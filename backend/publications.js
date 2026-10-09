@@ -326,7 +326,7 @@ function hintReceipt(ctx,commentId) {
     ...(item.imported===2&&!update?{errorCode}:{}),public_inbox:true,execution_authorized:false},
     {status:!item.imported?202:item.imported===2&&!update?409:200});
 }
-export async function importPublicationHint(ctx,input,fetcher=fetch,now=Date.now()) {
+export async function importPublicationHint(ctx,input,fetcher=fetch,now=Date.now(),admitMutation=operation=>operation()) {
   if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).length!==1||!Number.isSafeInteger(input.commentId)||input.commentId<1)
     return Response.json({error:'Expected only a positive numeric commentId'},{status:400});
   publicationSchema(ctx);
@@ -340,8 +340,13 @@ export async function importPublicationHint(ctx,input,fetcher=fetch,now=Date.now
   if(stored?.imported===2){
     const p=JSON.parse(stored.publication);
     if(p.type==='reply'&&allowance(ctx,'conflicts',1,now)&&![...sql.exec('SELECT event_id FROM public_coordination_events WHERE event_id=?',p.id)].length){
-      charge(ctx,'conflicts',1,now);
-      sharedStore(ctx,'/internal/shared/coordination',legacyUpdate(p,commentId));
+      await admitMutation(()=>{
+        // Alarm admission yields; another importer may have recovered this
+        // exact occurrence while its durable wake was being acknowledged.
+        if(!allowance(ctx,'conflicts',1,now)||[...sql.exec('SELECT event_id FROM public_coordination_events WHERE event_id=?',p.id)].length)return;
+        charge(ctx,'conflicts',1,now);
+        sharedStore(ctx,'/internal/shared/coordination',legacyUpdate(p,commentId));
+      });
     }
   }
   const prior=hintReceipt(ctx,commentId);if(prior)return prior;
@@ -371,10 +376,16 @@ export async function importPublicationHint(ctx,input,fetcher=fetch,now=Date.now
     const publication=comment?.id===commentId&&comment.issue_url===ISSUE_URL?decodePublication(comment):null;
     if(!publication){sql.exec('UPDATE public_import_hints SET status=422,expires_ms=? WHERE comment_id=?',now+INTERVAL,commentId);
       return Response.json({error:'Comment is not a valid publication in the fixed issue'},{status:422});}
-    sql.exec('INSERT OR IGNORE INTO imported_comments(comment_id,publication) VALUES(?,?)',commentId,JSON.stringify(publication));
-    await applyPendingPublications(ctx,{now,commentId,work:{pending:100,conflicts:0},recover:false});
-    sql.exec('DELETE FROM public_import_hints WHERE comment_id=?',commentId);
-    return hintReceipt(ctx,commentId);
+    const raced=hintReceipt(ctx,commentId);
+    if(raced){sql.exec('DELETE FROM public_import_hints WHERE comment_id=?',commentId);return raced;}
+    // Only independently validated durable publication work requires mutation
+    // admission. Receipt/cache/budget no-ops never reserve an alarm wake.
+    return await admitMutation(async()=>{
+      sql.exec('INSERT OR IGNORE INTO imported_comments(comment_id,publication) VALUES(?,?)',commentId,JSON.stringify(publication));
+      await applyPendingPublications(ctx,{now,commentId,work:{pending:100,conflicts:0},recover:false});
+      sql.exec('DELETE FROM public_import_hints WHERE comment_id=?',commentId);
+      return hintReceipt(ctx,commentId);
+    });
   } catch {
     sql.exec('UPDATE public_import_hints SET status=503,expires_ms=? WHERE comment_id=?',now+INTERVAL,commentId);
     return Response.json({error:'Import hint unavailable; the existing reconciler is retained'},{status:503});
