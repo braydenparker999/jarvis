@@ -24,8 +24,10 @@ function wakeSchema(ctx) {
 }
 function hasWakeTable(ctx) {
   if (wakeTables.has(ctx)) return true;
-  if (!rows(ctx,"SELECT name FROM sqlite_master WHERE type='table' AND name='relay_core_alarm_wakes'").length) return false;
-  wakeTables.add(ctx); return true;
+  // Probing a missing optional lane must not scan every schema row during
+  // delivery retention. LIMIT 0 reads no rows; cache only positive existence.
+  try { rows(ctx,'SELECT due_ms FROM relay_core_alarm_wakes LIMIT 0');wakeTables.add(ctx);return true; }
+  catch(error) { if (/no such table: relay_core_alarm_wakes\b/.test(error.message||''))return false;throw error; }
 }
 function nextReserved(ctx) {
   return hasWakeTable(ctx) ? rows(ctx,'SELECT MIN(due_ms) AS n FROM relay_core_alarm_wakes')[0].n : null;
