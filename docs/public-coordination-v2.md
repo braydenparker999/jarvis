@@ -160,6 +160,16 @@ text attests authenticated private execution or host execution. A live lifecycle
 must be independently approved and verified before claiming Lucy/Muse wake-up
 works in production. No direct push to Muse is promised.
 
+Internal wake admission retains at most 256 ordinary reservations and one
+aggregate alarm recovery row. A due alarm acknowledges its recovery wake before
+either bounded lane runs, even when ordinary admission is full. Ordinary ingress
+reclaims expired slots before checking capacity. Interrupted retries preserve
+the original five-minute orphan deadline; successful retries cannot renew it.
+A still-running handler retains its own five-minute lease when an older orphan
+expires, including an acknowledgment that crosses that deadline. The recovery
+adjustment adds no table, index, KV key, public execution authority or external
+schedule change.
+
 ## Credential-free import acceleration
 
 After a successful comment write/read-back, a capable publisher may call:
