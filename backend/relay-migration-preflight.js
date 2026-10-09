@@ -103,9 +103,14 @@ export async function relayMigrationPreflightAdmission(ctx, input, now, reserve)
   const problem = stepInputsProblem(input, now); if (problem) return beforeSqlBlocked(problem);
   if (!object(ctx)) return beforeSqlBlocked('native_context_unknown');
   if (typeof reserve !== 'function') return beforeSqlBlocked('external_admission_required');
-  const request = {planRevision: PLAN.revision, reservationId: crypto.randomUUID(), utcDay: day(now), scope: input.scope,
-    allocationSignature: allocationSignature(input), allocation: {...input.allocations.find(item => item.scope === input.scope)},
-    envelope: {rowsRead: PLAN.stepRowsRead, rowsWritten: PLAN.stepRowsWritten, storedBytes: PLAN.checkpointBytes}};
+  // Capture the complete binding before handing control to the reservation
+  // callback. Neither a changed input nor a changed validation reference may
+  // attach an original scope's receipt to a different SQL operation.
+  const inputBinding = JSON.stringify(input), snapshot = JSON.parse(inputBinding);
+  const snapshotProblem = stepInputsProblem(snapshot, now); if (snapshotProblem) return beforeSqlBlocked(snapshotProblem);
+  const request = Object.freeze({planRevision: PLAN.revision, reservationId: crypto.randomUUID(), utcDay: day(now), scope: snapshot.scope,
+    allocationSignature: allocationSignature(snapshot), allocation: Object.freeze({...snapshot.allocations.find(item => item.scope === snapshot.scope)}),
+    envelope: Object.freeze({rowsRead: PLAN.stepRowsRead, rowsWritten: PLAN.stepRowsWritten, storedBytes: PLAN.checkpointBytes})});
   const previous = admittedContexts.get(ctx);
   if (previous?.utcDay === request.utcDay) {
     if (previous.scope !== request.scope || previous.allocationSignature !== request.allocationSignature) return beforeSqlBlocked('preflight_allocation_plan_changed');
@@ -113,6 +118,8 @@ export async function relayMigrationPreflightAdmission(ctx, input, now, reserve)
   }
   let receipt;
   try {receipt = await reserve(request);} catch {return beforeSqlBlocked('external_admission_unavailable');}
+  try {if (JSON.stringify(input) !== inputBinding) return beforeSqlBlocked('external_admission_invalid');}
+  catch {return beforeSqlBlocked('external_admission_invalid');}
   if (exact(receipt, ['status', 'reason']) && receipt.status === 'blocked'
     && ['preflight_allocation_exhausted', 'preflight_allocation_plan_changed', 'external_admission_unknown'].includes(receipt.reason)) return beforeSqlBlocked(receipt.reason);
   if (!exact(receipt, ['status', 'reservationId', 'utcDay', 'scope', 'allocationSignature', 'attempt', 'reserved']) || receipt.status !== 'reserved'
@@ -131,7 +138,7 @@ export async function relayMigrationPreflightAdmission(ctx, input, now, reserve)
   }
   admittedContexts.set(ctx, {utcDay: request.utcDay, scope: request.scope, allocationSignature: request.allocationSignature, attempt: receipt.attempt});
   const permit = Object.freeze({});
-  permits.set(permit, {ctx, input: JSON.stringify(input), issuedAt: now, attempt: receipt.attempt, reserved: {...receipt.reserved}});
+  permits.set(permit, {ctx, input: inputBinding, issuedAt: now, attempt: receipt.attempt, reserved: {...receipt.reserved}});
   return permit;
 }
 
