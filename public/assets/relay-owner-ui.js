@@ -12,12 +12,12 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), draftS
   const retryAttempts=new Map();
   let state = { mode: api.selectedMode==='owner'||(api.selectedMode===undefined&&api.hasCredential)?'owner':'public', status: api.hasCredential ? 'unknown' : 'none',
     messages: [], draft: draftStore.read(), devices: [], device: null, pairing: null, error: '', warning: '', busy: false, sending: false, query: '', authenticating: false, account: null, accountReady: false, accountNotice: '', loginDevices: [],
-    jobsEnabled:false,jobs:[],jobsError:'',syncStale:false,jobMode:false,jobTitle:'',jobKind:'consequential',jobProject:'',jobGoal:'',requestsOnly:false,sendUnconfirmed:false,sendNotice:'',jobDetailId:null,jobDetail:null,jobDetailBusy:false,jobDetailError:'',jobDetailStale:false,jobBusy:false };
+    jobsEnabled:false,jobs:[],jobsError:'',syncStale:false,jobMode:false,jobTitle:'',jobKind:'consequential',jobProject:'',jobGoal:'',requestsOnly:false,workFilter:'all',sendUnconfirmed:false,sendNotice:'',jobDetailId:null,jobDetail:null,jobDetailBusy:false,jobDetailError:'',jobDetailStale:false,jobBusy:false };
   const emit = () => { for (const listener of listeners) listener(); };
   const mode = next => { if (next !== state.mode) { state.mode = next; onModeChange(next); } emit(); };
   function clearPrivate({preserveDraft = false} = {}) { state.loginDevices = []; accountConsent = null; state.account = null; state.accountReady = false; state.accountNotice = ''; state.messages = []; if (!preserveDraft) {state.draft = '';draftStore.save('');} state.devices = []; state.device = null; failedSend = null; cursor = '0';
     jobCursor='0';jobFence=null;jobChangesSupported=typeof api.jobChanges==='function';jobResetCache=null;jobReading=null;
-    ++detailEpoch;retryAttempts.clear();state.jobsEnabled=false;state.jobs=[];state.jobsError='';state.syncStale=false;state.jobMode=false;state.jobTitle='';state.jobKind='consequential';state.jobProject='';state.jobGoal='';state.requestsOnly=false;state.sendUnconfirmed=false;state.sendNotice='';state.jobDetailId=null;state.jobDetail=null;state.jobDetailBusy=false;state.jobDetailError='';state.jobDetailStale=false;state.jobBusy=false; }
+    ++detailEpoch;retryAttempts.clear();state.jobsEnabled=false;state.jobs=[];state.jobsError='';state.syncStale=false;state.query='';state.jobMode=false;state.jobTitle='';state.jobKind='consequential';state.jobProject='';state.jobGoal='';state.requestsOnly=false;state.workFilter='all';state.sendUnconfirmed=false;state.sendNotice='';state.jobDetailId=null;state.jobDetail=null;state.jobDetailBusy=false;state.jobDetailError='';state.jobDetailStale=false;state.jobBusy=false; }
   function failure(error) {
     const safe = error instanceof OwnerApiError ? error : new OwnerApiError('network');
     state.error = safe.message;
@@ -135,7 +135,8 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), draftS
     snapshot() { return structuredClone(state); },
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     setDraft(value) { state.draft = value.slice(0, 4000); const saved = draftStore.save(state.draft); if (!saved) state.warning = 'Could not retain this private draft in the tab. Copy it before leaving.'; return saved; },
-    setQuery(value) { state.query = value.trim().toLowerCase();state.requestsOnly=false; emit(); },
+    setQuery(value) { state.query = value.trim().toLowerCase(); emit(); },
+    setWorkFilter(value){if(['all','queued','working','blocked','finished'].includes(value)){state.workFilter=value;emit();}},
     setJobMode(value){if(!state.jobsEnabled||state.sending)return;state.jobMode=value===true;state.sendUnconfirmed=false;emit();},
     setJobTitle(value){state.jobTitle=value.slice(0,120);},
     setJobProject(value){state.jobProject=value.slice(0,120);},
@@ -369,14 +370,16 @@ export function ownerWorkStatus(job, now=Date.now()) {
   return {state:'blocked',label:job.stage==='waiting_for_owner'?'Blocked · needs your input':job.stage==='failed'?'Blocked · attempt failed':'Blocked · outcome unconfirmed'};
 }
 
-export function groupOwnerWork(jobs, {query='', now=Date.now()}={}) {
+export function groupOwnerWork(jobs, {query='', filter='all', now=Date.now()}={}) {
+  query=query.trim().toLowerCase();
   const roots=new Map();
   for(const job of jobs){const attempts=roots.get(job.rootJobId)||[];attempts.push(job);roots.set(job.rootJobId,attempts);}
   const tasks=[...roots.values()].map(attempts=>{
     attempts.sort((a,b)=>a.attempt-b.attempt||a.sequence-b.sequence);
     const job=attempts.at(-1);return {job,attempts,status:ownerWorkStatus(job,now)};
   }).filter(({job,attempts})=>job.actionKind!=='unclassified'||job.attempt>1||attempts.some(attempt=>attempt.execution||attempt.completion))
-    .filter(({job})=>!query||[job.title,job.body,job.presentation?.projectTitle,job.presentation?.goalTitle].some(text=>text?.toLowerCase().includes(query)));
+    .filter(({status})=>filter==='all'||status.state===filter)
+    .filter(({job})=>!query||[job.title,job.body,job.presentation?.projectTitle,job.presentation?.goalTitle,job.presentation?.latestUpdate?.summary,job.latestResult?.body||job.result?.body,job.latestResult?.correctionSummary].some(text=>text?.toLowerCase().includes(query)));
   tasks.sort((a,b)=>b.job.updatedAt.localeCompare(a.job.updatedAt)||b.job.sequence-a.job.sequence);
   return tasks;
 }
@@ -538,13 +541,18 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
     if(focused){const node=focused.id?detailDialog.querySelector('#'+focused.id):[...detailDialog.querySelectorAll('button,summary,input')].find(n=>(n.getAttribute('aria-label')||n.textContent)===focused.label);node?.focus({preventScroll:true});}
   }
   function renderWork(state) {
-    const panel=chatNodes.messages,tasks=groupOwnerWork(state.jobs,{query:state.query});
-    const signature=JSON.stringify([state.jobs,state.query,state.jobsError,state.syncStale,workVisible,tasks.map(t=>t.status)]);
+    const panel=chatNodes.messages,allTasks=groupOwnerWork(state.jobs),tasks=groupOwnerWork(state.jobs,{query:state.query,filter:state.workFilter});
+    const signature=JSON.stringify([state.jobs,state.query,state.workFilter,state.jobsError,state.syncStale,workVisible,tasks.map(t=>t.status)]);
     if(workSignature===signature)return;workSignature=signature;
     const open=new Map([...panel.querySelectorAll?.('details[data-work-key]')||[]].map(n=>[n.dataset.workKey,n.open]));
     const scroll=panel.scrollTop,focused=panel.contains?.(doc.activeElement)?doc.activeElement?.id:null;
     const body=make('section','','owner-work');body.id='relay-owner-current-work';body.setAttribute('aria-label','Private current work');
     body.append(make('h2','Current work'),make('p','Private · saved requests and authenticated execution updates','request-meta'));
+    const filters=make('div','','owner-work-filters'),filterLabel=make('label','Status');filterLabel.htmlFor='relay-owner-work-filter';
+    const filter=make('select');filter.id='relay-owner-work-filter';
+    for(const [value,label] of [['all','All work'],['queued','Queued'],['working','Working'],['blocked','Needs attention'],['finished','Finished']]){const option=make('option',label);option.value=value;filter.append(option);}
+    filter.value=state.workFilter;filter.onchange=()=>controller.setWorkFilter(filter.value);filters.append(filterLabel,filter);body.append(filters);
+    const count=make('p',tasks.length+' of '+allTasks.length+' saved task'+(allTasks.length===1?'':'s'),'request-meta');count.id='relay-owner-work-count';body.append(count);
     if(state.syncStale||state.jobsError){const stale=make('p','Last known records · '+(state.jobsError||'refresh unavailable'),'relay-owner-note');stale.setAttribute('role','status');body.append(stale);}
     function disclosure(key,title,cls,initial=false){const n=make('details','',cls);n.dataset.workKey=key;n.open=open.has(key)?open.get(key):initial;const s=make('summary',title);s.id='owner-work-'+encodeURIComponent(key);n.append(s);return n;}
     function taskRow(task){
@@ -573,14 +581,17 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
       }
     }
     const current=tasks.filter(t=>t.status.state!=='finished'),finished=tasks.filter(t=>t.status.state==='finished');
-    if(current.length)projects(current.slice(0,workVisible),body,'current');else body.append(make('p',state.busy&&!state.jobs.length?'Loading saved requests…':'No current work is recorded.','relay-owner-note'));
+    if(current.length)projects(current.slice(0,workVisible),body,'current');else if(!finished.length)body.append(make('p',state.busy&&!state.jobs.length?'Loading saved requests…':state.query||state.workFilter!=='all'?'No work matches this search and status.':'No current work is recorded.','relay-owner-note'));
     if(current.length>workVisible){const more=action('Show more current work ('+Math.min(workVisible,current.length)+' of '+current.length+')',()=>{workVisible+=50;renderMessages(controller.snapshot());},'text-button');body.append(more);}
-    if(finished.length){const done=disclosure('finished','Finished · '+finished.length,'owner-work-finished');projects(finished.slice(0,workVisible),done,'finished');if(finished.length>workVisible)done.append(action('Show more finished work',()=>{workVisible+=50;renderMessages(controller.snapshot());},'text-button'));body.append(done);}
+    if(finished.length){const done=disclosure('finished','Finished · '+finished.length,'owner-work-finished');if(state.query||state.workFilter==='finished')done.open=true;projects(finished.slice(0,workVisible),done,'finished');if(finished.length>workVisible)done.append(action('Show more finished work',()=>{workVisible+=50;renderMessages(controller.snapshot());},'text-button'));body.append(done);}
     panel.replaceChildren(body);panel.scrollTop=scroll;
     if(focused)[...panel.querySelectorAll?.('[id]')||[]].find(n=>n.id===focused)?.focus({preventScroll:true});
   }
   function renderMessages(state) {
     if (!chatNodes) return;
+    const search=doc.getElementById('relay-owner-search'),searchLabel=doc.getElementById('relay-owner-search-label');
+    const searchText=state.requestsOnly&&state.jobsEnabled?'Search current work':'Search private messages';
+    if(search){search.placeholder=searchText;if(search.value.trim().toLowerCase()!==state.query)search.value=state.query;}if(searchLabel)searchLabel.textContent=searchText;
     const panel=chatNodes.messages,anchor=chatNodes.first&&readingAnchor?readingAnchor:position(panel),jobs=new Map(state.jobs.map(j=>[j.messageId,j]));
     const existing=new Map([...panel.children].filter(n=>n.dataset?.messageId).map(n=>[n.dataset.messageId,n])),nodes=[];
     const work=state.requestsOnly&&state.jobsEnabled;if(work)renderWork(state);else workSignature='';
@@ -645,7 +656,7 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
       section.classList.add('relay-owner-chat');
       const heading = make('div', '', 'relay-owner-heading'); heading.append(make('h2', 'Owner chat')); section.append(heading);
       const search = make('div', '', 'conversation-search'); search.id = 'relay-owner-search-bar'; search.hidden = true;
-      const searchLabel = make('label', 'Search private messages', 'sr-only'); searchLabel.htmlFor = 'relay-owner-search';
+      const searchLabel = make('label', 'Search private messages', 'sr-only'); searchLabel.htmlFor = 'relay-owner-search';searchLabel.id='relay-owner-search-label';
       const searchInput = make('input'); searchInput.id = 'relay-owner-search'; searchInput.type = 'search'; searchInput.placeholder = 'Search private messages'; searchInput.autocomplete = 'off';searchInput.value=state.query;search.hidden=!state.query; searchInput.oninput = () => controller.setQuery(searchInput.value);const searchClose=action('',()=>ui.toggleSearch(),'icon-button');searchClose.innerHTML=icon('close');searchClose.setAttribute('aria-label','Close search');search.append(searchLabel,searchInput,searchClose); section.append(search);
       workSignature='';workVisible=50;const messages = make('div', '', 'messages'); messages.setAttribute('aria-label', 'Private owner conversation'); messages.setAttribute('aria-live', 'polite'); section.append(messages);
       const form = make('form', '', 'composer'); form.id = 'relay-owner-message-form';
@@ -763,7 +774,7 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
     },
     unmount() { if(chatNodes)readingAnchor=position(chatNodes.messages);closeInspector();connectionDialog?.close?.();connectionDialog?.remove?.();connectionDialog=null;clearSensitiveFields(); if (viewKey.startsWith('account:') || controller.snapshot().authenticating || controller.snapshot().loginDevices.length) controller.cancelSensitive(); root = null; chatNodes = null; viewKey = ''; clearInterval(timer); },
     toggleSearch() { const bar = doc.getElementById('relay-owner-search-bar'); if (!bar) return; bar.hidden = !bar.hidden; if (!bar.hidden) doc.getElementById('relay-owner-search').focus(); else { doc.getElementById('relay-owner-search').value = ''; controller.setQuery(''); } },
-    latest() { controller.setQuery('');if(chatNodes)chatNodes.messages.scrollTop=chatNodes.messages.scrollHeight; },
+    latest() { if(controller.snapshot().requestsOnly)controller.toggleRequests();else controller.setQuery('');if(chatNodes)chatNodes.messages.scrollTop=chatNodes.messages.scrollHeight; },
     requests(){controller.toggleRequests();if(chatNodes)chatNodes.messages.scrollTop=0;},
     connection(){
       if(!doc.body)return;connectionDialog?.close?.();const state=controller.snapshot(),dialog=make('dialog','','app-sheet conversation-sheet');connectionDialog=dialog;dialog.setAttribute('aria-label','Private owner connection');const heading=make('div','','dialog-heading'),close=action('',()=>dialog.close(),'icon-button');close.innerHTML=icon('close');close.setAttribute('aria-label','Close connection details');heading.append(make('h2','Private owner connection'),close);dialog.append(heading);

@@ -127,3 +127,7 @@ body:is(.relay-page,.muse-page) .rich-body .code-block pre{padding-top:60px}
 @media(max-height:600px){body:is(.relay-page,.muse-page) .topbar{min-height:calc(64px + env(safe-area-inset-top))}body:is(.relay-page,.muse-page) .messages{padding-top:16px}body:is(.relay-page,.muse-page) .composer-input textarea{max-height:96px}body:is(.relay-page,.muse-page) .chat-empty{padding-block:24px}.owner-job-fields{gap:6px}.owner-job-fields p{display:none}}
 @media(min-width:800px){body:is(.relay-page,.muse-page) .workspace{border-inline:1px solid #ffffff0a}body:is(.relay-page,.muse-page) .messages{padding-inline:32px}body:is(.relay-page,.muse-page) .composer{padding-inline:28px}body:is(.relay-page,.muse-page) .app-sheet{bottom:24px;border-radius:12px}}
 @media(prefers-reduced-motion:reduce){body:is(.relay-page,.muse-page) .app-sheet[open]{animation:none}}
+
+.owner-work-filters{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;margin:12px 0}
+.owner-work-filters label{font-size:13px;color:var(--muted)}
+.owner-work-filters select{min-width:0;max-width:100%;min-height:48px;font-size:14px;padding:10px 12px}

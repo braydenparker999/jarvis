@@ -22,6 +22,13 @@ test('private projects expose truthful current work and corrected results with z
     const current=work.locator('[data-job-id="'+working.id+'"]');await current.locator('summary').first().click();assert.match(await current.innerText(),/Read both fictional notes/);
     const waiting=work.locator('[data-job-id="'+blocked.id+'"]');await waiting.locator('summary').first().click();assert.match(await waiting.innerText(),/Which fictional width/);
     await work.locator('.owner-work-finished>summary').click();const finished=work.locator('[data-job-id="'+done.id+'"]');await finished.locator('summary').first().click();assert.match(await finished.innerText(),/Corrected result · version 2/);assert.match(await finished.innerText(),/four shrubs/);assert.match(await finished.innerText(),/reply version 1/);
+    await conversationMenu(page,'Search current work');const search=page.getByRole('searchbox',{name:'Search current work'});
+    await search.fill('measurements');assert.equal(await work.locator('details[data-job-id]').count(),1);assert.equal(await work.locator('details[data-job-id]').first().getAttribute('data-job-id'),working.id);
+    await work.locator('#relay-owner-work-filter').selectOption('queued');assert.equal(await work.locator('details[data-job-id]').count(),0);assert.match(await work.innerText(),/No work matches this search and status/);
+    await search.fill('');assert.equal(await work.locator('details[data-job-id]').count(),1);assert.equal(await work.locator('details[data-job-id]').first().getAttribute('data-job-id'),queued.id);
+    await work.locator('#relay-owner-work-filter').selectOption('finished');await search.fill('four shrubs');assert.equal(await work.locator('details[data-job-id]').count(),1);assert.equal(await work.locator('details[data-job-id]').first().getAttribute('data-job-id'),done.id);
+    await work.locator('#relay-owner-work-filter').selectOption('all');await page.getByRole('button',{name:'Close search',exact:true}).click();assert.equal(await work.locator('details[data-job-id]').count(),5);
+    await current.locator('summary').first().click();
     assert.equal(phone.records.filter(r=>r.method==='GET'&&r.path.startsWith('/relay/owner/')).length,before,'Opening Projects, Goals and Tasks uses cached change records only');
     assert.equal(phone.records.filter(r=>r.path.startsWith('/relay/owner/')).length,beforeAll,'Expansion also creates no preflight or other API request');
     assert.equal(phone.records.filter(r=>r.path.endsWith('/jobs/detail')).length,0);
