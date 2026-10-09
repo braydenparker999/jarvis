@@ -2,13 +2,14 @@
 import publication from '../public/content/jarvis.json' with {type:'json'};
 import {enqueueRelayMessage} from './relay-events.js';
 import {RELAY_OAUTH_OBJECT} from './relay-common.js';
+import {coordinationSchema, recordPublicEntry, appendCoordination, readPublicCoordination} from './public-coordination.js';
 export const SHARED_OBJECT = RELAY_OAUTH_OBJECT;
 export const PUBLIC_KEY = '2d9a0d0d4254cd5774d2d4e7806cbadae306271ffc1f31fef0d44cd7e226c2a5';
 const id = x => typeof x === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(x);
 const text = (x, max) => typeof x === 'string' && x.trim().length > 0 && x.length <= max;
 const json = (x, status = 200) => Response.json(x, {status});
 
-export function sharedStore(ctx, path, body = {}, params = new URLSearchParams()) {
+export function sharedSchema(ctx) {
   const sql = ctx.storage.sql;
   sql.exec(`CREATE TABLE IF NOT EXISTS shared_entries (
     seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
@@ -17,13 +18,22 @@ export function sharedStore(ctx, path, body = {}, params = new URLSearchParams()
   sql.exec('CREATE INDEX IF NOT EXISTS shared_kind_seq ON shared_entries(kind, seq)');
   sql.exec('CREATE TABLE IF NOT EXISTS shared_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
   sql.exec('CREATE TABLE IF NOT EXISTS shared_briefing_dates (date TEXT PRIMARY KEY, entry_id TEXT NOT NULL)');
+  coordinationSchema(ctx);
+}
+export function sharedStore(ctx, path, body = {}, params = new URLSearchParams()) {
+  sharedSchema(ctx);
+  const sql = ctx.storage.sql;
   const rows = (q, ...v) => [...sql.exec(q, ...v)];
   const entry = r => ({id:r.id, body:r.body, createdAt:r.created_at,
     ...(r.kind === 'briefing' ? {title:r.title} : {role:r.kind === 'user' ? 'user' : 'assistant'}),
     ...(r.kind === 'reply' ? {kind:'reply', replyTo:r.reply_to} : {})});
-  const insert = (m, kind) => sql.exec(
+  const insert = (m, kind) => {sql.exec(
     'INSERT INTO shared_entries(id,kind,reply_to,title,body,created_at) VALUES(?,?,?,?,?,?)',
     m.id, kind, m.replyTo || null, m.title || null, m.body.trim(), m.createdAt || new Date().toISOString());
+    recordPublicEntry(ctx, m.id);
+  };
+  if (path === '/internal/shared/coordination') return appendCoordination(ctx, body.payload, body.provenance);
+  if (path === '/internal/shared/changes' || path === '/internal/shared/result') return readPublicCoordination(ctx, path, params);
   if (path === '/internal/shared/import') {
     // Input comes only from the old DO and the checked-in, trusted publication.
     return ctx.storage.transactionSync(() => {
@@ -48,7 +58,7 @@ export function sharedStore(ctx, path, body = {}, params = new URLSearchParams()
     const selected = page.slice(0,200);
     const result = {messages:selected.filter(r=>r.kind!=='briefing').map(entry),posts:selected.filter(r=>r.kind==='briefing').map(entry),
       nextCursor:page.length>200 ? String(selected.at(-1).seq) : null,
-      mode:'github-publications',serviceVersion:7,publisher:{source:'GitHub issue #2 → Cloudflare',...JSON.parse(rows("SELECT value FROM shared_meta WHERE key='publisher-status'")[0]?.value || '{"ok":false,"error":"Publication sync has not run yet"}')}};
+      mode:'github-publications',serviceVersion:7,coordinationVersion:2,publisher:{source:'GitHub issue #2 → Cloudflare',...JSON.parse(rows("SELECT value FROM shared_meta WHERE key='publisher-status'")[0]?.value || '{"ok":false,"error":"Publication sync has not run yet"}')}};
     if (path.endsWith('/inbox')) {
       // Pending queue is independent of history pagination; never hide old pending messages.
       const pending=rows("SELECT * FROM shared_entries u WHERE kind='user' AND NOT EXISTS(SELECT 1 FROM shared_entries r WHERE r.reply_to=u.id) ORDER BY seq LIMIT 101");

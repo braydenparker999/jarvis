@@ -1,6 +1,8 @@
 import {API_ORIGIN} from './config.js';
+import {readPublicPages, publicEventMessages} from './public-coordination.js';
 // Enabled only after the deployed Worker and authenticated assistant pass live tests.
 export function createDirectApi(fetcher=fetch,origin=API_ORIGIN) {
+  let publicEvents=[],changeCursor;
   async function cloud(path,body,headers={}) {
     let r;
     try{r=await fetcher(origin+path,{method:body?'POST':'GET',headers:{...(body?{'Content-Type':'application/json'}:{}),...headers},body:body?JSON.stringify(body):undefined,cache:'no-store',signal:AbortSignal.timeout(15000)});}
@@ -18,11 +20,23 @@ export function createDirectApi(fetcher=fetch,origin=API_ORIGIN) {
       cursor=state.nextCursor;seen.add(cursor);
     } while(cursor!==null);
     const unique=items=>[...new Map(items.map(m=>[m.id,m])).values()];
+    if(state.coordinationVersion===2){
+      // Commit cursor/cache together only after every page succeeds. Reload
+      // starts at zero; a partial read retries from the previous complete cursor.
+      const updates=await readPublicPages(cloud,{cursor:changeCursor,events:publicEvents});
+      // Entry acceptance still comes from the original complete history/read or
+      // POST receipt. A newer change page must not alter an in-flight send's
+      // existing conflict/receipt behavior. Subsequent history reads recover it.
+      publicEvents=updates.events;changeCursor=updates.cursor;
+      messages.push(...publicEventMessages(publicEvents));
+      state.coordinationCursor=changeCursor;
+    }
     state.messages=unique(messages).sort((a,b)=>a.createdAt.localeCompare(b.createdAt));state.posts=unique(posts);
     const answered=new Set(state.messages.filter(m=>m.kind==='reply').map(m=>m.replyTo));
     state.unanswered=state.messages.filter(m=>m.role==='user'&&!answered.has(m.id));return state;
   }
   return async function request(path,body,headers={}) {
+    if(path==='/shared/result')return readPublicPages(cloud,{requestId:body.requestId,cursor:body.cursor});
     if(path==='/shared/state')return load();
     if(path==='/shared/messages'){
       let data;
