@@ -122,13 +122,15 @@ function recordExamined(ctx,id,seq){
     WHERE examined_seq<>excluded.examined_seq`,id,seq);
 }
 function considerLiveEvent(ctx,sub,event,now){
-  const result=enqueueFor(ctx,sub,event,now);
-  if(result==='full')return;
   const examined=rows(ctx,'SELECT examined_seq FROM relay_subscription_scans WHERE subscription_id=?',sub.id)[0]?.examined_seq??sub.ack_seq;
-  // A later live insert cannot certify an older replay gap. Enqueue and this
-  // cursor update run inside the message's existing synchronous transaction.
-  if(event.seq>examined&&!rows(ctx,'SELECT seq FROM relay_events WHERE seq>? AND seq<? LIMIT 1',examined,event.seq).length)
-    recordExamined(ctx,sub.id,event.seq);
+  // Ahead-of-gap live occurrences stay in the durable journal. Enqueuing them
+  // first could fill every slot with successors, leaving no capacity for the
+  // older missing FIFO head and no safe callback that could free a slot.
+  if(event.seq>examined&&rows(ctx,'SELECT seq FROM relay_events WHERE seq>? AND seq<? LIMIT 1',examined,event.seq).length)return;
+  const result=enqueueFor(ctx,sub,event,now);
+  // Enqueue and this cursor update run inside the message's existing synchronous
+  // transaction. A full queue never certifies an unqueued relevant occurrence.
+  if(result!=='full'&&event.seq>examined)recordExamined(ctx,sub.id,event.seq);
 }
 function fillOutbox(ctx,sub,now,inTransaction=false){
   const fill=()=>{

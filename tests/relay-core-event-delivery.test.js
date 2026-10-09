@@ -45,14 +45,14 @@ async function setup(t){
   return {...fixture,ctx,sql,rows,now,auth,parameters,subscribe,seed,ack,examined};
 }
 
-test('mixed retained kinds use bounded SQL pages and an older replay match precedes a newly queued live occurrence',async t=>{
+test('mixed retained kinds use bounded SQL pages and an older replay match precedes a later live occurrence',async t=>{
   const s=await setup(t),calls=[];
   for(let n=1;n<=1200;n++)s.seed(n,n%3===2?RELAY_OWNER_EVENT:n%3===1?RELAY_EVENT:PUBLIC_RESULT_EVENT,n===1049?'Fictional NEEDLE older match':'Fictional ignored text');
   const sub=await s.subscribe(s.parameters(RELAY_OWNER_EVENT,{inbox_id:RELAY_OWNER_INBOX,message_contains:'needle'}));
   assert.equal(s.ack(sub.id),0);assert.equal(s.examined(sub.id),749);
   assert.equal(s.rows('SELECT COUNT(*) AS n FROM relay_outbox')[0].n,0);
   s.ctx.storage.transactionSync(()=>enqueueRelayOwnerMessage(s.ctx,{id:fixtureId(1201),body:'Fictional needle newer live occurrence',createdAt:new Date(s.now).toISOString(),device_id:fixtureId(900001)},s.now));
-  assert.equal(s.examined(sub.id),749,'A new queued occurrence cannot jump the unfinished replay range');
+  assert.equal(s.examined(sub.id),749,'A live occurrence cannot jump the unfinished replay range');
   const responder=async(_url,options)=>{calls.push(JSON.parse(options.body));return new Response(null,{status:204});};
   await drainRelayOutbox(s.ctx,s.env,responder,s.now+50);
   assert.equal(calls[0].data.message_id,fixtureId(1049));assert.equal(s.ack(sub.id),1049);
@@ -100,6 +100,41 @@ test('dense multi-page replay honors backpressure and eventually delivers every 
   assert.deepEqual(delivered.map(item=>Number(item.cursor.slice(7))),Array.from({length:count},(_,n)=>n+1));
   assert.equal(new Set(delivered.map(item=>item.eventId)).size,count);assert.equal(s.ack(sub.id),count);assert.equal(s.examined(sub.id),count);
   assert.equal(s.rows("SELECT COUNT(*) AS n FROM relay_outbox WHERE status='pending'")[0].n,0);
+});
+
+test('a live flood behind an unexamined relevant gap cannot fill the queue or deadlock FIFO refill',async t=>{
+  const s=await setup(t),liveCount=2200;
+  for(let n=1;n<=300;n++)s.seed(n,RELAY_OWNER_EVENT,n===251?'Fictional needle oldest gap occurrence':'Fictional ignored ASCII text');
+  const sub=await s.subscribe(s.parameters(RELAY_OWNER_EVENT,{inbox_id:RELAY_OWNER_INBOX,message_contains:'needle'}));
+  assert.equal(s.examined(sub.id),250);assert.equal(s.ack(sub.id),0);
+  assert.equal(s.rows('SELECT COUNT(*) AS n FROM relay_outbox')[0].n,0);
+  for(let n=301;n<=300+liveCount;n++)s.ctx.storage.transactionSync(()=>enqueueRelayOwnerMessage(s.ctx,
+    {id:fixtureId(n),body:'Fictional needle live flood '+n,createdAt:new Date(s.now).toISOString(),device_id:fixtureId(900001)},s.now));
+  assert.equal(s.rows('SELECT COUNT(*) AS n FROM relay_events')[0].n,300+liveCount,'Every admitted live occurrence remains durable');
+  assert.equal(s.rows('SELECT COUNT(*) AS n FROM relay_outbox')[0].n,0,'Ahead-of-gap live events cannot consume FIFO refill capacity');
+  assert.equal(s.examined(sub.id),250);assert.equal(s.ack(sub.id),0);assert.equal(relayNextAlarmTime(s.ctx,s.now),s.now+50);
+  const attempts=[],delivered=[];
+  const responder=async(_url,options)=>{
+    attempts.push(options.body);if(attempts.length===1)return new Response('',{status:503});
+    delivered.push(JSON.parse(options.body).data.message_id);return new Response(null,{status:204});
+  };
+  let at=s.now+50;await drainRelayOutbox(s.ctx,s.env,responder,at);
+  assert.equal(JSON.parse(attempts[0]).data.message_id,fixtureId(251));assert.equal(s.ack(sub.id),0);
+  assert.equal(s.examined(sub.id),500);assert.equal(relayNextAlarmTime(s.ctx,at),at+1000,'The certified oldest head owns retry backoff');
+  let wakes=1,reachedCapacity=false;
+  while(delivered.length<liveCount+1){
+    at=relayNextAlarmTime(s.ctx,at);const priorDelivered=delivered.length;
+    await drainRelayOutbox(s.ctx,s.env,responder,at);wakes++;
+    assert.equal(delivered.length,priorDelivered+1,'Each eligible wake makes transport progress; no stagnant 50ms loop');
+    const pending=s.rows("SELECT COUNT(*) AS n FROM relay_outbox WHERE status='pending'")[0].n;
+    assert.ok(pending<=2000);if(pending===1999&&s.examined(sub.id)<300+liveCount)reachedCapacity=true;
+    assert.ok(wakes<=liveCount+2);
+  }
+  assert.equal(reachedCapacity,true);assert.equal(wakes,liveCount+2);assert.equal(attempts[0],attempts[1],'Gap head retry retains its immutable occurrence');
+  assert.deepEqual(delivered,[fixtureId(251),...Array.from({length:liveCount},(_,n)=>fixtureId(n+301))]);
+  assert.equal(s.examined(sub.id),300+liveCount);assert.equal(s.ack(sub.id),300+liveCount);
+  assert.equal(s.rows("SELECT COUNT(*) AS n FROM relay_outbox WHERE status='pending'")[0].n,0);
+  assert.ok(relayNextAlarmTime(s.ctx,at)>at+60000,'Completed flood leaves no rapid refill wake');
 });
 
 test('interruption between enqueue and examined commit rolls back both and an old partial enqueue replays idempotently',async t=>{

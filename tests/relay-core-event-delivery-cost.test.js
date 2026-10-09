@@ -10,7 +10,7 @@ import {Miniflare,convertV4MiniflareOptions} from 'miniflare';
 const fixtureSource=`
 import {sharedSchema} from '../backend/shared.js';
 import {relayOAuthStore} from '../backend/relay-oauth.js';
-import {relayEventSchema,relaySubscribe,drainRelayOutbox,relayNextAlarmTime,scheduleRelayAlarm} from '../backend/relay-events.js';
+import {relayEventSchema,relaySubscribe,drainRelayOutbox,relayNextAlarmTime,scheduleRelayAlarm,enqueueRelayOwnerMessage} from '../backend/relay-events.js';
 import {RELAY_OWNER,RELAY_OWNER_SCOPE,RELAY_OWNER_INBOX,RELAY_OWNER_EVENT,RELAY_INBOX} from '../backend/relay-common.js';
 export class EventCostFixture {
   constructor(ctx,env){
@@ -32,7 +32,7 @@ export class EventCostFixture {
     sql.exec('CREATE TABLE fictional_numbers(n INTEGER PRIMARY KEY)');
     sql.exec('INSERT INTO fictional_numbers WITH RECURSIVE numbers(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM numbers WHERE n<?) SELECT n FROM numbers',count);
     sql.exec("INSERT INTO relay_events(event_id,message_id,occurred_at,created_ms,data) SELECT 'fictional-event-'||n,CASE WHEN ?='cross' AND n<? THEN 'public:' ELSE 'owner:' END||printf('00000000-0000-4000-8000-%012d',n),'2026-10-09T00:00:00Z',?,json_object('inbox_id',CASE WHEN ?='cross' AND n<? THEN ? ELSE ? END,'message_id',printf('00000000-0000-4000-8000-%012d',n),'author_authenticated',CASE WHEN ?='cross' AND n<? THEN json('false') ELSE json('true') END) FROM fictional_numbers",mode,count,this.now,mode,count,RELAY_INBOX,RELAY_OWNER_INBOX,mode,count);
-    sql.exec("INSERT INTO relay_owner_event_bodies SELECT 'fictional-event-'||n,CASE WHEN ?='dense' OR n=? OR (?='cross' AND n=?) THEN 'Fictional needle text' ELSE 'Fictional ignored ASCII text' END FROM fictional_numbers WHERE ?!='cross' OR n=?",mode,count-100,mode,count,mode,count);
+    sql.exec("INSERT INTO relay_owner_event_bodies SELECT 'fictional-event-'||n,CASE WHEN ?='dense' OR (?='flood' AND n=251) OR (?!='flood' AND (n=? OR (?='cross' AND n=?))) THEN 'Fictional needle text' ELSE 'Fictional ignored ASCII text' END FROM fictional_numbers WHERE ?!='cross' OR n=?",mode,mode,mode,count-100,mode,count,mode,count);
     sql.exec('INSERT INTO relay_oauth VALUES(?,?,?,?)','grant:fictional-grant','grant',JSON.stringify({principal:RELAY_OWNER,resource:this.env.RELAY_MCP_ORIGIN+'/relay/mcp',scope:RELAY_OWNER_SCOPE,revoked:false}),this.now+86400000);
     if(legacy)sql.exec('DROP INDEX relay_event_kind_seq');
   }
@@ -50,6 +50,12 @@ export class EventCostFixture {
     if(path==='/cold'){
       const p={name:RELAY_OWNER_EVENT,arguments:{inbox_id:RELAY_OWNER_INBOX,message_contains:'needle'},delivery:{mode:'webhook',url:'https://fictional.example.test/callback',secret:'whsec_'+btoa(String.fromCharCode(...new Uint8Array(32).fill(27)))},cursor:'relay1:0'};
       this.sub=await relaySubscribe(this.ctx,{principal:RELAY_OWNER,grantId:'fictional-grant',scopes:[RELAY_OWNER_SCOPE]},p,this.env,fetcher,this.now);
+    }else if(path==='/flood'){
+      const count=Number(u.searchParams.get('count')||2200);
+      for(let n=1;n<=count;n++)this.ctx.storage.transactionSync(()=>enqueueRelayOwnerMessage(this.ctx,
+        {id:'00000000-0000-4000-8000-'+String(n+700000).padStart(12,'0'),body:'Fictional needle live flood '+n,
+          createdAt:new Date(this.now).toISOString(),device_id:'00000000-0000-4000-8000-999999999999'},this.now));
+      next=relayNextAlarmTime(this.ctx,this.now);
     }else if(path==='/warm'){
       this.now+=50;await drainRelayOutbox(this.ctx,this.env,fetcher,this.now,{schedule:false});
       next=relayNextAlarmTime(this.ctx,this.now);await scheduleRelayAlarm(this.ctx,this.now);
@@ -67,7 +73,7 @@ export class EventCostFixture {
 export default {fetch(request,env){const u=new URL(request.url);return env.HUBS.get(env.HUBS.idFromName(u.searchParams.get('fixture')||'fictional-default')).fetch(request);}};
 `;
 
-test('native workerd cold/warm refill budgets stay page-bound for dense, sparse and unrelated histories', {timeout:30000},async()=>{
+test('native workerd cold/warm refill budgets stay page-bound for dense, sparse, unrelated histories and live floods', {timeout:30000},async()=>{
   const configuration=JSON.parse(readFileSync(new URL('../backend/wrangler.jsonc',import.meta.url),'utf8'));
   const bundle=await build({stdin:{contents:fixtureSource,sourcefile:'fictional-event-cost-worker.js',resolveDir:fileURLToPath(new URL('.',import.meta.url))},bundle:true,write:false,format:'esm',platform:'browser',target:'es2022',external:['node:crypto']});
   let egress=0;
@@ -85,6 +91,8 @@ test('native workerd cold/warm refill budgets stay page-bound for dense, sparse 
     }
     for(let n=0;n<7;n++)measured.denseBackpressure=await request('dense','/warm');
     measured.denseFull=await request('dense','/warm');
+    await request('flood','/seed',{mode:'flood',count:300});measured.floodCold=await request('flood','/cold');
+    measured.floodAdmission=await request('flood','/flood',{count:2200});measured.floodFirst=await request('flood','/warm');measured.floodSecond=await request('flood','/warm');
     await request('legacy','/seed',{mode:'sparse',count:6000,legacy:1});measured.legacyIndexCold=await request('legacy','/cold');
     measured.emptyWarm=await request('sparse','/empty');
     const compact=Object.fromEntries(Object.entries(measured).map(([name,{rowsRead,rowsWritten,sqlCalls,alarmWrites,callbacks,examined,ack,pending}])=>[name,{rowsRead,rowsWritten,sqlCalls,alarmWrites,callbacks,examined,ack,pending}]));
@@ -99,6 +107,15 @@ test('native workerd cold/warm refill budgets stay page-bound for dense, sparse 
     assert.ok(measured.denseFull.rowsRead<2300,'Queue-full input reduces to capacity, instead of rereading 250 matches');
     assert.ok(measured.crossCold.rowsRead<100,'Kind index skips 5,999 unrelated public occurrences');
     assert.ok(measured.crossWarm.rowsRead<100);
+    assert.equal(measured.floodCold.examined,250);assert.equal(measured.floodCold.pending,0);
+    assert.equal(measured.floodAdmission.examined,250);assert.equal(measured.floodAdmission.pending,0);assert.equal(measured.floodAdmission.ack,0);
+    assert.ok(!measured.floodAdmission.queries.some(({query})=>query.includes('SELECT COUNT(*) AS n FROM relay_outbox')),'Deferred live admission never scans queue capacity');
+    assert.ok(measured.floodAdmission.rowsRead/2200<20,'Per-message native reads stay bounded behind a gap');
+    assert.ok(measured.floodAdmission.rowsWritten/2200<=8,'Only the durable occurrence/body and their indexes are written');
+    assert.equal(measured.floodFirst.ack,251);assert.equal(measured.floodFirst.callbacks,1);
+    assert.equal(measured.floodSecond.ack,301);assert.equal(measured.floodSecond.callbacks,1);
+    assert.ok(measured.floodFirst.rowsRead<1200);assert.ok(measured.floodSecond.rowsRead<1700);
+    assert.ok(measured.floodFirst.rowsWritten<1350);assert.ok(measured.floodSecond.rowsWritten<1350);
     for(const name of ['sparseCold','sparseWarm','crossCold','crossWarm','emptyWarm'])assert.ok(measured[name].rowsWritten<50,name);
     // Each new occurrence writes the outbox table plus its four indexes.
     for(const name of ['denseCold','denseWarm','denseFull'])assert.ok(measured[name].rowsWritten<1350,name);
