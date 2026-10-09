@@ -33,17 +33,17 @@ export class CorePublicCostFixture {
     sql.exec('INSERT INTO fixture_numbers WITH RECURSIVE nums(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM nums WHERE n<?) SELECT n FROM nums',count);
     sql.exec("INSERT INTO shared_entries(id,kind,body,created_at) SELECT printf('00000000-0000-4000-8000-%012d',n),'user','Fictional public request',? FROM fixture_numbers",stamp);
     publicationSchema(this.ctx);
-    if(mode!=='cold')sql.exec("INSERT INTO public_changes(kind,item_id,request_id) SELECT 'entry',id,id FROM shared_entries");
+    if(mode!=='cold')sql.exec("INSERT OR IGNORE INTO public_changes(kind,item_id,request_id) SELECT 'entry',id,id FROM shared_entries");
     if(mode==='warm'){
       sql.exec("INSERT INTO imported_comments(comment_id,publication,imported) SELECT n,'{}',1 FROM fixture_numbers");
       await syncPublications(this.ctx,()=>{this.egress++;return Response.json([]);},this.now);
     }
-    if(mode==='pending')sql.exec(`INSERT INTO imported_comments(comment_id,publication) SELECT n,json_object('type','coordination','payload',
+    if(mode==='pending')sql.exec(`INSERT INTO imported_comments(comment_id,publication,imported) SELECT n,json_object('type','coordination','payload',
       json_object('schema','jarvis-coordination-v2','eventId',printf('00000000-0000-4000-8000-%012d',n+10000),
       'requestId',printf('00000000-0000-4000-8000-%012d',n+20000),'attemptId',printf('00000000-0000-4000-8000-%012d',n+30000),
       'stage','final','body','Fictional missing-original result','artifacts',json('[]'),'resultVersion',1),
       'provenance',json_object('source','github-issue','repository','braydenparker999/jarvis','issue',2,'commentId',n,
-      'authorId',183016859,'publishedAt',?)) FROM fixture_numbers`,stamp);
+      'authorId',183016859,'publishedAt',?)),-1 FROM fixture_numbers`,stamp);
     if(mode==='legacy'){
       const messages=Array.from({length:251},(_,n)=>({id:id(n+10000),role:n%2?'assistant':'user',
         body:n%2?'Fictional untrusted receipt':'Fictional late old public request',createdAt:stamp}));

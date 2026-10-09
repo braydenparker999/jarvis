@@ -56,6 +56,28 @@ export function coordinationSchema(ctx) {
   sql.exec(`CREATE TABLE IF NOT EXISTS public_artifact_state (
     request_id TEXT NOT NULL, attempt_id TEXT NOT NULL, artifact_id TEXT NOT NULL,
     result_version INTEGER NOT NULL, artifact TEXT NOT NULL, PRIMARY KEY(request_id,attempt_id,artifact_id))`);
+  if(metadata(ctx,'public-entry-index-version')!==1)ctx.storage.transactionSync(()=>{
+    // This trigger survives a c4 rollback. Its old plain INSERTs then append to
+    // the same journal atomically, without changing the shared entry or reply.
+    sql.exec(`CREATE TRIGGER IF NOT EXISTS public_changes_entry_insert AFTER INSERT ON shared_entries BEGIN
+      INSERT OR IGNORE INTO public_changes(kind,item_id,request_id)
+      VALUES('entry',NEW.id,CASE WHEN NEW.kind='user' THEN NEW.id ELSE NEW.reply_to END);
+    END`);
+    const previous=metadata(ctx,'public-changes-backfill');
+    const throughEntry=rows(ctx,'SELECT COALESCE(MAX(seq),0) AS n FROM shared_entries')[0].n;
+    const throughEvent=rows(ctx,'SELECT COALESCE(MAX(seq),0) AS n FROM public_coordination_events')[0].n;
+    const entryAfter=previous?.entryAfter??0;
+    const eventAfter=previous?.eventAfter??(metadata(ctx,'public-artifacts-backfilled')?throughEvent:0);
+    if(entryAfter<throughEntry||eventAfter<throughEvent){
+      saveMetadata(ctx,'public-changes-backfill',{entryAfter,eventAfter,throughEntry,throughEvent});
+      if(metadata(ctx,'public-changes-backfilled'))saveMetadata(ctx,'public-changes-backfilled',false);
+      // A previously warmed publisher may have a long local cooldown and an
+      // unchanged journal generation. Admit this new repair once immediately;
+      // its later pages still obey the existing continuation/work budgets.
+      saveMetadata(ctx,'publisher-local-next-attempt',0);
+    }
+    saveMetadata(ctx,'public-entry-index-version',1);
+  });
   if ((!metadata(ctx, 'public-changes-backfilled') || !metadata(ctx, 'public-artifacts-backfilled')) && !metadata(ctx, 'public-changes-backfill')) {
     const throughEntry = rows(ctx, 'SELECT COALESCE(MAX(seq),0) AS n FROM shared_entries')[0].n;
     const throughEvent = rows(ctx, 'SELECT COALESCE(MAX(seq),0) AS n FROM public_coordination_events')[0].n;
@@ -71,7 +93,8 @@ export function coordinationSchema(ctx) {
 // Live inserts are indexed atomically, including late legacy user messages, so
 // neither an incomplete page nor a new write can be hidden behind a watermark.
 export function publicChangesReady(ctx) {
-  return !!metadata(ctx, 'public-changes-backfilled') && !!metadata(ctx, 'public-artifacts-backfilled') && metadata(ctx, 'legacy-inbox-initialized') !== false;
+  return !!metadata(ctx, 'public-changes-backfilled') && !!metadata(ctx, 'public-artifacts-backfilled') &&
+    !metadata(ctx,'public-changes-backfill') && metadata(ctx, 'legacy-inbox-initialized') !== false;
 }
 function retainArtifacts(ctx, payload) {
   for (const item of payload.artifacts) ctx.storage.sql.exec(`INSERT INTO public_artifact_state VALUES(?,?,?,?,?)
@@ -114,7 +137,8 @@ export function backfillPublicChanges(ctx, limit = PUBLIC_BACKFILL_LIMIT) {
 }
 export function recordPublicEntry(ctx, id) {
   ctx.storage.sql.exec(`INSERT OR IGNORE INTO public_changes(kind,item_id,request_id)
-    SELECT 'entry',id,CASE WHEN kind='user' THEN id ELSE reply_to END FROM shared_entries WHERE id=?`, id);
+    SELECT 'entry',id,CASE WHEN kind='user' THEN id ELSE reply_to END FROM shared_entries WHERE id=?
+    AND NOT EXISTS(SELECT 1 FROM public_changes WHERE kind='entry' AND item_id=?)`, id,id);
 }
 const publicEntry = row => ({id: row.id, body: row.body, createdAt: row.created_at,
   ...(row.kind === 'briefing' ? {title: row.title} : {role: row.kind === 'user' ? 'user' : 'assistant'}),

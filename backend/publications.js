@@ -42,6 +42,10 @@ export function publicationSchema(ctx) {
   ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS imported_comments (comment_id INTEGER PRIMARY KEY, publication TEXT NOT NULL, imported INTEGER NOT NULL DEFAULT 0, error TEXT)');
   ctx.storage.sql.exec('CREATE INDEX IF NOT EXISTS imported_comments_status ON imported_comments(imported,comment_id)');
   ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS publication_recovery (comment_id INTEGER PRIMARY KEY)');
+  if(!meta(ctx,'publisher-v2-pending-compatibility')){
+    const through=rows(ctx,'SELECT COALESCE(MAX(comment_id),0) AS n FROM imported_comments WHERE imported=0')[0].n;
+    putMeta(ctx,'publisher-v2-pending-compatibility',{after:0,through,complete:through===0});
+  }
   schemas.add(ctx);
 }
 const meta=(ctx,key)=>JSON.parse([...ctx.storage.sql.exec('SELECT value FROM shared_meta WHERE key=?',key)][0]?.value||'null');
@@ -84,6 +88,42 @@ function legacyUpdate(p, commentId) {
     commentId,authorId:OWNER,publishedAt:p.createdAt,legacyConflict:true}};
 }
 const rows=(ctx,q,...args)=>[...ctx.storage.sql.exec(q,...args)];
+const pending=item=>item.imported===0||item.imported===-1;
+// c4 selects exactly imported=0 and understands only legacy publications. New
+// coordination dependencies use -1 before any await and remain private to this
+// importer until they become accepted (1) or a durable conflict (2).
+const pendingDisposition=p=>p.type==='coordination'?-1:0;
+// A retained ccf journal can still contain unsafe coordination rows at 0. Keep
+// this candidate running until its bounded examined-prefix sweep completes
+// before switching to c4; false/absent is not permission to roll back. New rows
+// are already safe, and this checkpoint never deletes accepted publications.
+export function publicationRollbackCompatible(ctx) {
+  return meta(ctx,'publisher-v2-pending-compatibility')?.complete===true;
+}
+function pendingPage(ctx,after,limit) {
+  const legacy=rows(ctx,'SELECT * FROM imported_comments WHERE imported=0 AND comment_id>? ORDER BY comment_id LIMIT ?',after,limit);
+  const coordination=rows(ctx,'SELECT * FROM imported_comments WHERE imported=-1 AND comment_id>? ORDER BY comment_id LIMIT ?',after,limit);
+  // Both ranges use imported_comments_status. Merge at most 2*limit in memory;
+  // IN(... ) ORDER BY would otherwise sort an arbitrarily large pending journal.
+  const result=[];let a=0,b=0;
+  while(result.length<limit&&(a<legacy.length||b<coordination.length))
+    result.push(b>=coordination.length||a<legacy.length&&legacy[a].comment_id<coordination[b].comment_id?legacy[a++]:coordination[b++]);
+  return result;
+}
+function repairPendingCompatibility(ctx,now,work) {
+  const checkpoint=meta(ctx,'publisher-v2-pending-compatibility');
+  if(checkpoint.complete)return;
+  const limit=allowance(ctx,'pending',Math.min(100,work.pending),now);if(!limit)return;
+  const page=rows(ctx,'SELECT comment_id,publication FROM imported_comments WHERE imported=0 AND comment_id>? AND comment_id<=? ORDER BY comment_id LIMIT ?',
+    checkpoint.after,checkpoint.through,limit);
+  charge(ctx,'pending',page.length,now);work.pending-=page.length;
+  ctx.storage.transactionSync(()=>{
+    for(const item of page)if(JSON.parse(item.publication).type==='coordination')
+      ctx.storage.sql.exec('UPDATE imported_comments SET imported=-1 WHERE comment_id=? AND imported=0',item.comment_id);
+    const after=page.length===limit?page.at(-1).comment_id:checkpoint.through;
+    putMeta(ctx,'publisher-v2-pending-compatibility',{...checkpoint,after,complete:after>=checkpoint.through});
+  });
+}
 const generation=ctx=>rows(ctx,'SELECT COALESCE(MAX(seq),0) AS n FROM public_changes')[0].n;
 const conflictTail=ctx=>rows(ctx,'SELECT COALESCE(MAX(comment_id),0) AS n FROM imported_comments WHERE imported=2')[0].n;
 function allowance(ctx,kind,limit,now) {
@@ -99,6 +139,8 @@ function charge(ctx,kind,count,now) {
 }
 async function applyItem(ctx,item) {
   const p=JSON.parse(item.publication),sql=ctx.storage.sql;
+  if(p.type==='coordination'&&item.imported===0)
+    sql.exec('UPDATE imported_comments SET imported=-1 WHERE comment_id=? AND imported=0',item.comment_id);
   const r=sharedStore(ctx,p.type==='coordination'?'/internal/shared/coordination':p.type==='reply'?'/internal/shared/reply':'/internal/shared/briefing',p);
   if(r.ok){sql.exec('UPDATE imported_comments SET imported=1,error=NULL WHERE comment_id=?',item.comment_id);return true;}
   if(r.status===409){
@@ -118,13 +160,13 @@ export async function applyPendingPublications(ctx,{now=Date.now(),work={pending
   let examined=0,progressed=false;
   // An authenticated exact-target hint is never starved behind old dependencies.
   if(commentId!==null&&work.pending&&allowance(ctx,'pending',1,now)){
-    const item=rows(ctx,'SELECT * FROM imported_comments WHERE comment_id=? AND imported=0',commentId)[0];
+    const item=rows(ctx,'SELECT * FROM imported_comments WHERE comment_id=? AND imported IN(0,-1)',commentId)[0];
     if(item){charge(ctx,'pending',1,now);work.pending--;examined++;progressed=await applyItem(ctx,item);}
   }
   for(let round=0;round<8&&work.pending;round++){
     const limit=allowance(ctx,'pending',Math.min(100,work.pending),now);if(!limit)break;
     const after=Number(meta(ctx,'publisher-pending-cursor')||0);
-    const page=rows(ctx,'SELECT * FROM imported_comments WHERE imported=0 AND comment_id>? ORDER BY comment_id LIMIT ?',after,limit);
+    const page=pendingPage(ctx,after,limit);
     if(!page.length){if(after)putMeta(ctx,'publisher-pending-cursor',0);if(after&&progressed)continue;break;}
     charge(ctx,'pending',page.length,now);work.pending-=page.length;examined+=page.length;
     let advanced=false;for(const item of page)if(await applyItem(ctx,item))advanced=true;
@@ -207,7 +249,7 @@ function takePass(ctx,now) {
   putMeta(ctx,'publisher-pass-budget',{day,total:(stored?.day===day?stored.total:0)+1});return true;
 }
 function summary(ctx) {
-  const pending=rows(ctx,'SELECT comment_id FROM imported_comments WHERE imported=0 LIMIT 601').length;
+  const pending=rows(ctx,'SELECT comment_id FROM imported_comments WHERE imported IN(0,-1) LIMIT 601').length;
   const conflicts=rows(ctx,'SELECT comment_id FROM imported_comments WHERE imported=2 LIMIT 101').length;
   return {pending:Math.min(pending,600),conflicts:Math.min(conflicts,100),morePending:pending>600,moreConflicts:conflicts>100};
 }
@@ -226,6 +268,7 @@ async function reconcile(ctx,fetcher,now,env) {
   // committed page, and shared-object concurrency cannot multiply this pass.
   putMeta(ctx,'publisher-local-next-attempt',now+INTERVAL);
   try {
+    repairPendingCompatibility(ctx,now,work);
     if(legacyDue)await syncLegacyInbox(ctx,env,now);
     const backfillLimit=meta(ctx,'public-changes-backfill')?allowance(ctx,'backfill',PUBLICATION_LIMITS.backfillPerRun,now):0;
     // Reserve the bounded batch before its atomic writes. A process loss after
@@ -259,7 +302,7 @@ async function reconcile(ctx,fetcher,now,env) {
           for(const comment of comments){
             if(Number.isFinite(Date.parse(comment?.updated_at))&&(!scan.newest||Date.parse(comment.updated_at)>Date.parse(scan.newest)))scan.newest=comment.updated_at;
             const p=decodePublication(comment);
-            if(p){sql.exec('INSERT OR IGNORE INTO imported_comments(comment_id,publication) VALUES(?,?)',comment.id,JSON.stringify(p));newPublications++;admitted.push(comment.id);}
+            if(p){sql.exec('INSERT OR IGNORE INTO imported_comments(comment_id,publication,imported) VALUES(?,?,?)',comment.id,JSON.stringify(p),pendingDisposition(p));newPublications++;admitted.push(comment.id);}
           }
           scan.page++;
           if(comments.length<100){
@@ -268,7 +311,7 @@ async function reconcile(ctx,fetcher,now,env) {
           }else putMeta(ctx,'publisher-scan',scan);
         });
         for(const id of new Set(admitted))if(work.pending&&allowance(ctx,'pending',1,now)){
-          const item=rows(ctx,'SELECT * FROM imported_comments WHERE comment_id=? AND imported=0',id)[0];
+          const item=rows(ctx,'SELECT * FROM imported_comments WHERE comment_id=? AND imported IN(0,-1)',id)[0];
           if(item){charge(ctx,'pending',1,now);work.pending--;await applyItem(ctx,item);}
         }
         const reserved=complete?0:(PUBLICATION_LIMITS.pagesPerRun-pages-1)*PUBLICATION_LIMITS.commentsPerPage;
@@ -293,7 +336,7 @@ async function reconcile(ctx,fetcher,now,env) {
     putMeta(ctx,'publisher-local-generation',generation(ctx));
     putMeta(ctx,'publisher-conflict-observed-tail',conflictTail(ctx));
     // Exhausted local budgets defer to their next reset, never a fast alarm loop.
-    let localNext=now+(localMore?PUBLICATION_LIMITS.continuationMs:PUBLICATION_LIMITS.maxIdleMs);
+    let localNext=now+(localMore||!publicationRollbackCompatible(ctx)?PUBLICATION_LIMITS.continuationMs:PUBLICATION_LIMITS.maxIdleMs);
     for(const kind of ['pending','conflicts','backfill'])if(!allowance(ctx,kind,1,now)){
       const budget=meta(ctx,'publisher-work:'+kind);
       localNext=Math.max(localNext,(Math.max(Math.floor(now/3600000),budget?.hour||0)+1)*3600000,
@@ -322,9 +365,9 @@ function hintReceipt(ctx,commentId) {
   // Older rejected legacy rows kept only a generic conflict diagnostic. Their
   // durable event proves a precise ID/payload conflict without changing history.
   const errorCode=event&&!matches?'event_id_conflict':event?.error_code||item.error;
-  return Response.json({commentId,publicationId:id,status:!item.imported?'pending':update?'update-imported':item.imported===1?'imported':'conflict',
+  return Response.json({commentId,publicationId:id,status:pending(item)?'pending':update?'update-imported':item.imported===1?'imported':'conflict',
     ...(item.imported===2&&!update?{errorCode}:{}),public_inbox:true,execution_authorized:false},
-    {status:!item.imported?202:item.imported===2&&!update?409:200});
+    {status:pending(item)?202:item.imported===2&&!update?409:200});
 }
 export async function importPublicationHint(ctx,input,fetcher=fetch,now=Date.now(),admitMutation=operation=>operation()) {
   if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).length!==1||!Number.isSafeInteger(input.commentId)||input.commentId<1)
@@ -381,7 +424,7 @@ export async function importPublicationHint(ctx,input,fetcher=fetch,now=Date.now
     // Only independently validated durable publication work requires mutation
     // admission. Receipt/cache/budget no-ops never reserve an alarm wake.
     return await admitMutation(async()=>{
-      sql.exec('INSERT OR IGNORE INTO imported_comments(comment_id,publication) VALUES(?,?)',commentId,JSON.stringify(publication));
+      sql.exec('INSERT OR IGNORE INTO imported_comments(comment_id,publication,imported) VALUES(?,?,?)',commentId,JSON.stringify(publication),pendingDisposition(publication));
       await applyPendingPublications(ctx,{now,commentId,work:{pending:100,conflicts:0},recover:false});
       sql.exec('DELETE FROM public_import_hints WHERE comment_id=?',commentId);
       return hintReceipt(ctx,commentId);

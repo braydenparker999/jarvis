@@ -37,7 +37,7 @@ export class CoreAlarmCostFixture extends Hub {
     sql.exec('CREATE TABLE fixture_numbers(n INTEGER PRIMARY KEY)');
     sql.exec('INSERT INTO fixture_numbers WITH RECURSIVE numbers(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM numbers WHERE n<?) SELECT n FROM numbers',count);
     sql.exec("INSERT INTO shared_entries(id,kind,body,created_at) SELECT printf('00000000-0000-4000-8000-%012d',n),'user','Fictional retained public request','2026-10-08T00:00:00Z' FROM fixture_numbers");
-    sql.exec("INSERT INTO public_changes(kind,item_id,request_id) SELECT 'entry',id,id FROM shared_entries");
+    sql.exec("INSERT OR IGNORE INTO public_changes(kind,item_id,request_id) SELECT 'entry',id,id FROM shared_entries");
     sql.exec("INSERT INTO imported_comments(comment_id,publication,imported) SELECT n,?,1 FROM fixture_numbers",JSON.stringify({type:'briefing',body:'Fictional processed publication'}));
     this.access=random();
     const client=random(),grantId=random(),code=random(),accessHash=await hash(this.access),resource=this.env.RELAY_MCP_ORIGIN+'/relay/mcp';
