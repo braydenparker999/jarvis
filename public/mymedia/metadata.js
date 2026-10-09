@@ -10,7 +10,7 @@ export function youtubeUploadDate(value) {
 }
 
 export function youtubeDate(row = {}) {
-  const upload = youtubeUploadDate(row.upload_date || row.youtubeUploadDate);
+  const upload = youtubeUploadDate(row.upload_date) || youtubeUploadDate(row.youtubeUploadDate);
   if (upload) return {youtubeAt:upload, youtubeDateKind:'upload'};
   // timestamp means the video became available; epoch is extraction time.
   const stamp = Number(row.timestamp) * 1000;
@@ -26,4 +26,28 @@ export function savedYouTubeDate(video) {
   return Number.isFinite(video.youtubeAt) && video.youtubeAt >= Date.UTC(2005, 0, 1) && video.youtubeAt < Date.UTC(2200, 0, 1) &&
     ['upload','published'].includes(video.youtubeDateKind)
     ? {youtubeAt:video.youtubeAt, youtubeDateKind:video.youtubeDateKind} : {youtubeAt:0, youtubeDateKind:''};
+}
+
+// Provenance describes the date field, never extraction time or Drive creation.
+export function dateProvenance(row, date = youtubeDate(row)) {
+  if (!date.youtubeAt) return null;
+  const expected = date.youtubeDateKind;
+  const sources = expected === 'upload'
+    ? ['yt-dlp.upload_date', 'manifest.youtubeUploadDate', 'archive.yt-dlp.upload_date']
+    : ['yt-dlp.timestamp', 'manifest.youtubePublishedAt'];
+  const raw = row.youtubeDateProvenance;
+  if (raw && raw.kind === expected && sources.includes(raw.source) &&
+      /^[A-Za-z0-9_-]{11}$/.test(raw.youtubeId || '') &&
+      (!row.youtubeId || raw.youtubeId === row.youtubeId)) {
+    return {source:raw.source, kind:expected, youtubeId:raw.youtubeId,
+      ...(/^[a-f0-9]{64}$/.test(raw.evidenceSha256 || '') ? {evidenceSha256:raw.evidenceSha256} : {}),
+      ...(typeof raw.observedAt === 'string' && youtubeDate({youtubePublishedAt:raw.observedAt}).youtubeAt
+        ? {observedAt:raw.observedAt} : {})};
+  }
+  const youtubeId = row.youtubeId || row.id;
+  if (!/^[A-Za-z0-9_-]{11}$/.test(youtubeId || '')) return null;
+  const source = expected === 'upload'
+    ? youtubeUploadDate(row.upload_date) ? 'yt-dlp.upload_date' : 'manifest.youtubeUploadDate'
+    : row.youtubePublishedAt ? 'manifest.youtubePublishedAt' : 'yt-dlp.timestamp';
+  return {source, kind:expected, youtubeId};
 }

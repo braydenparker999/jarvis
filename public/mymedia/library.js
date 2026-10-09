@@ -1,5 +1,5 @@
 import {enrichVideos} from './discovery.js';
-import {savedYouTubeDate} from './metadata.js';
+import {dateProvenance, savedYouTubeDate} from './metadata.js';
 // My Media: Drive folder listing, file naming and watch progress.
 // Pure functions only; the page wires them to the DOM in app.js.
 import {folderId} from '../drawercast/drive-api.js';
@@ -49,6 +49,7 @@ export function toVideo(file, folder, others = []) {
   return {id:file.id, name:file.name, title, youtubeId, folder,
     mimeType:file.mimeType || '', size:Number(file.size) || 0,
     modified:Date.parse(file.modifiedTime) || 0, addedAt:Date.parse(file.createdTime)||0,
+    ...(typeof file.md5Checksum==='string'&&/^[a-f0-9]{32}$/.test(file.md5Checksum)?{md5Checksum:file.md5Checksum}:{}),
     duration:Math.round(Number(meta.durationMillis) / 1000) || 0,
     width:Number(meta.width) || 0, height:Number(meta.height) || 0,
     thumbnail:/^https:\/\/[a-z0-9.-]+\.googleusercontent\.com\//.test(file.thumbnailLink || '') ? file.thumbnailLink : '',
@@ -77,7 +78,7 @@ export function createVideoApi(key, fetcher = fetch) {
     const info = await get('/' + root, {fields:'id,name,mimeType'}, signal);
     if (info.mimeType !== FOLDER) throw Error('The configured video folder is not a folder.');
     const queue = [{id:root, path:info.name}], visited = new Set(), videos = [];
-    let metadataFile=null;
+    let metadataFiles=[];
     while (queue.length) {
       if (visited.size >= 500) throw Error('This folder has too many subfolders.');
       const current = queue.shift();
@@ -87,7 +88,7 @@ export function createVideoApi(key, fetcher = fetch) {
       let token = '';
       do {
         const page = await get('', {q:"'" + current.id + "' in parents and trashed = false", pageSize:'1000',
-          fields:'nextPageToken,files(id,name,mimeType,size,modifiedTime,createdTime,thumbnailLink,videoMediaMetadata(width,height,durationMillis),capabilities(canDownload))',
+          fields:'nextPageToken,files(id,name,mimeType,size,md5Checksum,modifiedTime,createdTime,thumbnailLink,videoMediaMetadata(width,height,durationMillis),capabilities(canDownload))',
           ...(token ? {pageToken:token} : {})}, signal);
         if (!Array.isArray(page.files)) throw Error('Drive returned an incomplete folder listing.');
         for (const f of page.files) {
@@ -99,14 +100,21 @@ export function createVideoApi(key, fetcher = fetch) {
         if (token && seen.has(token)) throw Error('Drive pagination repeated.');
         seen.add(token);
       } while (token);
-      if(current.id===root)metadataFile=files.find(f=>f.name==='jarvis-video-metadata.json'&&Number(f.size||0)<2000000);
+      if(current.id===root)metadataFiles=files.filter(f=>f.name==='jarvis-video-metadata.json');
       const others = files.filter(f => !VIDEO.test(f.name));
       for (const f of files) if (VIDEO.test(f.name)) videos.push(toVideo(f, current.path, others));
       if (videos.length > 20000) throw Error('Choose a folder with fewer than 20,000 videos.');
     }
-    let enriched=videos;
-    if(metadataFile){try{const manifest=await get('/'+metadataFile.id,{alt:'media'},signal);enriched=enrichVideos(videos,manifest);}catch{if(signal?.aborted)throw signal.reason;}}
-    return {id:root, name:info.name, videos:enriched, fetched:Date.now()};
+    let enriched=videos,metadataStatus=metadataFiles.length>1?'ambiguous':'missing';
+    const metadataFile=metadataFiles.length===1?metadataFiles[0]:null;
+    if(metadataFile){
+      metadataStatus='invalid';
+      if(Number(metadataFile.size||0)<2000000){try{
+        const manifest=await get('/'+metadataFile.id,{alt:'media'},signal);
+        if(manifest&&Array.isArray(manifest.videos)&&manifest.videos.length<=20000){enriched=enrichVideos(videos,manifest);metadataStatus='loaded';}
+      }catch{if(signal?.aborted)throw signal.reason;metadataStatus='unavailable';}}
+    }
+    return {id:root, name:info.name, videos:enriched, fetched:Date.now(),metadataStatus};
   }
   return {list, mediaURL:id => mediaURL(id, key)};
 }
@@ -137,6 +145,7 @@ export function parseLibrary(raw, expectedFolder = '') {
       typeof v.title === 'string' && typeof v.folder === 'string' && typeof v.name === 'string')
       .map(v => ({...v,
         ...savedYouTubeDate(v),
+        youtubeDateProvenance:dateProvenance(v,savedYouTubeDate(v)),
         image:ID.test(v.image || '') ? v.image : null,
         youtubeId:/^[A-Za-z0-9_-]{11}$/.test(v.youtubeId || '') ? v.youtubeId : '',
         thumbnail:/^https:\/\/[a-z0-9.-]+\.googleusercontent\.com\//.test(v.thumbnail || '') ? v.thumbnail : '',

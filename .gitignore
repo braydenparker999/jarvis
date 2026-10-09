@@ -7,3 +7,6 @@ __pycache__/
 *.pyc
 r2-migration-report.json
 backend/wrangler.music.generated.json
+jarvis-video-metadata.json
+jarvis-video-metadata.candidate.json
+video-date-backfill-plan.json

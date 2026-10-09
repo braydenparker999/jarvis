@@ -1,8 +1,13 @@
 // Usage: node scripts/build-video-metadata.mjs /path/to/downloaded-videos
-// Run alongside yt-dlp --write-info-json; upload the resulting file with videos.
-import {readFile,readdir,writeFile} from 'node:fs/promises';
-import {join,resolve,basename} from 'node:path';
-import {youtubeDate} from '../public/mymedia/metadata.js';
-const root=resolve(process.argv[2]||'.'),videos=[];
-async function walk(dir){for(const entry of await readdir(dir,{withFileTypes:true})){const path=join(dir,entry.name);if(entry.isDirectory()){await walk(path);continue;}if(!entry.name.endsWith('.info.json'))continue;try{const m=JSON.parse(await readFile(path,'utf8'));if(!/^[A-Za-z0-9_-]{11}$/.test(m.id||''))continue;const date=youtubeDate(m);videos.push({youtubeId:m.id,name:m._filename?basename(m._filename):undefined,creator:m.channel||m.uploader||'',description:(m.description||'').slice(0,2000),topics:(m.categories||[]).slice(0,12),addedAt:m.epoch?m.epoch*1000:0,...(date.youtubeAt?date.youtubeDateKind==='upload'?{youtubeUploadDate:new Date(date.youtubeAt).toISOString().slice(0,10)}:{youtubePublishedAt:new Date(date.youtubeAt).toISOString()}: {})});}catch{console.warn('Skipped unreadable metadata:',entry.name);}}}
-await walk(root);await writeFile(join(root,'jarvis-video-metadata.json'),JSON.stringify({version:2,videos},null,2)+'\n');console.log(`Prepared metadata for ${videos.length} videos.`);
+// Reconcile local yt-dlp sidecars additively; no network, upload or media reads.
+import {readFile,writeFile} from 'node:fs/promises';
+import {join,resolve} from 'node:path';
+import {collectInfoMetadata,mergePreparedMetadata} from './video-date-backfill.mjs';
+const root=resolve(process.argv[2]||'.'),path=join(root,'jarvis-video-metadata.json');
+let previous=null,existing={version:2,videos:[]};
+try{previous=await readFile(path,'utf8');existing=JSON.parse(previous);}catch(error){if(error.code!=='ENOENT')throw Error('Existing metadata is unreadable or invalid; left unchanged.');}
+const {rows,diagnostics}=await collectInfoMetadata(root),{manifest,conflicts}=mergePreparedMetadata(existing,rows);
+// Once enrolled, emit a candidate instead of replacing active metadata.
+const output=previous===null?path:join(root,'jarvis-video-metadata.candidate.json');
+await writeFile(output,JSON.stringify(manifest,null,2)+'\n',{flag:'wx'});
+console.log(JSON.stringify({prepared:manifest.videos.length,skipped:diagnostics.length,conflicts:conflicts.length,candidate:previous!==null}));
