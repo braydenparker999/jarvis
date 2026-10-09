@@ -116,6 +116,38 @@ test('Quick AI transfers use explicit private/public destinations, retain drafts
     await page.evaluate(async incoming=>(await import('/assets/relay-transfer.js')).createRelayTransferStore().stage(incoming),quickAITransfer(question,'Next answer',destination));
     assert.deepEqual(writes(phone),[]);
   });
+  for(const failure of ['tab','aggregate'])await t.test(`a real failed public ${failure} write keeps transfer actions reachable and reload recovers exactly once`,async()=>{
+    const phone=await open(),{page}=phone,incoming=quickAITransfer(question,answer,'public');
+    await page.evaluate(async incoming=>(await import('/assets/relay-transfer.js')).createRelayTransferStore().stage(incoming),incoming);
+    const fault=await phone.cdp.send('Page.addScriptToEvaluateOnNewDocument',{source:`
+      if(location.origin===${JSON.stringify(SITE)}){
+        const original=Storage.prototype.setItem;
+        Storage.prototype.setItem=function(key,value){
+          if(!window.__publicTransferWriteFailed&&key===${JSON.stringify(failure==='tab'?'jarvis.shared.v1.composer.v1':'jarvis.shared.v1')}
+              &&(key==='jarvis.shared.v1'?JSON.parse(value).composer:String(value)).includes(${JSON.stringify(incoming.body.slice(0,40))})){
+            window.__publicTransferWriteFailed=true;throw new DOMException('Synthetic one-time draft storage failure','QuotaExceededError');
+          }
+          return original.call(this,key,value);
+        };
+      }`});
+    await page.goto(RELAY_URL);await phone.cdp.send('Page.removeScriptToEvaluateOnNewDocument',{identifier:fault.identifier});
+    await page.getByRole('heading',{name:'Unable to save on this device',exact:true}).waitFor();
+    assert.equal(await page.evaluate(()=>window.__publicTransferWriteFailed),true);
+    assert.equal(await page.locator('#message-text').count(),0);
+    assert.equal(await page.evaluate(key=>JSON.parse(sessionStorage.getItem(key)).pending.id,RELAY_TRANSFER_KEY),incoming.id);
+    assert.equal(await page.evaluate(()=>JSON.parse(localStorage.getItem('jarvis.shared.v1')).composer),existingPublic);
+    await page.getByRole('button',{name:'Copy incoming draft',exact:true}).click();
+    assert.equal(await page.evaluate(key=>JSON.parse(sessionStorage.getItem(key)).pending.id,RELAY_TRANSFER_KEY),incoming.id);
+    await page.locator('#relay-transfer-notice').getByRole('button',{name:'Dismiss saved transfer',exact:true}).click();
+    await page.getByRole('button',{name:'Keep saved transfer',exact:true}).click();
+    assert.equal(await page.evaluate(key=>JSON.parse(sessionStorage.getItem(key)).pending.id,RELAY_TRANSFER_KEY),incoming.id);assert.deepEqual(writes(phone),[]);
+    await page.reload();await page.locator('#message-text').waitFor();
+    const expected=existingPublic+'\n\n'+incoming.body;assert.equal(await page.locator('#message-text').inputValue(),expected);
+    assert.equal(await page.evaluate(key=>sessionStorage.getItem(key),RELAY_TRANSFER_KEY),null);
+    assert.equal(await page.evaluate(key=>JSON.parse(sessionStorage.getItem(key)).body,OWNER_DRAFT_KEY),existingPrivate);
+    assert.equal(await page.evaluate(()=>JSON.parse(localStorage.getItem('jarvis.quick-ai.v1')).chats[0].draft),sourceDraft);
+    assert.deepEqual(writes(phone),[]);contained(phone);
+  });
   await t.test('expired owner access retains the transfer and existing draft through reload and genuine synthetic re-pairing; sending still requires a click',async()=>{
     const phone=await open(),{page}=phone;
     h.ctx.storage.sql.exec('UPDATE relay_owner_sessions SET expires_ms=? WHERE device_id=?',Date.now()-1,owner.device.id);

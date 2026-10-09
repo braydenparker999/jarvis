@@ -134,7 +134,7 @@ function drawPage() {
   if (['notes','tools','server'].includes(route)) { renderUtility(route,$('content'),{notify,connection,showConnection,state,storageError,sync}); return; }
   // A damaged public store must not route private data through its recovery path.
   if (route === 'chat' && ownerUI.mode !== 'public') { adoptRelayTransfer('owner',ownerController.snapshot().draft,value=>ownerController.setDraft(value));ownerUI.mount($('content'));drawTransferNotice();return; }
-  if (storageError) { $('content').innerHTML = `<div class="empty"><h1>Unable to save on this device</h1><p>${escape(storageError)}</p><p>Existing data has not been changed. Allow browser storage, then reload.</p></div>`; return; }
+  if (storageError) { $('content').innerHTML = `<div class="empty"><h1>Unable to save on this device</h1><p>${escape(storageError)}</p><p>Existing data has not been changed. Allow browser storage, then reload.</p></div>`;if(route==='chat')drawTransferNotice();return; }
   if (route === 'chat') drawChat();
   if (route === 'board') drawBoard();
 }

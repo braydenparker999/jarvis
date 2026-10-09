@@ -47,6 +47,9 @@ text and explicitly dismiss its saved transfer in a confirmation sheet. The
 confirmation is bound to the complete unchanged transfer journal. Dismissal
 never changes either composer or the source chat; cancellation and copying
 leave the transfer saved.
+If a public draft write fails, the existing storage-error screen retains these
+transfer recovery actions. After storage recovers, reloading resumes the saved
+journal without appending the incoming text twice.
 
 Unsent private composer text now survives navigation and confirmed session
 expiry in **sessionStorage for this tab**, under a separate owner-draft key.
