@@ -1,18 +1,20 @@
 import { createRelayOwnerApi, OwnerApiError, normalizeOwnerJobCompletion } from './relay-owner-api.js';
 import { icon, autosize, copyText, richText } from './ui.js';
+import { createOwnerDraftStore } from './relay-draft-store.js';
 
-// Private history, drafts and failed sends exist only in this closure. In particular,
-// never pass them to conversation(), public submitMessage(), transfer or shared sync.
-export function createRelayOwnerController({ api = createRelayOwnerApi(), uuid = () => crypto.randomUUID(), onModeChange = () => {} } = {}) {
+// Private history and failed sends exist only in this closure; unsent drafts
+// also survive in tab storage. In particular,
+// never pass them to conversation(), public submitMessage() or shared sync.
+export function createRelayOwnerController({ api = createRelayOwnerApi(), draftStore = createOwnerDraftStore(), uuid = () => crypto.randomUUID(), onModeChange = () => {} } = {}) {
   const listeners = new Set();
   let generation = 0, reading = null, failedSend = null, cursor = '0', accountConsent = null, detailEpoch = 0;
   const retryAttempts=new Map();
   let state = { mode: api.selectedMode==='owner'||(api.selectedMode===undefined&&api.hasCredential)?'owner':'public', status: api.hasCredential ? 'unknown' : 'none',
-    messages: [], draft: '', devices: [], device: null, pairing: null, error: '', warning: '', busy: false, sending: false, query: '', authenticating: false, account: null, accountReady: false, accountNotice: '', loginDevices: [],
+    messages: [], draft: draftStore.read(), devices: [], device: null, pairing: null, error: '', warning: '', busy: false, sending: false, query: '', authenticating: false, account: null, accountReady: false, accountNotice: '', loginDevices: [],
     jobsEnabled:false,jobs:[],jobsError:'',syncStale:false,jobMode:false,jobTitle:'',jobKind:'consequential',requestsOnly:false,sendUnconfirmed:false,sendNotice:'',jobDetailId:null,jobDetail:null,jobDetailBusy:false,jobDetailError:'',jobDetailStale:false,jobBusy:false };
   const emit = () => { for (const listener of listeners) listener(); };
   const mode = next => { if (next !== state.mode) { state.mode = next; onModeChange(next); } emit(); };
-  function clearPrivate() { state.loginDevices = []; accountConsent = null; state.account = null; state.accountReady = false; state.accountNotice = ''; state.messages = []; state.draft = ''; state.devices = []; state.device = null; failedSend = null; cursor = '0';
+  function clearPrivate({preserveDraft = false} = {}) { state.loginDevices = []; accountConsent = null; state.account = null; state.accountReady = false; state.accountNotice = ''; state.messages = []; if (!preserveDraft) {state.draft = '';draftStore.save('');} state.devices = []; state.device = null; failedSend = null; cursor = '0';
     ++detailEpoch;retryAttempts.clear();state.jobsEnabled=false;state.jobs=[];state.jobsError='';state.syncStale=false;state.jobMode=false;state.jobTitle='';state.jobKind='consequential';state.requestsOnly=false;state.sendUnconfirmed=false;state.sendNotice='';state.jobDetailId=null;state.jobDetail=null;state.jobDetailBusy=false;state.jobDetailError='';state.jobDetailStale=false;state.jobBusy=false; }
   function failure(error) {
     const safe = error instanceof OwnerApiError ? error : new OwnerApiError('network');
@@ -22,7 +24,7 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), uuid =
       // Invalidate every concurrent read/send, including a response which was
       // authenticated before another operation confirmed revocation.
       ++generation; reading = null; state.busy = false; state.sending = false; state.authenticating = false; api.cancelAuthentication?.();
-      clearPrivate(); state.pairing = null;
+      clearPrivate({preserveDraft: safe.kind === 'expired'}); state.pairing = null;
       state.status = ['expired', 'revoked'].includes(safe.kind) ? safe.kind : 'unknown';
       emit();
     }
@@ -86,7 +88,7 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), uuid =
     get status() { return state.status; },
     snapshot() { return structuredClone(state); },
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
-    setDraft(value) { state.draft = value.slice(0, 4000); },
+    setDraft(value) { state.draft = value.slice(0, 4000); const saved = draftStore.save(state.draft); if (!saved) state.warning = 'Could not retain this private draft in the tab. Copy it before leaving.'; return saved; },
     setQuery(value) { state.query = value.trim().toLowerCase();state.requestsOnly=false; emit(); },
     setJobMode(value){if(!state.jobsEnabled||state.sending)return;state.jobMode=value===true;state.sendUnconfirmed=false;emit();},
     setJobTitle(value){state.jobTitle=value.slice(0,120);},
@@ -113,7 +115,7 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), uuid =
       try {
         const data = await api.login(username, password, label.trim().slice(0, 80) || 'This browser', { remember: remember === true, ...(replacement.deviceId === undefined ? {} : { replaceDeviceId: replacement.deviceId, confirmReplacement: true }) });
         if (epoch !== generation) return;
-        clearPrivate(); state.device = data.device; state.status = 'approved'; state.warning = api.storageWarning;state.jobsEnabled=data.jobs_enabled===true;
+        clearPrivate({preserveDraft: true}); state.device = data.device; state.status = 'approved'; state.warning = api.storageWarning;state.jobsEnabled=data.jobs_enabled===true;
         state.authenticating = false; mode('owner'); await readMessages(epoch);await readJobs(epoch);
       } catch (error) { if (epoch === generation) { if (error instanceof OwnerApiError && error.kind === 'device_limit') state.loginDevices = error.devices;
           if (error instanceof OwnerApiError && error.kind === 'device_unavailable') state.loginDevices = []; failure(error); } }
@@ -160,7 +162,7 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), uuid =
       try {
         const pairing = await api.startPairing(label.trim().slice(0, 80) || 'This phone', { remember: remember === true });
         if (epoch !== generation) return;
-        clearPrivate(); state.pairing = pairing; state.status = 'pending';
+        clearPrivate({preserveDraft: true}); state.pairing = pairing; state.status = 'pending';
       } catch (error) { if (epoch === generation) failure(error); }
       finally { if (epoch === generation) { state.busy = false; emit(); } }
     },
@@ -215,7 +217,7 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), uuid =
         if (epoch !== generation) return;
         accepted=true;if(data.job)mergeJob(data.job);
         const matches=state.draft.trim()===item.body&&state.jobMode===item.jobMode&&(!item.jobMode||state.jobTitle.trim()===item.title&&state.jobKind===item.actionKind);
-        if(matches){state.draft='';state.jobTitle='';state.jobMode=false;}else state.sendNotice='Earlier request confirmed · your edited draft is still here';
+        if(matches){state.draft='';draftStore.save('');state.jobTitle='';state.jobMode=false;}else state.sendNotice='Earlier request confirmed · your edited draft is still here';
         failedSend = null;
         await readMessages(epoch);
         await readJobs(epoch);
@@ -332,7 +334,7 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
     const remember = make('label', '', 'relay-owner-remember'), checkbox = make('input');
     checkbox.type = 'checkbox'; checkbox.id = 'relay-owner-login-remember'; checkbox.checked = false;
     remember.append(checkbox, make('span', 'Remember this device session on this browser'));
-    const notice = make('p', 'If checked, this browser saves only a device token and device ID. Access expires after exactly 365 days of inactivity and renews on authenticated use. Scripts on this shared website origin can read the token. Anyone using this browser can use this access. Your account username and password, private messages and drafts are not saved by Relay in browser storage. Clearing browser data ends this device session; sign in here again with your account credentials.', 'relay-owner-note');
+    const notice = make('p', 'If checked, this browser saves only a device token and device ID. Access expires after exactly 365 days of inactivity and renews on authenticated use. Scripts on this shared website origin can read the token. Anyone using this browser can use this access. Your account username and password and private history are not saved by Relay in browser storage. Unsent drafts are kept in this tab, separate from public Relay drafts. Clearing browser data ends this device session; sign in here again with your account credentials.', 'relay-owner-note');
     notice.id = 'relay-owner-login-storage-notice'; checkbox.setAttribute('aria-describedby', notice.id);
     let replacementSelect = null, replacementConsent = null;
     if (state.loginDevices.length) {
@@ -514,6 +516,7 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
     if(state.status!=='approved')readingAnchor=null;
     clearSensitiveFields(); root.classList.add('relay-owner-content'); root.replaceChildren(); viewKey = key; chatNodes = null;
     const section = make('section', '', 'relay-owner-panel'); root.append(section);
+    if (key !== 'chat' && state.draft) section.append(make('p', 'Your unsent private draft is kept in this tab. Sign in to review it.', 'relay-owner-notice'));
     if (key === 'chat') {
       section.classList.add('relay-owner-chat');
       const heading = make('div', '', 'relay-owner-heading'); heading.append(make('h2', 'Owner chat')); section.append(heading);
@@ -587,7 +590,7 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
         const remember = make('label', '', 'relay-owner-remember');
         const checkbox = make('input'); checkbox.type = 'checkbox'; checkbox.id = 'relay-owner-remember'; checkbox.checked = pairRemember; checkbox.onchange = () => { pairRemember = checkbox.checked; };
         remember.append(checkbox, make('span', 'Remember owner access on this browser'));
-        const consent = make('p', 'If checked, this browser saves only a device token and device ID. Access expires after exactly 365 days of inactivity and renews on authenticated use. Scripts on this shared website origin can read the token. Anyone using this browser can use this access. Clearing browser data requires signing in again with account credentials, or pairing again if account sign-in is not configured. Private messages and drafts are never saved in public browser storage.', 'relay-owner-note'); consent.id = 'relay-owner-storage-notice'; checkbox.setAttribute('aria-describedby', consent.id);
+        const consent = make('p', 'If checked, this browser saves only a device token and device ID. Access expires after exactly 365 days of inactivity and renews on authenticated use. Scripts on this shared website origin can read the token. Anyone using this browser can use this access. Clearing browser data requires signing in again with account credentials, or pairing again if account sign-in is not configured. Private history is not saved in browser storage. Unsent drafts are kept in this tab, separate from public Relay drafts.', 'relay-owner-note'); consent.id = 'relay-owner-storage-notice'; checkbox.setAttribute('aria-describedby', consent.id);
         const start = action(state.busy ? 'Creating code…' : 'Create pairing code', () => {}, 'primary'); start.type = 'submit'; start.disabled = state.busy;
         form.append(label, input, remember, consent, start); form.onsubmit = event => { event.preventDefault(); pairLabel = input.value; pairRemember = checkbox.checked; controller.startPairing(pairLabel, pairRemember); }; section.append(form);
       }
