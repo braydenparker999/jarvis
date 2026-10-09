@@ -1,8 +1,9 @@
 // Durable private request lifecycle. These internal helpers require the caller's
 // existing authenticated owner session or live relay:owner OAuth transaction.
 // A lease is concurrency evidence, never a credential or permission grant.
-import {RELAY_OWNER, RelayError, uuid, cursor} from './relay-common.js';
+import {RELAY_OWNER, RELAY_OWNER_SCOPE, RELAY_OWNER_EVENT, RelayError, uuid, cursor} from './relay-common.js';
 import {relayOwnerDelivery} from './relay-events.js';
+import {relayGrantActiveInStore} from './relay-oauth.js';
 
 export const RELAY_OWNER_JOB_LEASE_MS = 5 * 60000;
 export const RELAY_OWNER_JOB_MAX_ATTEMPTS = 5;
@@ -12,6 +13,175 @@ const OUTCOMES = ['not_started', 'known', 'unknown'];
 const rows = (ctx, sql, ...values) => [...ctx.storage.sql.exec(sql, ...values)];
 const iso = ms => new Date(ms).toISOString();
 const fail = (status, message, code) => { throw new RelayError(status === 403 ? -32012 : status === 429 ? -32013 : -32602, message, {status, ...(code ? {code} : {})}); };
+
+// A compact latest-version index, not a second history of private text. SQLite's
+// AUTOINCREMENT sequence survives replacement/coalescing and is independent of
+// both the request creation position and the writer's wall clock.
+const changeSQL = ids => `INSERT OR REPLACE INTO relay_owner_job_changes(job_id)
+  -- This existing UNIQUE(id) index avoids choosing kind/seq and scanning the
+  -- entire private inbox for each trigger's small IN-subquery.
+  SELECT id FROM relay_owner_entries INDEXED BY sqlite_autoindex_relay_owner_entries_1
+  WHERE kind='user' AND principal='${RELAY_OWNER}' AND id IN (${ids});`;
+const eventRequest = value => `SELECT substr(message_id,7) FROM relay_events WHERE seq=${value} AND message_id LIKE 'owner:%'`;
+const headRequest = subscription => `SELECT substr(message_id,7) FROM (SELECT e.message_id FROM relay_outbox o INDEXED BY relay_outbox_unsettled
+  JOIN relay_events e ON e.seq=o.event_seq WHERE o.subscription_id=${subscription} AND o.status IN ('pending','failed') ORDER BY o.event_seq LIMIT 1)`;
+function changeTrigger(ctx, name, on, when, body) {
+  ctx.storage.sql.exec(`CREATE TRIGGER IF NOT EXISTS relay_owner_job_change_${name} ${on} ${when ? 'WHEN ' + when : ''} BEGIN ${body} END`);
+}
+const deliverySources = new WeakSet();
+function changeSourceSchema(ctx, commitReady = false) {
+  // Lazy DDL can have run inside a transaction later rolled back. A JS cache
+  // alone must never suppress reinstallation after an interrupted first page.
+  const ready = rows(ctx, 'SELECT delivery_ready FROM relay_owner_job_refresh WHERE id=1')[0]?.delivery_ready;
+  if (ready === 1) {deliverySources.add(ctx); return;}
+  if (ready === undefined && deliverySources.has(ctx)
+    && rows(ctx, "SELECT name FROM sqlite_master WHERE type='trigger' AND name='relay_owner_job_change_recovery_insert'").length) return;
+  deliverySources.delete(ctx);
+  const tables = new Set(rows(ctx, "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('relay_events','relay_outbox','relay_delivery_receipts','relay_outbox_recoveries')").map(row => row.name));
+  // Event tables are lazy. Install these after the first private presentation
+  // initializes delivery, or before reading already initialized event storage.
+  if (tables.size !== 4) return;
+  for (const operation of ['INSERT', 'UPDATE', 'DELETE']) {
+    const value = operation === 'DELETE' ? 'OLD' : 'NEW';
+    const changed = operation === 'UPDATE' ? '(OLD.message_id IS NOT NEW.message_id)' : '1';
+    changeTrigger(ctx, 'event_' + operation.toLowerCase(), `AFTER ${operation} ON relay_events`,
+      `${changed} AND (${value}.message_id LIKE 'owner:%'${operation === 'UPDATE' ? " OR OLD.message_id LIKE 'owner:%'" : ''})`,
+      changeSQL(`SELECT substr(${value}.message_id,7)${operation === 'UPDATE' ? ' UNION SELECT substr(OLD.message_id,7)' : ''}`));
+    changeTrigger(ctx, 'outbox_' + operation.toLowerCase(), `AFTER ${operation} ON relay_outbox`,
+      operation === 'UPDATE' ? 'OLD.status IS NOT NEW.status OR OLD.attempts IS NOT NEW.attempts OR OLD.last_error IS NOT NEW.last_error OR OLD.event_seq IS NOT NEW.event_seq OR OLD.subscription_id IS NOT NEW.subscription_id' : '',
+      changeSQL(`${eventRequest(value + '.event_seq')} UNION ${headRequest(value + '.subscription_id')}${operation === 'UPDATE' ? ' UNION ' + eventRequest('OLD.event_seq') + ' UNION ' + headRequest('OLD.subscription_id') : ''}`));
+    changeTrigger(ctx, 'receipt_' + operation.toLowerCase(), `AFTER ${operation} ON relay_delivery_receipts`,
+      operation === 'UPDATE' ? 'OLD.accepted_ms IS NOT NEW.accepted_ms OR OLD.event_seq IS NOT NEW.event_seq' : '', changeSQL(eventRequest(value + '.event_seq')));
+    const deadline = operation === 'DELETE' ? '' : `INSERT OR REPLACE INTO relay_owner_job_deadlines(job_id,source,deadline_ms,expired)
+      SELECT id,'recovery:'||NEW.subscription_id||':'||NEW.event_seq,NEW.last_recovery_ms+60000,0
+      FROM relay_owner_entries INDEXED BY sqlite_autoindex_relay_owner_entries_1
+      WHERE kind='user' AND principal='${RELAY_OWNER}' AND id IN (${eventRequest('NEW.event_seq')}) AND NEW.recoveries<2;`;
+    changeTrigger(ctx, 'recovery_' + operation.toLowerCase(), `AFTER ${operation} ON relay_outbox_recoveries`,
+      operation === 'UPDATE' ? 'OLD.recoveries IS NOT NEW.recoveries OR OLD.last_recovery_ms IS NOT NEW.last_recovery_ms' : '',
+      changeSQL(eventRequest(value + '.event_seq')) + `DELETE FROM relay_owner_job_deadlines
+        WHERE job_id IN (${eventRequest(value + '.event_seq')}) AND source='recovery:'||${value}.subscription_id||':'||${value}.event_seq;` + deadline);
+  }
+  if (ready === 0 && commitReady) ctx.storage.sql.exec('UPDATE relay_owner_job_refresh SET delivery_ready=1 WHERE id=1 AND delivery_ready=0');
+  deliverySources.add(ctx);
+}
+
+function changeSchema(ctx) {
+  const sql = ctx.storage.sql;
+  sql.exec(`CREATE TABLE IF NOT EXISTS relay_owner_job_changes (
+    cursor INTEGER PRIMARY KEY AUTOINCREMENT CHECK(cursor BETWEEN 1 AND 999999999999999), job_id TEXT NOT NULL UNIQUE)`);
+  sql.exec(`CREATE TABLE IF NOT EXISTS relay_owner_job_refresh (
+    id INTEGER PRIMARY KEY CHECK(id=1), backfill_after INTEGER NOT NULL, backfill_through INTEGER NOT NULL,
+    refresh_after INTEGER NOT NULL DEFAULT 0, refresh_through INTEGER NOT NULL DEFAULT 0, source_signature TEXT,
+    delivery_ready INTEGER NOT NULL DEFAULT 0 CHECK(delivery_ready IN (0,1)))`);
+  sql.exec(`CREATE TABLE IF NOT EXISTS relay_owner_job_deadlines (
+    job_id TEXT NOT NULL, source TEXT NOT NULL, deadline_ms INTEGER NOT NULL, expired INTEGER NOT NULL CHECK(expired IN (0,1)),
+    PRIMARY KEY(job_id,source))`);
+  sql.exec('CREATE INDEX IF NOT EXISTS relay_owner_job_deadline_due ON relay_owner_job_deadlines(expired,deadline_ms,job_id)');
+  for (const operation of ['INSERT', 'UPDATE']) {
+    const semanticColumns = ['request_id', 'principal', 'device_id', 'title', 'action_kind', 'specified', 'stage', 'created_ms', 'updated_ms', 'finished_ms',
+      'result_reply_id', 'parent_job_id', 'root_job_id', 'attempt', 'cancel_requested_ms', 'outcome', 'failure_code', 'failure_message',
+      'lease_run_id', 'lease_grant_id', 'lease_expires_ms', 'acknowledged_ms'];
+    changeTrigger(ctx, 'job_' + operation.toLowerCase(), `AFTER ${operation} ON relay_owner_jobs`,
+      operation === 'UPDATE' ? semanticColumns.map(column => `OLD.${column} IS NOT NEW.${column}`).join(' OR ') : '',
+      changeSQL(`SELECT NEW.request_id UNION SELECT NEW.parent_job_id${operation === 'UPDATE'
+        ? ' WHERE OLD.parent_job_id IS NOT NEW.parent_job_id UNION SELECT OLD.parent_job_id WHERE OLD.parent_job_id IS NOT NEW.parent_job_id' : ''}`));
+    changeTrigger(ctx, 'lease_' + operation.toLowerCase(), `AFTER ${operation} ON relay_owner_jobs`,
+      operation === 'UPDATE' ? 'OLD.lease_expires_ms IS NOT NEW.lease_expires_ms' : 'NEW.lease_expires_ms IS NOT NULL',
+      `DELETE FROM relay_owner_job_deadlines WHERE job_id=NEW.id AND source='lease';
+       INSERT INTO relay_owner_job_deadlines(job_id,source,deadline_ms,expired) SELECT NEW.id,'lease',NEW.lease_expires_ms,0
+       WHERE NEW.lease_expires_ms IS NOT NULL AND NEW.principal='${RELAY_OWNER}';`);
+    changeTrigger(ctx, 'entry_' + operation.toLowerCase(), `AFTER ${operation} ON relay_owner_entries`,
+      `${operation === 'UPDATE' ? '(OLD.body IS NOT NEW.body OR OLD.created_at IS NOT NEW.created_at OR OLD.reply_to IS NOT NEW.reply_to) AND ' : ''}NEW.principal='${RELAY_OWNER}'`,
+      changeSQL("SELECT CASE WHEN NEW.kind='user' THEN NEW.id ELSE NEW.reply_to END"));
+  }
+  for (const table of ['relay_owner_job_events', 'relay_owner_job_result_corrections']) {
+    // These rows are append-only through all authorized routes. Trigger their
+    // insertion so distinct attestation writers at one timestamp remain visible.
+    changeTrigger(ctx, table + '_insert', `AFTER INSERT ON ${table}`, '', changeSQL('SELECT NEW.job_id'));
+  }
+  changeSourceSchema(ctx);
+}
+
+const changeWatermark = ctx => rows(ctx, "SELECT seq FROM sqlite_sequence WHERE name='relay_owner_job_changes'")[0]?.seq ?? 0;
+const refreshRow = ctx => rows(ctx, 'SELECT * FROM relay_owner_job_refresh WHERE id=1')[0];
+function ensureRefresh(ctx) {
+  // Diagnostics can initialize schema without writing data. Start the durable
+  // cold checkpoint only when an authorized job projection/feed needs it.
+  if (!rows(ctx, 'SELECT id FROM relay_owner_job_refresh WHERE id=1').length) ctx.storage.sql.exec(`INSERT INTO relay_owner_job_refresh(id,backfill_after,backfill_through)
+    SELECT 1,0,COALESCE(MAX(seq),0) FROM relay_owner_entries WHERE kind='user' AND principal='${RELAY_OWNER}'`);
+}
+const requestWatermark = ctx => rows(ctx, "SELECT COALESCE(MAX(seq),0) AS n FROM relay_owner_entries WHERE kind='user' AND principal=?", RELAY_OWNER)[0].n;
+const markChanged = (ctx, id) => ctx.storage.sql.exec(changeSQL('?'), id);
+function trackDeadlines(ctx, row) {
+  if (Number.isSafeInteger(row.lease_expires_ms)) ctx.storage.sql.exec("INSERT OR IGNORE INTO relay_owner_job_deadlines(job_id,source,deadline_ms,expired) VALUES(?,'lease',?,0)", row.id, row.lease_expires_ms);
+  // At most the existing subscription limit's worth of recovery rows belong to
+  // one event. This also seeds deadlines restored from a pre-feed Worker.
+  if (!deliverySources.has(ctx)) return;
+  for (const recovery of rows(ctx, `SELECT r.subscription_id,r.event_seq,r.last_recovery_ms FROM relay_events e
+    JOIN relay_outbox o ON o.event_seq=e.seq JOIN relay_outbox_recoveries r ON r.subscription_id=o.subscription_id AND r.event_seq=o.event_seq
+    WHERE e.message_id=? AND r.recoveries<2`, 'owner:' + row.id)) {
+    ctx.storage.sql.exec('INSERT OR IGNORE INTO relay_owner_job_deadlines(job_id,source,deadline_ms,expired) VALUES(?,?,?,0)',
+      row.id, 'recovery:' + recovery.subscription_id + ':' + recovery.event_seq, recovery.last_recovery_ms + 60000);
+  }
+}
+function deliverySignature(ctx, env, now) {
+  const initialized = deliverySources.has(ctx) || rows(ctx, "SELECT name FROM sqlite_master WHERE type='table' AND name='relay_subscriptions'").length;
+  const subscriptions = initialized ? rows(ctx, 'SELECT id,principal,grant_id,name,arguments,expires_ms,state FROM relay_subscriptions WHERE principal=? AND name=? AND expires_ms>? ORDER BY id LIMIT 9',
+    RELAY_OWNER, RELAY_OWNER_EVENT, now) : [];
+  if (subscriptions.length > 8) fail(503, 'Private delivery configuration unavailable');
+  // Exclude tokens, callbacks, signing keys, payloads, acknowledgements and scan
+  // cursors. Grant validity is read through the existing authoritative helper.
+  return JSON.stringify([env?.RELAY_MCP_ENABLED === 'true', env?.RELAY_OWNER_ENABLED === 'true', subscriptions.map(sub => [
+    sub.id, sub.arguments, sub.expires_ms, sub.state, relayGrantActiveInStore(ctx, env, sub.grant_id, RELAY_OWNER_SCOPE)])]);
+}
+function deadlinesPending(ctx, now) {
+  return rows(ctx, 'SELECT job_id FROM relay_owner_job_deadlines WHERE expired=0 AND deadline_ms<=? LIMIT 1', now).length
+    || rows(ctx, 'SELECT job_id FROM relay_owner_job_deadlines WHERE expired=1 AND deadline_ms>? LIMIT 1', now).length;
+}
+function refreshPending(ctx, now) {
+  const state = refreshRow(ctx);
+  return state.backfill_after < state.backfill_through || state.refresh_after < state.refresh_through || !!deadlinesPending(ctx, now);
+}
+function advanceChanges(ctx, env, size, now) {
+  changeSourceSchema(ctx, true);
+  let state = refreshRow(ctx), budget = size;
+  const signature = deliverySignature(ctx, env, now);
+  if (state.source_signature !== signature) {
+    if (state.source_signature === null) ctx.storage.sql.exec('UPDATE relay_owner_job_refresh SET source_signature=? WHERE id=1', signature);
+    else ctx.storage.sql.exec('UPDATE relay_owner_job_refresh SET source_signature=?,refresh_after=0,refresh_through=? WHERE id=1', signature, Math.max(state.refresh_through, requestWatermark(ctx)));
+    state = refreshRow(ctx);
+  }
+  if (state.backfill_after < state.backfill_through) {
+    const selected = rows(ctx, "SELECT * FROM relay_owner_entries WHERE kind='user' AND principal=? AND seq>? AND seq<=? ORDER BY seq LIMIT ?",
+      RELAY_OWNER, state.backfill_after, state.backfill_through, budget);
+    for (const request of selected) {
+      const existed = rows(ctx, 'SELECT id FROM relay_owner_jobs WHERE id=?', request.id).length > 0;
+      const job = relayOwnerJobEnsure(ctx, request);
+      trackDeadlines(ctx, job);
+      // New metadata's insert/event triggers already advanced its version. Only
+      // pre-existing metadata needs an explicit migration notification.
+      if (existed) markChanged(ctx, job.id);
+    }
+    ctx.storage.sql.exec('UPDATE relay_owner_job_refresh SET backfill_after=? WHERE id=1', selected.at(-1)?.seq ?? state.backfill_through);
+    budget -= selected.length;
+  }
+  if (budget) {
+    const expired = rows(ctx, 'SELECT job_id,source FROM relay_owner_job_deadlines WHERE expired=0 AND deadline_ms<=? ORDER BY deadline_ms,job_id LIMIT ?', now, budget);
+    const restored = rows(ctx, 'SELECT job_id,source FROM relay_owner_job_deadlines WHERE expired=1 AND deadline_ms>? ORDER BY deadline_ms,job_id LIMIT ?', now, budget - expired.length);
+    for (const [selected, side] of [[expired, 1], [restored, 0]]) for (const deadline of selected) {
+      markChanged(ctx, deadline.job_id);
+      ctx.storage.sql.exec('UPDATE relay_owner_job_deadlines SET expired=? WHERE job_id=? AND source=?', side, deadline.job_id, deadline.source);
+    }
+    budget -= expired.length + restored.length;
+  }
+  state = refreshRow(ctx);
+  if (budget && state.refresh_after < state.refresh_through) {
+    const selected = rows(ctx, "SELECT seq,id FROM relay_owner_entries WHERE kind='user' AND principal=? AND seq>? AND seq<=? ORDER BY seq LIMIT ?",
+      RELAY_OWNER, state.refresh_after, state.refresh_through, budget);
+    for (const request of selected) markChanged(ctx, request.id);
+    ctx.storage.sql.exec('UPDATE relay_owner_job_refresh SET refresh_after=? WHERE id=1', selected.at(-1)?.seq ?? state.refresh_through);
+  }
+}
 
 export function relayOwnerJobSchema(ctx) {
   ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS relay_owner_jobs (
@@ -40,6 +210,7 @@ export function relayOwnerJobSchema(ctx) {
     created_ms INTEGER NOT NULL, UNIQUE(job_id,version),
     FOREIGN KEY(id) REFERENCES relay_owner_job_events(id), FOREIGN KEY(job_id) REFERENCES relay_owner_jobs(id),
     FOREIGN KEY(original_reply_id) REFERENCES relay_owner_entries(id))`);
+  changeSchema(ctx);
 }
 
 function original(ctx, id) {
@@ -209,6 +380,10 @@ function present(ctx, env, row, now) {
   const results = resultHistory(ctx, row, reply), latestResult = results.at(-1) ?? null;
   if (completion && (!reply || completion.replyId !== reply.id || completion.resultVersion > (latestResult?.version ?? 0))) fail(503, 'Private work completion result unavailable');
   const unverified = stage === 'outcome_unknown' && (!!reply || row.stage === 'completed');
+  ensureRefresh(ctx);
+  const delivery = relayOwnerDelivery(ctx, env, row.request_id, !!reply, now);
+  changeSourceSchema(ctx, true);
+  trackDeadlines(ctx, row);
   return {id: row.id, sequence: row.seq, messageId: row.request_id, title: row.title, body: request.body, actionKind: row.action_kind, stage,
     createdAt: iso(row.created_ms), updatedAt: iso(row.updated_ms), finishedAt: completion?.createdAt ?? (stage === 'outcome_unknown' || row.finished_ms === null ? null : iso(row.finished_ms)),
     author_authenticated: true, principal: RELAY_OWNER, device_id: request.device_id, authentication_source: request.authentication_source, visibility: 'private',
@@ -225,7 +400,7 @@ function present(ctx, env, row, now) {
       : stage === 'outcome_unknown' ? {code: 'lease_expired', message: 'Execution acknowledgement expired; the outcome is unknown.', outcome: 'unknown'}
       : row.failure_code ? {code: row.failure_code, message: row.failure_message, outcome: row.outcome} : null,
     retryAllowed: canRetry(ctx, row, now) && !child, retryRequiresConfirmation: requiresRetryConfirmation(ctx, row, now), retryJobId: child?.id ?? null,
-    delivery: relayOwnerDelivery(ctx, env, row.request_id, !!reply, now)};
+    delivery};
 }
 export function relayOwnerJobRead(ctx, env, id, now = Date.now()) {
   const row = relayOwnerJobEnsure(ctx, original(ctx, id));
@@ -240,6 +415,26 @@ export function relayOwnerJobsList(ctx, env, after, limit, now = Date.now()) {
   const selected = rows(ctx, "SELECT * FROM relay_owner_entries WHERE kind='user' AND principal=? AND seq>? ORDER BY seq LIMIT ?", RELAY_OWNER, start, size + 1);
   const jobs = selected.slice(0, size).map(request => present(ctx, env, relayOwnerJobEnsure(ctx, request), now));
   return {jobs, nextCursor: selected.length > size ? String(selected[size - 1].seq) : null};
+}
+
+// Call only inside the existing authenticated owner transaction. Each new fence
+// advances at most one page's worth of migration/deadline/configuration work.
+// Replaced versions beyond a fence remain visible after its committed cursor;
+// this is a current-state feed, not an immutable snapshot of every transition.
+export function relayOwnerJobsChanges(ctx, env, after, limit, through, now = Date.now()) {
+  const start = cursor(after) ?? 0, requestedFence = cursor(through);
+  if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 50)) fail(400, 'Invalid job page size');
+  const size = limit ?? 20, watermark = changeWatermark(ctx);
+  if (requestedFence !== null && requestedFence < start) fail(400, 'Invalid job change fence');
+  if (start > watermark || requestedFence !== null && requestedFence > watermark) fail(409, 'Private job cursor requires a fresh snapshot', 'job_cursor_reset');
+  ensureRefresh(ctx);
+  if (requestedFence === null) advanceChanges(ctx, env, size, now);
+  const fence = requestedFence ?? changeWatermark(ctx);
+  const selected = rows(ctx, 'SELECT cursor,job_id FROM relay_owner_job_changes WHERE cursor>? AND cursor<=? ORDER BY cursor LIMIT ?', start, fence, size + 1);
+  const changes = selected.slice(0, size).map(change => ({cursor: String(change.cursor), job: present(ctx, env, relayOwnerJobEnsure(ctx, original(ctx, change.job_id)), now)}));
+  const more = selected.length > size, committed = more ? changes.at(-1).cursor : String(fence);
+  const pending = refreshPending(ctx, now) || rows(ctx, 'SELECT cursor FROM relay_owner_job_changes WHERE cursor>? LIMIT 1', fence).length > 0;
+  return {changes, cursor: committed, through: String(fence), nextCursor: more ? committed : null, bootstrapPending: pending};
 }
 export function relayOwnerJobCancel(ctx, env, id, session, now) {
   const row = relayOwnerJobEnsure(ctx, original(ctx, id));

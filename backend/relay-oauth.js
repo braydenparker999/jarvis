@@ -212,6 +212,8 @@ export async function relayOAuth(request, env, fetcher = fetch) {
 export function relayOAuthStore(ctx, b, now = Date.now()) {
   const sql = ctx.storage.sql;
   sql.exec('CREATE TABLE IF NOT EXISTS relay_oauth (key TEXT PRIMARY KEY, category TEXT NOT NULL, value TEXT NOT NULL, expires_at INTEGER NOT NULL)');
+  sql.exec('CREATE INDEX IF NOT EXISTS relay_oauth_expiry ON relay_oauth(expires_at)');
+  sql.exec('CREATE INDEX IF NOT EXISTS relay_oauth_category_expiry ON relay_oauth(category,expires_at)');
   return ctx.storage.transactionSync(() => {
     // Preserve only still-valid legacy client rows. Already-expired/deleted
     // identities must re-register, never be reconstructed from an authorize URL.

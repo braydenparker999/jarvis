@@ -11,11 +11,15 @@ const row = (body, index = 0) => ({id: crypto.randomUUID(), role: 'user', body,
   createdAt: new Date(Date.parse(stamp) + index * 1000).toISOString()});
 const mutations = phone => phone.records.filter(record => !['GET', 'HEAD', 'OPTIONS'].includes(record.method));
 const state = page => page.evaluate(key => JSON.parse(localStorage.getItem(key)), STORAGE_KEY);
+const historyRead = record => ['/shared/state', '/shared/changes'].includes(record.path) && record.method === 'GET';
+const legacyFeed = process.env.JARVIS_LEGACY_ACCEPTANCE_FEED === 'legacy';
 
 async function journey(t) {
   const browser = await launchQualifiedBrowser(t); if (!browser) return null;
   const h = createConversationFixture(t), pages = [];
-  assert.equal(sharedStore(h.ctx, '/internal/shared/state').status, 200, 'Initialize the empty real shared schema before offline no-write assertions');
+  const empty = sharedStore(h.ctx, '/internal/shared/state');
+  assert.equal(empty.status, 200, 'Initialize the empty real shared schema before offline no-write assertions');
+  const emptyState = await empty.json(), staleThrough = String(h.rows('SELECT COALESCE(MAX(seq),0) AS n FROM public_changes')[0].n);
   t.after(() => closeConversationHarness(browser, h, pages));
   const open = async (legacy, cached, {measureWrites = false, journal = null, tabDraft = null} = {}) => {
     const phone = await openConversationPage(browser, h,
@@ -44,12 +48,21 @@ async function journey(t) {
       }
     }, {oldKey: LEGACY_KEY, key: STORAGE_KEY, original, cached: JSON.stringify(cached), measureWrites, journal, tabDraft});
     let readMode = 'offline';
-    phone.rule(record => record.path === '/shared/state' && record.method === 'GET', async ({forward}) => {
+    phone.rule(historyRead, async ({record, forward}) => {
       if (readMode === 'offline') return Response.json({error: 'Offline fictional fixture'}, {status: 503, headers: {'Access-Control-Allow-Origin': SITE}});
+      // The same assertions can explicitly exercise the old history transport;
+      // unsupported changes is distinct from the fixture's offline outage.
+      if (legacyFeed && record.path === '/shared/changes') return Response.json({error: 'Fictional legacy route unavailable'}, {status: 404, headers: {'Access-Control-Allow-Origin': SITE}});
+      if (readMode === 'stale' && record.path === '/shared/changes') {
+        // Serve the honest earlier fence. A later committed cursor is rejected
+        // by that older view; never forge an empty current complete checkpoint.
+        const after = new URL(record.url).searchParams.get('cursor').split(':')[1];
+        return h.fixture.request('/shared/changes?cursor=' + encodeURIComponent(`pc2:${after}:${staleThrough}`), {headers: {Origin: SITE}});
+      }
       const response = await forward();
-      if (readMode !== 'stale') return response;
-      const data = await response.json();
-      return Response.json({...data, messages: [], posts: [], nextCursor: null}, {status: response.status, headers: response.headers});
+      if (readMode !== 'stale' && !legacyFeed) return response;
+      const data = readMode === 'stale' ? emptyState : await response.json();
+      return Response.json({...data, ...(legacyFeed ? {coordinationVersion: 1} : {})}, {status: response.status, headers: response.headers});
     }, Infinity);
     return {phone, original, online() { readMode = 'online'; }, offline() { readMode = 'offline'; }, stale() { readMode = 'stale'; }};
   };
@@ -66,7 +79,7 @@ async function load(phone, reload = false) {
   await phone.page.locator('#message-text').waitFor(); await idle(phone.page);
 }
 async function refresh(phone) {
-  const response = phone.page.waitForResponse(response => new URL(response.url()).pathname === '/shared/state' && response.request().method() === 'GET');
+  const response = phone.page.waitForResponse(response => historyRead({path: new URL(response.url()).pathname, method: response.request().method()}));
   await phone.page.evaluate(() => dispatchEvent(new Event('online'))); await response; await idle(phone.page);
 }
 const cache = (messages, legacyPending) => ({version: 1, messages, posts: [], outbox: [], composer: draft,
@@ -236,7 +249,7 @@ test('301 shared-confirmed old rows retain exact acceptance evidence outside the
   await observe(); session.stale(); await refresh(phone); await observe();
   session.offline(); await load(phone, true); await observe();
   session.stale(); await refresh(phone); await observe(); await load(phone, true); await observe();
-  assert.ok(phone.records.some(record => record.path === '/shared/state' && new URL(record.url).searchParams.get('after') !== '0'), 'Exact acceptance is established by a complete paginated shared read');
+  assert.ok(phone.records.some(record => historyRead(record) && (record.path === '/shared/state' ? new URL(record.url).searchParams.get('after') !== '0' : /^pc2:[1-9]\d*:\d+$/.test(new URL(record.url).searchParams.get('cursor')))), 'Exact acceptance is established by a complete paginated shared read');
   await writeSyntheticEvidence(phone, 'current-legacy-301-genuine-public-proof-390x844', {acceptedLegacyRows: 301, mutations: 0, exactRawRetained: true, completePaginationExercised: true});
 });
 
@@ -292,7 +305,7 @@ test('legacy queue overlap: exact unproved intents survive offline reload and an
     session.online(); const refreshed = refresh(phone); await entered.promise;
     await observe();
     assert.equal(j.h.rows('SELECT COUNT(*) AS n FROM shared_entries WHERE id=?', original.id)[0].n, 0, 'The complete empty GET cannot establish acceptance before the queued POST reaches storage');
-    assert.ok(phone.records.some(record => record.path === '/shared/state' && record.method === 'GET' && record.status === 200));
+    assert.ok(phone.records.some(record => historyRead(record) && record.status === 200));
     assert.deepEqual(mutations(phone).map(record => JSON.parse(record.body)), [{id: queued.id, body: queued.body}]);
     release.resolve(); await refreshed;
     const accepted = await state(phone.page), actual = accepted.messages.find(message => message.id === original.id);

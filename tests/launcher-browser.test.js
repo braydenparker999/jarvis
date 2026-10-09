@@ -43,7 +43,14 @@ test('launcher browser behavior', { skip: executablePath ? false : 'Install Chro
         if (!['GET', 'HEAD', 'OPTIONS'].includes(call.method)) api.mutations.push(call);
         let status = 200, body;
         if (api.offline) { status = 503; body = { error: 'Offline fixture. Your drafts are safe.' }; }
-        else if (url.pathname === '/shared/state') body = { mode: 'github-publications', messages: api.messages, posts: api.posts, publisher: { ok: true }, nextCursor: null };
+        else if (url.pathname === '/shared/changes') { status = 404; body = { error: 'This fictional legacy service does not support changes' }; }
+        else if (url.pathname === '/shared/state') {
+          // The old service returns immutable public entries, without the
+          // browser's saved/queue flags. Keep the /state compatibility coverage.
+          const wire = entry => Object.fromEntries(Object.entries(entry).filter(([key]) => ['id', 'body', 'createdAt', 'role', 'kind', 'replyTo', 'title'].includes(key)));
+          body = { mode: 'github-publications', coordinationVersion: 1, messages: api.messages.map(wire), posts: api.posts.map(wire), publisher: { ok: true }, nextCursor: null,
+            public_inbox: true, author_authenticated: false, execution_authorized: false };
+        }
         else if (url.pathname === '/shared/messages' && request.method() === 'POST') {
           const item = request.postDataJSON();
           api.sent.push(item);
@@ -329,7 +336,9 @@ test('launcher browser behavior', { skip: executablePath ? false : 'Install Chro
         api.offline = false;
         await page.getByRole('button', { name: 'Conversation menu' }).click();
         await page.getByRole('button', { name: 'Connection details', exact: true }).click();
+        const sharedRead = page.waitForResponse(response => new URL(response.url()).pathname === '/shared/state' && response.request().method() === 'GET');
         await page.getByRole('button', { name: 'Refresh messages' }).click();
+        await sharedRead;
         await page.waitForFunction(() => document.querySelector('#sync-now')?.disabled === false);
         assert.deepEqual(await page.locator('.bubble').allTextContents(), ['Legacy thought'], 'A complete empty public read cannot erase the older local copy');
         assert.equal(await page.locator('#message-text').inputValue(), 'Legacy draft');

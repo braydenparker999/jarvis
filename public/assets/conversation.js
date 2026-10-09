@@ -1,4 +1,5 @@
 import {el, icon, richText, sheet, copyText, readLocal, writeLocal, autosize} from './ui.js';
+import {publicReportLabel} from './public-coordination.js';
 
 // Keep existing nodes and their scroll anchors across inbox refreshes.
 export function conversation({panel, composer, channel, author, body=m=>m.body, notify=()=>{}, draftChanged=()=>{}, emptyTitle='What’s on your mind?', emptyDescription='Write a message to '+author+'.', scope=''} ){
@@ -8,11 +9,16 @@ export function conversation({panel, composer, channel, author, body=m=>m.body, 
   const formatter=new Intl.DateTimeFormat(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
   const savedPosition=readLocal('jarvis.'+channel+'.reading.v1',null);
   const jump=el('button','New messages','new-messages');jump.type='button';jump.hidden=true;panel.after(jump);
+  const completeBody=m=>body(m)+(m.kind==='coordination'?m.publicReport.artifacts.map(item=>'\n'+item.label+' · revision '+item.revision+': '+item.url).join(''):'');
   jump.onclick=()=>{query='';savedOnly=false;const input=document.getElementById('conversation-search');if(input)input.value='';update(messages);panel.scrollTop=panel.scrollHeight;jump.hidden=true;};
   function showActions(id){if(document.querySelector('.app-sheet[open]'))return;const m=messages.find(x=>x.id===id);if(!m)return;sheet(m.role==='user'?'Your message':author,[
-    {label:'Copy message',icon:'copy',action:async()=>notify(await copyText(body(m))?'Copied':'Select the message text to copy it')},
+    {label:'Copy message',icon:'copy',action:async()=>notify(await copyText(completeBody(m))?'Copied':'Select the message text to copy it')},
     {label:bookmarks.has(id)?'Remove bookmark':'Bookmark',icon:'bookmark',action:()=>{bookmarks.has(id)?bookmarks.delete(id):bookmarks.add(id);if(!writeLocal(key,[...bookmarks]))notify('Bookmark could not be saved');update(messages);}},
-    {label:'Quote in reply',icon:'quote',action:()=>{const quoted=body(m).slice(0,900).split('\n').map(s=>'> '+s).join('\n');composer.value=(composer.value?composer.value+'\n\n':'')+quoted+'\n\n';composer.value=composer.value.slice(0,composer.maxLength>0?composer.maxLength:16000);draftChanged(composer.value);autosize(composer);composer.focus();composer.setSelectionRange(composer.value.length,composer.value.length);}},
+    {label:'Quote in reply',icon:'quote',action:()=>{const quoted=completeBody(m).slice(0,900).split('\n').map(s=>'> '+s).join('\n');composer.value=(composer.value?composer.value+'\n\n':'')+quoted+'\n\n';composer.value=composer.value.slice(0,composer.maxLength>0?composer.maxLength:16000);draftChanged(composer.value);autosize(composer);composer.focus();composer.setSelectionRange(composer.value.length,composer.value.length);}},
+    ...(m.kind==='coordination'?[{label:'Public report details',icon:'info',action:()=>{const report=m.publicReport,detail=sheet('Public report',[]);
+      detail.append(el('p',publicReportLabel(m),'sheet-context'),el('p','This is a public report published through GitHub. The destination does not verify an agent’s identity or attest private execution.','sheet-note'),
+        el('p','Attempt: '+report.attemptId+'\nRecorded: '+report.recordedAt+'\nPublished: '+report.provenance.publishedAt,'sheet-context'));
+      const link=el('a','View source publication','sheet-action');link.href='https://github.com/braydenparker999/jarvis/issues/2#issuecomment-'+report.provenance.commentId;link.target='_blank';link.rel='noopener noreferrer';detail.append(link);}}]:[]),
   ]);}
   panel.addEventListener('click',e=>{const a=e.target.closest('[data-message-actions]');if(a)showActions(a.dataset.messageActions);});
   panel.addEventListener('contextmenu',e=>{const row=e.target.closest('[data-message-id]');if(row && !e.target.closest('a')){e.preventDefault();showActions(row.dataset.messageId);}});
@@ -24,7 +30,7 @@ export function conversation({panel, composer, channel, author, body=m=>m.body, 
   function update(next){
     const oldIds=new Set(messages.map(x=>x.id)), anchor=position();messages=next;
     const answered=new Set(next.filter(m=>m.kind==='reply').map(m=>m.replyTo));
-    const selected=next.filter(m=>(!savedOnly||bookmarks.has(m.id))&&(!query||body(m).toLowerCase().includes(query)));
+    const selected=next.filter(m=>(!savedOnly||bookmarks.has(m.id))&&(!query||completeBody(m).toLowerCase().includes(query)));
     const existing=new Map([...panel.children].filter(n=>n.dataset.messageId).map(n=>[n.dataset.messageId,n]));
     panel.querySelector('.chat-empty')?.remove();
     const wanted=new Set(selected.map(m=>m.id));for(const [id,n] of existing)if(!wanted.has(id))n.remove();
@@ -36,12 +42,22 @@ export function conversation({panel, composer, channel, author, body=m=>m.body, 
         row.append(header,el('div','','bubble rich-body'),el('span','','message-time'));
       }
       row.classList.toggle('bookmarked',bookmarks.has(m.id));
+      const reportLabel=publicReportLabel(m);
+      row.querySelector('.message-author').textContent=reportLabel|| (m.role==='user'?'You':author);
+      if(reportLabel)row.setAttribute('aria-label',reportLabel+' · public report; no private execution authority');
       const content=body(m);if(row._body!==content){richText(row.querySelector('.bubble'),content);row._body=content;}
+      if(m.kind==='coordination'&&row._report!==JSON.stringify(m.publicReport)){
+        const bubble=row.querySelector('.bubble');richText(bubble,content);
+        for(const item of m.publicReport.artifacts){const p=el('p'),link=el('a',item.label+' · revision '+item.revision);link.href=item.url;link.target='_blank';link.rel='noopener noreferrer';p.append(link);bubble.append(p);}
+        const note=el('p','Public report · private execution unverified.','message-time');bubble.append(note);
+        row._report=JSON.stringify(m.publicReport);
+      }
       const stamp=formatter.format(new Date(m.createdAt));
       const sendLabels={rejected:'Send rejected · text saved on this device',conflict:'ID conflict · original text saved',unknown:'Send unconfirmed · queued on this device'};
       const statusText=stamp+(m.localOnly?' · Local history · on this device':m.role==='user'?' · '+(!m.saved?sendLabels[m.sendState]||(deliveryError?'Send unconfirmed · queued on this device':deliveryBusy?'Sending to public inbox':'Queued on this device'):answered.has(m.id)?'Saved':'Awaiting reply'):'')+(bookmarks.has(m.id)?' · Bookmarked':'');
-      if(row._stamp!==statusText){row.querySelector('.message-time').textContent=statusText;row._stamp=statusText;}
-      row.querySelector('.message-time').dataset.pending=String(!m.localOnly&&m.role==='user'&&(!m.saved||!answered.has(m.id)));
+      const timestamp=row.querySelector(':scope > .message-time');
+      if(row._stamp!==statusText){timestamp.textContent=statusText;row._stamp=statusText;}
+      timestamp.dataset.pending=String(!m.localOnly&&m.role==='user'&&(!m.saved||!answered.has(m.id)));
       if(panel.children[i]!==row)panel.insertBefore(row,panel.children[i]||null);
     }
     if(!selected.length){const empty=el('div','','chat-empty');if(scope&&!query&&!savedOnly)empty.append(el('p',scope,'empty-label'));empty.append(el('h2',query?'No matching messages':savedOnly?'No bookmarks yet':deliveryBusy&&!messages.length?'Opening your conversation…':emptyTitle),el('p',query?'Try a different phrase.':savedOnly?'Bookmark a message from its menu.':deliveryError&&!messages.length?'The inbox is unavailable. Your draft stays on this device; use Retry sync to try again.':deliveryBusy&&!messages.length?'Checking the shared inbox.':emptyDescription));panel.append(empty);}

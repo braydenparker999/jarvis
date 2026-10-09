@@ -3,7 +3,7 @@ import {conversation} from './conversation.js';
 import {createDirectApi} from './direct-api.js';
 import {museBody} from './channels.js';
 import {MUSE_STORAGE_KEY, MAX_MESSAGE, readMuse, queueMuse, mergeMuse} from './muse-store.js';
-import {createPublicDeliveryStore} from './public-delivery-store.js';
+import {createPublicReaderDeliveryStore, mergePublicReaderInbox} from './public-reader-cache.js';
 
 const $ = id => document.getElementById(id);
 const request = createDirectApi();
@@ -12,7 +12,7 @@ appViewport();
 document.querySelectorAll('[data-icon]').forEach(n=>n.innerHTML=icon(n.dataset.icon));
 function notify(value){$('toast').textContent=value;$('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').hidden=true,3500);}
 const time = value => new Intl.DateTimeFormat(undefined, {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'}).format(new Date(value));
-try { deliveryStore=createPublicDeliveryStore({storage:localStorage,tabStorage:sessionStorage,key:MUSE_STORAGE_KEY,read:readMuse});state=deliveryStore.restore();state=deliveryStore.commit(state); }
+try { deliveryStore=createPublicReaderDeliveryStore({storage:localStorage,tabStorage:sessionStorage,key:MUSE_STORAGE_KEY,read:readMuse});state=deliveryStore.restore();state=deliveryStore.commit(state); }
 catch (e) { storageError = e.message || 'Browser storage is unavailable. Keep your text here or copy it before leaving.'; }
 function commit(next) {
   try{state=deliveryStore.commit(next);storageError='';}catch(error){state=next;if(error.storageFailure)storageError=error.message;throw error;}
@@ -36,17 +36,18 @@ async function sync() {
   busy = true; syncError = ''; render();
   let sending;
   try {
-    // Read first: a previous POST may have succeeded before its response was lost.
-    const inbox=await request('/shared/state');commit(mergeMuse(state,inbox));
+    // History uses a complete public checkpoint. A lost POST response still
+    // needs an exact target probe before its queued UUID can be accepted.
+    const inbox=await request('/shared/state',{publicReader:state.publicReader});commit(mergePublicReaderInbox(state,inbox,mergeMuse));
     while(state.outbox.some(message=>message.sendState!=='conflict')){
       const message=state.outbox.find(message=>message.sendState!=='conflict');
       sending=message;setSendState(message.id,'sending');
       try{
-        const remote=await request('/shared/messages',{id:message.id,body:message.body});commit(mergeMuse(state,remote));
+        const remote=await request('/shared/messages',{id:message.id,body:message.body,retry:['unknown','sending','rejected'].includes(message.sendState)});commit(mergePublicReaderInbox(state,remote,mergeMuse));
         if(state.outbox.some(m=>m.id===message.id))throw Error('Message acceptance could not be confirmed. Refresh to retry the same message.');
       }catch(error){if(error.status!==409)throw error;setSendState(message.id,'conflict');}
     }
-    if(sending){const latest=await request('/shared/state');commit(mergeMuse(state,latest));}
+    if(sending){const latest=await request('/shared/state',{publicReader:state.publicReader});commit(mergePublicReaderInbox(state,latest,mergeMuse));}
     if(state.outbox.some(m=>m.sendState==='conflict'))syncError='A queued message has an ID conflict. Its original text stays here; other messages can still sync.';
   } catch (e) { if(sending&&state.outbox.some(m=>m.id===sending.id)){try{setSendState(sending.id,e.status===409?'conflict':e.status>=400&&e.status<500?'rejected':'unknown');}catch{}}syncError = e.message || 'Sync failed. Queued messages remain on this device.'; }
   finally { busy = false; render(); }
