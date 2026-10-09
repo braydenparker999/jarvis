@@ -23,6 +23,27 @@ async function build(directory,baseline){
 }
 async function open(browser,built,theme){
   const context=await browser.newContext(profile),page=await context.newPage(),errors=[];page.on('pageerror',error=>errors.push(error.message));page.setDefaultTimeout(12000);
+  // Observe native navigation input before the app installs capture guards.
+  // Retain no text, and never alter, replay, or await the observed events.
+  await context.addInitScript(()=>{
+    const events=[];
+    const record=(type,phase,event)=>{
+      const lifecycle=window.fixtureLifecycle,scene=window.fixtureScene,nav=document.querySelector('[data-nav="library"]');
+      const replacement=lifecycle?.replacementClicks?.get(event?.pointerId);
+      events.push({type,phase,at:performance.now(),timeStamp:event?.timeStamp,pointerId:event?.pointerId,pointerType:event?.pointerType,
+        trusted:event?.isTrusted,target:event?.target?.id||event?.target?.tagName,nav:event?.target?.closest?.('[data-nav]')?.dataset.nav,
+        x:event?.clientX,y:event?.clientY,screen:window.PA?.Nav.cur,focused:document.hasFocus(),
+        visibility:document.visibilityState,handler:typeof nav?.onclick,version:lifecycle?.version,contacts:lifecycle?[...lifecycle.contacts]:[],
+        scenePhase:scene?.phase,sceneActive:!!(scene?.state||scene?.settling),replacement:replacement?{at:replacement.at,connected:replacement.node.isConnected}:null,event});
+      if(events.length>80)events.shift();
+    };
+    window.fixtureNavigationTrace={record,capture:()=>events.map(({event,...entry})=>({...entry,defaultPrevented:event?.defaultPrevented}))};
+    for(const type of ['pointerdown','pointerup','pointercancel','click'])for(const capture of [true,false]){
+      document.addEventListener(type,event=>record(type,capture?'capture':'bubble',event),{capture,passive:true});
+    }
+    for(const type of ['focus','blur','resize'])window.addEventListener(type,event=>record(type,'window',event),{passive:true});
+    document.addEventListener('visibilitychange',event=>record('visibilitychange','document',event),{passive:true});
+  });
   await context.route('**/*',route=>/^https?:/.test(route.request().url())?route.abort('blockedbyclient'):route.continue());
   await page.goto(pathToFileURL(built.output).href);await page.waitForFunction(()=>window.powerampPreview?.ready);await page.locator('#preview-size').tap();await page.waitForFunction(()=>powerampPreview.ready&&powerampPreview.count===5000);
   await page.evaluate(theme=>{PA.SET.uiTheme=theme;PA.SET.playerLayout='classic';PA.SET.bgBlur=5;PA.SET.vizOnPlayer=false;PA.SET.animations='default';PA.NativeSettings.values.list_header_buttons=1;PA.applySettings();PA.Engine.seek(42);PA.UI.renderProgress();},theme);
@@ -30,7 +51,7 @@ async function open(browser,built,theme){
   const cdp=await context.newCDPSession(page);await cdp.send('Emulation.setCPUThrottlingRate',{rate:4});
   const point=(x,y)=>({id:1,x,y,radiusX:1,radiusY:1,force:1}),start=(x,y)=>cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[point(x,y)]}),move=(x,y)=>cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[point(x,y)]}),end=()=>cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
   const frame=()=>page.evaluate(()=>new Promise(done=>requestAnimationFrame(done)));
-  const settled=async screen=>{try{await page.waitForFunction(screen=>PA.Nav.cur===screen&&!fixtureScene.state&&!fixtureScene.settling&&!PA.LibraryPageMotion.state&&!PA.LibraryPageMotion.finish&&!fixtureLifecycle.gesture&&!document.querySelector('.player-scene-input'),screen);await page.waitForFunction(screen=>{const root=document.querySelector('#sc-'+screen),mini=document.querySelector('#mini');return Number(getComputedStyle(root).opacity)>.9999&&(screen==='player'||Number(getComputedStyle(mini).opacity)>.9999);},screen);await frame();}catch(error){const state=await page.evaluate(expected=>{const rect=n=>{if(!n)return null;const r=n.getBoundingClientRect(),s=getComputedStyle(n);return {hidden:n.hidden,inert:n.inert,opacity:s.opacity,visibility:s.visibility,pointerEvents:s.pointerEvents,rect:{left:r.left,top:r.top,width:r.width,height:r.height}};};const scene=s=>s?{from:s.fromName,target:s.target,progress:s.progress,shared:s.morph?.p,commit:s.commit}:null;return {expected,current:PA.Nav.cur,phase:fixtureScene.phase,state:scene(fixtureScene.state),settling:scene(fixtureScene.settling),gesture:fixtureLifecycle.gesture?{phase:fixtureLifecycle.gesture.phase,node:fixtureLifecycle.gesture.node?.id}:null,contacts:[...fixtureLifecycle.contacts],root:rect(document.querySelector('#sc-'+expected)),mini:rect(document.querySelector('#mini')),nav:rect(document.querySelector('[data-nav="library"]')),plane:!!document.querySelector('.player-scene-input'),historyState:!!PA.LibraryPageMotion.state,historyFinish:!!PA.LibraryPageMotion.finish,visibility:document.visibilityState};},screen);console.error('POWERAMP_PROTO_SETTLE_FAILURE '+JSON.stringify({source:built.sourceHash,theme,state}));await save('persistent-'+theme+'-'+(built.output.endsWith('v7.html')?'v7':'live')+'-settle-failure.json',state);throw error;}};
+  const settled=async screen=>{try{await page.waitForFunction(screen=>PA.Nav.cur===screen&&!fixtureScene.state&&!fixtureScene.settling&&!PA.LibraryPageMotion.state&&!PA.LibraryPageMotion.finish&&!fixtureLifecycle.gesture&&!document.querySelector('.player-scene-input'),screen);await page.waitForFunction(screen=>{const root=document.querySelector('#sc-'+screen),mini=document.querySelector('#mini');return Number(getComputedStyle(root).opacity)>.9999&&(screen==='player'||Number(getComputedStyle(mini).opacity)>.9999);},screen);await frame();}catch(error){const state=await page.evaluate(expected=>{const rect=n=>{if(!n)return null;const r=n.getBoundingClientRect(),s=getComputedStyle(n);return {hidden:n.hidden,inert:n.inert,opacity:s.opacity,visibility:s.visibility,pointerEvents:s.pointerEvents,rect:{left:r.left,top:r.top,width:r.width,height:r.height}};};const scene=s=>s?{from:s.fromName,target:s.target,progress:s.progress,shared:s.morph?.p,commit:s.commit}:null;return {expected,current:PA.Nav.cur,phase:fixtureScene.phase,state:scene(fixtureScene.state),settling:scene(fixtureScene.settling),gesture:fixtureLifecycle.gesture?{phase:fixtureLifecycle.gesture.phase,node:fixtureLifecycle.gesture.node?.id}:null,contacts:[...fixtureLifecycle.contacts],root:rect(document.querySelector('#sc-'+expected)),mini:rect(document.querySelector('#mini')),nav:rect(document.querySelector('[data-nav="library"]')),plane:!!document.querySelector('.player-scene-input'),historyState:!!PA.LibraryPageMotion.state,historyFinish:!!PA.LibraryPageMotion.finish,visibility:document.visibilityState,focused:document.hasFocus(),inputTrace:fixtureNavigationTrace.capture()};},screen);console.error('POWERAMP_PROTO_SETTLE_FAILURE '+JSON.stringify({source:built.sourceHash,theme,state}));await save('persistent-'+theme+'-'+(built.output.endsWith('v7.html')?'v7':'live')+'-settle-failure.json',state);throw error;}};
   const center=selector=>page.locator(selector).evaluate(n=>{const r=n.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2};});
   const library=async()=>{await page.locator('[data-nav="library"]').tap();await settled('library');await page.getByRole('button',{name:'All Songs',exact:true}).tap();await settled('list');};
   await page.evaluate(()=>{
@@ -92,7 +113,10 @@ test('persistent single shared owner: exact endpoints, 4x CPU input budget, visi
         }
         const setup=group.candidateTimings.flatMap(r=>r.operations).filter(r=>r.operation==='create');assert.equal(setup.length,6);for(const value of [...setup,...group.heldRegrab.candidate.filter(r=>r.operation==='create')]){assert.equal(value.deepClones,0);assert.equal(value.styleEnumerations,0);assert.equal(value.cssRulesReads,0);assert.ok(value.ms<=33,'absolute 4x setup budget: '+JSON.stringify(value));}
         assert.deepEqual(a.errors,[]);assert.deepEqual(b.errors,[]);
-      }catch(error){group.error=String(error);await save('persistent-prototype-report.json',report);await save('persistent-'+theme+'-failure.png',await b.page.screenshot());throw error;}finally{await a.context.close();await b.context.close();}
+      }catch(error){group.error=String(error);await save('persistent-prototype-report.json',report);await save('persistent-'+theme+'-failure.png',await b.page.screenshot());throw error;}finally{
+        for(const h of [a,b])try{await save('persistent-'+h.slug+'-navigation.json',await h.page.evaluate(()=>fixtureNavigationTrace.capture()));}catch(error){console.error('POWERAMP_PROTO_TRACE_UNAVAILABLE '+h.slug+' '+String(error));}
+        await a.context.close();await b.context.close();
+      }
     }
     report.failures=failures;await save('persistent-prototype-report.json',report);t.diagnostic('POWERAMP_PERSISTENT_PROTOTYPE '+JSON.stringify(report));assert.deepEqual(failures,[],'canonical endpoint pixel and tracked-geometry gates remain unchanged');
   }finally{await save('persistent-prototype-report.json',report);await browser?.close();await rm(directory,{recursive:true,force:true});}
