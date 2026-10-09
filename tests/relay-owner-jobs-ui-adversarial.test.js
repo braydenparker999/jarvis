@@ -216,7 +216,7 @@ test('private corrections require bounded associated history, exact latest evide
   assert.equal(JSON.stringify([...f.values.values()]).includes(original), false, 'Result history remains outside persistent credential storage');
 });
 
-test('a stale private inspector response after real server expiry cannot revive jobs, results or drafts', async t => {
+test('a stale private inspector after server expiry cannot revive jobs/results; only the existing unsent draft remains', async t => {
   const entered = deferred(), release = deferred(); let hold = false;
   const f = await client(t, async (request, response) => {
     if (hold && request.path.endsWith('/jobs/detail')) { entered.resolve(); await release.promise; }
@@ -232,7 +232,7 @@ test('a stale private inspector response after real server expiry cannot revive 
   release.resolve(); await pending;
   const state = c.snapshot();
   assert.deepEqual(state.messages, []); assert.deepEqual(state.jobs, []); assert.equal(state.jobDetail, null);
-  assert.equal(state.jobDetailId, null); assert.equal(state.draft, ''); assert.equal(state.jobTitle, '');
+  assert.equal(state.jobDetailId, null); assert.equal(state.draft, 'PRIVATE-STALE-INSPECTOR-DRAFT-3546'); assert.equal(state.jobTitle, '');
   assert.equal(f.calls.some(call => ['/shared/messages', '/v1/messages'].includes(call.path)), false);
 });
 
