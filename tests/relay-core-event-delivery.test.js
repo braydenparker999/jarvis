@@ -15,9 +15,22 @@ import {relayEventSchema,relaySubscribe,relayUnsubscribe,drainRelayOutbox,relayN
 const fixtureId=n=>'00000000-0000-4000-8000-'+String(n).padStart(12,'0');
 const fixtureSecret='whsec_'+Buffer.alloc(32,29).toString('base64');
 const status=code=>async()=>new Response([204,205].includes(code)?null:'',{status:code});
-async function setup(t,{ownerOnly=false}={}){
+async function setup(t,{ownerOnly=false,faithfulReplayText=false}={}){
   const fixture=createRelayFixture({env:{RELAY_OWNER_ENABLED:'true'}});t.after(()=>fixture.close());
   const ctx=fixture.object(SHARED_OBJECT).ctx,sql=ctx.storage.sql;
+  if(faithfulReplayText){
+    // Node 22 node:sqlite returns TEXT only up to its first NUL, although the
+    // persisted bytes are intact. Decode this replay projection through BLOB
+    // to model workerd's full TEXT results without changing production SQL.
+    const exec=sql.exec.bind(sql),decoder=new TextDecoder();
+    sql.exec=(query,...values)=>{
+      const result=exec(query,...values);
+      if(!result.some(row=>Object.hasOwn(row,'message_body')))return result;
+      const encoded=exec(`SELECT CAST(message_body AS BLOB) AS replay_bytes FROM (${query})`,...values);
+      for(let n=0;n<result.length;n++)if(encoded[n].replay_bytes!==null)result[n].message_body=decoder.decode(encoded[n].replay_bytes);
+      return result;
+    };
+  }
   if(!ownerOnly)sharedSchema(ctx);relayEventSchema(ctx);
   const now=Date.now(),grantId='fictional-event-delivery-grant';
   const grant={principal:RELAY_OWNER,resource:fixture.env.RELAY_MCP_ORIGIN+'/relay/mcp',scope:'relay:events '+RELAY_OWNER_SCOPE,revoked:false};
@@ -251,7 +264,9 @@ test('retention floor and maxAge truncation constrain examined replay without in
 });
 
 test('SQL substring pruning keeps literal Unicode case folding and public-result request filters',async t=>{
-  const s=await setup(t);s.seed(1,RELAY_OWNER_EVENT,'Fictional KELVIN message');s.seed(2,RELAY_OWNER_EVENT,'Fictional %_ literal');s.seed(3,RELAY_OWNER_EVENT,'Fictional \u0000 KELVIN after nul');
+  const s=await setup(t,{faithfulReplayText:true}),nulBody='Fictional \u0000 KELVIN after nul';
+  s.seed(1,RELAY_OWNER_EVENT,'Fictional KELVIN message');s.seed(2,RELAY_OWNER_EVENT,'Fictional %_ literal');s.seed(3,RELAY_OWNER_EVENT,nulBody);
+  assert.equal(new TextDecoder().decode(s.rows('SELECT CAST(body AS BLOB) AS bytes FROM relay_owner_event_bodies WHERE event_id=?','fictional-event-3')[0].bytes),nulBody);
   const kelvin=await s.subscribe(s.parameters(RELAY_OWNER_EVENT,{inbox_id:RELAY_OWNER_INBOX,message_contains:'kelvin'}));
   const literal=await s.subscribe(s.parameters(RELAY_OWNER_EVENT,{inbox_id:RELAY_OWNER_INBOX,message_contains:'%_'}));
   assert.deepEqual(s.rows('SELECT event_seq FROM relay_outbox WHERE subscription_id=?',kelvin.id).map(row=>row.event_seq),[1,3]);

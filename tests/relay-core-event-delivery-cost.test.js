@@ -39,6 +39,23 @@ export class EventCostFixture {
   async fetch(request){
     const u=new URL(request.url),path=u.pathname;
     if(path==='/seed'){this.seed(Number(u.searchParams.get('count')||6000),u.searchParams.get('mode')||'sparse',u.searchParams.get('legacy')==='1');return Response.json({fictional:true,seeded:this.count});}
+    if(path==='/unicode'){
+      this.seed(3,'unicode',false);
+      const nulBody='Fictional '+String.fromCharCode(0)+' KELVIN after nul',sql=this.ctx.storage.sql;
+      for(const [n,body] of [[1,'Fictional KELVIN message'],[2,'Fictional %_ literal'],[3,nulBody]])sql.exec('UPDATE relay_owner_event_bodies SET body=? WHERE event_id=?',body,'fictional-event-'+n);
+      const nativeNulBody=[...sql.exec('SELECT body FROM relay_owner_event_bodies WHERE event_id=?','fictional-event-3')][0].body;
+      const acceptedCursors=[],fetcher=async(_url,options)=>{
+        const body=JSON.parse(options.body);if(body.type==='verification')return Response.json({challenge:body.challenge});
+        acceptedCursors.push(body.cursor);return new Response(null,{status:204});
+      };
+      const p={name:RELAY_OWNER_EVENT,arguments:{inbox_id:RELAY_OWNER_INBOX,message_contains:'kelvin'},delivery:{mode:'webhook',url:'https://fictional.example.test/callback',secret:'whsec_'+btoa(String.fromCharCode(...new Uint8Array(32).fill(27)))},cursor:'relay1:0'};
+      const sub=await relaySubscribe(this.ctx,{principal:RELAY_OWNER,grantId:'fictional-grant',scopes:[RELAY_OWNER_SCOPE]},p,this.env,fetcher,this.now);
+      const queuedSeq=[...sql.exec('SELECT event_seq FROM relay_outbox WHERE subscription_id=? ORDER BY event_seq',sub.id)].map(row=>row.event_seq);
+      await drainRelayOutbox(this.ctx,this.env,fetcher,this.now,{schedule:false});
+      await drainRelayOutbox(this.ctx,this.env,fetcher,this.now+50,{schedule:false});
+      const ack=[...sql.exec('SELECT ack_seq FROM relay_subscriptions WHERE id=?',sub.id)][0].ack_seq;
+      return Response.json({fictional:true,nativeNulBody,queuedSeq,acceptedCursors,ack});
+    }
     if(path==='/plan'){
       const index=[...this.ctx.storage.sql.exec("SELECT sql FROM sqlite_master WHERE name='relay_event_kind_seq'")][0].sql;
       const expression=index.slice(index.indexOf('((')+1,index.lastIndexOf(',seq)'));
@@ -85,6 +102,10 @@ test('native workerd cold/warm refill budgets stay page-bound for dense, sparse,
       const u=new URL('https://fictional-cost.example.test'+path);u.searchParams.set('fixture',fixture);for(const [key,value] of Object.entries(parameters))u.searchParams.set(key,value);
       const response=await mf.dispatchFetch(u.href);assert.equal(response.status,200);return response.json();
     };
+    const unicode=await request('unicode','/unicode');
+    assert.equal(unicode.nativeNulBody,'Fictional \u0000 KELVIN after nul','Native workerd TEXT preserves embedded NUL and the following Unicode text');
+    assert.deepEqual(unicode.queuedSeq,[1,3],'Unchanged native SQL and JS pruning retain both Kelvin matches, including after NUL');
+    assert.deepEqual(unicode.acceptedCursors,['relay1:1','relay1:3']);assert.equal(unicode.ack,3);
     const measured={};
     for(const mode of ['sparse','dense','cross']){
       await request(mode,'/seed',{mode,count:6000});measured[mode+'Cold']=await request(mode,'/cold');measured[mode+'Warm']=await request(mode,'/warm');
