@@ -84,3 +84,18 @@ test('lost accepted response retries the original labels and UUID while retainin
   const first=JSON.parse(f.calls.find(c=>c.path==='/relay/owner/jobs'&&c.options.method==='POST').options.body);controller.setJobGoal('Edited goal');await controller.send();assert.equal(f.calls.filter(c=>c.path==='/relay/owner/jobs'&&c.options.method==='POST').length,1);
   await controller.retryUnconfirmed();const writes=f.calls.filter(c=>c.path==='/relay/owner/jobs'&&c.options.method==='POST').map(c=>JSON.parse(c.options.body));assert.deepEqual(writes[1],first);assert.equal(controller.snapshot().jobGoal,'Edited goal');assert.equal(controller.snapshot().draft,'Fictional private draft');assert.equal(f.h.rows('SELECT COUNT(*) AS n FROM relay_owner_jobs')[0].n,1);
 });
+
+
+test('current work search and status filters stay private and perform no requests',async t=>{
+  const f=await fixture(t),first=await f.create({title:'Compare materials',project_title:'Fictional garden',goal_title:'Plan a path'}),second=await f.create({title:'Prepare notes'});
+  const run=crypto.randomUUID();await f.rpc('relay_owner_job_claim',{job_id:first.job.id,run_id:run,event_id:crypto.randomUUID()});
+  await f.rpc('relay_owner_job_update',{job_id:first.job.id,run_id:run,event_id:crypto.randomUUID(),stage:'running',summary:'Checking two fictional measurements.'});
+  const controller=createRelayOwnerController({api:f.api,draftStore:{read:()=>'',save:()=>true}});await controller.refresh();controller.toggleRequests();
+  const reads=f.calls.length,select=()=>{const state=controller.snapshot();return groupOwnerWork(state.jobs,{query:state.query,filter:state.workFilter});};
+  for(const query of ['materials',' GARDEN ','path','measurements']){controller.setQuery(query);assert.equal(controller.snapshot().requestsOnly,true);assert.deepEqual(select().map(t=>t.job.id),[first.job.id]);}
+  controller.setWorkFilter('queued');assert.equal(select().length,0);controller.setQuery('');assert.deepEqual(select().map(t=>t.job.id),[second.job.id]);
+  controller.setWorkFilter('working');assert.deepEqual(select().map(t=>t.job.id),[first.job.id]);controller.setWorkFilter('invalid');assert.equal(controller.snapshot().workFilter,'working');
+  controller.setWorkFilter('all');controller.setQuery('no fictional match');assert.equal(select().length,0);assert.equal(f.calls.length,reads,'Search and filtering use already loaded records only');
+  controller.toggleRequests();controller.setQuery('private work');assert.equal(controller.snapshot().requestsOnly,false,'Message search remains in the message context');
+  assert.equal(f.store.has('jarvis.relay.work-filter'),false);
+});
