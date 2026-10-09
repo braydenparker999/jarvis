@@ -12,7 +12,8 @@ const publicRoot=resolve('public');
 const policy=JSON.parse(await readFile(join(publicRoot,'staticwebapp.config.json'),'utf8'));
 const mime={'.html':'text/html','.js':'text/javascript','.json':'application/json','.css':'text/css','.otf':'font/otf'};
 const stamp='2026-10-03T03:00:00Z';
-const relayMessages=Array.from({length:25},(_,i)=>({id:'message-'+i,body:i%2?'## A useful reply\nA **clear answer**, with a [source](https://example.com).\n\n- One practical step\n- A second step\n\n'+('More context. '.repeat(25)):'A question about '+i,role:i%2?'assistant':'user',kind:i%2?'reply':undefined,replyTo:i%2?'message-'+(i-1):undefined,createdAt:stamp}));
+const messageId=i=>'00000000-0000-4000-8000-'+String(i+1).padStart(12,'0');
+const relayMessages=Array.from({length:25},(_,i)=>({id:messageId(i),body:i%2?'## A useful reply\nA **clear answer**, with a [source](https://example.com).\n\n- One practical step\n- A second step\n\n'+('More context. '.repeat(25)):'A question about '+i,role:i%2?'assistant':'user',kind:i%2?'reply':undefined,replyTo:i%2?messageId(i-1):undefined,createdAt:stamp}));
 const videos=Array.from({length:24},(_,i)=>({id:'video0000000'+String(i).padStart(2,'0'),name:['Mediterranean Sundance','The craft of photography','Building something remarkable','Winter light','A quiet place to explore','An introduction to rhythm'][i%6]+' '+i+' [vrAMRxBB5KI].mp4',mimeType:'video/mp4',modifiedTime:new Date(Date.parse(stamp)-i*86400000).toISOString(),videoMediaMetadata:{durationMillis:String((i+1)*120000),height:1080,width:1920}}));
 const guitarSong={songId:1,revisionId:1,title:'Lágrima',artist:'Francisco Tárrega',tracks:[{partId:0,kind:'guitar',instrumentId:24,instrument:'Classical guitar',name:'Guitar'},{partId:1,kind:'guitar',instrumentId:24,instrument:'Guitar',name:'Second guitar'}]};
 const tuning=[64,59,55,50,45,40];
@@ -24,11 +25,17 @@ test('redesigned modules: mobile flows, retained state, safe text and notation p
  const browser=await chromium.launch({executablePath:chrome,headless:true,args:['--no-sandbox']});
  async function session(width=390){
   const context=await browser.newContext({viewport:{width,height:844},isMobile:width<600,hasTouch:true}),page=await context.newPage(),errors=[];
-  page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(m.type()==='error'&&m.text().includes('Content Security Policy'))errors.push(m.text());});let inbox=[...relayMessages,{id:'muse-one',role:'user',body:MUSE_PREFIX+'Please find a new album.',createdAt:stamp},{id:'muse-two',role:'assistant',kind:'reply',replyTo:'muse-one',body:'## Your music is ready\nOpen [Poweramp]('+origin+'/drawercast/).',createdAt:stamp}];
+  page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(m.type()==='error'&&m.text().includes('Content Security Policy'))errors.push(m.text());});let inbox=[...relayMessages,{id:messageId(25),role:'user',body:MUSE_PREFIX+'Please find a new album.',createdAt:stamp},{id:messageId(26),role:'assistant',kind:'reply',replyTo:messageId(25),body:'## Your music is ready\nOpen [Poweramp]('+origin+'/drawercast/).',createdAt:stamp}];
   await context.route('**/*',async route=>{
-   const r=route.request(),url=new URL(r.url()),json=data=>route.fulfill({contentType:'application/json',body:JSON.stringify(data)});
+   const r=route.request(),url=new URL(r.url()),json=(data,status=200)=>route.fulfill({status,contentType:'application/json',body:JSON.stringify(data)});
    if(url.origin===origin){if(url.pathname==='/assets/quick-ai-config.json')return json({version:3,geminiKey:'test-gemini',groqKey:'test-groq',tavilyKey:'test-search'});if(url.pathname==='/assets/drive-config.json')return json({apiKey:'AIza'+'x'.repeat(35),videoFolderId:'folder123456789'});return route.continue();}
-   if(url.origin===API_ORIGIN){if(url.pathname==='/shared/state')return json({mode:'github-publications',messages:inbox,posts:[],publisher:{ok:true},nextCursor:null});if(url.pathname==='/shared/messages'){const m=r.postDataJSON();inbox.push({...m,role:'user',createdAt:stamp});return json({ok:true});}if(url.pathname==='/guitar/search')return json({results:[guitarSong]});if(url.pathname==='/guitar/songs/1')return json({song:guitarSong});if(url.pathname==='/guitar/songs/1/score')return json(score);}
+   if(url.origin===API_ORIGIN){
+    // Emulate a valid old public service rather than aborting the newer route.
+    if(url.pathname==='/shared/changes')return json({error:'This fictional legacy service does not support changes'},404);
+    if(url.pathname==='/shared/state')return json({mode:'github-publications',coordinationVersion:1,messages:inbox,posts:[],publisher:{ok:true},nextCursor:null,public_inbox:true,author_authenticated:false,execution_authorized:false});
+    if(url.pathname==='/shared/messages'){const m=r.postDataJSON(),existing=inbox.find(entry=>entry.id===m.id);if(existing)return existing.role==='user'&&existing.body===m.body?json({entry:existing}):json({error:'Fictional immutable ID conflict'},409);const entry={id:m.id,body:m.body,role:'user',createdAt:stamp};inbox.push(entry);return json({entry},201);}
+    if(url.pathname==='/guitar/search')return json({results:[guitarSong]});if(url.pathname==='/guitar/songs/1')return json({song:guitarSong});if(url.pathname==='/guitar/songs/1/score')return json(score);
+   }
    if(url.host==='www.googleapis.com'){
     if(url.searchParams.get('alt')==='media')return route.abort();
     if(url.pathname.endsWith('/folder123456789'))return json({id:'folder123456789',name:'My videos',mimeType:'application/vnd.google-apps.folder'});
@@ -49,8 +56,8 @@ test('redesigned modules: mobile flows, retained state, safe text and notation p
    await page.locator('#messages').evaluate(p=>p.scrollTop=0);await page.locator('#message-text').fill('An unfinished thought');
    const token=await page.locator('.message-row').first().evaluate(n=>{n._sentinel='retained';return n.dataset.messageId;});
    const before=await page.locator('#messages').evaluate(p=>p.scrollTop);
-   s.addMessage({id:'new-reply',role:'assistant',kind:'reply',replyTo:'message-24',body:'New reply',createdAt:stamp});
-   await page.locator('#chat-menu').click();await page.getByRole('button',{name:'Refresh inbox',exact:true}).click();await page.locator('[data-message-id="new-reply"]').waitFor();
+   s.addMessage({id:messageId(27),role:'assistant',kind:'reply',replyTo:messageId(24),body:'New reply',createdAt:stamp});
+   await page.locator('#chat-menu').click();await page.getByRole('button',{name:'Refresh inbox',exact:true}).click();await page.locator('[data-message-id="'+messageId(27)+'"]').waitFor();
    assert.equal(await page.locator('.message-row').first().evaluate(n=>n._sentinel),'retained');assert.equal(await page.locator('#message-text').inputValue(),'An unfinished thought');assert.ok(Math.abs(await page.locator('#messages').evaluate(p=>p.scrollTop)-before)<3);
    await page.locator('[data-message-id="'+token+'"] .message-actions').click();await page.getByRole('button',{name:'Bookmark',exact:true}).click();assert.equal(await page.locator('.bookmarked').count(),1);
    await page.locator('#chat-menu').click();await page.getByRole('button',{name:'Bookmarks',exact:true}).click();assert.equal(await page.locator('.message-row').count(),1);
