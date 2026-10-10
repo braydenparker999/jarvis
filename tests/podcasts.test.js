@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {publicURL,parseFeed,episodeID,durationSeconds,getFeed,directory,podcasts,upstream} from '../backend/podcasts.js';
-import {emptyState,keyOf,nextQueued,resumePosition,shouldSleep,compactProgress,clock,readState} from '../public/podcasts/core.js';
+import {emptyState,keyOf,nextQueued,resumePosition,shouldSleep,compactProgress,clock,positionText,readState} from '../public/podcasts/core.js';
 import worker from '../backend/worker.js';
 const feedURL='https://feeds.example.org/podcast.xml';
 const rss=`<?xml version="1.0"?><rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel><title>History &amp; Sound</title><itunes:author>Somebody</itunes:author><description><![CDATA[<p>A good <b>show</b></p>]]></description><itunes:image href="https://images.example.org/show.jpg"/><item><title>Episode &amp; one</title><guid isPermaLink="false">episode-1</guid><description><![CDATA[<p>Notes with &amp; characters and &lt;item&gt; text.</p>]]></description><pubDate>Fri, 02 Oct 2026 12:00:00 GMT</pubDate><itunes:duration>01:02:03</itunes:duration><enclosure url="https://media.example.org/audio.mp3?a=1&amp;b=2" type="audio/mpeg" length="12000"/></item><item><title>Episode two</title><guid>episode-2</guid><itunes:duration>120</itunes:duration><enclosure url="https://media.example.org/two.mp3" type="audio/mpeg"/></item><item><title>Duplicate</title><guid>episode-1</guid><enclosure url="https://media.example.org/audio.mp3" type="audio/mpeg"/></item><item><title>Private</title><enclosure url="http://127.0.0.1/audio.mp3" type="audio/mpeg"/></item><item><title>Video</title><enclosure url="https://media.example.org/video.mp4" type="video/mp4"/></item></channel></rss>`;
@@ -84,4 +84,10 @@ test('resume, ordered queue, progress bounds and timer transitions preserve list
   assert.equal(shouldSleep({endOfEpisode:true},2000),false);assert.equal(shouldSleep({endOfEpisode:true},2000,true),true);
   assert.equal(Object.keys(compactProgress(Object.fromEntries(Array.from({length:400},(_,i)=>[i,{updatedAt:i}])))).length,300);
   assert.equal(clock(3723),'1:02:03');assert.deepEqual(readState({getItem:()=>'{broken'}),emptyState());
+});
+
+test('accessible episode positions include spoken units, total duration and honest unknown duration',()=>{
+ assert.equal(positionText(25,60),'25 seconds of 1 minute');
+ assert.equal(positionText(3601,7320),'1 hour 1 second of 2 hours 2 minutes');
+ assert.equal(positionText(0,0),'0 seconds; duration unavailable');
 });

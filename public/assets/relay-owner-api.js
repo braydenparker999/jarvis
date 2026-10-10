@@ -85,7 +85,18 @@ function privateJob(value){
         &&['claimed','running','waiting_for_owner','failed','cancelled','work_completed','result_corrected'].includes(u.kind)
         &&typeof u.summary==='string'&&!!u.summary.trim()&&u.summary.length<=1000&&validDate(u.createdAt)
         &&u.authentication_source==='owner-oauth-mcp'&&u.author_authenticated===true&&u.visibility==='private'))throw new OwnerApiError('invalid');
-    presentation={projectTitle:p.projectTitle,goalTitle:p.goalTitle,latestUpdate:u?{id:u.id,jobId:u.jobId,kind:u.kind,summary:u.summary,createdAt:u.createdAt,
+    let work;
+    if(p.work!==undefined && p.work!==null){
+      const w=p.work;
+      if(!jobIdentifier(w.workId)||!Number.isInteger(w.revision)||w.revision<0||w.revision>20
+        ||w.authentication_source!=='owner-oauth-mcp'||w.author_authenticated!==true||w.visibility!=='private'
+        ||!Array.isArray(w.plan)||w.plan.length>8||w.plan.some(step=>typeof step!=='string'||!step.trim()||step.length>1000)
+        ||(w.revision===0 ? w.title!==null||w.goal!==null||w.plan.length!==0||w.updatedAt!==null||w.workId===value.id
+          : w.workId!==value.rootJobId||!label(w.title)||w.title===null||typeof w.goal!=='string'||!w.goal.trim()||w.goal.length>1000||!w.plan.length||!validDate(w.updatedAt)))throw new OwnerApiError('invalid');
+      work={workId:w.workId,revision:w.revision,title:w.title,goal:w.goal,plan:[...w.plan],updatedAt:w.updatedAt,
+        authentication_source:'owner-oauth-mcp',author_authenticated:true,visibility:'private'};
+    }
+    presentation={...(p.work!==undefined?{work:work??null}:{}),projectTitle:p.projectTitle,goalTitle:p.goalTitle,latestUpdate:u?{id:u.id,jobId:u.jobId,kind:u.kind,summary:u.summary,createdAt:u.createdAt,
       authentication_source:'owner-oauth-mcp',author_authenticated:true,visibility:'private'}:null};
   }
   // Project the contract: unexpected credential, HTML or transport fields never

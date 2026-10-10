@@ -552,7 +552,7 @@
         <div class="filter-row">
           <select class="select" id="discoverType" aria-label="Content type"><option value="all" ${!state.discover.sector&&state.discover.type==='all'?'selected':''}>All types</option>${sectorOption}${types.map(x=>`<option ${!state.discover.sector&&state.discover.type===x?'selected':''}>${esc(typeLabel(x))}</option>`).join('')}</select>
           <select class="select" id="discoverAddon" aria-label="Add-on"><option value="all">All add-ons</option>${[...new Map(cats.map(x=>[x.entry.providerKey,x.entry.providerName])).entries()].map(([key,name])=>`<option value="${esc(key)}" ${state.discover.addon===key?'selected':''}>${esc(name)}</option>`).join('')}</select>
-          <select class="select" id="discoverCatalog" aria-label="Catalog"><option value="all">All catalogs</option>${cats.map(x=>`<option value="${esc(x.entry.key)}" ${state.discover.catalog===x.entry.key?'selected':''}>${esc(x.entry.displayName)} · ${esc(x.entry.providerName)}</option>`).join('')}</select>
+          <select class="select" id="discoverCatalog" aria-label="Catalog"><option value="all">All catalogs</option>${cats.map(x=>`<option value="${esc(x.entry.key)}" ${state.discover.catalog===x.entry.key?'selected':''}>${esc(x.entry.displayName)} · ${esc(typeLabel(x.cat.type))} · ${esc(x.entry.providerName)}</option>`).join('')}</select>
           ${genres.length?`<select class="select" id="discoverGenre" aria-label="Genre"><option value="all">All genres</option>${genres.map(x=>`<option ${state.discover.genre===x?'selected':''}>${esc(x)}</option>`).join('')}</select>`:''}
         </div>
         <div id="discoverResults">${skeletonRail()}</div>`;
@@ -697,6 +697,8 @@
       });
     }
     function search(q,route=Routes.begin('search')){
+      // Every explicit search owns the query, including recent-search taps.
+      clearTimeout(searchTimer);
       q=String(q||'').trim();
       state.query=q;
       if(!route.current()||state.currentPage!=='search')return;
