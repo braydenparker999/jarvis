@@ -1,4 +1,4 @@
-import {icon as uiIcon, sheet, appViewport, autosize, copyText} from './ui.js';
+import {icon as uiIcon, sheet as plainSheet, appViewport, autosize, copyText} from './ui.js';
 import {conversation} from './conversation.js';
 import { apps, icon, loadPreferences, savePreferences, renderUtility } from './hub.js';
 import { API_ORIGIN } from './config.js';
@@ -9,6 +9,7 @@ import { channelMessages } from './channels.js';
 import { OWNER_SESSION_KEY } from './relay-owner-api.js';
 import { createRelayOwnerController, createRelayOwnerUI } from './relay-owner-ui.js';
 import {createRelayTransferStore} from './relay-transfer.js';
+import {createRelayMenuHistory} from './relay-menu-history.js';
 
 const $ = id => document.getElementById(id);
 const icons = {
@@ -27,6 +28,8 @@ catch (e) { storageError = e.message || 'Device storage is unavailable.'; }
 let route = getRoute(), chatUI, workReturn='public', savedView=false, surfaceMotionKey='';
 const reducedMotion=window.matchMedia('(prefers-reduced-motion: reduce)');
 reducedMotion.addEventListener('change',event=>{if(event.matches)document.getAnimations().forEach(animation=>animation.cancel());});
+const relayMenuHistory=createRelayMenuHistory({history,getURL:()=>location.href});
+function sheet(title,entries){return plainSheet(title,entries,route==='chat'?relayMenuHistory:undefined);}
 const ownerController = createRelayOwnerController({onModeChange:next=>{if(next!=='public')savedView=false;if(route==='chat')drawShell();}});
 const ownerUI = createRelayOwnerUI({controller:ownerController});
 let relayTransfers, transferNotice = '';
@@ -74,6 +77,7 @@ function connection() {
   return state.syncedAt ? 'Connected' : 'Connecting';
 }
 function drawShell() {
+  relayMenuHistory.invalidate();
   ownerUI.unmount();
   chatUI?.savePosition(); chatUI=null;
   for(const cls of ['module-page','conversation-page','relay-page'])document.body.classList.toggle(cls,route==='chat');
@@ -188,7 +192,7 @@ function openRelayMenu(){
   const entries=[{label:state.requestsOnly&&privateView?'Search current work':'Search messages',icon:'search',disabled:privateView&&state.status!=='approved',action:()=>$('chat-search-toggle')?.click()},
     {label:'Chats',icon:'chat',action:openChats},{label:'Work',icon:'check',action:openWork},{label:'Saved',icon:'bookmark',action:openSaved},{label:'Settings',icon:'info',action:openRelaySettings}];
   const dialog=sheet('Relay',entries);dialog.classList.add('relay-navigation-sheet');[...dialog.querySelectorAll('.sheet-action')].forEach((node,i)=>{node.setAttribute('aria-label',entries[i].label);if(entries[i].label==='Saved')node.setAttribute('aria-description','Saved public messages on this device');});
-  const home=document.createElement('a');home.href='/';home.dataset.route='home';home.className='relay-menu-home';home.textContent='Jarvis home';home.onclick=()=>dialog.close();dialog.append(home);
+  const home=document.createElement('a');home.href='/';home.dataset.route='home';home.className='relay-menu-home';home.textContent='Jarvis home';dialog.append(home);
 }
 function drawPage() {
   if (route === 'home' || route === 'favorites') { drawHome(); return; }
@@ -380,11 +384,14 @@ function setPublicSendState(id,sendState){commit({...state,messages:state.messag
 document.addEventListener('click', e => {
   const link = e.target.closest('[data-route]');
   if (!link || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
-  e.preventDefault(); $('hub-dialog')?.close();
-  if (route !== link.dataset.route) { route = link.dataset.route; history.pushState({},'',paths[route]); }
-  drawShell(); window.scrollTo(0,0);
+  e.preventDefault();
+  relayMenuHistory.navigate(()=>{
+    $('hub-dialog')?.close();
+    if (route !== link.dataset.route) { route = link.dataset.route; history.pushState({},'',paths[route]); }
+    drawShell(); window.scrollTo(0,0);
+  });
 });
-window.addEventListener('popstate',()=>{ route=getRoute(); drawShell(); });
+window.addEventListener('popstate',()=>{ if(relayMenuHistory.popstate())return;route=getRoute();drawShell(); });
 window.addEventListener('online',sync);
 window.addEventListener('pageshow',updateClock);
 document.addEventListener('visibilitychange',updateClock);
