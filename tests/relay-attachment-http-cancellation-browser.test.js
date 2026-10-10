@@ -13,7 +13,10 @@ async function loseSession(page){await page.evaluate(key=>{localStorage.removeIt
 async function assertUploadCancelled(j,record){
  await waitForValue(()=>j.cancellations.find(event=>event.canceled===true&&event.request?.method==='POST'&&event.request.url===j.origin+'/relay/owner/attachments'&&event.request.postData===record.body));
  assert.equal(record.disconnected,true,'Actual HTTP response socket closed before its held response');
- assert.equal(j.failures.some(f=>f.method==='POST'&&f.body===record.body&&f.error==='net::ERR_ABORTED'),true,'Browser confirms this exact POST abort');
+ // CDP and Playwright deliver cancellation independently; wait for both exact observations.
+ const matchesAbort=f=>f.method==='POST'&&f.url===j.origin+'/relay/owner/attachments'&&f.body===record.body&&f.error==='net::ERR_ABORTED';
+ await waitForValue(()=>j.failures.find(matchesAbort));
+ assert.equal(j.failures.some(matchesAbort),true,'Browser confirms this exact POST abort');
 }
 
 test('held upload POST cancellation discards staged bytes and a late HTTP response cannot restore the file',{timeout:120000},async t=>{
