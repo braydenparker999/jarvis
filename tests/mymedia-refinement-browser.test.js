@@ -95,7 +95,8 @@ test('My Media rendered refinement: geometry, access, focus, compact viewport an
     await page.goto(origin+'/mymedia/');
     await page.waitForFunction(()=>document.querySelector('#status')?.textContent.startsWith('72 videos'));
     assert.equal(await page.locator('#sections .video-tile').count(),60, 'fixture loaded all 72 videos with 60 rendered');
-    assert.equal(await page.locator('.browse-count').textContent(),'60 of 72 videos');
+    assert.equal(await page.locator('.browse-count').count(),0,'ordinary Explore keeps counts in its freshness status');
+    assert.equal(await page.locator('#sections .video-tile').count(),60);
     return {page,context,errors};
   }
   async function noOverflow(page) {
@@ -148,6 +149,12 @@ test('My Media rendered refinement: geometry, access, focus, compact viewport an
     const old=await session(width,844,true);
     await screenshot(old.page,'baseline-feed-'+width);
     await old.page.evaluate(()=>scrollTo(0,1800));await screenshot(old.page,'baseline-scroll-'+width);
+    await old.page.locator('#continue-grid').scrollIntoViewIfNeeded();await screenshot(old.page,'baseline-continue-'+width);
+    if(width===1200) {
+      await old.page.locator('#sections .video-card').first().click();
+      await old.page.waitForFunction(()=>document.querySelector('#video').readyState>=1);
+      await screenshot(old.page,'baseline-player-desktop');
+    }
     await old.context.close();
 
     const {page,context,errors}=await session(width);
@@ -171,9 +178,10 @@ test('My Media rendered refinement: geometry, access, focus, compact viewport an
     assert.equal(await page.locator('#sections .video-card').evaluate(n=>{const r=n.getBoundingClientRect(),header=document.querySelector('#library-toolbar').getBoundingClientRect();return r.top>=header.bottom && r.bottom<=document.querySelector('.media-nav').getBoundingClientRect().top;}),true,'focused result is clear of fixed controls');
     await screenshot(page,'candidate-search-'+width);
     await page.locator('#all-videos').click();
-    assert.equal(await page.locator('.browse-count').textContent(),'60 of 72 videos');
+    assert.equal(await page.locator('.browse-count').count(),0,'ordinary Explore keeps counts in its freshness status');
+    assert.equal(await page.locator('#sections .video-tile').count(),60);
     await page.locator('#load-more').click();
-    assert.equal(await page.locator('.browse-count').textContent(),'72 videos');
+    assert.equal(await page.locator('.browse-count').count(),0,'Show more does not turn Explore into a focused count view');
     assert.equal(await page.locator('#sections .video-tile').count(),72);
     await target(page,'#continue-grid a.card-creator');
     await target(page,'#continue-grid .video-menu');
@@ -204,7 +212,8 @@ test('My Media rendered refinement: geometry, access, focus, compact viewport an
     await page.locator('#video').evaluate(n=>n.pause());
     await page.locator('#back').click();
     await page.waitForFunction(()=>!document.querySelector('#library-view').hidden);
-    assert.equal(await page.locator('.browse-count').textContent(),'60 of 72 videos');
+    assert.equal(await page.locator('.browse-count').count(),0,'ordinary Explore keeps counts in its freshness status');
+    assert.equal(await page.locator('#sections .video-tile').count(),60);
     assert.deepEqual(errors,[]);await noOverflow(page);await context.close();
   });
 
