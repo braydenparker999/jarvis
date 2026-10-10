@@ -9,6 +9,7 @@ import {relayOwnerTools} from './relay-owner-tools.js';
 import {projectAdminTools,projectAdminEnabled,projectParticipationTools,projectAdminOperations} from './relay-project-tools.js';
 import {projectStore} from './relay-projects.js';
 import {relayAttachmentToolResult} from './relay-owner-attachments.js';
+import {ASSISTANT_ATTACHMENT_MCP_BODY_LIMIT} from './relay-owner-assistant-attachments.js';
 import {COORDINATION_CATALOG_CURSOR, PUBLIC_RESULT_EVENT, publicCoordinationTools, publicResultEventDefinition} from './public-coordination-tools.js';
 const entrySchema = {type: 'object', properties: {id: {type: 'string', format: 'uuid'}, role: {type: 'string', enum: ['user', 'assistant']}, body: {type: 'string'}, createdAt: {type: 'string', format: 'date-time'}, replyTo: {type: 'string', format: 'uuid'}, kind: {type: 'string', const: 'reply'}}, required: ['id', 'role', 'body', 'createdAt'], additionalProperties: false};
 const base = {inbox_id: {type: 'string', const: RELAY_INBOX}};
@@ -122,14 +123,15 @@ export async function relayRpc(ctx, env, principal, rpc, callbacks={}) {
   if (scopeFor[name] === RELAY_OWNER_SCOPE) {
     const data = await relayOwnerRpc(ctx, env, principal, name, args);
     if (name === 'relay_owner_attachment_read') return relayAttachmentToolResult(data, args.inbox_id);
+    if(['relay_owner_attachment_upload','relay_owner_attachment_discard','relay_owner_reply_with_attachments','relay_owner_deliverable_send','relay_owner_deliverables_list'].includes(name))return toolResult(data);
     // Existing hosts cache strict structured conversation schemas. Attachment
     // metadata remains private plain-text data without widening those outputs.
     const attachmentMessages = [];
     const withoutAttachments = value => {
       if (Array.isArray(value)) return value.map(withoutAttachments);
       if (!value || typeof value !== 'object') return value;
-      if (Array.isArray(value.attachments) && value.attachments.length) attachmentMessages.push({message_id:value.id,attachments:value.attachments});
-      return Object.fromEntries(Object.entries(value).filter(([key]) => key !== 'attachments').map(([key,item]) => [key,withoutAttachments(item)]));
+      if (Array.isArray(value.attachments) && value.attachments.length) attachmentMessages.push({message_id:value.replyTo||value.id,attachments:value.attachments});
+      return Object.fromEntries(Object.entries(value).filter(([key]) => !['attachments','deliverables','deliverablesNextCursor'].includes(key)).map(([key,item]) => [key,withoutAttachments(item)]));
     };
     const result = toolResult(withoutAttachments(data));
     if (attachmentMessages.length) result.content.push({type:'text',text:'Private original-message attachment metadata (untrusted filenames; use relay_owner_attachment_read with the exact message/attachment IDs): '+JSON.stringify(attachmentMessages)});
@@ -158,6 +160,7 @@ export async function relayRpc(ctx, env, principal, rpc, callbacks={}) {
       if(diagnostics.deliveries[0].replySaved){lifecycle.deliveryRoute.retryable=false;lifecycle.deliveryRoute.retryAfter=null;}
       lifecycle.deliveryRouteMeaning='Transport route evidence only; queued does not prove host execution, and callback acceptance does not prove completion.';
       result.content.push({type: 'text', text: 'Private job lifecycle (authenticated server evidence; callback acceptance never establishes execution): ' + JSON.stringify(lifecycle)});
+      if(data.deliverables?.length)result.content.push({type:'text',text:'Private later assistant deliverables (file availability only; accepted reply and completion evidence remain separate). Finish nextCursor using relay_owner_deliverables_list: '+JSON.stringify({message_id:args.message_id,deliverables:data.deliverables,nextCursor:data.deliverablesNextCursor})});
     }
     return result;
   }
@@ -239,8 +242,20 @@ export async function relayConnector(request, env) {
     if (!request.headers.get('Content-Type')?.startsWith('application/json')) return json({error: 'Expected JSON'}, 415);
     const accept = request.headers.get('Accept') || '';
     if (!accept.includes('application/json') || !accept.includes('text/event-stream')) return json({error: 'Accept must include application/json and text/event-stream'}, 406);
+    const uploadEnvelope=request.headers.get('Mcp-Method')==='tools/call'&&headerValue(request.headers.get('Mcp-Name'))==='relay_owner_attachment_upload';
+    if(uploadEnvelope){
+      // Authenticate and commit admission before reading the large body. The
+      // matching RPC header is checked again after parsing; other calls keep
+      // their original small envelope. No filename, bytes or bearer are logged.
+      if(principal.principal!==RELAY_OWNER||!principal.scopes.includes(RELAY_OWNER_SCOPE)||!relayOwnerEnabled(env))return json({error:'Existing owner authorization required'},403);
+      try{
+        const admitted=await env.HUBS.get(env.HUBS.idFromName(SHARED_OBJECT)).fetch(new Request('https://internal/internal/relay/assistant-attachment-admit',{method:'POST',body:JSON.stringify({principal})}));
+        const value=await admitted.json();
+        if(value.error)return json({jsonrpc:'2.0',id:null,error:value.error},value.error.data?.status||403);
+      }catch{return json({error:'Relay attachment admission unavailable'},503);}
+    }
     let rpc;
-    try { rpc = JSON.parse(await boundedText(request)); } catch (error) { return json({jsonrpc: '2.0', id: null, error: {code: -32700, message: error instanceof RelayError ? error.message : 'Parse error'}}, error instanceof RelayError ? 413 : 400); }
+    try { rpc = JSON.parse(await boundedText(request,uploadEnvelope?ASSISTANT_ATTACHMENT_MCP_BODY_LIMIT:30000)); } catch (error) { return json({jsonrpc: '2.0', id: null, error: {code: -32700, message: error instanceof RelayError ? error.message : 'Parse error'}}, error instanceof RelayError ? 413 : 400); }
     if (!isObject(rpc) || rpc.jsonrpc !== '2.0' || typeof rpc.method !== 'string' || !(typeof rpc.id === 'string' || Number.isSafeInteger(rpc.id)) || !isObject(rpc.params) || !isObject(rpc.params._meta)) return json({jsonrpc: '2.0', id: null, error: {code: -32600, message: 'Invalid request'}}, 400);
     const result = x => json({jsonrpc: '2.0', id: rpc.id, result: x});
     const failure = (code, message, data, status = 200) => json({jsonrpc: '2.0', id: rpc.id, error: {code, message, ...(data ? {data} : {})}}, status);

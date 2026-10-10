@@ -1,4 +1,4 @@
-import {RELAY_ATTACHMENT_TYPES,RELAY_ATTACHMENT_MAX_BYTES,attachmentUuid,attachmentMetadata,messageAttachments} from './relay-attachment-contract.js';
+import {RELAY_ATTACHMENT_TYPES,RELAY_ATTACHMENT_MAX_BYTES,attachmentUuid,attachmentMetadata,messageAttachments,assistantDeliverable} from './relay-attachment-contract.js';
 import { API_ORIGIN } from './config.js';
 
 // This key is deliberately unrelated to public inbox, drafts, transfers or module state.
@@ -330,6 +330,16 @@ export function createRelayOwnerApi({ fetcher = globalThis.fetch, origin = API_O
         || m.delivery!==undefined&&!validDelivery(m.delivery))
         || !(data.nextCursor === null || /^\d{1,15}$/.test(String(data.nextCursor)))) throw new OwnerApiError('invalid');
       return {...data,messages:data.messages.map(entry=>({...entry,attachments:parseAttachments(entry)}))};
+    },
+    async deliverables(messageId,after='0',{signal}={}){
+      if(!attachmentUuid(messageId)||!/^\d{1,15}$/.test(String(after)))throw new OwnerApiError('invalid');
+      const query=new URLSearchParams({message_id:messageId,after:String(after),limit:'10'});
+      const data=await attachmentCall('/relay/owner/deliverables?'+query,{signal});
+      if(data.visibility!=='private'||data.message_id!==messageId||!Array.isArray(data.deliverables)||data.deliverables.length>10
+        ||!(data.nextCursor===null||/^\d{1,15}$/.test(data.nextCursor)&&Number(data.nextCursor)>Number(after)))throw new OwnerApiError('invalid');
+      let deliveries;try{deliveries=data.deliverables.map(item=>assistantDeliverable(item,messageId));}catch{throw new OwnerApiError('invalid');}
+      if(new Set(deliveries.map(item=>item.id)).size!==deliveries.length||data.nextCursor!==null&&!deliveries.length)throw new OwnerApiError('invalid');
+      return {deliverables:deliveries,nextCursor:data.nextCursor};
     },
     async uploadAttachment(messageId,id,file,{signal}={}){
       const token=credential?.device_token;if(!token)throw new OwnerApiError('unauthorized');
