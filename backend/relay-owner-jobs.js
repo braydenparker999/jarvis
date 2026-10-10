@@ -204,6 +204,7 @@ export function relayOwnerJobSchema(ctx) {
     authentication_source TEXT NOT NULL, argument_json TEXT NOT NULL,
     writer_id TEXT NOT NULL, FOREIGN KEY(job_id) REFERENCES relay_owner_jobs(id))`);
   ctx.storage.sql.exec('CREATE INDEX IF NOT EXISTS relay_owner_job_event_order ON relay_owner_job_events(job_id,seq)');
+  ctx.storage.sql.exec('CREATE INDEX IF NOT EXISTS relay_owner_job_event_kind ON relay_owner_job_events(job_id,kind,seq DESC)');
   ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS relay_owner_job_result_corrections (
     id TEXT PRIMARY KEY, job_id TEXT NOT NULL, version INTEGER NOT NULL CHECK(version BETWEEN 2 AND 5),
     original_reply_id TEXT NOT NULL, body TEXT NOT NULL, correction_summary TEXT NOT NULL,
@@ -269,7 +270,8 @@ function presentation(ctx, row) {
     AND kind IN ('claimed','running','waiting_for_owner','failed','cancelled','work_completed','result_corrected')
     AND NOT(kind='running' AND summary='Authenticated execution progress acknowledged.')
     ORDER BY seq DESC LIMIT 1`, row.id)[0];
-  return {...organization(ctx, row), latestUpdate: update ? {id: update.id, jobId: row.id, kind: update.kind,
+  const work = workMetadata(ctx, row);
+  return {...organization(ctx, row), ...(work ? {work} : {}), latestUpdate: update ? {id: update.id, jobId: row.id, kind: update.kind,
     summary: update.summary, createdAt: iso(update.created_ms), authentication_source: 'owner-oauth-mcp',
     author_authenticated: true, visibility: 'private'} : null};
 }
@@ -518,8 +520,19 @@ export function relayOwnerJobValidateRpc(name, args) {
     return;
   }
   if (!uuid(args.job_id)) fail(400, 'Invalid job ID');
-  if (name === 'relay_owner_job_read') return;
+  if (name === 'relay_owner_job_read' || name === 'relay_owner_job_work_read') return;
   if (!uuid(args.event_id)) fail(400, 'Invalid job event ID');
+  if (name === 'relay_owner_job_plan') {
+    title(args.title); summary(args.goal, true);
+    if (!Number.isInteger(args.expected_revision) || args.expected_revision < 0 || args.expected_revision >= 20) fail(400, 'Invalid work revision');
+    if (!Array.isArray(args.plan) || args.plan.length < 1 || args.plan.length > 8) fail(400, 'Plan requires one to eight steps');
+    for (const step of args.plan) summary(step, true);
+    return;
+  }
+  if (name === 'relay_owner_job_link') {
+    if (!uuid(args.work_id) || args.work_id === args.job_id) fail(400, 'A follow-up requires a different exact work ID');
+    summary(args.reason, true); return;
+  }
   if (name === 'relay_owner_job_result_correct') {
     if (!uuid(args.expected_reply_id) || !Number.isInteger(args.expected_version) || args.expected_version < 1 || args.expected_version > 4) fail(400, 'Invalid expected private result version');
     if (args.event_id === args.expected_reply_id) fail(400, 'Correction requires a separate event ID');
@@ -556,6 +569,7 @@ function requireLease(row, principal, runId, now, allowExpired = false) {
 export function relayOwnerJobRpc(ctx, env, principal, name, args, now) {
   if (name === 'relay_owner_jobs_list') return relayOwnerJobsList(ctx, env, args.cursor, args.limit, now);
   if (name === 'relay_owner_job_read') return relayOwnerJobRead(ctx, env, args.job_id, now);
+  if (['relay_owner_job_plan','relay_owner_job_link','relay_owner_job_work_read'].includes(name)) return workRpc(ctx, env, principal, name, args, now);
   let row = relayOwnerJobEnsure(ctx, original(ctx, args.job_id));
   const argument = eventArguments(name, args);
   const previous = rows(ctx, 'SELECT job_id,argument_json,writer_id FROM relay_owner_job_events WHERE id=?', args.event_id)[0];
@@ -625,4 +639,67 @@ export function relayOwnerJobRpc(ctx, env, principal, name, args, now) {
   appendEvent(ctx, {id: args.event_id, jobId: row.id, kind: argument.kind, message: name === 'relay_owner_job_claim' ? 'Authenticated assistant execution acknowledged this request.' : summary(args.summary) || 'Authenticated execution progress acknowledged.',
     now, source: 'owner-oauth-mcp', arguments: argument, writer: principal.grantId});
   return {job: present(ctx, env, jobRow(ctx, row.id), now), newWrite: true};
+}
+
+// Organization is append-only metadata in the existing authenticated journal.
+// It never mutates request text, accepted replies, execution or action scope.
+function workMetadata(ctx, row) {
+  // Retry attempts share root organization only. Their request, execution,
+  // lease, accepted reply and completion remain independently projected.
+  if (row.root_job_id !== row.id) return workMetadata(ctx, jobRow(ctx, row.root_job_id));
+  const link = rows(ctx, "SELECT argument_json FROM relay_owner_job_events WHERE job_id=? AND kind='work_linked'", row.id)[0];
+  const planned = rows(ctx, "SELECT id,argument_json,created_ms FROM relay_owner_job_events WHERE job_id=? AND kind='work_planned' ORDER BY seq DESC LIMIT 1", row.id)[0];
+  if (!link && !planned) return null;
+  if (link) return {workId: JSON.parse(link.argument_json).work_id, revision: 0, title: null, goal: null, plan: [], updatedAt: null,
+    authentication_source: 'owner-oauth-mcp', author_authenticated: true, visibility: 'private'};
+  const value = JSON.parse(planned.argument_json);
+  return {workId: row.id, revision: value.expected_revision + 1, title: value.title, goal: value.goal, plan: value.plan,
+    updatedAt: iso(planned.created_ms), authentication_source: 'owner-oauth-mcp', author_authenticated: true, visibility: 'private'};
+}
+function workRpc(ctx, env, principal, name, args, now) {
+  const row = relayOwnerJobEnsure(ctx, original(ctx, args.job_id));
+  const read = () => ({job: present(ctx, env, jobRow(ctx, row.id), now), work: workMetadata(ctx, row),
+    followUps: rows(ctx, "SELECT argument_json FROM relay_owner_job_events WHERE job_id=? AND kind='work_followup' ORDER BY seq LIMIT 50", row.id)
+      .map(event => JSON.parse(event.argument_json).message_id)});
+  if (name === 'relay_owner_job_work_read') return read();
+  const argument = name === 'relay_owner_job_plan'
+    ? {kind: 'work_planned', expected_revision: args.expected_revision, title: title(args.title), goal: summary(args.goal, true), plan: args.plan.map(step => summary(step, true))}
+    : {kind: 'work_linked', work_id: args.work_id, reason: summary(args.reason, true)};
+  const previous = rows(ctx, 'SELECT job_id,argument_json,writer_id FROM relay_owner_job_events WHERE id=?', args.event_id)[0];
+  if (previous) {
+    if (previous.job_id !== row.id || previous.writer_id !== principal.grantId || previous.argument_json !== JSON.stringify(argument)) fail(409, 'Private work event ID conflict');
+    return {...read(), newWrite: false};
+  }
+  const requireBudget = jobId => {
+    if (rows(ctx, "SELECT COUNT(*) AS n FROM relay_owner_job_events WHERE job_id=? AND authentication_source='owner-oauth-mcp'", jobId)[0].n >= MAX_PROGRESS_EVENTS) fail(429, 'Private job progress limit reached');
+  };
+  requireBudget(row.id);
+  const current = workMetadata(ctx, row);
+  if (name === 'relay_owner_job_plan') {
+    if (row.root_job_id !== row.id || current && current.workId !== row.id) fail(409, 'Plan belongs to the original work; read that exact work first');
+    if ((current?.revision ?? 0) !== args.expected_revision) fail(409, 'Private work revision conflict');
+    appendEvent(ctx, {id: args.event_id, jobId: row.id, kind: argument.kind, message: 'Work plan saved: ' + argument.title,
+      now, source: 'owner-oauth-mcp', arguments: argument, writer: principal.grantId});
+    // Refresh the at-most-four retry presentations through the existing change
+    // feed. Follow the indexed unique parent chain; never scan the inbox.
+    let parentId = row.id;
+    for (let attempt = 1; attempt < RELAY_OWNER_JOB_MAX_ATTEMPTS; attempt++) {
+      const child = rows(ctx, 'SELECT id FROM relay_owner_jobs WHERE parent_job_id=?', parentId)[0];
+      if (!child) break;
+      markChanged(ctx, child.id); parentId = child.id;
+    }
+  } else {
+    if (current || row.specified || row.parent_job_id) fail(409, 'Message already belongs to work');
+    const target = relayOwnerJobEnsure(ctx, original(ctx, args.work_id));
+    requireBudget(target.id);
+    const targetWork = workMetadata(ctx, target);
+    if (!targetWork || targetWork.workId !== target.id) fail(409, 'Read and classify the exact original work before linking a follow-up');
+    if (row.seq <= target.seq) fail(409, 'Follow-up must follow its original work');
+    if (rows(ctx, "SELECT COUNT(*) AS n FROM relay_owner_job_events WHERE job_id=? AND kind='work_followup'", target.id)[0].n >= 50) fail(429, 'Private work follow-up limit reached');
+    appendEvent(ctx, {id: args.event_id, jobId: row.id, kind: argument.kind, message: argument.reason, now,
+      source: 'owner-oauth-mcp', arguments: argument, writer: principal.grantId});
+    appendEvent(ctx, {id: 'followup:' + args.event_id, jobId: target.id, kind: 'work_followup', message: argument.reason, now,
+      source: 'owner-oauth-mcp', arguments: {message_id: row.id}, writer: principal.grantId});
+  }
+  return {...read(), newWrite: true};
 }

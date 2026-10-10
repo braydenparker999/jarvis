@@ -109,7 +109,7 @@ export async function relayRpc(ctx, env, principal, rpc, callbacks={}) {
       result.content.push({type: 'text', text: 'Private subscription diagnostics (current subscription evidence only; no host execution proof): ' + JSON.stringify(subscriptions)});
       // Keep cached structured conversation schemas unchanged. Corrections
       // remain explicit plain-text data, never invocation or approval markers.
-      const {job} = await relayOwnerRpc(ctx, env, principal, 'relay_owner_job_read', {inbox_id: args.inbox_id, job_id: args.message_id});
+      const {job, work, followUps} = await relayOwnerRpc(ctx, env, principal, 'relay_owner_job_work_read', {inbox_id: args.inbox_id, job_id: args.message_id});
       const lifecycle = {job_id: job.id, stage: job.stage, actionKind: job.actionKind, cancelRequested: job.cancelRequested,
         parentJobId: job.parentJobId, rootJobId: job.rootJobId, attempt: job.attempt, execution: job.execution, retryJobId: job.retryJobId,
         resultVersion: job.resultVersion, completion: job.completion, finishedAt: job.finishedAt, failure: job.failure,
@@ -118,6 +118,7 @@ export async function relayRpc(ctx, env, principal, rpc, callbacks={}) {
       // Keep cached structured schemas and the four existing content blocks.
       // This optional route observation contains no callback, grant or body and
       // never changes the authenticated run/completion evidence above.
+      lifecycle.work = work; lifecycle.followUps = followUps;
       lifecycle.deliveryRoute=relayOwnerDeliveryRoute(ctx,env,args.message_id);
       if(diagnostics.deliveries[0].replySaved){lifecycle.deliveryRoute.retryable=false;lifecycle.deliveryRoute.retryAfter=null;}
       lifecycle.deliveryRouteMeaning='Transport route evidence only; queued does not prove host execution, and callback acceptance does not prove completion.';
