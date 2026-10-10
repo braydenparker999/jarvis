@@ -1,0 +1,57 @@
+# Private assistant attachment delivery contract
+
+Status: draft contract for backend and frontend coordination. This branch starts from active release 97b048abfde97426da7b5eb3a310964631ce724c. Implementation and qualification are pending. It does not enable production changes.
+
+## Native MCP delivery from available bytes
+
+All tools are flat, require the existing live relay:owner OAuth capability, and return metadata only for writes. Supply actual available file bytes encoded as canonical base64; there is no URL/path fetch, invented artifact ID, public object URL, credential argument or new grant.
+
+1. relay_owner_attachment_upload({inbox_id:"brayden-owner",message_id,delivery_id,attachment_id,name,mime_type,data_base64})
+   - message_id is the existing authenticated private original user message.
+   - Choose stable UUIDs for delivery_id and attachment_id before starting. Every file for one delivery uses the same delivery_id.
+   - Stage one bounded validated file. Return {inbox_id,attachment,newWrite,visibility:"private"}.
+   - Identical retries return the existing receipt; changing bytes, names, MIME, target or original message cannot replace it.
+2. relay_owner_reply_with_attachments({inbox_id:"brayden-owner",message_id,delivery_id,body,attachment_ids})
+   - Commit the first immutable accepted reply and its ordered files atomically.
+   - One to four distinct staged files; body may be empty for a file-only reply.
+   - Existing accepted replies remain untouched. A conflicting reply fails; choose the later-deliverable tool when the original already has an accepted reply.
+3. relay_owner_deliverable_send({inbox_id:"brayden-owner",message_id,delivery_id,body,attachment_ids})
+   - Append one immutable later assistant deliverable to the original conversation.
+   - It neither consumes nor replaces an accepted reply, rewrites a job result, nor marks work complete.
+   - The same stable UUID, body, ordered file IDs and original message are required on uncertain-write retries.
+   - Both commit tools return {inbox_id,delivery,newWrite,visibility:"private"}.
+4. relay_owner_attachment_discard({inbox_id:"brayden-owner",message_id,delivery_id,attachment_id})
+   - Dispose only the same grant's unlinked stage; linked files remain immutable.
+   - A bounded cancellation tombstone prevents a delayed upload from resurrecting that UUID.
+5. relay_owner_deliverables_list({inbox_id:"brayden-owner",message_id,cursor,limit})
+   - Bounded stable creation-order pages of later deliverables. cursor and limit are optional, default 10, maximum 25.
+   - {inbox_id,message_id,deliverables,nextCursor,visibility:"private"}.
+
+Accepted files remain readable by the existing owner-authenticated download and relay_owner_attachment_read paths. Staging/publishing ownership is bound to the originating live grant; no grant identifier is returned. Keep the original bytes and stable IDs until an uncertain write is reconciled by an identical retry or an authenticated read.
+
+## Frontend contract
+
+GET /relay/owner/conversation?message_id=<original UUID> adds:
+- reply.attachments for a first reply committed with files.
+- deliverables: the first creation-order page (up to 10).
+- deliverablesNextCursor: string or null. Additional pages use GET /relay/owner/deliverables?message_id=<original UUID>&after=<cursor>&limit=<1..25>.
+
+Each later delivery is:
+{id,messageId,kind:"deliverable",role:"assistant",body,createdAt,author_authenticated:true,principal:"github:183016859",authentication_source:"owner-oauth-mcp",visibility:"private",attachments:[metadata]}
+
+Commit receipts use the same delivery shape with kind:"reply" or "deliverable". A reply delivery's id is the actual immutable accepted reply UUID. Filename and body remain inert untrusted display data. Attachment metadata remains:
+{id,messageId,name,mimeType,sizeBytes,sha256,createdAt,state:"linked",visibility:"private"}
+messageId always identifies the original private user message, including files delivered on replies/later deliverables. Original user-message attachments exclude assistant deliveries.
+
+Use the existing bearer-only GET /relay/owner/attachments/content?message_id=<metadata.messageId>&attachment_id=<metadata.id>, with preview=1 only for a validated raster image. Verify the actual byte size, MIME and SHA-256 before creating an in-memory object URL. PDF/text/JSON are downloads. No credentials in URLs, inline PDF frame, executable HTML or public download link. Existing preview/download lifecycle cleanup applies.
+
+These are conversation file-delivery facts, not completion or execution evidence. Render later deliverables separately from accepted replies and job result corrections. Keep the accepted reply stable. The cached existing MCP conversation output schema stays compatible; additive file/deliverable details are separate private content blocks, and the new list tool provides pagination.
+
+## Bounds and safeguards
+
+Reuse the supported static PNG/JPEG/WebP, PDF, UTF-8 text/Markdown/CSV and JSON formats and validators. Preserve the 1 MiB/file, four files/delivery, 128 staged owner files, 64 new uploads/day, 16 MiB/day, 64 MiB retained bytes and 1,024 lifetime attachment identities. Both inbound and outbound files share these quotas. At most 32 later deliveries per original conversation. Unlinked stages expire after 24 hours with retained identity tombstones.
+
+The large MCP envelope is allowed only for an authenticated owner attachment-upload tool header. Admission attempts are charged before its body is read, and codec attempts before expensive validation. Other MCP requests retain their existing small limit. Authentication is rechecked after asynchronous validation and inside the final synchronous write/link transaction.
+
+No frontend implementation, live upload, deployment, credential/scope change, new storage provider, schedule or job-completion control is included in this backend draft. Native host file-byte availability/catalog refresh and actual host-to-live private delivery remain explicit release acceptance checks.
+
