@@ -1,0 +1,19 @@
+test_artifact_budget_exact_upper_bound (test_r2_preparation_ahead.PreparationTests.test_artifact_budget_exact_upper_bound) ... ok
+test_cancelled_old_token_cannot_publish_into_replacement (test_r2_preparation_ahead.PreparationTests.test_cancelled_old_token_cannot_publish_into_replacement) ... ok
+test_cancelled_running_preparation_retains_slot_until_exit (test_r2_preparation_ahead.PreparationTests.test_cancelled_running_preparation_retains_slot_until_exit) ... ok
+test_changed_revision_recipe_destination_job_or_source_invalidates (test_r2_preparation_ahead.PreparationTests.test_changed_revision_recipe_destination_job_or_source_invalidates) ... ok
+test_close_keeps_active_lease_and_blocks_new_admission (test_r2_preparation_ahead.PreparationTests.test_close_keeps_active_lease_and_blocks_new_admission) ... ok
+test_duplicate_preparation_for_same_token_is_refused (test_r2_preparation_ahead.PreparationTests.test_duplicate_preparation_for_same_token_is_refused) ... ok
+test_failures_and_interruptions_release_preparation_reservation (test_r2_preparation_ahead.PreparationTests.test_failures_and_interruptions_release_preparation_reservation) ... ok
+test_immutable_same_buffer_and_empty_cover_guard (test_r2_preparation_ahead.PreparationTests.test_immutable_same_buffer_and_empty_cover_guard) ... ok
+test_only_one_next_and_two_global_artifacts_for_three_producers (test_r2_preparation_ahead.PreparationTests.test_only_one_next_and_two_global_artifacts_for_three_producers) ... ok
+test_preparation_cannot_start_without_admission (test_r2_preparation_ahead.PreparationTests.test_preparation_cannot_start_without_admission) ... ok
+test_retained_failure_traceback_does_not_keep_abandoned_payloads (test_r2_preparation_ahead.PreparationTests.test_retained_failure_traceback_does_not_keep_abandoned_payloads) ... ok
+test_size_bounds_are_checked_before_extract_and_publish (test_r2_preparation_ahead.PreparationTests.test_size_bounds_are_checked_before_extract_and_publish) ... ok
+test_ttl_covers_preparation_time_and_waiting_time (test_r2_preparation_ahead.PreparationTests.test_ttl_covers_preparation_time_and_waiting_time) ... ok
+test_synthetic_schedule_preserves_provider_times_one_next_and_network_serialization (test_r2_preparation_ahead.ScheduleTests.test_synthetic_schedule_preserves_provider_times_one_next_and_network_serialization) ... ok
+
+----------------------------------------------------------------------
+Ran 14 tests in 0.079s
+
+OK

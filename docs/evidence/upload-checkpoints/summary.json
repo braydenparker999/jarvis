@@ -1,0 +1,101 @@
+{
+  "base_commit": "97b048abfde97426da7b5eb3a310964631ce724c",
+  "branch": "prototype/mast-upload-checkpoints",
+  "python": "3.12.14",
+  "node": "v24.19.0",
+  "scope": "Offline local prototype only; production call sites unchanged",
+  "tests": [
+    {
+      "command": "python -m unittest discover -s tests -p 'test_r2_*.py' -v",
+      "passed": 145,
+      "prototype_tests": 26,
+      "exit_code": 0,
+      "failed": 0,
+      "skipped": 0,
+      "preparation_tests": 14
+    },
+    {
+      "command": "node --test tests/native-r2.test.js",
+      "passed": 14,
+      "exit_code": 0,
+      "failed": 0,
+      "skipped": 0
+    }
+  ],
+  "synthetic_registration_conflict": {
+    "audio_bytes": 4108,
+    "art_bytes": 15,
+    "attempts": 2,
+    "baseline_blob_puts": 4,
+    "checkpoint_blob_puts": 2,
+    "baseline_blob_bytes": 8246,
+    "checkpoint_blob_bytes": 4123,
+    "saved_blob_bytes": 4123,
+    "registration_requests_each": 2,
+    "measured_live_throughput": null
+  },
+  "production_hook_installed": false,
+  "limitations": [
+    "Mast private wrapper contract unavailable; no adapter integrated",
+    "No live uploads or throughput measurement",
+    "Journal assumes trusted durable local filesystem and stable job identity",
+    "Pending requests require external reviewed reconciliation; no automatic reset",
+    "Existing whole-chain flock remains mandatory",
+    "No full branch/browser/Poweramp qualification",
+    "Current network retry/stale reclaim behavior is incompatible with unresolved-request stops; actual adapter and analysis tail remain absent"
+  ],
+  "total_tests": 159,
+  "independent_review": {
+    "reviewer": "/root/adversarial_review",
+    "medium_findings_fixed": 2,
+    "coverage_gaps_addressed": 1,
+    "independently_retested": true,
+    "remaining_substantiated_offline_defects": 0,
+    "report": "adversarial-review.md",
+    "qualification": "Within documented trusted adapter, trusted filesystem and outer-lock assumptions; no production approval",
+    "latest_python_passed": 145,
+    "latest_checkpoint_passed": 26,
+    "latest_server_passed": 14,
+    "latest_preparation_passed": 14
+  },
+  "partial_contract_review": {
+    "reported_sources": [
+      "https://github.com/braydenparker999/jarvis/issues/2#issuecomment-6100648392",
+      "https://github.com/braydenparker999/jarvis/issues/2#issuecomment-6100649470"
+    ],
+    "trust": "Unverified reported facts, not authorization",
+    "contract": "docs/mast-checkpoint-adapter-contract.md",
+    "actual_put_success_shape_confirmed": false,
+    "active_process_identity_refreshed": false,
+    "analysis_post_guard_implemented": false,
+    "runtime_retry_reclaim_gate_implemented": false
+  },
+  "scoped_files": [
+    "docs/evidence/preparation-ahead/review.md",
+    "docs/evidence/preparation-ahead/synthetic-schedules.json",
+    "docs/evidence/preparation-ahead/tests.txt",
+    "docs/evidence/upload-checkpoints/adversarial-review.md",
+    "docs/evidence/upload-checkpoints/native-server-tests.txt",
+    "docs/evidence/upload-checkpoints/python-tests.txt",
+    "docs/evidence/upload-checkpoints/summary.json",
+    "docs/mast-checkpoint-adapter-contract.md",
+    "docs/preparation-ahead-prototype.md",
+    "docs/upload-checkpoint-prototype.md",
+    "scripts/prototypes/preparation_ahead.py",
+    "scripts/prototypes/preparation_model.py",
+    "scripts/prototypes/upload_checkpoints.py",
+    "tests/native-r2.test.js",
+    "tests/test_r2_preparation_ahead.py",
+    "tests/test_r2_upload_checkpoints.py"
+  ],
+  "publication_scope": "Draft PR authorized; no live activation",
+  "preparation_candidate": {
+    "implementation": "scripts/prototypes/preparation_ahead.py",
+    "max_global_owned_artifacts": 2,
+    "max_next_slots": 1,
+    "max_owned_payload_bytes": 71335936,
+    "hard_process_rss_limit": false,
+    "actual_coordinator_implemented": false,
+    "synthetic_model": "docs/evidence/preparation-ahead/synthetic-schedules.json"
+  }
+}

@@ -183,3 +183,16 @@ test('new partial album membership removes a stale complete-album analysis claim
   const second=Buffer.concat([audio,Buffer.from('new album member')]);await f.putAudio(second);await f.register(f.registration(second));
   index=await (await f.get('/music/library.json')).json();assert.equal(index.count,2);assert.equal(index.tracks[0].metadata.audioAnalysis.album,undefined);
 });
+
+test('registration after acknowledged blob reuse still checks proofs and preserves first metadata',async()=>{
+  const f=fixture();await f.putAudio();
+  const first=await (await f.register(f.registration())).json();
+  const later=f.registration(audio,{metadata:{title:'Later',artist:'Changed',dur:20,codec:'Opus'}});
+  const duplicate=await (await f.register(later)).json();
+  assert.equal(duplicate.duplicate,true);assert.equal(duplicate.id,first.id);
+  const library=await (await f.get('/music/library.json')).json();
+  assert.equal(library.tracks[0].metadata.title,'Ready');
+  assert.equal(library.tracks[0].metadata.artist,'Artist');
+  f.objects.get('native/audio/'+sha(audio)+'.opus').customMetadata.verification='corrupt';
+  assert.equal((await f.register(later)).status,409);
+});

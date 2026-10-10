@@ -1,0 +1,22 @@
+✔ upload rejects unregistered, tampered, stale and cross-destination signatures before R2 (49.014046ms)
+✔ blobs stay invisible until verified audio and artwork registration; retries are idempotent (21.420944ms)
+✔ content-addressed PUT cannot overwrite existing data and registration survives a CAS conflict (6.121127ms)
+✔ valid signatures cannot publish altered, oversized, malformed or incomplete bodies (4.581919ms)
+✔ different concurrent registrations preserve both songs (5.630748ms)
+✔ native audio supports actual byte ranges, ETags and artwork; changed identities fail closed (10.966379ms)
+✔ repeated range and catalog reads reuse validation but still check live catalog and media identities (5.005483ms)
+✔ a cached catalog immediately sees registration, removal, invalid replacement and deletion (6.733354ms)
+✔ catalog cache is isolated by storage binding and fails closed on replacement between HEAD and GET (4.917443ms)
+✔ native source preserves prior migrated track identity and source-local user state (1.505152ms)
+✔ signed analysis upgrades bind the existing object, preserve IDs and handle CAS/idempotency/conflicts (11.657562ms)
+✔ signed duplicate analysis correction accepts the exact prior object without client JSON-number ambiguity (6.984974ms)
+✔ new partial album membership removes a stale complete-album analysis claim (9.392501ms)
+✔ registration after acknowledged blob reuse still checks proofs and preserves first metadata (4.545856ms)
+ℹ tests 14
+ℹ suites 0
+ℹ pass 14
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 245.611275
