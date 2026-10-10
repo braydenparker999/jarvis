@@ -24,6 +24,7 @@ const escape = value => String(value).replaceAll('&', '&amp;').replaceAll('"', '
 const executablePath = [process.env.JARVIS_CHROME, '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome', chromium.executablePath()].find(path => path && existsSync(path));
 const form = body => ({method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: new URLSearchParams(body).toString(), redirect: 'manual'});
 const approvePath = request => new URL(request.url()).pathname === '/relay/oauth/approve' && request.method() === 'POST';
+const faviconOrigins = new Set([ISSUER, CHATGPT, GITHUB, ATTACKER, SAME_SITE_ATTACKER]);
 const metadata = {'io.modelcontextprotocol/protocolVersion': RELAY_VERSION, 'io.modelcontextprotocol/clientCapabilities': {}};
 
 test('CI has Chromium for the real Relay OAuth browser regression', () => {
@@ -92,7 +93,7 @@ test('Relay OAuth navigation uses browser-generated origins and real workerd SQL
     async function rpc(method, params, token) {
       return mf.dispatchFetch(RESOURCE, {method: 'POST', headers: {'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', Authorization: 'Bearer ' + token, 'MCP-Protocol-Version': RELAY_VERSION, 'Mcp-Method': method, ...(method === 'tools/call' ? {'Mcp-Name': params.name} : {})}, body: JSON.stringify({jsonrpc: '2.0', id: 1, method, params: {_meta: metadata, ...params}}), redirect: 'manual'});
     }
-    async function open({legacyReferrer = false, legacyCsp = false, githubCancel = false, automaticGithub = false} = {}) {
+    async function open({legacyReferrer = false, legacyCsp = false, githubCancel = false, automaticGithub = false, holdResponseUrl = null} = {}) {
       const context = await browser.newContext({serviceWorkers: 'block', offline: true});
       const records = [], callbacks = [], errors = [], blocked = [], consoleMessages = [];
       const session = {context, records, callbacks, errors, blocked, consoleMessages, githubCancel, automaticGithub};
@@ -101,10 +102,19 @@ test('Relay OAuth navigation uses browser-generated origins and real workerd SQL
       page.on('pageerror', error => errors.push(error));
       page.on('console', message => consoleMessages.push(message.text()));
       session.page = page;
+      session.documentEpoch = 0;
+      session.cancelledFavicons = [];
+      page.on('framenavigated', frame => { if (frame === page.mainFrame()) session.documentEpoch++; });
+      if (holdResponseUrl) {
+        let release;
+        session.heldResponse = {released: new Promise(resolve => { release = resolve; }), release: () => release(), used: false};
+      }
       const cdp = await context.newCDPSession(page);
       session.cdp = cdp;
       const pending = new Set();
       session.pending = pending;
+      const cancelledRequests = new Set();
+      cdp.on('Network.loadingFailed', event => { if (event.canceled) cancelledRequests.add(event.requestId); });
       await cdp.send('Network.enable');
       await cdp.send('Network.setCacheDisabled', {cacheDisabled: true});
       // Independent egress guard, installed before the bridge. Even a missing
@@ -122,6 +132,7 @@ test('Relay OAuth navigation uses browser-generated origins and real workerd SQL
       // routing automatically continues redirects, so must not be used here.
       // https://chromedevtools.github.io/devtools-protocol/tot/Fetch/
       async function bridge(event) {
+        const documentEpoch = session.documentEpoch;
         const request = event.request, url = new URL(request.url);
         // These are Chrome's raw paused-request headers. Never reconstruct a
         // Cookie from the cookie jar, or supply/override Origin or Referer.
@@ -130,6 +141,10 @@ test('Relay OAuth navigation uses browser-generated origins and real workerd SQL
           fetchId: event.requestId, networkId: event.networkId, redirectedFrom: event.redirectedRequestId};
         records.push(record);
         async function fulfill({status = 200, headers = {}, contentType, body = ''}) {
+          if (session.heldResponse && !session.heldResponse.used && url.href === holdResponseUrl) {
+            session.heldResponse.used = true;
+            await session.heldResponse.released;
+          }
           const responseHeaders = Object.entries(headers).flatMap(([name, value]) => name.toLowerCase() === 'set-cookie'
             ? String(value).split('\n').map(value => ({name, value})) : [{name, value: String(value)}]);
           if (contentType) responseHeaders.push({name: 'Content-Type', value: contentType});
@@ -142,7 +157,22 @@ test('Relay OAuth navigation uses browser-generated origins and real workerd SQL
           await cdp.send('Fetch.failRequest', {requestId: event.requestId, errorReason});
         }
         try {
-          if ([ISSUER, CHATGPT, GITHUB, ATTACKER, SAME_SITE_ATTACKER].includes(url.origin) && url.pathname === '/favicon.ico') return await fulfill({status: 204});
+          if (faviconOrigins.has(url.origin) && url.pathname === '/favicon.ico') {
+            try { return await fulfill({status: 204}); }
+            catch (error) {
+              // Navigation can discard a paused favicon before this CDP reply.
+              // A replaced document or explicit Network cancellation proves its
+              // lifetime ended. Never accept this error for a journey request.
+              if (request.method === 'GET' && event.resourceType === 'Other' &&
+                  error.message.endsWith('Protocol error (Fetch.fulfillRequest): Invalid InterceptionId.') &&
+                  (cancelledRequests.has(event.networkId) || session.documentEpoch > documentEpoch)) {
+                session.cancelledFavicons.push({origin: url.origin, path: url.pathname,
+                  reason: cancelledRequests.has(event.networkId) ? 'network-cancelled' : 'document-replaced'});
+                return;
+              }
+              throw error;
+            }
+          }
           if (url.origin === CHATGPT && url.pathname === '/__relay_fixture/connect') {
             return await fulfill({status: 200, headers: {'Content-Type': 'text/html', 'Referrer-Policy': 'no-referrer'}, body: `<!doctype html><title>Fixture ChatGPT Connect</title><h1>Fixture ChatGPT Connect</h1><a href="${escape(authorize)}">Connect Relay</a>`});
           }
@@ -234,6 +264,7 @@ test('Relay OAuth navigation uses browser-generated origins and real workerd SQL
     async function close(session) {
       const isolation = [];
       try {
+        session.heldResponse?.release();
         await Promise.allSettled([...session.pending]);
         session.closing = true;
         await session.context.close();
@@ -511,8 +542,27 @@ test('Relay OAuth navigation uses browser-generated origins and real workerd SQL
       }
     });
 
+    await t.test('a cancelled document interception remains a fixture failure', async () => {
+      const session = await open({holdResponseUrl: CHATGPT + '/__relay_fixture/connect'});
+      try {
+        const navigation = session.page.goto(CHATGPT + '/__relay_fixture/connect').catch(error => error);
+        await assertEventually(() => session.heldResponse.used, 'the document response is paused');
+        await session.page.goto(ATTACKER + '/__relay_fixture/attack');
+        assert.match((await navigation).message, /ERR_ABORTED|interrupted/);
+        session.heldResponse.release();
+        await Promise.allSettled([...session.pending]);
+        assert.equal(session.cancelledFavicons.length, 0, 'document failures are never classified as favicon cancellation');
+        assert.equal(session.errors.length, 1);
+        assert.match(session.errors[0].message, /Fetch\.fulfillRequest.*Invalid InterceptionId/);
+        await assert.rejects(close(session), /Invalid InterceptionId/, 'the original strict fixture-error gate remains active');
+      } finally {
+        session.heldResponse.release();
+        await session.context.close();
+      }
+    });
+
     await t.test('browser-generated same-origin CSRF mismatch is rejected without consuming the valid consent', async () => {
-      const session = await open();
+      const session = await open({holdResponseUrl: ISSUER + '/favicon.ico'});
       try {
         await begin(session);
         // Keep the production CSP intact: default-src:none forbids fetch(),
@@ -526,7 +576,15 @@ test('Relay OAuth navigation uses browser-generated origins and real workerd SQL
         const invalid = session.records.find(r => r.path === '/relay/oauth/approve');
         assert.equal(invalid.headers.origin, ISSUER);
         assert.ok(invalid.headers.cookie?.includes(COOKIE + '='));
+        await assertEventually(() => session.heldResponse.used, 'the error document requested its favicon');
         await session.page.goto(ISSUER + '/__relay_fixture/stale-form');
+        session.heldResponse.release();
+        await Promise.allSettled([...session.pending]);
+        const cancelled = session.cancelledFavicons.filter(record => record.origin === ISSUER);
+        assert.equal(cancelled.length, 1, 'the held favicon cancellation is accounted for exactly once');
+        assert.equal(cancelled[0].path, '/favicon.ico');
+        assert.ok(['network-cancelled', 'document-replaced'].includes(cancelled[0].reason),
+          'the obsolete interception has independent request-lifetime evidence');
         session.consentUrl = session.page.url();
         await complete(session);
         assert.ok(session.callbacks[0].searchParams.has('code'), 'failed CSRF must leave valid owner approval possible');
