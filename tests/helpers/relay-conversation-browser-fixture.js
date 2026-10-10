@@ -228,18 +228,35 @@ export async function conversationMenu(page, label) {
     if (inWork) await page.getByRole('button', {name: 'Back to chat', exact: true}).click();
     await page.locator('#relay-menu-button').click();
     const dialog = () => page.getByRole('dialog');
-    if (['Public chat', 'Latest messages', 'Owner chat', 'Connect this phone', 'Pairing status'].includes(label)) {
-      await dialog().getByRole('button', {name: 'Chats', exact: true}).click();
-      await dialog().getByRole('button', {name: ['Public chat','Latest messages'].includes(label) ? 'Public' : 'Private', exact: true}).click();
-    } else if (['Search messages', 'Search private messages'].includes(label)) {
-      await dialog().getByRole('button', {name: 'Search messages', exact: true}).click();
-    } else if (label === 'Bookmarks') {
-      await dialog().getByRole('button', {name: 'Saved', exact: true}).click();
-    } else {
-      await dialog().getByRole('button', {name: 'Settings', exact: true}).click();
-      await dialog().getByRole('button', {name: label, exact: true}).click();
-      if (inWork && label.startsWith('Refresh')) await page.getByRole('button', {name: 'Open current work', exact: true}).click();
+    async function choose(name) {
+      const closingSheet = await dialog().elementHandle();
+      assert.ok(closingSheet, 'The requested menu must be open');
+      await dialog().getByRole('button', {name, exact: true}).click();
+      // Wait for this exact menu, not a new connection/detail dialog opened by
+      // its action. Navigation actions retire history before native cleanup.
+      await page.waitForFunction(node => !node.isConnected, closingSheet);
+      await closingSheet.dispose();
     }
+    if (['Public chat', 'Latest messages', 'Owner chat', 'Connect this phone', 'Pairing status'].includes(label)) {
+      await choose('Chats');
+      await choose(['Public chat','Latest messages'].includes(label) ? 'Public' : 'Private');
+    } else if (['Search messages', 'Search private messages'].includes(label)) {
+      await choose('Search messages');
+    } else if (label === 'Bookmarks') {
+      await choose('Saved');
+    } else {
+      await choose('Settings');
+      await choose(label);
+    }
+    // Verify destination readiness before callers inspect its private content.
+    if (['Public chat', 'Latest messages'].includes(label)) {
+      await page.locator('body[data-conversation-mode="public"] #message-text').waitFor();
+    } else if (['Owner chat', 'Connect this phone', 'Pairing status'].includes(label)) {
+      await page.locator('body[data-conversation-mode="owner"]').waitFor();
+    } else if (label === 'Bookmarks') {
+      await page.waitForFunction(() => document.querySelector('.conversation-identity .brand')?.textContent === 'Saved');
+    }
+    if (inWork && label.startsWith('Refresh')) await page.getByRole('button', {name: 'Open current work', exact: true}).click();
     return;
   }
   await page.getByRole('button', {name: 'Conversation menu', exact: true}).click();
