@@ -13,7 +13,9 @@ export function attachmentMetadata(value,{messageId,state}={}){
 }
 export function messageAttachments(entry){
   if(entry.attachments===undefined)return [];
-  if(!Array.isArray(entry.attachments)||entry.attachments.length>4||entry.attachments.length&&entry.role!=='user')throw Error('Invalid message attachments');
+  if(!Array.isArray(entry.attachments)||entry.attachments.length>4)throw Error('Invalid message attachments');
+  if(entry.attachments.length&&entry.role!=='user'&&(entry.role!=='assistant'||entry.visibility!=='private'||entry.author_authenticated!==true
+    ||entry.principal!=='github:183016859'||entry.authentication_source!=='owner-oauth-mcp'||!attachmentUuid(entry.replyTo)||entry.replyTo===entry.id))throw Error('Invalid assistant attachment provenance');
   const items=entry.attachments.map(item=>attachmentMetadata(item,{messageId:entry.id,state:'linked'}));
   if(new Set(items.map(item=>item.id)).size!==items.length)throw Error('Duplicate attachments');return items;
 }

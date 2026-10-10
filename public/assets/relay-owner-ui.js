@@ -675,7 +675,7 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
     const anchor=changed?(positions.chat||{bottom:true}):chatNodes.first&&readingAnchor?readingAnchor:position(panel),jobs=new Map(state.jobs.map(j=>[j.messageId,j]));
     const existing=new Map([...panel.children].filter(n=>n.dataset?.messageId).map(n=>[n.dataset.messageId,n])),nodes=[];
     if(work)renderWork(state,changed?positions.work:null);else workSignature='';
-    const selected = work?[]:state.messages.filter(m => (!state.query || m.body.toLowerCase().includes(state.query))&&(!state.requestsOnly||jobs.has(m.id)));
+    const selected = work?[]:state.messages.filter(m => (!state.query || m.body.toLowerCase().includes(state.query)||(m.attachments||[]).some(item=>item.name.toLowerCase().includes(state.query)))&&(!state.requestsOnly||jobs.has(m.id)));
     let previousDay,previousMessage;
     for (const m of selected) {
       const day=messageDay(m.createdAt),dayStart=day.key!==previousDay?day.label:'';previousDay=day.key;
@@ -685,7 +685,7 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
       row = make('article', '', 'message-row ' + (m.role === 'user' ? 'outgoing' : 'incoming')+(grouped?' message-group-continuation':''));row._signature=signature;
       row.dataset.messageId = m.id;
       if(dayStart)row.append(make('p',dayStart,'message-day'));
-      const heading=make('div','','message-heading'),copy=action('',async()=>{copy.setAttribute('aria-label',await copyText(m.body)?'Private message copied':'Copy private message');},'message-actions');copy.innerHTML=icon('copy');copy.setAttribute('aria-label','Copy private message');heading.append(make('span',m.role==='user'?'You':'dot','message-author'));row.append(heading);
+      const heading=make('div','','message-heading'),copy=action('',async()=>{copy.setAttribute('aria-label',await copyText(m.body)?'Private message copied':'Copy private message');},'message-actions');copy.innerHTML=icon('copy');copy.setAttribute('aria-label','Copy private message');copy.hidden=!m.body;heading.append(make('span',m.role==='user'?'You':'dot','message-author'));row.append(heading);
       if(job&&workTitle(job)!=='Owner request')row.append(make('p',workTitle(job),'owner-request-title'));
       // Request text is inert. The inspector alone formats the saved result.
       const bubble=make('div','','bubble');if(m.body)bubble.append(make('p',m.body,'message-body'));for(const item of m.attachments||[])bubble.append(attachmentContent.row(item));row.append(bubble);
