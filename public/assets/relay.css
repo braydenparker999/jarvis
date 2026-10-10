@@ -296,7 +296,7 @@ body.relay-page .composer-bottom>span{font-size:10px;line-height:14px;color:var(
 /* Approved Relay charcoal conversation proportions. */
 body.relay-page{--bg:#000;--surface:#303030;--raised:#393939;--text:#f7f7f7;--muted:#a3a3a3;--label:#a3a3a3;--line:#494949;--accent:#dce3eb;--success:#dce3eb;background:#000;font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
 body.relay-page .workspace{position:relative;max-width:820px;grid-template-rows:minmax(0,1fr);background:#000;border:0}
-body.relay-page .topbar{position:absolute;inset:0 0 auto;grid-row:1;height:116px;min-height:0;padding:0;display:block;border:0;background:linear-gradient(#000 0%,#000e 60%,#0000 100%);z-index:20;pointer-events:none}
+body.relay-page .topbar{position:absolute;inset:0 0 auto;grid-row:1;height:116px;min-height:0;padding:0;display:block;border:0;background:transparent;z-index:20;pointer-events:none}
 body.relay-page .topbar>*{pointer-events:auto}
 body.relay-page .topbar>.toolbar-actions{display:none}
 body.relay-page .conversation-identity{position:absolute;left:50%;top:13px;transform:translateX(-50%);display:flex;flex-direction:column;flex-wrap:nowrap;gap:2px;align-items:center;padding:0;width:150px;max-width:calc(100% - 144px);pointer-events:auto}
@@ -371,6 +371,7 @@ body.relay-page main#content .message-row.outgoing .bubble{background:#506d92;co
 /* Consistent conversation header and focused task editor. */
 
 body.relay-page .topbar{height:150px}
+body.relay-page[data-relay-destination=chat] :is(.relay-identity-mark,.relay-scope-toggle){background:#303030;border-radius:18px}
 body.relay-page main#content .messages{padding-top:152px}
 body.relay-page .conversation-search{margin-top:148px}
 body.relay-page main#content:has(.conversation-search:not([hidden])) .messages{padding-top:16px}
