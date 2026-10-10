@@ -10,6 +10,7 @@ import { OWNER_SESSION_KEY } from './relay-owner-api.js';
 import { createRelayOwnerController, createRelayOwnerUI } from './relay-owner-ui.js';
 import {createRelayTransferStore} from './relay-transfer.js';
 import {createRelayMenuHistory} from './relay-menu-history.js';
+import {createRelayAttachmentUI,trapRelayDialogFocus} from './relay-attachments.js';
 
 const $ = id => document.getElementById(id);
 const icons = {
@@ -32,6 +33,7 @@ const relayMenuHistory=createRelayMenuHistory({history,getURL:()=>location.href}
 function relaySheet(title,entries){return sheet(title,entries,relayMenuHistory);}
 const ownerController = createRelayOwnerController({onModeChange:next=>{if(next!=='public')savedView=false;if(route==='chat')drawShell();}});
 const ownerUI = createRelayOwnerUI({controller:ownerController});
+const attachments=createRelayAttachmentUI({openSheet:relaySheet,notify,getContext:()=>({key:route!=='chat'?null:ownerUI.mode==='public'?null:ownerController.status==='approved'?'owner:'+ownerController.snapshot().device?.id:null,ownerAuthorized:ownerController.status==='approved'})});
 let relayTransfers, transferNotice = '';
 try{relayTransfers=createRelayTransferStore();}catch{transferNotice='Could not read the transferred draft. Keep this tab open and allow browser storage.';}
 ownerController.subscribe(()=>{updateConversationIdentity();updateRelayNavigation();if(route==='chat'&&ownerUI.mode!=='public')drawTransferNotice();});
@@ -108,10 +110,6 @@ function drawShell() {
   if(route==='chat') {
     $('relay-nav-chat').onclick=()=>{if(ownerUI.mode!=='public'){ownerController.showOwner();ownerController.setJobMode(false);ownerController.setRequestsOnly(false);}updateRelayNavigation();};
     $('relay-nav-work').onclick=()=>{ownerController.showOwner();ownerController.setJobMode(false);ownerController.setRequestsOnly(true);updateRelayNavigation();};
-    const identity=document.querySelector('.conversation-identity'),scope=document.createElement('button');scope.type='button';scope.id='relay-scope-toggle';scope.className='relay-scope-toggle';scope.setAttribute('aria-label','Choose public or private conversation');scope.onclick=()=>relaySheet('Conversation visibility',[
-      {label:'Private owner chat',icon:'chat',action:()=>{ownerController.showOwner();ownerController.setRequestsOnly(false);}},
-      {label:'Public chat',icon:'chat',action:()=>ownerController.showPublic()}
-    ]);identity.append(scope);
     updateConversationIdentity();
     updateRelayNavigation();
     $('connection-button').hidden=true; $('connection-button').onclick=openRelaySettings;
@@ -142,7 +140,7 @@ function updateConversationIdentity(){
   const node=$('conversation-visibility');if(!node||route!=='chat')return;
   const privateView=ownerUI.mode!=='public';document.body.dataset.conversationMode=privateView?'owner':'public';
   node.textContent=privateView?ownerController.status==='approved'?'Private owner · this phone':ownerController.status==='checking'?'Private owner · verifying access':ownerController.status==='expired'?'Private owner · session expired':ownerController.status==='revoked'?'Private owner · access revoked':'Private owner · sign-in required':'Public · shared conversation';
-  const scope=$('relay-scope-toggle');if(scope){scope.textContent=privateView?'Private':'Public';scope.setAttribute('aria-description',node.textContent);}
+
 }
 function updateRelayNavigation(){
   if(route!=='chat')return;const state=ownerController,work=state.mode==='owner'&&state.requestsOnly;
@@ -163,7 +161,8 @@ function relayControls(){
   if(workButton){workButton.setAttribute('aria-pressed',String(work));workButton.setAttribute('aria-label',work?'Search current work':'Open current work');const key=work?'search':'work';if(workButton.dataset.icon!==key){workButton.dataset.icon=key;workButton.innerHTML=work?uiIcon('search'):uiIcon('check')+'<span>Work</span>';}workButton.onclick=work?()=>ownerUI.toggleSearch():openWork;}
   const brand=header?.querySelector('.conversation-identity .brand'),title=work?'Work':ownerController.mode==='account'?'Account':ownerController.mode==='devices'?'Devices':savedView?'Saved':'Relay';if(brand&&brand.textContent!==title)brand.textContent=title;
   const identity=header?.querySelector('.conversation-identity');if(identity&&!identity.querySelector('.relay-identity-mark')){const mark=document.createElement('span');mark.className='relay-identity-mark';mark.innerHTML=uiIcon('chat');identity.prepend(mark);}
-  const input=document.querySelector('.composer-input');if(input&&!input.querySelector('#relay-compose-menu')){const plus=document.createElement('button');plus.type='button';plus.id='relay-compose-menu';plus.className='relay-composer-plus';plus.setAttribute('aria-label','Open Relay menu');plus.innerHTML=uiIcon('plus');plus.onclick=openRelayMenu;input.prepend(plus);}
+  const input=document.querySelector('.composer-input');if(input&&!input.querySelector('#relay-compose-menu')){const plus=document.createElement('button');plus.type='button';plus.id='relay-compose-menu';plus.className='relay-composer-plus';plus.setAttribute('aria-label','Attach images or files');plus.innerHTML=uiIcon('plus');plus.onclick=attachments.open;input.prepend(plus);}
+  attachments.sync();
   animateRelaySurface(work);
 }
 function animateRelaySurface(work){
@@ -185,13 +184,13 @@ function openRelaySettings(){
 }
 function openWork(){savedView=false;if(!(ownerController.mode==='owner'&&ownerController.requestsOnly))workReturn=ownerUI.mode;$('relay-nav-work')?.click();$('relay-menu-button')?.focus({preventScroll:true});}
 function returnToChat(){savedView=false;ownerController.setRequestsOnly(false);ownerController.setJobMode(false);if(workReturn==='public')ownerController.showPublic();else ownerController.showOwner();updateRelayNavigation();$('relay-compose-menu')?.focus({preventScroll:true});}
-function openChats(){savedView=false;relaySheet('Chats',[{label:'Private',icon:'chat',action:()=>{ownerController.showOwner();ownerController.setJobMode(false);ownerController.setRequestsOnly(false);updateRelayNavigation();}},{label:'Public',icon:'chat',action:()=>{ownerController.showPublic();chatUI?.latest();relayControls();}}]);}
+function openChats(){savedView=false;const dialog=relaySheet('Chats',[{label:'Private',icon:'chat',action:()=>{ownerController.showOwner();ownerController.setJobMode(false);ownerController.setRequestsOnly(false);updateRelayNavigation();}},{label:'Public',icon:'chat',action:()=>{ownerController.showPublic();chatUI?.latest();relayControls();}}]);dialog.classList.add('relay-navigation-sheet');trapRelayDialogFocus(dialog);dialog.setAttribute('aria-label','Choose chat');const selected=ownerUI.mode==='public'?'Public':'Private';for(const button of dialog.querySelectorAll('.sheet-action')){button.setAttribute('aria-label',button.textContent.trim());if(button.textContent.trim()===selected)button.setAttribute('aria-current','page');}}
 function openSaved(){savedView=true;ownerController.showPublic();chatUI?.bookmarks(true);relayControls();}
 function openRelayMenu(){
   const state=ownerController.snapshot(),privateView=ownerUI.mode!=='public';
   const entries=[{label:state.requestsOnly&&privateView?'Search current work':'Search messages',icon:'search',disabled:privateView&&state.status!=='approved',action:()=>$('chat-search-toggle')?.click()},
     {label:'Chats',icon:'chat',action:openChats},{label:'Work',icon:'check',action:openWork},{label:'Saved',icon:'bookmark',action:openSaved},{label:'Settings',icon:'info',action:openRelaySettings}];
-  const dialog=relaySheet('Relay',entries);dialog.classList.add('relay-navigation-sheet');[...dialog.querySelectorAll('.sheet-action')].forEach((node,i)=>{node.setAttribute('aria-label',entries[i].label);if(entries[i].label==='Saved')node.setAttribute('aria-description','Saved public messages on this device');});
+  const dialog=relaySheet('Relay',entries);dialog.classList.add('relay-navigation-sheet');trapRelayDialogFocus(dialog);dialog.setAttribute('aria-label','Relay navigation');const context=document.createElement('p');context.className='sheet-context';context.textContent=privateView?'Private owner chat':'Public shared chat';dialog.querySelector('.dialog-heading').after(context);[...dialog.querySelectorAll('.sheet-action')].forEach((node,i)=>{node.setAttribute('aria-label',entries[i].label);if(entries[i].label==='Saved')node.setAttribute('aria-description','Saved public messages on this device');});
   const home=document.createElement('a');home.href='/';home.dataset.route='home';home.className='relay-menu-home';home.textContent='Jarvis home';dialog.append(home);
 }
 function drawPage() {
