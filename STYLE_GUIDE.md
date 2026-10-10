@@ -2,6 +2,22 @@
 
 Status: approved visual direction, September 20, 2026. This guide governs the version 1.1 implementation and future UI work.
 
+Relay's visual direction was updated on October 10, 2026. Its dedicated editorial workspace below supersedes the dark palette and narrow layout for Relay. Other modules retain the approved Poweramp-inspired direction.
+
+## Relay editorial workspace
+
+Relay has two primary destinations: **Chat** and **Work**. Private/Public visibility is explicit and independent of the destination. Work requires owner access. Public conversation never loads private records in the background.
+
+Use a warm light canvas (`#FAF9F6`), white input/sheet surfaces, dark text (`#20242B`), readable secondary text (`#626873`), a restrained indigo action/focus color (`#3F46A7`), and pale user prompts (`#EEEFFC`). Decorative separators (`#D9DCE3`) provide alignment; meaningful input boundaries and focus need stronger contrast. Use the system font, 16px/25px body text, 14px/20px labels, 13px/18px metadata and 24px/30px page titles. Keep 48px interactive targets and visible keyboard focus.
+
+Phone navigation uses labeled Chat/Work destinations. Desktop uses a quiet 224px rail and a flexible reading canvas. Assistant prose is unboxed; user messages have a restrained tint. Group conversation dates and keep message actions compact. Preserve the reader's position through updates and between destinations.
+
+Work uses aligned, flat rows with title, actual status, meaningful saved update and activity time. Project and goal remain useful context. Waiting for owner, execution unknown, failure, cancellation pending and completion unverified remain distinct. Lease heartbeats do not imply progress. Local search, filtering and disclosure use already-loaded records.
+
+Task creation has a focused scrollable form, an explicit Back action and an accessible submit action. Retain unsent drafts and the requested scope when returning to Chat or Work; an unconfirmed send retains its original retry identity. Phone task detail fills the screen; desktop uses a bounded side pane. Active detail leads with the blocker or next step, and finished detail leads with results. Original requests, delivery details, correction versions and history stay available in labeled disclosures. Completion remains an authenticated report bound to a particular accepted reply version.
+
+Scope these styles to Relay. Preserve the existing authorization, draft expiry, retry and completion contracts; the existing VisualViewport resize handling; safe-area insets; reduced motion; static hosting; and resource budgets. Validate phone, reduced keyboard space, 320px reflow, enlarged text, desktop, loading, empty, stale and error states with fictional rendered fixtures. References informing hierarchy and restraint include [Linear's 2026 refresh](https://linear.app/now/behind-the-latest-design-refresh) and [Chrome's keyboard viewport guidance](https://developer.chrome.com/blog/viewport-resize-behavior).
+
 ## Design reference
 
 Follow the approved dark, Poweramp-inspired concept: a near-black screen with a faint warm wash at its edges; a compact toolbar titled “Jarvis”; a “Home” heading and quiet Edit action; an unboxed favorite-shortcut row; grouped application rows; and a flat bottom navigation bar. Off-white text, fine gray outlines and restrained amber highlights give it character.

@@ -29,8 +29,8 @@ const ownerController = createRelayOwnerController({onModeChange:()=>{if(route==
 const ownerUI = createRelayOwnerUI({controller:ownerController});
 let relayTransfers, transferNotice = '';
 try{relayTransfers=createRelayTransferStore();}catch{transferNotice='Could not read the transferred draft. Keep this tab open and allow browser storage.';}
-ownerController.subscribe(()=>{updateConversationIdentity();if(route==='chat'&&ownerUI.mode!=='public')drawTransferNotice();});
-appViewport();
+ownerController.subscribe(()=>{updateConversationIdentity();updateRelayNavigation();if(route==='chat'&&ownerUI.mode!=='public')drawTransferNotice();});
+appViewport(({keyboard})=>{document.body.dataset.relayCompactViewport=String(keyboard);});
 addEventListener('pagehide',()=>chatUI?.savePosition());
 const paths = { home: '/', chat: '/jarvis/', board: '/daily-board/', favorites: '/favorites/', settings: '/settings/', notes: '/notes/', tools: '/tools/', server: '/server/' };
 const labels = { home: 'Home', chat: 'Relay', board: 'Daily Board', favorites: 'Favorites', settings: 'Settings', notes: 'Notes', tools: 'Tools', server: 'Server' };
@@ -76,17 +76,19 @@ function drawShell() {
   chatUI?.savePosition(); chatUI=null;
   for(const cls of ['module-page','conversation-page','relay-page'])document.body.classList.toggle(cls,route==='chat');
   if(route==='chat'&&!document.querySelector('link[href^="/assets/conversation.css"]')){const css=document.createElement('link');css.rel='stylesheet';css.href='/assets/conversation.css?v=20261008';document.head.append(css);}
+  if(route==='chat'&&!document.querySelector('link[href^="/assets/relay.css"]')){const css=document.createElement('link');css.rel='stylesheet';css.href='/assets/relay.css?v=20261010';document.head.append(css);}
   document.body.dataset.conversationMode=route==='chat'&&ownerUI.mode!=='public'?'owner':'public';
   const hub = ['home','favorites','settings'].includes(route);
   const launcher = ['home','favorites'].includes(route);
   clearTimeout(clockTimer);
   document.body.classList.toggle('launcher-page', launcher);
-  document.querySelector('meta[name="theme-color"]').content = launcher ? '#090a0c' : '#121212';
+  document.querySelector('meta[name="theme-color"]').content = route==='chat'?'#FAF9F6':launcher ? '#090a0c' : '#121212';
   document.title = `${labels[route]} · Jarvis`;
   const header = launcher
     ? `<header class="topbar launcher-topbar"><a class="brand" href="/" data-route="home">Jarvis</a><nav class="toolbar-actions" aria-label="Launcher tools"><button class="icon-button" id="search-button" aria-label="Search apps" aria-expanded="${route==='home'&&searchOpen}" ${route==='home'?'aria-controls="launcher-search"':''}>${icon('search')}</button><a class="icon-button" href="/favorites/" data-route="favorites" aria-label="Favorites" ${route==='favorites'?'aria-current="page"':''}>${icon('favorites')}</a><button class="icon-button" id="connection-button" aria-label="Connection details">${icon('more')}<span class="sr-only">${connection()}</span></button></nav></header>`
     : `<header class="topbar">${hub?`<button class="icon-button" id="menu-button" aria-label="Open navigation">${icon('menu')}</button>`:`<a class="icon-button" href="/" data-route="home" aria-label="Back to Home">${icon('back')}</a>`}${route==='chat'?`<div class="conversation-identity"><span class="brand" role="heading" aria-level="1">Relay</span><span class="conversation-visibility" id="conversation-visibility"></span></div>`:`<span class="brand">Jarvis</span>`}<div class="toolbar-actions">${route==='chat'?`<button class="icon-button" id="chat-search-toggle" aria-label="Search messages" hidden>${uiIcon('search')}</button><button class="icon-button" id="chat-menu" aria-label="Conversation menu">${uiIcon('more')}</button>`:''}${hub?`<button class="icon-button" id="search-button" aria-label="Search apps">${icon('search')}</button>`:''}<button class="icon-button" id="connection-button" aria-label="Connection details">${icon('more')}<span class="sr-only">${connection()}</span></button></div></header>`;
-  $('app').innerHTML = `<div class="workspace${launcher?' launcher':''}">${header}<main id="content" tabindex="-1"></main>${hub&&!launcher?`<nav class="bottom-nav" aria-label="Hub navigation">${['home','favorites','settings'].map(key=>`<a href="${paths[key]}" data-route="${key}" ${key===route?'aria-current="page"':''}>${icon(key)}<span>${labels[key]}</span></a>`).join('')}</nav>`:''}</div>`;
+  const relayNav=route==='chat'?`<nav class="relay-navigation" aria-label="Relay destinations"><a class="relay-home" href="/" data-route="home">${icon('back')}<span>Jarvis home</span></a><p class="relay-nav-heading">Relay</p><button type="button" id="relay-nav-chat">${uiIcon('chat')}<span>Chat</span></button><button type="button" id="relay-nav-work">${uiIcon('check')}<span>Work</span></button><p class="relay-nav-note">A conversation, and the work that follows.</p></nav>`:'';
+  $('app').innerHTML = `<div class="workspace${launcher?' launcher':''}">${relayNav}${header}<main id="content" tabindex="-1"></main>${hub&&!launcher?`<nav class="bottom-nav" aria-label="Hub navigation">${['home','favorites','settings'].map(key=>`<a href="${paths[key]}" data-route="${key}" ${key===route?'aria-current="page"':''}>${icon(key)}<span>${labels[key]}</span></a>`).join('')}</nav>`:''}</div>`;
   $('connection-button').onclick = showConnection;
   if ($('menu-button')) $('menu-button').onclick = showNavigation;
   if ($('search-button')) $('search-button').onclick = () => {
@@ -98,7 +100,14 @@ function drawShell() {
   };
   drawPage();
   if(route==='chat') {
+    $('relay-nav-chat').onclick=()=>{if(ownerUI.mode!=='public'){ownerController.showOwner();ownerController.setJobMode(false);ownerController.setRequestsOnly(false);}updateRelayNavigation();};
+    $('relay-nav-work').onclick=()=>{ownerController.showOwner();ownerController.setJobMode(false);ownerController.setRequestsOnly(true);updateRelayNavigation();};
+    const identity=document.querySelector('.conversation-identity'),scope=document.createElement('button');scope.type='button';scope.id='relay-scope-toggle';scope.className='relay-scope-toggle';scope.setAttribute('aria-label','Choose public or private conversation');scope.onclick=()=>sheet('Conversation visibility',[
+      {label:'Private owner chat',icon:'chat',action:()=>{ownerController.showOwner();ownerController.setRequestsOnly(false);}},
+      {label:'Public chat',icon:'chat',action:()=>ownerController.showPublic()}
+    ]);identity.append(scope);
     updateConversationIdentity();
+    updateRelayNavigation();
     $('connection-button').hidden=true;
     $('chat-search-toggle').onclick=()=>{
       if(ownerUI.mode!=='public'){ownerUI.toggleSearch();return;}
@@ -127,6 +136,14 @@ function updateConversationIdentity(){
   const node=$('conversation-visibility');if(!node||route!=='chat')return;
   const privateView=ownerUI.mode!=='public';document.body.dataset.conversationMode=privateView?'owner':'public';
   node.textContent=privateView?ownerController.status==='approved'?'Private owner · this phone':ownerController.status==='checking'?'Private owner · verifying access':ownerController.status==='expired'?'Private owner · session expired':ownerController.status==='revoked'?'Private owner · access revoked':'Private owner · sign-in required':'Public · shared conversation';
+  const scope=$('relay-scope-toggle');if(scope){scope.textContent=privateView?'Private':'Public';scope.setAttribute('aria-description',node.textContent);}
+}
+function updateRelayNavigation(){
+  if(route!=='chat')return;const state=ownerController,work=state.mode!=='public'&&state.requestsOnly;
+  document.body.dataset.relayDestination=work?'work':'chat';
+  document.body.dataset.relayTaskOpen=String(state.mode!=='public'&&state.status==='approved'&&state.jobMode);
+  for(const [id,current]of [['relay-nav-chat',!work],['relay-nav-work',work]]){const button=$(id);if(button){if(current)button.setAttribute('aria-current','page');else button.removeAttribute('aria-current');}}
+  const search=$('chat-search-toggle');if(search){search.hidden=ownerUI.mode!=='public'&&state.status!=='approved';search.setAttribute('aria-label',work?'Search current work':ownerUI.mode!=='public'?'Search private messages':'Search messages');}
 }
 function drawPage() {
   if (route === 'home' || route === 'favorites') { drawHome(); return; }
@@ -234,7 +251,7 @@ function drawChat() {
   input.oninput=()=>{saveDraft(input.value);autosize(input);};
   input.onkeydown=e=>{if(e.key==='Enter' && (e.ctrlKey||e.metaKey) && !e.isComposing){e.preventDefault();$('message-form').requestSubmit();}};
   $('message-form').onsubmit=e=>{e.preventDefault();submitMessage();};
-  chatUI=conversation({panel:$('messages'),composer:input,channel:'relay',author:'Jarvis',notify,draftChanged:saveDraft,emptyTitle:'A little room to think.',emptyDescription:'Ask Jarvis a question or leave a thought. Replies arrive after the next inbox check.',scope:'Public conversation'});
+  chatUI=conversation({panel:$('messages'),composer:input,channel:'relay',author:'Jarvis',notify,draftChanged:saveDraft,emptyTitle:'A little room to think.',emptyDescription:'Ask Jarvis a question or leave a thought. Replies arrive after the next inbox check.',scope:'Public conversation',dateGroups:true});
   chatUI.update(channelMessages(state.messages));
   $('conversation-search').oninput=e=>chatUI.search(e.target.value);
   $('chat-search-close').onclick=()=>$('chat-search-toggle').click();

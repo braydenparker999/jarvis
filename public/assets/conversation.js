@@ -1,12 +1,13 @@
-import {el, icon, richText, sheet, copyText, readLocal, writeLocal, autosize} from './ui.js';
+import {el, icon, richText, sheet, copyText, readLocal, writeLocal, autosize, messageDay} from './ui.js';
 import {publicReportLabel} from './public-coordination.js';
 
 // Keep existing nodes and their scroll anchors across inbox refreshes.
-export function conversation({panel, composer, channel, author, body=m=>m.body, notify=()=>{}, draftChanged=()=>{}, emptyTitle='What’s on your mind?', emptyDescription='Write a message to '+author+'.', scope=''} ){
+export function conversation({panel, composer, channel, author, body=m=>m.body, notify=()=>{}, draftChanged=()=>{}, emptyTitle='What’s on your mind?', emptyDescription='Write a message to '+author+'.', scope='',dateGroups=false} ){
   let messages=[], query='', savedOnly=false, first=true, timer, start, deliveryBusy=false, deliveryError=false;
   const key='jarvis.'+channel+'.bookmarks.v1';
   const raw=readLocal(key,[]), bookmarks=new Set(Array.isArray(raw)?raw:[]);
   const formatter=new Intl.DateTimeFormat(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
+  const clockFormat=new Intl.DateTimeFormat(undefined,{hour:'numeric',minute:'2-digit'});
   const savedPosition=readLocal('jarvis.'+channel+'.reading.v1',null);
   const jump=el('button','New messages','new-messages');jump.type='button';jump.hidden=true;panel.after(jump);
   const completeBody=m=>body(m)+(m.kind==='coordination'?m.publicReport.artifacts.map(item=>'\n'+item.label+' · revision '+item.revision+': '+item.url).join(''):'');
@@ -34,13 +35,15 @@ export function conversation({panel, composer, channel, author, body=m=>m.body, 
     const existing=new Map([...panel.children].filter(n=>n.dataset.messageId).map(n=>[n.dataset.messageId,n]));
     panel.querySelector('.chat-empty')?.remove();
     const wanted=new Set(selected.map(m=>m.id));for(const [id,n] of existing)if(!wanted.has(id))n.remove();
+    let previousDay;
     for(let i=0;i<selected.length;i++){
       const m=selected[i];let row=existing.get(m.id);
       if(!row){row=el('article','','message-row '+(m.role==='user'?'outgoing':'incoming'));row.dataset.messageId=m.id;
         const header=el('div','','message-heading');header.append(el('span',m.role==='user'?'You':author,'message-author'));
         const action=el('button','','message-actions');action.type='button';action.dataset.messageActions=m.id;action.setAttribute('aria-label','Message actions');action.innerHTML=icon('more');header.append(action);
-        row.append(header,el('div','','bubble rich-body'),el('span','','message-time'));
+        if(dateGroups){const footer=el('div','','message-footer');footer.append(el('span','','message-time'),action);row.append(header,el('div','','bubble rich-body'),footer);}else row.append(header,el('div','','bubble rich-body'),el('span','','message-time'));
       }
+      if(dateGroups){const day=messageDay(m.createdAt),label=previousDay!==day.key?day.label:'';previousDay=day.key;let divider=row.querySelector('.message-day');if(label){if(!divider){divider=el('p','','message-day');row.insertBefore(divider,row.firstChild);}divider.textContent=label;}else divider?.remove();}
       row.classList.toggle('bookmarked',bookmarks.has(m.id));
       const reportLabel=publicReportLabel(m);
       row.querySelector('.message-author').textContent=reportLabel|| (m.role==='user'?'You':author);
@@ -52,10 +55,10 @@ export function conversation({panel, composer, channel, author, body=m=>m.body, 
         const note=el('p','Public report · private execution unverified.','message-time');bubble.append(note);
         row._report=JSON.stringify(m.publicReport);
       }
-      const stamp=formatter.format(new Date(m.createdAt));
+      const stamp=(dateGroups?clockFormat:formatter).format(new Date(m.createdAt));
       const sendLabels={rejected:'Send rejected · text saved on this device',conflict:'ID conflict · original text saved',unknown:'Send unconfirmed · queued on this device'};
       const statusText=stamp+(m.localOnly?' · Local history · on this device':m.role==='user'?' · '+(!m.saved?sendLabels[m.sendState]||(deliveryError?'Send unconfirmed · queued on this device':deliveryBusy?'Sending to public inbox':'Queued on this device'):answered.has(m.id)?'Saved':'Awaiting reply'):'')+(bookmarks.has(m.id)?' · Bookmarked':'');
-      const timestamp=row.querySelector(':scope > .message-time');
+      const timestamp=row.querySelector(dateGroups?'.message-footer > .message-time':':scope > .message-time');
       if(row._stamp!==statusText){timestamp.textContent=statusText;row._stamp=statusText;}
       timestamp.dataset.pending=String(!m.localOnly&&m.role==='user'&&(!m.saved||!answered.has(m.id)));
       if(panel.children[i]!==row)panel.insertBefore(row,panel.children[i]||null);
