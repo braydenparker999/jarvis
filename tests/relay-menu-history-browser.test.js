@@ -25,6 +25,7 @@ async function journey(t, {privateView = false, direct = false} = {}) {
 async function openMenu(page, trigger = '#relay-menu-button') {
   await page.locator(trigger).click();
   await page.locator('dialog.relay-navigation-sheet[open]').waitFor();
+  await page.locator('dialog.relay-navigation-sheet[open]').evaluate(node=>Promise.allSettled(node.getAnimations().map(animation=>animation.finished)));
 }
 async function closed(page) {
   await page.locator('dialog.app-sheet').waitFor({state: 'detached'});
@@ -77,7 +78,7 @@ test('Close, Escape, backdrop and repeated openings retire one menu entry before
   const j = await journey(t); if (!j) return;
   const {phone, page} = j, base = await historySnapshot(phone);
   for (const how of ['close', 'escape', 'backdrop', 'close', 'escape', 'close']) {
-    await openMenu(page, '#relay-compose-menu');
+    await openMenu(page, '#relay-menu-button');
     const open = await historySnapshot(phone);
     assert.equal(open.currentIndex, base.currentIndex + 1);
     assert.equal(open.entries.length, base.entries.length + 1, 'Reopening replaces the stale Forward entry');
@@ -85,12 +86,12 @@ test('Close, Escape, backdrop and repeated openings retire one menu entry before
     else if (how === 'escape') await page.keyboard.press('Escape');
     else {
       const bounds = await page.getByRole('dialog').boundingBox();
-      assert.ok(bounds && bounds.y > 1, 'The phone sheet leaves a real backdrop target');
-      await page.mouse.click(1, 1);
+      assert.ok(bounds && bounds.x===0 && bounds.width < page.viewportSize().width - 1, 'The side panel leaves a real backdrop target');
+      await page.mouse.click(page.viewportSize().width-1, 20);
     }
     await closed(page);
     assert.equal((await historySnapshot(phone)).currentIndex, base.currentIndex);
-    assert.equal(await page.evaluate(() => document.activeElement.id), 'relay-compose-menu');
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'relay-menu-button');
   }
   await page.goBack(); await assertHome(page);
   assertBrowserContained(phone);

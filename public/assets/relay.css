@@ -613,3 +613,21 @@ body.relay-page .conversation-notice button{color:#f4d6df}
 body.relay-page .conversation-notice[data-kind=note]{background:#25354a;color:#dce8f8}
 body.relay-page .conversation-notice[data-kind=note] p{background:transparent;color:#dce8f8}
 body.relay-page .relay-owner-content .relay-owner-error{color:#f4d6df}
+
+/* Only navigation occupies the side edge; settings and action sheets retain their layouts. */
+body.relay-page dialog.relay-navigation-sheet{position:fixed;inset:0 auto 0 0;margin:0;width:min(340px,calc(100vw - 48px));max-width:340px;height:var(--app-height,100dvh);max-height:100dvh;border-radius:0 24px 24px 0;padding:max(8px,env(safe-area-inset-top)) 16px max(16px,env(safe-area-inset-bottom));overflow-y:auto}
+body.relay-page .relay-navigation-sheet .dialog-heading{position:sticky;top:0;z-index:1}
+body.relay-page .relay-attachment-actions{display:flex;flex-wrap:wrap;gap:8px}
+body.relay-page .relay-attachment-actions .sheet-action{flex:1;min-width:120px;background:#303030;border:1px solid #555}
+body.relay-page .relay-attachment-item{display:flex;gap:12px;align-items:center;padding:12px 0;border-bottom:1px solid #444}
+body.relay-page .relay-attachment-item>div{min-width:0;flex:1}
+body.relay-page .relay-attachment-item img{width:64px;height:64px;object-fit:contain;background:#181818;border-radius:8px}
+body.relay-page .relay-attachment-name,body.relay-page .relay-attachment-chip>span{overflow-wrap:anywhere}
+body.relay-page .relay-attachment-item button,body.relay-page .relay-attachment-chip button{min-height:48px;min-width:48px;flex-shrink:0}
+body.relay-page .relay-attachment-summary{max-height:160px;overflow:auto;padding:8px 0;font-size:12px;color:#ddd}
+body.relay-page .relay-attachment-summary p{margin:0}
+body.relay-page .relay-attachment-chip{display:flex;align-items:center;gap:8px;justify-content:space-between}
+body.relay-page .relay-attachment-sheet .relay-attachment-list:empty{display:none}
+@media(prefers-reduced-motion:no-preference){body.relay-page .relay-navigation-sheet[open]{animation:relay-side-in 160ms ease-out both;transform-origin:left center}@keyframes relay-side-in{from{opacity:.8;transform:translateX(-16px)}to{opacity:1;transform:translateX(0)}}}
+
+body.relay-page .relay-composer-plus[hidden]{display:none}

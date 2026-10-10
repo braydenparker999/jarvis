@@ -22,7 +22,8 @@ test('Relay chat icons float over unfiltered scroll content on mobile and deskto
       await conversationMenu(page,'Requests');assert.equal(await page.locator('.topbar').evaluate(n=>getComputedStyle(n).backgroundColor),'rgb(0, 0, 0)');
       await page.getByRole('button',{name:'Back to chat',exact:true}).click();assert.equal(await messages.evaluate(n=>n.scrollTop),350);
       await conversationMenu(page,'Public chat');await page.locator('#message-text').waitFor();observations.push({style:await page.locator('.topbar').evaluate(n=>{const s=getComputedStyle(n);return {background:s.backgroundColor,image:s.backgroundImage,blur:s.backdropFilter,filter:s.filter,pointerEvents:s.pointerEvents};})});
-      for(const selector of ['.relay-identity-mark','.relay-scope-toggle'])assert.equal(await page.locator(selector).evaluate(n=>getComputedStyle(n).backgroundColor),'rgb(48, 48, 48)');
+      assert.equal(await page.locator('#relay-scope-toggle').count(),0);
+      for(const selector of ['.relay-identity-mark'])assert.equal(await page.locator(selector).evaluate(n=>getComputedStyle(n).backgroundColor),'rgb(48, 48, 48)');
       assertBrowserContained(phone);
     }
     for(const {style} of observations){assert.equal(style.image,'none');assert.equal(style.background,'rgba(0, 0, 0, 0)');assert.equal(style.blur,'none');assert.equal(style.filter,'none');assert.equal(style.pointerEvents,'none');}
