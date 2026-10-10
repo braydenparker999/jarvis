@@ -5,7 +5,7 @@ import {createVideoApi, folderId, mediaURL, thumbnails, parseLibrary, parseProgr
   continueWatching, searchVideos, groupByFolder, formatDuration, srtToVtt,
   PROGRESS_KEY, LIBRARY_KEY} from './library.js';
 import {play} from './player.js';
-import {knownCreators, creatorGroups, videoPresentation, sortDisplayedVideos} from './presentation.js';
+import {knownCreators, creatorGroups, videoPresentation, sortDisplayedVideos, browseCountText} from './presentation.js';
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
@@ -108,8 +108,8 @@ function renderShelves(){
   $('sort-note').textContent=unknown===videos.length?'Original YouTube dates aren’t in this library’s metadata yet. All videos are still shown.':`${unknown} video${unknown===1?'':'s'} have no YouTube date. They appear after dated videos.`;
   if(directory){const matches=creators.filter(g=>g.name.toLocaleLowerCase().includes(query.toLocaleLowerCase()));$('sections').innerHTML=matches.length?'<div class="creator-directory">'+matches.map(g=>creatorLink(g)).join('')+'</div>':'<div class="media-empty"><h2>No matching creators</h2><p>Creator names come from metadata or recognizable filename prefixes. Your folder collections are in Library.</p></div>';return;}
   if(focused){
-    const items=videos;
-    $('sections').innerHTML=items.length?`<p class="browse-count">${items.length} video${items.length===1?'':'s'}</p><div class="video-grid">${items.slice(0,pageLimit).map(card).join('')}</div>`:`<div class="media-empty"><h2>${view==='saved'?'Save something for later':'No matching videos'}</h2><p>${view==='saved'?'Use a video’s menu to add it here.':'Try a different filter or search.'}</p></div>`;
+    const items=videos, shown=items.slice(0,pageLimit);
+    $('sections').innerHTML=items.length?`<p class="browse-count">${browseCountText(shown.length,items.length)}</p><div class="video-grid">${shown.map(card).join('')}</div>`:`<div class="media-empty"><h2>${view==='saved'?'Save something for later':'No matching videos'}</h2><p>${view==='saved'?'Use a video’s menu to add it here.':'Try a different filter or search.'}</p></div>`;
     $('load-more').hidden=items.length<=pageLimit;return;
   }
   const groups=groupByFolder(videos,library.name);
