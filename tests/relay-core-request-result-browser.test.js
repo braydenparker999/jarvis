@@ -106,6 +106,8 @@ test('actual private typed request recovers lost save once, retains edited draft
   const first=phone.records.find(record=>record.path==='/relay/owner/jobs'&&record.method==='POST'),payload=JSON.parse(first.body);
   assert.equal(h.rows('SELECT COUNT(*) AS n FROM relay_owner_jobs')[0].n,1);
   await page.getByRole('button',{name:'Retry private send',exact:true}).click();
+  await page.waitForFunction(()=>!/(?:Saving privately|Refreshing private inbox)/.test(document.querySelector('.relay-owner-chat .composer [role="status"]')?.textContent||''));
+  await page.locator('#relay-owner-task-back').click();
   await page.locator(`[data-job-id="${payload.id}"] .job-state`).waitFor();
   await page.waitForFunction(()=>!/(?:Saving privately|Refreshing private inbox)/.test(document.querySelector('.relay-owner-chat .composer [role="status"]')?.textContent||''));
   const writes=phone.records.filter(record=>record.path==='/relay/owner/jobs'&&record.method==='POST');

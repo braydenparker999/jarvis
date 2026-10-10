@@ -11,6 +11,8 @@ export const glyphs = {
   chevron:'<path d="m9 5 7 7-7 7"/>', clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>', check:'<path d="m5 12 4 4L19 6"/>'
 };
 export const icon = name => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${glyphs[name] || glyphs.more}</svg>`;
+const dayFormat=new Intl.DateTimeFormat(undefined,{weekday:'short',month:'short',day:'numeric'});
+export function messageDay(stamp){const date=new Date(stamp);if(!Number.isFinite(date.getTime()))return {key:'unknown',label:'Date unavailable'};const key=date.toDateString();return {key,label:key===new Date().toDateString()?'Today':dayFormat.format(date)};}
 export function el(tag, content = '', cls = '') { const node = document.createElement(tag); node.textContent = content; if(cls) node.className = cls; return node; }
 export function safeURL(value) { try {const url = new URL(value); return ['http:','https:'].includes(url.protocol) && !url.username && !url.password ? url.href : ''; } catch { return ''; } }
 function inline(node, value, sources = []) {
@@ -53,7 +55,7 @@ export function sheet(title, entries) {
   document.body.append(dialog);dialog.showModal();return dialog;
 }
 export function autosize(input){input.style.height='auto';input.style.height=Math.min(160,input.scrollHeight)+'px';}
-export function appViewport(){const update=()=>{if(!visualViewport || visualViewport.scale===1)document.documentElement.style.setProperty('--app-height',(visualViewport?.height||innerHeight)+'px');};update();visualViewport?.addEventListener('resize',update);addEventListener('resize',update);}
+export function appViewport(onChange=()=>{}){const update=()=>{if(!visualViewport || visualViewport.scale===1){const height=visualViewport?.height||innerHeight;document.documentElement.style.setProperty('--app-height',height+'px');onChange({height,keyboard:innerHeight-height>120});}};update();visualViewport?.addEventListener('resize',update);addEventListener('resize',update);}
 export function readLocal(key, fallback){try {return JSON.parse(localStorage.getItem(key)) ?? fallback;}catch{return fallback;}}
 export function writeLocal(key,value){try{localStorage.setItem(key,JSON.stringify(value));return true;}catch{return false;}}
 export async function copyText(value){try{await navigator.clipboard.writeText(value);return true;}catch{return false;}}

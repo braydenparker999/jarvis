@@ -1,5 +1,5 @@
 import { createRelayOwnerApi, OwnerApiError, normalizeOwnerJobCompletion } from './relay-owner-api.js';
-import { icon, autosize, copyText, richText } from './ui.js';
+import { icon, autosize, copyText, richText, messageDay } from './ui.js';
 import { createOwnerDraftStore } from './relay-draft-store.js';
 
 // Private history and failed sends exist only in this closure; unsent drafts
@@ -10,14 +10,15 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), draftS
   let generation = 0, reading = null, failedSend = null, cursor = '0', accountConsent = null, detailEpoch = 0;
   let jobCursor='0',jobFence=null,jobChangesSupported=typeof api.jobChanges==='function',jobResetCache=null,jobReading=null;
   const retryAttempts=new Map();
+  const queries={chat:'',work:''};
   let state = { mode: api.selectedMode==='owner'||(api.selectedMode===undefined&&api.hasCredential)?'owner':'public', status: api.hasCredential ? 'unknown' : 'none',
     messages: [], draft: draftStore.read(), devices: [], device: null, pairing: null, error: '', warning: '', busy: false, sending: false, query: '', authenticating: false, account: null, accountReady: false, accountNotice: '', loginDevices: [],
-    jobsEnabled:false,jobs:[],jobsError:'',syncStale:false,jobMode:false,jobTitle:'',jobKind:'consequential',jobProject:'',jobGoal:'',requestsOnly:false,workFilter:'all',sendUnconfirmed:false,sendNotice:'',jobDetailId:null,jobDetail:null,jobDetailBusy:false,jobDetailError:'',jobDetailStale:false,jobBusy:false };
+    jobsEnabled:false,jobs:[],jobsError:'',syncStale:false,jobMode:false,taskDraftKept:false,jobTitle:'',jobKind:'consequential',jobProject:'',jobGoal:'',requestsOnly:false,workFilter:'all',sendUnconfirmed:false,sendNotice:'',jobDetailId:null,jobDetail:null,jobDetailBusy:false,jobDetailError:'',jobDetailStale:false,jobBusy:false };
   const emit = () => { for (const listener of listeners) listener(); };
   const mode = next => { if (next !== state.mode) { state.mode = next; onModeChange(next); } emit(); };
   function clearPrivate({preserveDraft = false} = {}) { state.loginDevices = []; accountConsent = null; state.account = null; state.accountReady = false; state.accountNotice = ''; state.messages = []; if (!preserveDraft) {state.draft = '';draftStore.save('');} state.devices = []; state.device = null; failedSend = null; cursor = '0';
     jobCursor='0';jobFence=null;jobChangesSupported=typeof api.jobChanges==='function';jobResetCache=null;jobReading=null;
-    ++detailEpoch;retryAttempts.clear();state.jobsEnabled=false;state.jobs=[];state.jobsError='';state.syncStale=false;state.query='';state.jobMode=false;state.jobTitle='';state.jobKind='consequential';state.jobProject='';state.jobGoal='';state.requestsOnly=false;state.workFilter='all';state.sendUnconfirmed=false;state.sendNotice='';state.jobDetailId=null;state.jobDetail=null;state.jobDetailBusy=false;state.jobDetailError='';state.jobDetailStale=false;state.jobBusy=false; }
+    ++detailEpoch;retryAttempts.clear();queries.chat='';queries.work='';state.jobsEnabled=false;state.jobs=[];state.jobsError='';state.syncStale=false;state.query='';state.jobMode=false;state.taskDraftKept=false;state.jobTitle='';state.jobKind='consequential';state.jobProject='';state.jobGoal='';state.requestsOnly=false;state.workFilter='all';state.sendUnconfirmed=false;state.sendNotice='';state.jobDetailId=null;state.jobDetail=null;state.jobDetailBusy=false;state.jobDetailError='';state.jobDetailStale=false;state.jobBusy=false; }
   function failure(error) {
     const safe = error instanceof OwnerApiError ? error : new OwnerApiError('network');
     state.error = safe.message;
@@ -132,26 +133,32 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), draftS
     get mode() { return state.mode; },
     get hasCredential() { return api.hasCredential; },
     get status() { return state.status; },
+    get requestsOnly() { return state.requestsOnly; },
+    get jobMode() { return state.jobMode; },
+    get sending() { return state.sending; },
+    get busy() { return state.busy; },
+    get hasTaskDraft() { return !!(state.taskDraftKept||state.jobTitle||state.jobProject||state.jobGoal); },
     snapshot() { return structuredClone(state); },
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     setDraft(value) { state.draft = value.slice(0, 4000); const saved = draftStore.save(state.draft); if (!saved) state.warning = 'Could not retain this private draft in the tab. Copy it before leaving.'; return saved; },
-    setQuery(value) { state.query = value.trim().toLowerCase(); emit(); },
+    setQuery(value) { state.query = value.trim().toLowerCase();queries[state.requestsOnly?'work':'chat']=state.query; emit(); },
     setWorkFilter(value){if(['all','queued','working','blocked','finished','waiting_for_owner','execution_unknown','failed','cancellation_pending','completion_unverified'].includes(value)){state.workFilter=value;emit();}},
     beginTask({projectTitle='',goalTitle=''}={}){
       const label=value=>typeof value==='string'&&value.length<=120&&!/[\u0000-\u001f\u007f]/.test(value);
-      if(state.status!=='approved'||state.mode!=='owner'||!state.jobsEnabled||state.busy||state.sending||!label(projectTitle)||!label(goalTitle)||!projectTitle.trim())return false;
+      if(state.status!=='approved'||state.mode!=='owner'||!state.jobsEnabled||state.busy||state.sending||!label(projectTitle)||!label(goalTitle)||goalTitle.trim()&&!projectTitle.trim())return false;
       if(failedSend||state.draft||state.jobTitle||state.jobProject||state.jobGoal){
         if(failedSend)state.sendUnconfirmed=true;
         state.sendNotice=failedSend?'Resolve your unconfirmed send before adding a task.':'Finish or clear your current draft before adding a task.';emit();return false;
       }
       state.jobMode=true;state.jobProject=projectTitle.trim();state.jobGoal=goalTitle.trim();state.sendNotice='';emit();return true;
     },
-    setJobMode(value){if(!state.jobsEnabled||state.sending)return;state.jobMode=value===true;state.sendUnconfirmed=false;emit();},
+    setJobMode(value){if(!state.jobsEnabled||state.sending)return;if(state.jobMode&&value!==true)state.taskDraftKept=!!(state.draft||state.jobTitle||state.jobProject||state.jobGoal||state.jobKind!=='consequential');state.jobMode=value===true;state.sendUnconfirmed=!!failedSend;emit();},
     setJobTitle(value){state.jobTitle=value.slice(0,120);},
     setJobProject(value){state.jobProject=value.slice(0,120);},
     setJobGoal(value){state.jobGoal=value.slice(0,120);},
     setJobKind(value){if(['read_only','draft','consequential'].includes(value)){state.jobKind=value;emit();}},
-    toggleRequests(){state.requestsOnly=!state.requestsOnly;state.query='';emit();},
+    setRequestsOnly(value){const next=value===true;if(next===state.requestsOnly)return;queries[state.requestsOnly?'work':'chat']=state.query;state.requestsOnly=next;state.query=queries[next?'work':'chat'];emit();},
+    toggleRequests(){controller.setRequestsOnly(!state.requestsOnly);},
     closeJobDetail(){++detailEpoch;state.jobDetailId=null;state.jobDetail=null;state.jobDetailBusy=false;state.jobDetailError='';state.jobDetailStale=false;emit();},
     connect() {
       api.selectMode?.('owner');
@@ -261,6 +268,7 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), draftS
     },
     async send({retryOriginal=false}={}) {
       if (state.sending || state.status !== 'approved'||state.mode!=='owner') return;
+      if(state.taskDraftKept&&!state.jobMode&&!retryOriginal){state.sendNotice='Task draft kept. Resume it to review its requested scope before sending.';emit();return;}
       const draftBody=state.draft.trim();if(!draftBody&&!retryOriginal)return;
       if(state.jobMode&&!state.jobTitle.trim()&&!retryOriginal){state.error='Give this private request a short title.';emit();return;}
       if(state.jobMode&&state.jobGoal.trim()&&!state.jobProject.trim()&&!retryOriginal){state.error='Give this goal a project name.';emit();return;}
@@ -276,7 +284,7 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), draftS
         if (epoch !== generation) return;
         accepted=true;if(data.job)mergeJob(data.job);
         const matches=state.draft.trim()===item.body&&state.jobMode===item.jobMode&&(!item.jobMode||state.jobTitle.trim()===item.title&&state.jobKind===item.actionKind&&state.jobProject.trim()===item.projectTitle&&state.jobGoal.trim()===item.goalTitle);
-        if(matches){state.draft='';draftStore.save('');state.jobTitle='';state.jobProject='';state.jobGoal='';state.jobMode=false;state.sendNotice=item.jobMode?'Work request saved':'';}else state.sendNotice='Earlier request confirmed · your edited draft is still here';
+        if(matches){state.draft='';draftStore.save('');state.jobTitle='';state.jobProject='';state.jobGoal='';state.jobMode=false;state.taskDraftKept=false;state.sendNotice=item.jobMode?'Work request saved':'';}else state.sendNotice='Earlier request confirmed · your edited draft is still here';
         failedSend = null;
         await readMessages(epoch);
         await readJobs(epoch);
@@ -361,7 +369,8 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), draftS
 }
 
 const stamp = value => Number.isFinite(Date.parse(value)) ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) : 'Unknown';
-const messageStamp=value=>Number.isFinite(Date.parse(value))?new Intl.DateTimeFormat(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}).format(new Date(value)):'Unknown';
+const messageClock=new Intl.DateTimeFormat(undefined,{hour:'numeric',minute:'2-digit'});
+const messageStamp=value=>Number.isFinite(Date.parse(value))?messageClock.format(new Date(value)):'Unknown';
 const jobLabel=job=>{
   if(job.result&&!job.completion&&!['waiting_for_owner','failed','cancelled'].includes(job.stage))return 'Reply received · completion unverified'+(job.cancelRequested?' · cancellation requested':'');
   if(job.stage==='running'&&job.execution&&Date.parse(job.execution.leaseExpiresAt)<=Date.now())return job.cancelRequested?'Cancellation requested · outcome unconfirmed':'Acknowledgement expired · outcome unconfirmed';
@@ -426,7 +435,8 @@ export function ownerWorkPreview(job, status=ownerWorkStatus(job)) {
 }
 
 export function createRelayOwnerUI({ controller = createRelayOwnerController(), document: doc = globalThis.document } = {}) {
-  let root, timer, viewKey = '', chatNodes = null, pairLabel = '', pairRemember = false, readingAnchor=null, detailDialog=null, detailSignature='',detailFocus=null,connectionDialog=null,workSignature='',workVisible=50,workContext='',workOpen=new Map();
+  let root, timer, viewKey = '', chatNodes = null, pairLabel = '', pairRemember = false, readingAnchor=null, detailDialog=null, detailSignature='',detailFocus=null,connectionDialog=null,workSignature='',workVisible=50,workContext='',workOpen=new Map(),messageView=false;
+  const positions={chat:null,work:null};let taskFocus=null,taskWasOpen=false;
   const sensitiveInputs = new Set();
   function clearSensitiveFields() {
     for (const input of sensitiveInputs) { input.value = ''; if (input.type === 'checkbox') input.checked = false; }
@@ -491,39 +501,44 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
     if(row?.getBoundingClientRect&&panel.getBoundingClientRect)panel.scrollTop+=row.getBoundingClientRect().top-panel.getBoundingClientRect().top-anchor.offset;
     else panel.scrollTop=anchor.scroll;
   }
+  function workPosition(panel){const bounds=panel.getBoundingClientRect?.(),node=bounds?[...panel.querySelectorAll?.('[data-work-anchor]')||[]].find(n=>n.getBoundingClientRect().bottom>bounds.top):null;return {scroll:panel.scrollTop,id:node?.dataset.workAnchor,offset:node?node.getBoundingClientRect().top-bounds.top:0};}
+  function rememberWork(panel){for(const node of panel.querySelectorAll?.('details[data-work-key]')||[])workOpen.set(node.dataset.workKey,node.open);}
+  function startTask(){const state=controller.snapshot();if(!state.sendUnconfirmed&&!state.error&&(state.jobMode||controller.hasTaskDraft))controller.setJobMode(true);else controller.beginTask();if(chatNodes&&controller.jobMode)chatNodes.title.focus({preventScroll:true});}
   function closeInspector(){
     if(!detailDialog)return;const dialog=detailDialog;detailDialog=null;detailSignature='';dialog.close?.();dialog.remove?.();
-    if(detailFocus?.isConnected)detailFocus.focus?.({preventScroll:true});detailFocus=null;
+    if(doc.body)delete doc.body.dataset.relayDetailOpen;
+    const target=detailFocus?.isConnected?detailFocus:detailFocus?.id?doc.getElementById(detailFocus.id):null;target?.focus?.({preventScroll:true});detailFocus=null;
   }
   function renderInspector(state){
     if(state.mode!=='owner'||state.status!=='approved'||!state.jobDetailId){closeInspector();return;}
     if(!doc.body||!doc.createTextNode)return;
     if(!detailDialog){
       detailFocus=doc.activeElement;const dialog=make('dialog','','app-sheet conversation-sheet owner-request-detail');dialog.id='relay-owner-request-dialog';dialog.setAttribute('aria-label','Private request');detailDialog=dialog;
-      dialog.addEventListener('close',()=>{if(detailDialog!==dialog)return;detailDialog=null;detailSignature='';dialog.remove();controller.closeJobDetail();if(detailFocus?.isConnected)detailFocus.focus({preventScroll:true});detailFocus=null;});
+      dialog.addEventListener('close',()=>{if(detailDialog!==dialog)return;detailDialog=null;detailSignature='';dialog.remove();delete doc.body.dataset.relayDetailOpen;controller.closeJobDetail();const target=detailFocus?.isConnected?detailFocus:detailFocus?.id?doc.getElementById(detailFocus.id):null;target?.focus({preventScroll:true});detailFocus=null;});
       dialog.addEventListener('click',event=>{if(event.target!==dialog)return;const r=dialog.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)controller.closeJobDetail();});
-      doc.body.append(dialog);dialog.showModal();
+      doc.body.dataset.relayDetailOpen='true';doc.body.append(dialog);dialog.showModal();
     }
     const currentRefresh=detailDialog.querySelector('#relay-owner-request-refresh');if(currentRefresh){currentRefresh.textContent=state.jobDetailBusy?'Refreshing…':'Refresh request';currentRefresh.disabled=state.jobDetailBusy||state.jobBusy;}
     const signature=JSON.stringify([state.jobDetailId,state.jobDetail,state.jobDetailError,state.jobDetailStale,state.syncStale,state.jobsError,state.jobBusy,jobLabel(state.jobDetail?.job||{})]);if(signature===detailSignature)return;
-    const scroll=detailDialog.scrollTop,consent=detailDialog.querySelector('#relay-owner-retry-consent')?.checked===true,historyOpen=detailDialog.querySelector('#relay-owner-request-history')?.open===true,resultHistoryOpen=detailDialog.querySelector('#relay-owner-result-history')?.open===true;
+    const scroll=detailDialog.scrollTop,consent=detailDialog.querySelector('#relay-owner-retry-consent')?.checked===true,historyOpen=detailDialog.querySelector('#relay-owner-request-history')?.open===true,resultHistoryOpen=detailDialog.querySelector('#relay-owner-result-history')?.open===true,propertiesOpen=detailDialog.querySelector('#relay-owner-request-properties')?.open===true,objectiveOpen=detailDialog.querySelector('#relay-owner-objective')?.open;
     const focused=detailDialog.contains(doc.activeElement)?{id:doc.activeElement.id,label:doc.activeElement.getAttribute('aria-label')||doc.activeElement.textContent}:null;
     const bounds=detailDialog.getBoundingClientRect(),visible=[...detailDialog.querySelectorAll('[data-reading-anchor]')].find(n=>n.getBoundingClientRect().bottom>=bounds.top+24&&n.getBoundingClientRect().top<bounds.bottom);
     const reading=visible?{id:visible.dataset.readingAnchor,offset:visible.getBoundingClientRect().top-bounds.top}:null;
     detailSignature=signature;detailDialog.replaceChildren();
-    const heading=make('div','','dialog-heading'),title=make('h2','Private request'),close=action('',()=>controller.closeJobDetail(),'icon-button');close.innerHTML=icon('close');close.setAttribute('aria-label','Close private request');heading.append(title,close);detailDialog.append(heading);
+    const heading=make('div','','dialog-heading'),title=make('h2','Private request'),close=action('',()=>controller.closeJobDetail(),'icon-button request-back');close.innerHTML=icon('back');close.append(make('span','Back'));close.setAttribute('aria-label','Close private request');heading.append(close,title);detailDialog.append(heading);
     const data=state.jobDetail,job=data?.job;
     if(!job){detailDialog.append(make('p',state.jobDetailError||'Opening private request…','sheet-context'));const refresh=action('Retry request details',()=>controller.inspectJob(state.jobDetailId,{refresh:true}));refresh.disabled=state.jobDetailBusy;refresh.hidden=!state.jobDetailError;detailDialog.append(refresh);return;}
-    const requestBody=make('p',job.body,'request-body');requestBody.dataset.readingAnchor='request-body';const requestTitle=make('h3',job.title);requestTitle.dataset.readingAnchor='request-title';
-    detailDialog.append(make('p',(state.jobDetailStale||state.syncStale||state.jobsError?'Last known: ':'')+jobLabel(job),'request-state'),requestTitle,requestBody);
+    const requestBody=make('p',job.body,'request-body');requestBody.dataset.readingAnchor='request-body';const requestTitle=make('h3',job.title,'request-title');requestTitle.dataset.readingAnchor='request-title';
+    detailDialog.append(requestTitle);
     const update=meaningfulUpdate(job,data.events),labels=job.presentation;
     if(labels?.projectTitle)detailDialog.append(make('p',labels.projectTitle+(labels.goalTitle?' · '+labels.goalTitle:''),'request-meta'));
-    if(update){const progress=make('section','','request-progress');progress.id='relay-owner-latest-progress';progress.append(make('h3','Latest execution update'),make('p',update.summary,'request-body'),make('p',stamp(update.createdAt),'request-meta'));detailDialog.append(progress);}
+    detailDialog.append(make('p',(state.jobDetailStale||state.syncStale||state.jobsError?'Last known: ':'')+jobLabel(job),'request-state'));
+    if(job.cancelRequested)detailDialog.append(make('p',job.stage==='cancelled'?'The assistant acknowledged cancellation.':job.completion?'The assistant reported work complete after cancellation was requested. This does not report that the work stopped.':'Cancellation has been requested. The assistant has not confirmed that the work stopped.','request-copy request-next-step'));
+    if(job.stage==='waiting_for_owner')detailDialog.append(make('p','Review the assistant’s question below, then send the needed input or decision in your private conversation. Actions follow your existing explicit authorization.','request-copy request-next-step'));
+    const appendProgress=()=>{if(update){const progress=make('section','','request-progress');progress.id='relay-owner-latest-progress';progress.append(make('h3','Latest execution update'),make('p',update.summary,'request-copy'),make('p',stamp(update.createdAt),'request-meta'));detailDialog.append(progress);}};
+    if(!job.completion)appendProgress();
+    if(job.failure)detailDialog.append(make('h3',job.failure.code==='completion_unverified'?'Completion unverified':'What needs attention'),make('p',job.failure.message,'request-copy'),make('p',job.failure.code==='completion_unverified'?'The reply may be an acknowledgement, a blocker or available information. Review it in your private conversation; it does not establish that the work finished.':job.failure.outcome==='not_started'?'The assistant confirmed that the work did not start.':job.failure.outcome==='unknown'?'The earlier attempt may have done some or all of the work.':'Review what happened before another attempt.','request-meta'));
     const kinds={unclassified:'Ordinary owner message',read_only:'Research or inspection',draft:'Prepare a draft',consequential:'Action · review requested scope'};
-    detailDialog.append(make('p',kinds[job.actionKind]+' · attempt '+job.attempt+' · saved '+stamp(job.createdAt),'request-meta'));
-    if(job.execution)detailDialog.append(make('p','The owner-connected assistant acknowledged execution '+stamp(job.execution.acknowledgedAt)+'. '+(Date.parse(job.execution.leaseExpiresAt)<=Date.now()?'The recorded acknowledgement window ended ':'The acknowledgement expires ')+stamp(job.execution.leaseExpiresAt)+'.'+(job.stage==='running'&&Date.parse(job.execution.leaseExpiresAt)<=Date.now()?' Refresh to check the current outcome.':''),'request-meta'));
-    if(job.cancelRequested)detailDialog.append(make('p',job.stage==='cancelled'?'The assistant acknowledged cancellation.':job.completion?'The assistant reported work complete after cancellation was requested. This does not report that the work stopped.':'Cancellation has been requested. The assistant has not confirmed that the work stopped.','request-meta'));
-    if(job.stage==='waiting_for_owner')detailDialog.append(make('p','Review the request history for the assistant’s question or blocker, then send the needed input or decision in your private conversation. Actions follow your existing explicit authorization.','request-meta'));
     if(job.result){
       const latest=job.latestResult||{version:1,...job.result};
       detailDialog.append(make('h3',latest.version>1?'Authenticated correction':'Saved reply'));
@@ -548,11 +563,14 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
       const summary=make('p',job.completion.summary,'request-body');summary.id='relay-owner-completion-summary';summary.dataset.readingAnchor='completion-summary';
       report.append(make('h3','Completion report'),summary,make('p','Reported '+stamp(job.completion.createdAt)+' · reply version '+job.completion.resultVersion,'request-meta'),make('p','The authenticated owner-connected assistant reported work complete. This attestation does not certify factual claims or external outcomes.','request-meta'));detailDialog.append(report);
     }
-    if(job.failure)detailDialog.append(make('h3',job.failure.code==='completion_unverified'?'Completion unverified':'What needs attention'),make('p',job.failure.message,'request-body'),make('p',job.failure.code==='completion_unverified'?'The reply may be an acknowledgement, a blocker or available information. Review it in your private conversation; it does not establish that the work finished.':job.failure.outcome==='not_started'?'The assistant confirmed that the work did not start.':job.failure.outcome==='unknown'?'The earlier attempt may have done some or all of the work.':'Review what happened before another attempt.','request-meta'));
+    const objective=make('details');objective.id='relay-owner-objective';objective.open=objectiveOpen??!job.completion;objective.append(make('summary','Original request'),requestBody);detailDialog.append(objective);
+    const properties=make('details');properties.id='relay-owner-request-properties';properties.open=propertiesOpen;properties.append(make('summary','Scope and delivery details'),make('p',kinds[job.actionKind]+' · attempt '+job.attempt+' · saved '+stamp(job.createdAt),'request-meta'));
+    if(job.execution)properties.append(make('p','The owner-connected assistant acknowledged execution '+stamp(job.execution.acknowledgedAt)+'. '+(Date.parse(job.execution.leaseExpiresAt)<=Date.now()?'The recorded acknowledgement window ended ':'The acknowledgement expires ')+stamp(job.execution.leaseExpiresAt)+'.'+(job.stage==='running'&&Date.parse(job.execution.leaseExpiresAt)<=Date.now()?' Refresh to check the current outcome.':''),'request-meta'));
     if(job.delivery){
       const deliveryLabels={saved:'Request saved privately.',queued:'Request saved; callback delivery is queued.',callback_accepted:'The callback accepted delivery. This does not confirm execution.',delivery_failed:'Callback delivery failed. The saved request remains private.',reply_saved:'An authenticated owner reply is saved.'};
-      detailDialog.append(make('h3','Delivery'),make('p',deliveryLabels[job.delivery.state]||'Delivery evidence unavailable.','request-meta'));
+      properties.append(make('h3','Delivery'),make('p',deliveryLabels[job.delivery.state]||'Delivery evidence unavailable.','request-meta'));
     }
+    detailDialog.append(properties);if(job.completion)appendProgress();
     if(data.events.length){
       const details=make('details'),summary=make('summary','Request history');details.id='relay-owner-request-history';details.open=historyOpen;summary.id='relay-owner-request-history-toggle';details.append(summary);const list=make('ol','','request-events');
       for(const event of data.events){const item=make('li',event.summary+' · '+stamp(event.createdAt)+(event.authentication_source==='owner-oauth-mcp'?' · authenticated owner assistant':' · authenticated owner device'));item.dataset.readingAnchor='event:'+event.id;list.append(item);}
@@ -574,36 +592,36 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
     if(reading&&scroll>0){const anchor=[...detailDialog.querySelectorAll('[data-reading-anchor]')].find(n=>n.dataset.readingAnchor===reading.id);if(anchor)detailDialog.scrollTop+=anchor.getBoundingClientRect().top-detailDialog.getBoundingClientRect().top-reading.offset;}
     if(focused){const node=focused.id?detailDialog.querySelector('#'+focused.id):[...detailDialog.querySelectorAll('button,summary,input')].find(n=>(n.getAttribute('aria-label')||n.textContent)===focused.label);node?.focus({preventScroll:true});}
   }
-  function renderWork(state) {
+  function renderWork(state,restore=null) {
     const panel=chatNodes.messages,allTasks=groupOwnerWork(state.jobs),tasks=groupOwnerWork(state.jobs,{query:state.query,filter:state.workFilter}),attention=ownerWorkAttention(groupOwnerWork(state.jobs,{query:state.query}));
-    const signature=JSON.stringify([state.jobs,state.query,state.workFilter,state.jobsError,state.syncStale,workVisible,tasks.map(t=>t.status),attention]);
+    const signature=JSON.stringify([state.jobs,state.query,state.workFilter,state.jobsError,state.syncStale,state.busy&&!state.jobs.length,workVisible,tasks.map(t=>t.status),attention]);
     if(workSignature===signature)return;workSignature=signature;
-    for(const node of panel.querySelectorAll?.('details[data-work-key]')||[])workOpen.set(node.dataset.workKey,node.open);
+    rememberWork(panel);
     const bounds=panel.getBoundingClientRect?.(),visible=bounds?[...panel.querySelectorAll?.('[data-work-anchor]')||[]].find(node=>{const rect=node.getBoundingClientRect();return rect.height>0&&rect.bottom>bounds.top&&rect.top<bounds.bottom;}):null;
-    const reading=visible?{id:visible.dataset.workAnchor,offset:visible.getBoundingClientRect().top-bounds.top}:null;
+    const reading=restore|| (visible?{id:visible.dataset.workAnchor,offset:visible.getBoundingClientRect().top-bounds.top}:null);
     const context=JSON.stringify([state.query,state.workFilter]),contextChanged=context!==workContext;workContext=context;
-    const scroll=contextChanged?0:panel.scrollTop,focused=panel.contains?.(doc.activeElement)?doc.activeElement?.id:null;
+    const scroll=restore?.scroll??(contextChanged?0:panel.scrollTop),focused=panel.contains?.(doc.activeElement)?doc.activeElement?.id:null;
     const body=make('section','','owner-work');body.id='relay-owner-current-work';body.setAttribute('aria-label','Private current work');
-    body.append(make('h2','Current work'),make('p','Private · saved requests and authenticated execution updates','request-meta'));
-    const filters=make('div','','owner-work-filters'),filterLabel=make('label','Status');filterLabel.htmlFor='relay-owner-work-filter';
+    const heading=make('div','','owner-work-heading'),titles=make('div');titles.append(make('h2','Current work'),make('p','Private · saved tasks','request-meta'));const newTask=action(state.jobMode||state.jobTitle||state.jobProject||state.jobGoal?'Resume task':'New task',startTask,'primary');newTask.id='relay-owner-new-task';newTask.disabled=state.busy||state.sending;heading.append(titles,newTask);body.append(heading);
+    const filters=make('div','','owner-work-filters'),filterLabel=make('label','Status','sr-only');filterLabel.htmlFor='relay-owner-work-filter';
     const filter=make('select');filter.id='relay-owner-work-filter';
     for(const [value,label] of [['all','All work'],['queued','Queued'],['working','Working'],['blocked','Needs attention'],['finished','Finished'],...attentionLabels]){const option=make('option',label);option.value=value;filter.append(option);}
     filter.value=state.workFilter;filter.onchange=()=>controller.setWorkFilter(filter.value);filters.append(filterLabel,filter);body.append(filters);
-    const count=make('p',tasks.length+' of '+allTasks.length+' saved task'+(allTasks.length===1?'':'s'),'request-meta');count.id='relay-owner-work-count';body.append(count);
+    const count=make('p',tasks.length+' of '+allTasks.length+' saved task'+(allTasks.length===1?'':'s'),'request-meta');count.id='relay-owner-work-count';filters.append(count);
     if(state.syncStale||state.jobsError){const stale=make('p','Last known records · '+(state.jobsError||'refresh unavailable'),'relay-owner-note');stale.setAttribute('role','status');body.append(stale);}
     const needsAttention=attention.filter(item=>item.count);
     if(needsAttention.length){const summary=make('section','','owner-work-attention');summary.setAttribute('aria-label','Saved work needing attention');summary.append(make('h3','Needs attention'+(state.query?' · matching search':'')));const list=make('ul');for(const item of needsAttention){const row=make('li',item.label+' · '+item.count);row.dataset.attention=item.reason;list.append(row);}summary.append(list);body.append(summary);}
     function disclosure(key,title,cls,initial=false){const n=make('details','',cls);n.dataset.workKey=key;n.open=workOpen.has(key)?workOpen.get(key):initial;const s=make('summary',title);s.id='owner-work-'+encodeURIComponent(key);n.append(s);return n;}
     function taskRow(task){
       const {job,status,attempts}=task,row=disclosure('task:'+job.id,'','owner-work-task');row.dataset.jobId=job.id;row.dataset.state=status.state;if(status.attention)row.dataset.attention=status.attention;
-      row.firstChild.append(make('span',job.title,'owner-work-title'),make('span',status.label,'job-state'));
+      const compact={waiting_for_owner:'Waiting for you',execution_unknown:'Execution unknown',failed:'Failed',cancellation_pending:'Cancellation pending',completion_unverified:'Completion unverified'}[status.attention]||{queued:'Queued',working:'Working',finished:job.completion?'Reported complete':'Cancelled'}[status.state];
+      row.firstChild.append(make('span',job.title,'owner-work-title'),make('span',compact,'job-state'));
       row.append(make('p','Owner · You'+(job.execution?' · Owner-connected assistant':' · execution unacknowledged'),'request-meta'));
       const update=meaningfulUpdate(job),latest=job.latestResult||job.result,preview=ownerWorkPreview(job,status);
       const short=preview.length>240?preview.slice(0,237)+'…':preview;row.firstChild.dataset.workAnchor='task:'+job.id;
       row.firstChild.append(make('span',short,'owner-work-preview'),make('span','Task activity · '+stamp(ownerWorkActivity(job)),'owner-work-time'));
       if(update)row.append(make('p',update.kind==='result_corrected'&&latest?.correctionSummary?latest.correctionSummary:update.summary,'request-body owner-work-update'),make('p','Execution update · '+stamp(update.createdAt),'request-meta'));
       if(status.state==='blocked')row.append(make('p',job.failure?.message||job.stage==='waiting_for_owner'&&update?.summary||job.cancelRequested&&'Cancellation was requested; execution has not been confirmed stopped.'||'Refresh or inspect the request evidence to check the current outcome.','request-body owner-work-blocker'));
-      row.append(make('p','Task activity · '+stamp(ownerWorkActivity(job)),'request-meta'));
       if(latest){
         row.append(make('h3',job.resultVersion>1?'Corrected result · version '+job.resultVersion:job.completion?'Final result':'Saved reply · completion unverified'));
         const result=make('div','','request-body rich-body');result.dataset.resultVersion=String(job.resultVersion||1);result.dataset.workAnchor='result:'+job.id;richText(result,latest.body);row.append(result);
@@ -636,7 +654,7 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
     if(current.length>workVisible){const more=action('Show more current work ('+Math.min(workVisible,current.length)+' of '+current.length+')',()=>{workVisible+=50;renderMessages(controller.snapshot());},'text-button');body.append(more);}
     if(finished.length){const done=disclosure('finished','Finished · '+finished.length,'owner-work-finished');if((contextChanged||!workOpen.has('finished'))&&(state.query||state.workFilter==='finished'))done.open=true;projects(finished.slice(0,workVisible),done,'finished');if(finished.length>workVisible)done.append(action('Show more finished work',()=>{workVisible+=50;renderMessages(controller.snapshot());},'text-button'));body.append(done);}
     panel.replaceChildren(body);panel.scrollTop=scroll;
-    if(reading&&!contextChanged&&scroll>0){const anchor=[...panel.querySelectorAll?.('[data-work-anchor]')||[]].find(node=>node.dataset.workAnchor===reading.id);if(anchor)panel.scrollTop+=anchor.getBoundingClientRect().top-panel.getBoundingClientRect().top-reading.offset;}
+    if(reading&&(restore||!contextChanged)&&scroll>0){const anchor=[...panel.querySelectorAll?.('[data-work-anchor]')||[]].find(node=>node.dataset.workAnchor===reading.id);if(anchor)panel.scrollTop+=anchor.getBoundingClientRect().top-panel.getBoundingClientRect().top-reading.offset;}
     if(focused)[...panel.querySelectorAll?.('[id]')||[]].find(n=>n.id===focused)?.focus({preventScroll:true});
   }
   function renderMessages(state) {
@@ -644,16 +662,21 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
     const search=doc.getElementById('relay-owner-search'),searchLabel=doc.getElementById('relay-owner-search-label');
     const searchText=state.requestsOnly&&state.jobsEnabled?'Search current work':'Search private messages';
     if(search){search.placeholder=searchText;if(search.value.trim().toLowerCase()!==state.query)search.value=state.query;}if(searchLabel)searchLabel.textContent=searchText;
-    const panel=chatNodes.messages,anchor=chatNodes.first&&readingAnchor?readingAnchor:position(panel),jobs=new Map(state.jobs.map(j=>[j.messageId,j]));
+    const panel=chatNodes.messages,work=state.requestsOnly&&state.jobsEnabled,changed=work!==messageView;
+    if(changed){if(!chatNodes.first){if(messageView)rememberWork(panel);positions[messageView?'work':'chat']=messageView?workPosition(panel):position(panel);}messageView=work;}
+    const anchor=changed?(positions.chat||{bottom:true}):chatNodes.first&&readingAnchor?readingAnchor:position(panel),jobs=new Map(state.jobs.map(j=>[j.messageId,j]));
     const existing=new Map([...panel.children].filter(n=>n.dataset?.messageId).map(n=>[n.dataset.messageId,n])),nodes=[];
-    const work=state.requestsOnly&&state.jobsEnabled;if(work)renderWork(state);else workSignature='';
+    if(work)renderWork(state,changed?positions.work:null);else workSignature='';
     const selected = work?[]:state.messages.filter(m => (!state.query || m.body.toLowerCase().includes(state.query))&&(!state.requestsOnly||jobs.has(m.id)));
+    let previousDay;
     for (const m of selected) {
-      const job=jobs.get(m.id),replyJob=m.replyTo?jobs.get(m.replyTo):null,stale=state.syncStale||state.jobsError||state.jobDetailStale&&state.jobDetailId===job?.id,signature=JSON.stringify([m,job,replyJob?.resultVersion,state.busy,state.sending,stale,job?jobLabel(job):null]);let row=existing.get(m.id);
+      const day=messageDay(m.createdAt),dayStart=day.key!==previousDay?day.label:'';previousDay=day.key;
+      const job=jobs.get(m.id),replyJob=m.replyTo?jobs.get(m.replyTo):null,stale=state.syncStale||state.jobsError||state.jobDetailStale&&state.jobDetailId===job?.id,signature=JSON.stringify([m,job,replyJob?.resultVersion,state.busy,state.sending,stale,job?jobLabel(job):null,dayStart]);let row=existing.get(m.id);
       if(row?._signature===signature){nodes.push(row);continue;}
       row = make('article', '', 'message-row ' + (m.role === 'user' ? 'outgoing' : 'incoming'));row._signature=signature;
       row.dataset.messageId = m.id;
-      const heading=make('div','','message-heading'),copy=action('',async()=>{copy.setAttribute('aria-label',await copyText(m.body)?'Private message copied':'Copy private message');},'message-actions');copy.innerHTML=icon('copy');copy.setAttribute('aria-label','Copy private message');heading.append(make('span',m.role==='user'?'You':'dot','message-author'),copy);row.append(heading);
+      if(dayStart)row.append(make('p',dayStart,'message-day'));
+      const heading=make('div','','message-heading'),copy=action('',async()=>{copy.setAttribute('aria-label',await copyText(m.body)?'Private message copied':'Copy private message');},'message-actions');copy.innerHTML=icon('copy');copy.setAttribute('aria-label','Copy private message');heading.append(make('span',m.role==='user'?'You':'dot','message-author'));row.append(heading);
       if(job&&job.title!=='Owner request')row.append(make('p',job.title,'owner-request-title'));
       // Request text is inert. The inspector alone formats the saved result.
       row.append(make('p',m.body,'bubble'));
@@ -662,41 +685,50 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
         const labels={saved:'Saved privately · awaiting reply',queued:'Saved · awaiting assistant',callback_accepted:'Sent · awaiting reply',delivery_failed:'Delivery needs retry',reply_saved:'Reply saved'};
         status=job?'':labels[m.delivery?.state]||'Saved privately';
         if(job){
-          row.dataset.jobId=job.id;const info=make('div','','message-job');info.dataset.state=job.stage;info.append(make('span',(stale?'Last known: ':'')+jobLabel(job),'job-state'),action('Inspect request',()=>controller.inspectJob(job.id),'text-button'));row.append(info);
+          row.dataset.jobId=job.id;const info=make('div','','message-job');info.dataset.state=job.stage;const inspect=action('Inspect request',()=>controller.inspectJob(job.id),'text-button');inspect.id='relay-owner-inspect-'+job.id;info.append(make('span',(stale?'Last known: ':'')+jobLabel(job),'job-state'),inspect);row.append(info);
         }else if(m.delivery?.retryable){
           const retry=action('Retry callback delivery',()=>controller.retryDelivery(m.id));
           retry.disabled=state.busy||state.sending;row.append(retry);
         }
       }else if(replyJob?.resultVersion>1){
-        const correction=make('div','','message-job');correction.dataset.state=replyJob.stage;correction.append(make('span','A correction is saved · version '+replyJob.resultVersion,'job-state'),action('Inspect result',()=>controller.inspectJob(replyJob.id),'text-button'));row.append(correction);
+        const correction=make('div','','message-job');correction.dataset.state=replyJob.stage;const inspect=action('Inspect result',()=>controller.inspectJob(replyJob.id),'text-button');inspect.id='relay-owner-inspect-result-'+replyJob.id;correction.append(make('span','A correction is saved · version '+replyJob.resultVersion,'job-state'),inspect);row.append(correction);
       }
-      row.append(make('span',messageStamp(m.createdAt)+(status?' · '+status:''),'message-time'));nodes.push(row);
+      const footer=make('div','','message-footer');footer.append(make('span',messageStamp(m.createdAt)+(status?' · '+status:''),'message-time'),copy);row.append(footer);nodes.push(row);
     }
     if (!selected.length&&!work){const empty=make('div','','chat-empty');empty.append(make('p','Private owner conversation','empty-label'),make('h2',state.query?'No matching messages':state.requestsOnly?'No requests to show':state.busy?'Opening your conversation…':'What would you like to work on?'),make('p',state.query?'Try a different phrase.':state.requestsOnly?'Send a message or a work request. Both stay in your private conversation.':state.busy?'Checking your private inbox.':state.jobsEnabled?'Message dot or turn a thought into a work request. Saved replies and results appear here.':'Message dot privately. Replies appear here after the assistant checks the inbox.'));nodes.push(empty);}
     if(!work){if(panel.insertBefore){const wanted=new Set(nodes);for(const child of [...panel.children])if(!wanted.has(child))child.remove();for(let i=0;i<nodes.length;i++)if(panel.children[i]!==nodes[i])panel.insertBefore(nodes[i],panel.children[i]||null);}else panel.replaceChildren(...nodes);restorePosition(panel,anchor);}chatNodes.first=false;
     if (chatNodes.input.value !== state.draft) { chatNodes.input.value = state.draft; autosize(chatNodes.input); }
-    chatNodes.send.disabled = state.sending || state.busy;
+    chatNodes.section.dataset.workView=String(work);chatNodes.section.dataset.taskEditor=String(state.jobMode);
+    const newTask=doc.getElementById('relay-owner-new-task');if(newTask){newTask.textContent=state.jobMode||controller.hasTaskDraft?'Resume task':'New task';newTask.disabled=state.busy||state.sending;}
+    if(state.jobMode&&!taskWasOpen)taskFocus=doc.activeElement;taskWasOpen=state.jobMode;
+    chatNodes.taskHeader.hidden=!state.jobMode;chatNodes.taskActions.hidden=!state.jobMode;
+    chatNodes.taskBack.setAttribute('aria-label',state.requestsOnly?'Back to work':'Back to messages');
+    const target=state.jobMode?chatNodes.taskActions:chatNodes.inputRow;if(chatNodes.send.parentNode!==target)target.append(chatNodes.send);
+    chatNodes.sendLabel.textContent=state.jobMode?'Save request':'';
+    updateComposerSend(state);
     chatNodes.send.setAttribute('aria-label',state.sending?'Sending privately':state.jobMode?'Send private request':'Send private message');
     chatNodes.input.placeholder=state.jobMode?'Describe the work privately…':'Message dot privately…';
-    chatNodes.status.textContent=state.sending?'Saving privately…':state.sendUnconfirmed?state.sendNotice||'Send unconfirmed · your text is still here':state.error?'Private sync unavailable':state.busy?'Refreshing private inbox…':state.sendNotice|| (state.requestsOnly?'Private requests · all saved attempts':state.jobsEnabled?'Private · messages and work requests':'Private · replies arrive after an inbox check');
-    chatNodes.jobToggle.hidden=!state.jobsEnabled;chatNodes.jobToggle.disabled=state.sending;chatNodes.jobToggle.setAttribute('aria-pressed',String(state.jobMode));chatNodes.jobToggle.setAttribute('aria-label',state.jobMode?'Switch to private message':'Create work request');chatNodes.jobToggleLabel.textContent=state.jobMode?'Message instead':'Work request';
+    chatNodes.inputLabel.textContent=state.jobMode?'Describe the work':'Message dot privately';
+    chatNodes.status.textContent=state.sending?'Saving privately…':state.sendUnconfirmed?state.sendNotice||'Send unconfirmed · your text is still here':state.error?'Private sync unavailable':state.busy?'Refreshing private inbox…':state.sendNotice|| (!state.jobMode&&controller.hasTaskDraft?'Task draft kept · resume to send':state.requestsOnly?'Private requests · all saved attempts':state.jobsEnabled?'Private · messages and work requests':'Private · replies arrive after an inbox check');
+    chatNodes.jobToggle.hidden=!state.jobsEnabled;chatNodes.jobToggle.disabled=state.sending;chatNodes.jobToggle.setAttribute('aria-pressed',String(state.jobMode));chatNodes.jobToggle.setAttribute('aria-label',state.jobMode?'Switch to private message':'Create work request');chatNodes.jobToggleLabel.textContent=state.jobMode?'Message instead':controller.hasTaskDraft?'Resume task':'New task';
     chatNodes.jobFields.hidden=!state.jobMode;
     chatNodes.title.required=state.jobMode;if(chatNodes.title.value!==state.jobTitle)chatNodes.title.value=state.jobTitle;if(chatNodes.kind.value!==state.jobKind)chatNodes.kind.value=state.jobKind;
     if(chatNodes.project.value!==(state.jobProject||''))chatNodes.project.value=state.jobProject||'';if(chatNodes.goal.value!==(state.jobGoal||''))chatNodes.goal.value=state.jobGoal||'';
     chatNodes.jobNote.textContent=state.jobKind==='read_only'?'Ask for a report without changing anything. The assistant reviews the request before starting.':state.jobKind==='draft'?'Ask for prepared work to review. This draft scope grants no permission to publish or make other changes.':'The assistant reviews the requested scope and your existing authorization.';
-    chatNodes.error.textContent = state.error; chatNodes.error.hidden = !state.error;
+    chatNodes.error.textContent = state.sendNotice||state.error; chatNodes.error.hidden = !state.error&&!state.sendNotice;chatNodes.notice.dataset.kind=state.error||state.sendUnconfirmed?'error':'note';
     chatNodes.warning.textContent = state.warning; chatNodes.warning.hidden = !state.warning;
-    chatNodes.notice.hidden=!state.error&&!state.sendUnconfirmed;chatNodes.retry.textContent=state.sendUnconfirmed?'Retry private send':'Retry private sync';chatNodes.retry.disabled=state.busy||state.sending;
+    chatNodes.notice.hidden=!state.error&&!state.sendUnconfirmed&&!state.sendNotice;chatNodes.retry.hidden=!state.error&&!state.sendUnconfirmed;chatNodes.retry.textContent=state.sendUnconfirmed?'Retry private send':'Retry private sync';chatNodes.retry.disabled=state.busy||state.sending;
   }
+  function updateComposerSend(state=controller){if(!chatNodes)return;const taskDraft=!state.jobMode&&(state.hasTaskDraft??(state.taskDraftKept||state.jobTitle||state.jobProject||state.jobGoal));chatNodes.send.disabled=state.sending||state.busy||!chatNodes.input.value.trim()||state.jobMode&&!chatNodes.title.value.trim()||!!taskDraft;}
   function render() {
     const state = controller.snapshot();
     // The subscription also runs while private UI is hidden or unmounted.
-    if(state.status!=='approved'){readingAnchor=null;workOpen.clear();workContext='';workSignature='';workVisible=50;}
+    if(state.status!=='approved'){readingAnchor=null;positions.chat=null;positions.work=null;messageView=false;taskFocus=null;taskWasOpen=false;workOpen.clear();workContext='';workSignature='';workVisible=50;}
     if (!root?.isConnected || controller.mode === 'public') { clearSensitiveFields(); return; }
     if(connectionDialog&&(state.status!=='approved'||state.mode!=='owner')){connectionDialog.close?.();connectionDialog.remove?.();connectionDialog=null;}
     renderInspector(state);
     const key = state.mode === 'owner' && state.status === 'approved' ? 'chat' : state.mode + ':' + state.status;
-    const searchToggle = doc.getElementById('chat-search-toggle'); if (searchToggle) searchToggle.hidden = true;
+    const searchToggle = doc.getElementById('chat-search-toggle'); if (searchToggle) searchToggle.hidden = state.status!=='approved';
     if (key === 'chat' && viewKey === key) { renderMessages(state); return; }
     const active = doc.activeElement;
     // Preserve unsent setup choices when a status repaint follows network work.
@@ -704,6 +736,7 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
     if(chatNodes)readingAnchor=position(chatNodes.messages);
     clearSensitiveFields(); root.classList.add('relay-owner-content'); root.replaceChildren(); viewKey = key; chatNodes = null;
     const section = make('section', '', 'relay-owner-panel'); root.append(section);
+    if(key!=='chat'&&state.requestsOnly)section.append(make('p','Work requires private owner access. Sign in or reconnect this phone to view saved tasks.','relay-owner-note'));
     if (key !== 'chat' && state.draft) section.append(make('p', 'Your unsent private draft is kept in this tab. Sign in to review it.', 'relay-owner-notice'));
     if (key === 'chat') {
       section.classList.add('relay-owner-chat');
@@ -713,26 +746,27 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
       const searchInput = make('input'); searchInput.id = 'relay-owner-search'; searchInput.type = 'search'; searchInput.placeholder = 'Search private messages'; searchInput.autocomplete = 'off';searchInput.value=state.query;search.hidden=!state.query; searchInput.oninput = () => controller.setQuery(searchInput.value);const searchClose=action('',()=>ui.toggleSearch(),'icon-button');searchClose.innerHTML=icon('close');searchClose.setAttribute('aria-label','Close search');search.append(searchLabel,searchInput,searchClose); section.append(search);
       workSignature='';workVisible=50;const messages = make('div', '', 'messages'); messages.setAttribute('aria-label', 'Private owner conversation'); messages.setAttribute('aria-live', 'polite'); section.append(messages);
       const form = make('form', '', 'composer'); form.id = 'relay-owner-message-form';
+      const taskHeader=make('div','','owner-task-heading'),back=action('',()=>{const previous=taskFocus;controller.setJobMode(false);(previous?.isConnected?previous:doc.getElementById(controller.requestsOnly?'relay-owner-new-task':'relay-owner-job-toggle')||chatNodes?.input)?.focus({preventScroll:true});},'text-button');back.id='relay-owner-task-back';back.innerHTML=icon('back');back.append(make('span','Back'));back.setAttribute('aria-label','Back to messages');taskHeader.append(back,make('h2','New task'));form.append(taskHeader);
       const fields=make('div','','owner-job-fields');fields.hidden=true;
-      const titleLabel=make('label','Request title');titleLabel.htmlFor='relay-owner-job-title';const title=make('input');title.id='relay-owner-job-title';title.maxLength=120;title.placeholder='A short description';title.autocomplete='off';title.oninput=()=>controller.setJobTitle(title.value);const titleField=make('div');titleField.append(titleLabel,title);
+      const titleLabel=make('label','Request title');titleLabel.htmlFor='relay-owner-job-title';const title=make('input');title.id='relay-owner-job-title';title.maxLength=120;title.placeholder='What would you like to do?';title.autocomplete='off';title.oninput=()=>{controller.setJobTitle(title.value);updateComposerSend();};const titleField=make('div');titleField.append(titleLabel,title);
       const kindLabel=make('label','Requested scope');kindLabel.htmlFor='relay-owner-job-kind';const kind=make('select');kind.id='relay-owner-job-kind';for(const [value,text] of [['consequential','Needs review'],['read_only','Read-only report'],['draft','Draft only']]){const option=make('option',text);option.value=value;kind.append(option);}kind.onchange=()=>controller.setJobKind(kind.value);const kindField=make('div');kindField.append(kindLabel,kind);const jobNote=make('p');fields.append(titleField,kindField,jobNote);form.append(fields);
       const organization=make('details','','owner-job-organization');organization.append(make('summary','Project and goal (optional)'));
       const labels=make('div','','owner-job-labels');
       const projectLabel=make('label','Project');projectLabel.htmlFor='relay-owner-job-project';const project=make('input');project.id='relay-owner-job-project';project.maxLength=120;project.autocomplete='off';project.oninput=()=>controller.setJobProject(project.value);const projectField=make('div');projectField.append(projectLabel,project);
       const goalLabel=make('label','Goal');goalLabel.htmlFor='relay-owner-job-goal';const goal=make('input');goal.id='relay-owner-job-goal';goal.maxLength=120;goal.autocomplete='off';goal.oninput=()=>controller.setJobGoal(goal.value);const goalField=make('div');goalField.append(goalLabel,goal);labels.append(projectField,goalField);organization.append(labels);fields.append(organization);
-      const label = make('label', 'Message dot privately', 'sr-only'); label.htmlFor = 'relay-owner-message-text';
+      const label = make('label', 'Describe the work', 'sr-only owner-message-label'); label.htmlFor = 'relay-owner-message-text';
       const input = make('textarea'); input.id = 'relay-owner-message-text'; input.rows = 1; input.maxLength = 4000; input.placeholder = 'Message dot privately…'; input.autocomplete = 'off'; input.required = true; input.value = state.draft;
-      input.oninput = () => { controller.setDraft(input.value); autosize(input); };
+      input.oninput = () => { controller.setDraft(input.value); autosize(input);updateComposerSend(); };
       input.onkeydown = event => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.isComposing) { event.preventDefault(); form.requestSubmit(); } };
       const bottom = make('div', '', 'composer-bottom'), status = make('span'); status.setAttribute('role', 'status');
-      const toggle=action('',()=>controller.setJobMode(!controller.snapshot().jobMode),'composer-mode-button');toggle.id='relay-owner-job-toggle';toggle.innerHTML=icon('plus');const toggleLabel=make('span','Work request');toggle.append(toggleLabel);bottom.append(status,toggle);
-      const send = action('', () => {}, 'primary send-icon'); send.type = 'submit'; send.innerHTML = icon('send');const inputRow=make('div','','composer-input');inputRow.append(label,input,send);form.append(inputRow,bottom);
+      const toggle=action('',()=>{const opening=!controller.jobMode;controller.setJobMode(opening);if(opening)chatNodes?.title.focus({preventScroll:true});},'composer-mode-button');toggle.id='relay-owner-job-toggle';toggle.innerHTML=icon('plus');const toggleLabel=make('span','Work request');toggle.append(toggleLabel);bottom.append(status,toggle);
+      const send = action('', () => {}, 'primary send-icon'); send.type = 'submit'; send.innerHTML = icon('send');const sendLabel=make('span');send.append(sendLabel);const inputRow=make('div','','composer-input');inputRow.append(label,input,send);const taskActions=make('div','','owner-task-actions');form.append(inputRow,bottom,taskActions);
       form.onsubmit = event => { event.preventDefault(); controller.setDraft(input.value); controller.send(); };
       section.append(form);
       const error = make('p', '', 'relay-owner-error'); error.setAttribute('role', 'status');
       const warning = make('p', '', 'relay-owner-note owner-storage-warning');
       const retry = action('Retry private sync', () => controller.snapshot().sendUnconfirmed?controller.retryUnconfirmed():controller.refresh(),'text-button'),notice=make('div','','conversation-notice');notice.append(error,retry);section.insertBefore?.(notice,form);if(!section.insertBefore)section.append(notice);section.append(warning);
-      chatNodes = { messages, input, status, send, error, warning, retry,notice,jobToggle:toggle,jobToggleLabel:toggleLabel,jobFields:fields,title,kind,jobNote,project,goal,organization,first:true }; renderMessages(state); autosize(input);
+      chatNodes = { section,messages, input,inputLabel:label,status, send,sendLabel,inputRow,taskHeader,taskBack:back,taskActions,error, warning, retry,notice,jobToggle:toggle,jobToggleLabel:toggleLabel,jobFields:fields,title,kind,jobNote,project,goal,organization,first:true };messageView=false;renderMessages(state); autosize(input);
       return;
     }
     if (state.mode === 'account') {
@@ -825,9 +859,9 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
         else if (controller.mode === 'owner' && controller.hasCredential) controller.refresh();
       }, controller.status === 'pending' || controller.mode === 'pairing' ? 5000 : 30000);
     },
-    unmount() { if(chatNodes)readingAnchor=position(chatNodes.messages);closeInspector();connectionDialog?.close?.();connectionDialog?.remove?.();connectionDialog=null;clearSensitiveFields(); if (viewKey.startsWith('account:') || controller.snapshot().authenticating || controller.snapshot().loginDevices.length) controller.cancelSensitive(); root = null; chatNodes = null; viewKey = ''; clearInterval(timer); },
+    unmount() { if(chatNodes){if(messageView){rememberWork(chatNodes.messages);positions.work=workPosition(chatNodes.messages);}else positions.chat=position(chatNodes.messages);readingAnchor=positions.chat;}closeInspector();connectionDialog?.close?.();connectionDialog?.remove?.();connectionDialog=null;clearSensitiveFields(); if (viewKey.startsWith('account:') || controller.snapshot().authenticating || controller.snapshot().loginDevices.length) controller.cancelSensitive(); root = null; chatNodes = null; viewKey = ''; clearInterval(timer); },
     toggleSearch() { const bar = doc.getElementById('relay-owner-search-bar'); if (!bar) return; bar.hidden = !bar.hidden; if (!bar.hidden) doc.getElementById('relay-owner-search').focus(); else { doc.getElementById('relay-owner-search').value = ''; controller.setQuery(''); } },
-    latest() { if(controller.snapshot().requestsOnly)controller.toggleRequests();else controller.setQuery('');if(chatNodes)chatNodes.messages.scrollTop=chatNodes.messages.scrollHeight; },
+    latest() { if(controller.requestsOnly)controller.setRequestsOnly(false);controller.setQuery('');if(chatNodes)chatNodes.messages.scrollTop=chatNodes.messages.scrollHeight; },
     requests(){controller.toggleRequests();if(chatNodes)chatNodes.messages.scrollTop=0;},
     connection(){
       if(!doc.body)return;connectionDialog?.close?.();const state=controller.snapshot(),dialog=make('dialog','','app-sheet conversation-sheet');connectionDialog=dialog;dialog.setAttribute('aria-label','Private owner connection');const heading=make('div','','dialog-heading'),close=action('',()=>dialog.close(),'icon-button');close.innerHTML=icon('close');close.setAttribute('aria-label','Close connection details');heading.append(make('h2','Private owner connection'),close);dialog.append(heading);

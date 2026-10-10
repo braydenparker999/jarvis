@@ -207,6 +207,7 @@ test('private request UI distinguishes saving, callback receipt, execution, requ
   await drainRelayOutbox(h.ctx, h.fixture.env, receiver);
   await refreshRequest(page);
   assert.match(await jobDialog(page).locator('.request-state').textContent(), /Queued/);
+  await jobDialog(page).locator('#relay-owner-request-properties>summary').click();
   await jobDialog(page).getByText('The callback accepted delivery. This does not confirm execution.', {exact: true}).waitFor();
   assert.equal((await h.rpc(oauth, 'relay_owner_job_read', {inbox_id: RELAY_OWNER_INBOX, job_id: job.id})).job.stage, 'queued');
   const claim = {inbox_id: RELAY_OWNER_INBOX, job_id: job.id, run_id: crypto.randomUUID(), event_id: crypto.randomUUID()};
@@ -288,16 +289,16 @@ test('long private result inspector preserves its reading anchor and expanded hi
   const phone = await open({owner}), {page} = phone;
   await page.goto(RELAY_URL); await ownerInput(page).waitFor(); await inspectRequest(page, message.id);
   const detail = jobDialog(page);
-  const historyTarget = await detail.locator('summary').boundingBox();
+  const historyTarget = await detail.locator('#relay-owner-request-history>summary').boundingBox();
   assert.ok(historyTarget && historyTarget.width >= 48 && historyTarget.height >= 48, 'Expandable request history has a 48px touch target');
-  await detail.locator('summary').click();
+  await detail.locator('#relay-owner-request-history>summary').click();
   await detail.evaluate(dialog => { dialog.scrollTop = dialog.scrollHeight - dialog.clientHeight - 70; });
   const anchor = () => detail.evaluate(dialog => {
     const bounds = dialog.getBoundingClientRect();
     const node = [...dialog.querySelectorAll('.rich-body p,.request-events li')].find(node => {
       const rect = node.getBoundingClientRect(); return rect.height && rect.bottom >= bounds.top + 12;
     });
-    return {text: node?.textContent, offset: node ? node.getBoundingClientRect().top - bounds.top : 0, scroll: dialog.scrollTop, historyOpen: dialog.querySelector('details').open};
+    return {text: node?.textContent, offset: node ? node.getBoundingClientRect().top - bounds.top : 0, scroll: dialog.scrollTop, historyOpen: dialog.querySelector('#relay-owner-request-history').open};
   });
   const before = await anchor(); assert.ok(before.text); assert.equal(before.historyOpen, true);
   const refreshed = page.waitForResponse(response => new URL(response.url()).pathname === '/relay/owner/jobs/detail' && response.request().method() === 'GET');
@@ -610,7 +611,7 @@ test('owner reading anchor, independent drafts and keyboard controls survive ref
     assert.ok((await ownerInput(page).inputValue()).includes('\nSecond line'), 'Enter adds a newline');
     assert.equal(sentMessages(phone).length, 0, 'Plain Enter does not send');
     const geometry = await page.evaluate(() => ({width: innerWidth, documentWidth: document.documentElement.scrollWidth,
-      controls: [...document.querySelectorAll('.topbar button,.topbar a,#relay-owner-message-form button')].filter(node => !node.hidden).map(node => {
+      controls: [...document.querySelectorAll('.topbar button,.topbar a,#relay-owner-message-form button')].filter(node => {const r=node.getBoundingClientRect();return !node.hidden&&r.width&&r.height;}).map(node => {
         const rect = node.getBoundingClientRect(); return {name: node.getAttribute('aria-label'), width: rect.width, height: rect.height};
       })}));
     assert.ok(geometry.documentWidth <= geometry.width + 1, 'No horizontal overflow at supported phone widths');
