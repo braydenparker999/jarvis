@@ -9,7 +9,7 @@
 .library-toolbar{position:sticky;top:calc(64px + env(safe-area-inset-top));z-index:7;background:#101113;margin:0 -20px;padding:10px 20px 0;border-bottom:1px solid #ffffff08}
 .library-tools{display:flex;gap:8px;margin:0 0 10px}
 .library-tools input{flex:1;min-width:0;min-height:44px}.library-tools select{width:auto;max-width:115px;min-height:44px}
-.discovery-filters{display:flex;gap:8px;overflow:auto;padding:0 0 8px;scrollbar-width:none}
+.discovery-filters{display:flex;gap:8px;overflow:auto;padding:5px 5px 8px;margin-inline:-5px;scroll-padding-inline:5px;scrollbar-width:none}
 .discovery-filters button{min-height:44px;white-space:nowrap;font-size:14px;background:#1c1f22;color:#babec2;border:1px solid #ffffff09;padding:8px 14px;border-radius:8px}
 .discovery-filters button[aria-pressed=true]{color:var(--accent);border-color:#efbc7860}
 .status{font-size:13px;line-height:1.6;color:var(--muted);margin:6px 0 18px}.status.error{color:var(--error)}
@@ -22,7 +22,7 @@
 .thumb img{position:relative;z-index:1;width:100%;height:100%;object-fit:cover;display:block}
 .thumb .placeholder{position:absolute;inset:0;display:grid;place-items:center;color:#777f87;font-size:18px}
 .thumb .length{position:absolute;z-index:2;right:6px;bottom:6px;background:#000c;color:#fff;font-size:12px;line-height:18px;padding:1px 5px;border-radius:4px;font-variant-numeric:tabular-nums}
-.thumb .bar{position:absolute;z-index:2;left:0;right:0;bottom:0;height:4px;background:#ffffff2e;border-radius:0 0 10px 10px;overflow:hidden}.thumb .bar span{display:block;height:100%;background:var(--accent)}
+.thumb .bar{position:absolute;z-index:2;left:0;right:0;bottom:0;height:4px;background:#23262b;border-radius:0 0 10px 10px;overflow:hidden}.thumb .bar span{display:block;height:100%;background:var(--accent)}
 .card-text{display:block;padding-right:44px;min-width:0;min-height:76px}
 .video-card strong{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere;font-size:15px;font-weight:500;line-height:21px;margin-top:10px}
 .video-card small{display:block;font-size:12px;line-height:18px;color:var(--muted);margin-top:5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.watched-mark{color:var(--success)}
@@ -89,7 +89,7 @@
 .card-text{min-height:0}.card-details{padding-right:44px;min-height:40px;margin-top:5px}
 .card-creator,.card-status{display:block;font-size:12px;line-height:18px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 a.card-creator:hover,.watch-creator[href]:hover{color:var(--text);text-decoration:underline;text-underline-offset:3px}
-a.card-creator{min-height:24px;line-height:24px}
+a.card-creator{min-height:44px;line-height:44px}
 .video-menu{bottom:0}
 .creator-header{display:flex;align-items:center;gap:18px;padding:26px 0 22px;border-bottom:1px solid var(--line);margin-bottom:18px}
 .creator-monogram{width:48px;height:48px;flex-shrink:0;display:grid;place-items:center;background:var(--raised);color:var(--text);border-radius:50%;font-size:16px;font-weight:550;letter-spacing:-.02em}
@@ -104,16 +104,27 @@ a.card-creator{min-height:24px;line-height:24px}
 .creator-link small{display:block;color:var(--muted);font-size:12px;margin-top:3px}.creator-link>svg{width:18px;flex-shrink:0;color:var(--muted)}
 .creator-link.compact{flex:0 0 160px;border:0;min-height:48px;gap:10px}.creator-link.compact .creator-monogram{width:38px;height:38px;font-size:13px}.creator-link.compact strong{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .creator-directory{display:grid;margin:0 0 24px;gap:0 32px}
-#continue-grid .card-details{margin-left:124px;padding-right:36px;margin-top:-18px;min-height:34px}
+#continue-grid .card-details{margin-left:124px;padding-right:44px;margin-top:0;min-height:44px}
 .next-list .card-details{margin-top:5px}
-.watch-creator{display:block;min-height:32px;line-height:1.5}
+.watch-creator{display:block;min-height:44px;line-height:44px}
 @media(min-width:600px){.creator-directory{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(min-width:900px){.next-list .card-details{margin-left:calc(42% + 12px);margin-top:-34px;min-height:34px}.next-list .card-text{min-height:76px}}
+@media(min-width:900px){.next-list .card-details{margin-left:calc(42% + 12px);margin-top:8px;min-height:44px}.next-list .card-text{min-height:76px}}
 @media(max-width:430px){.library-tools select{max-width:150px;min-height:44px;width:auto}.library-tools{margin-bottom:8px}.discovery-filters{gap:6px}.discovery-filters button{padding-inline:12px}}
 /* Card hierarchy: title leads, creator and status stay orderly and scannable. */
 .video-card strong{font-size:16px;line-height:22px}
 .card-creator{font-size:13px;line-height:19px}
 .card-status{font-size:12px;line-height:18px}
+/* Keep focus rings and focused cards clear of fixed browser controls. */
+.media-page select:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.library-tools{scroll-margin-top:calc(74px + env(safe-area-inset-top))}
+.media-page .video-card,.media-page .video-menu,.media-page a.card-creator,.media-page .creator-link,.media-page .folder-summary{scroll-margin-block:calc(210px + env(safe-area-inset-top)) calc(90px + env(safe-area-inset-bottom))}
+.compact-media-viewport .library-toolbar{position:static}
+.compact-media-viewport .video-card,.compact-media-viewport .video-menu,.compact-media-viewport a.card-creator,.compact-media-viewport .creator-link,.compact-media-viewport .folder-summary{scroll-margin-top:calc(80px + env(safe-area-inset-top))}
+/* Short viewports need scrolling room more than a second fixed control row. */
+@media(max-height:540px){
+ .library-toolbar{position:static}
+ .media-page .video-card,.media-page .video-menu,.media-page a.card-creator,.media-page .creator-link,.media-page .folder-summary{scroll-margin-top:calc(80px + env(safe-area-inset-top))}
+}
 /* Reduced motion: no smooth scrolling or transitions in the library. */
 @media(prefers-reduced-motion:reduce){
  .media-page .video-grid,.media-page .media-rail,.media-page #continue-grid,.media-page .discovery-filters,.media-page .creator-strip-links{scroll-behavior:auto}

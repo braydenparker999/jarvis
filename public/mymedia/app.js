@@ -458,6 +458,15 @@ $('toggle-folders').addEventListener('click', () => {
   updateFolderToggle();
 });
 
+// Mobile keyboards can shrink the visual viewport without resizing CSS layout.
+function updateCompactViewport() {
+  const viewport = window.visualViewport;
+  if (!viewport || viewport.scale === 1) document.body.classList.toggle('compact-media-viewport', (viewport?.height || innerHeight) <= 540);
+}
+updateCompactViewport();
+window.visualViewport?.addEventListener('resize', updateCompactViewport);
+addEventListener('resize', updateCompactViewport);
+
 /* ---- start ------------------------------------------------------------ */
 
 async function start() {

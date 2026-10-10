@@ -20,7 +20,8 @@ test('progressBarMarkup is empty without progress, accessible with it', () => {
   assert.match(bar, /data-progress="62.4"/, 'paintBars still finds its hook');
   // Clamped to the valid range.
   assert.match(progressBarMarkup(140), /aria-valuenow="100"/);
-  assert.match(progressBarMarkup(-5), /aria-valuenow="0"/);
+  assert.match(progressBarMarkup(140), /data-progress="100.0"/);
+  for (const invalid of [-5, NaN, Infinity, -Infinity, '20']) assert.equal(progressBarMarkup(invalid), '');
 });
 
 test('card() renders progress through progressBarMarkup', async () => {
@@ -68,4 +69,16 @@ test('card hierarchy: title leads, creator and status stay ordered', async () =>
   const creatorSize = css.match(/\.card-creator\{[^}]*font-size:(\d+)px/);
   assert.ok(titleSize && creatorSize, 'both sizes are set');
   assert.ok(Number(titleSize[1]) > Number(creatorSize[1]), 'title is larger than creator');
+});
+
+test('focus and compact-height safeguards are scoped to My Media', async () => {
+  const css = await readFile(cssUrl, 'utf8');
+  assert.match(css, /\.media-page select:focus-visible\{outline:2px solid var\(--accent\)/);
+  assert.match(css, /\.discovery-filters\{[^}]*padding:5px 5px 8px/);
+  assert.match(css, /@media\(max-height:540px\)\{\s*\.library-toolbar\{position:static\}/);
+  assert.match(css, /a\.card-creator\{min-height:44px;line-height:44px\}/);
+  assert.match(css, /height:4px;background:#23262b/);
+  assert.match(css, /\.compact-media-viewport \.library-toolbar\{position:static\}/);
+  const app = await readFile(appUrl, 'utf8');
+  assert.match(app, /window\.visualViewport\?\.addEventListener\('resize', updateCompactViewport\)/);
 });
