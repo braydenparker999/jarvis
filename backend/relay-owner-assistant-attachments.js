@@ -21,10 +21,15 @@ function original(ctx,messageId){
 function target(ctx,principal,messageId,deliveryId){
  original(ctx,messageId);
  const existing=rows(ctx,'SELECT * FROM relay_owner_assistant_deliveries WHERE id=?',deliveryId)[0];
- if(existing&&(existing.message_id!==messageId||existing.principal!==RELAY_OWNER||existing.grant_id!==principal.grantId))unavailable();
+ if(existing){
+  if(existing.message_id!==messageId||existing.principal!==RELAY_OWNER||existing.grant_id!==principal.grantId)unavailable();
+  // Accepted provenance wins over a later identity alias admitted by an older
+  // Worker. The commit still checks the exact immutable body and ordered files.
+  return existing;
+ }
  const bound=rows(ctx,'SELECT a.message_id,t.grant_id FROM relay_owner_assistant_attachment_targets t JOIN relay_owner_attachments a ON a.id=t.attachment_id WHERE t.delivery_id=? LIMIT 1',deliveryId)[0];
  if(bound&&(bound.message_id!==messageId||bound.grant_id!==principal.grantId))unavailable();
- if(!existing&&rows(ctx,'SELECT id FROM relay_owner_entries WHERE id=?',deliveryId).length)fail(409,'attachment_delivery_conflict','Delivery ID conflicts with an existing private entry');
+ if(rows(ctx,'SELECT id FROM relay_owner_entries WHERE id=?',deliveryId).length)fail(409,'attachment_delivery_conflict','Delivery ID conflicts with an existing private entry');
  if(rows(ctx,'SELECT id FROM relay_owner_attachments WHERE id=?',deliveryId).length)fail(409,'attachment_delivery_conflict','Delivery ID conflicts with an attachment');
  return existing;
 }

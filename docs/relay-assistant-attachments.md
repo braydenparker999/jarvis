@@ -31,6 +31,8 @@ The local helper scripts/relay-assistant-file-args.mjs validates and packages an
 
 Accepted files remain readable by the existing owner-authenticated download and relay_owner_attachment_read paths. Staging/publishing ownership is bound to the originating live grant; no grant identifier is returned. Keep the original bytes and stable IDs until an uncertain write is reconciled by an identical retry or an authenticated read.
 
+Assistant file/delivery UUID reservations are symmetric with inbound uploads, unknown-file disposal and prospective user-message IDs. New writes cannot reuse a reserved identity; the same checks run before validation and at final admission to close asynchronous races. Identical already accepted deliveries reconcile from their stored provenance/body/ordered files before checking for a later alias admitted by an older Worker. Already accepted inbound byte identities also retain their exact retry behavior. This does not rename, delete or replace either accepted record.
+
 ## Frontend contract
 
 GET /relay/owner/conversation?message_id=<original UUID> adds:
@@ -59,6 +61,8 @@ No frontend implementation, live upload, deployment, credential/scope change, ne
 
 ## Synthetic qualification evidence
 
-The focused inbound/outbound attachment suite passes 76 checks without skips. Tests cover lost stage/commit responses and identical retries; ordered file linkage; cross-message/delivery/grant isolation and actual public/reply/foreign-owner rows; cancellation during hashing and permanent identity tombstones; quota races and admission before body/codec work; revocation; active execution ownership; atomic reply/event/link rollback; preservation of accepted text replies, result versions and completed execution attestations; later deliveries before an accepted reply; identity collision protection; and pagination at the 32-delivery limit.
+The focused inbound/outbound attachment suite passes 83 checks without skips. Tests cover lost stage/commit responses and identical retries; ordered file linkage; cross-message/delivery/grant isolation and actual public/reply/foreign-owner rows; cancellation during hashing and permanent identity tombstones; quota races and admission before body/codec work; revocation; active execution ownership; atomic reply/event/link rollback; preservation of accepted text replies, result versions and completed execution attestations; later deliveries before an accepted reply; identity collision protection; and pagination at the 32-delivery limit.
+
+Seven review regressions cover accepted-reply and later-delivery UUID reuse by inbound uploads; reconciliation with a preexisting legacy alias; pending/accepted UUID reuse by new messages and staging; no-op inbound cancellation against reservations; reverse inbound reservation protection; both completion orders of held upload hashes; and user-message admission during a file hash. Six failed on the prior candidate, and all seven pass after the symmetric guard/reconciliation fix. These are local synthetic state/race tests; they do not upload owner data.
 
 The local workerd test uses actual public /relay/mcp requests, OAuth token validation, production Worker/Hub routes and SQLite. It stages a genuine image, commits a file-only first reply, appends a genuine PDF and maximum 1 MiB UTF-8 file, retries commits, checks native read results and exact authenticated download bytes/hash, rejects wrong-original and unauthorized downloads, verifies session revocation and records zero outbound egress. This is local native transport/runtime evidence, not a claim of live ChatGPT host delivery or production TLS/CORS qualification.

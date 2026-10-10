@@ -38,6 +38,18 @@ export function relayAttachmentAdmit(ctx,now,phase='codec'){
  for(const bucket of [day,minute])rows(ctx,'INSERT INTO relay_owner_attachment_attempts VALUES(?,1) ON CONFLICT(bucket) DO UPDATE SET attempts=attempts+1',bucket);
  cleanup(ctx,now);
 }
+function assistantReserved(ctx,id,includeFile=false){
+ return rows(ctx,'SELECT id FROM relay_owner_assistant_deliveries WHERE id=? UNION ALL SELECT delivery_id FROM relay_owner_assistant_attachment_targets WHERE delivery_id=?'+(includeFile?' UNION ALL SELECT attachment_id FROM relay_owner_assistant_attachment_targets WHERE attachment_id=?':'')+' LIMIT 1',id,id,...(includeFile?[id]:[])).length>0;
+}
+// New inbound identities cannot consume assistant reservations. Existing
+// accepted inbound identities still reconcile before applying this new rule.
+export function relayAttachmentInboundMessageCheck(ctx,messageId){
+ if(assistantReserved(ctx,messageId,true))fail(409,'attachment_id_conflict','Message ID conflicts with an assistant file or delivery');
+}
+function inboundAttachmentIdentity(ctx,messageId,attachmentId){
+ relayAttachmentInboundMessageCheck(ctx,messageId);
+ if(assistantReserved(ctx,attachmentId))fail(409,'attachment_id_conflict','Attachment ID conflicts with an assistant delivery');
+}
 export function relayAttachmentPrecheck(ctx,session,body,now){
  ids(body.message_id,body.id);
  const prior=rows(ctx,'SELECT id,message_id,principal,device_id,name,mime_type,size_bytes,state,expires_ms FROM relay_owner_attachments WHERE id=?',body.id)[0];
@@ -47,6 +59,7 @@ export function relayAttachmentPrecheck(ctx,session,body,now){
   if(!['staged','linked'].includes(prior.state)||prior.state==='staged'&&prior.expires_ms<=now)fail(410,'attachment_expired','Attachment draft has expired or been discarded');
   return;
  }
+ inboundAttachmentIdentity(ctx,body.message_id,body.id);
  if(rows(ctx,'SELECT id FROM relay_owner_entries WHERE id=?',body.message_id).length)fail(409,'attachment_message_conflict','Attachments cannot be added to an existing message');
  const usage=rows(ctx,"SELECT COUNT(*) AS records,COALESCE(SUM(CASE WHEN state='staged' AND expires_ms>? THEN 1 ELSE 0 END),0) AS staged,COALESCE(SUM(CASE WHEN state='linked' OR state='staged' AND expires_ms>? THEN size_bytes ELSE 0 END),0) AS bytes FROM relay_owner_attachments WHERE principal=?",now,now,RELAY_OWNER)[0];
  const count=rows(ctx,"SELECT COUNT(*) AS n FROM relay_owner_attachments WHERE message_id=? AND principal=? AND state='staged' AND expires_ms>?",body.message_id,RELAY_OWNER,now)[0].n;
@@ -187,6 +200,7 @@ export function relayAttachmentUpload(ctx,session,body,prepared,now){
   if(!['staged','linked'].includes(previous.state))fail(410,'attachment_expired','Attachment draft has expired or been discarded');
   return {attachment:metadata(previous),newWrite:false,visibility:'private'};
  }
+ inboundAttachmentIdentity(ctx,body.message_id,body.id);
  if(rows(ctx,'SELECT id FROM relay_owner_entries WHERE id=?',body.message_id).length)fail(409,'attachment_message_conflict','Attachments cannot be added to an existing message');
  const usage=rows(ctx,"SELECT COUNT(*) AS records,COALESCE(SUM(CASE WHEN state='staged' THEN 1 ELSE 0 END),0) AS staged,COALESCE(SUM(CASE WHEN state IN ('staged','linked') THEN size_bytes ELSE 0 END),0) AS bytes FROM relay_owner_attachments WHERE principal=?",RELAY_OWNER)[0];
  const messageCount=rows(ctx,"SELECT COUNT(*) AS n FROM relay_owner_attachments WHERE message_id=? AND principal=? AND state='staged'",body.message_id,RELAY_OWNER)[0].n;
@@ -216,6 +230,10 @@ export function relayAttachmentLink(ctx,messageId,list){list.forEach((id,i)=>row
 export function relayAttachmentDiscard(ctx,session,body,now){
  ids(body.message_id,body.attachment_id);cleanup(ctx,now);const r=rows(ctx,'SELECT id,message_id,principal,device_id,state FROM relay_owner_attachments WHERE id=?',body.attachment_id)[0];
  if(!r){
+  // An unknown inbound cancellation must not create an attachment tombstone
+  // under a staged/accepted assistant delivery UUID or use an assistant file
+  // UUID as a prospective original message. Keep the same generic no-op shape.
+  if(assistantReserved(ctx,body.attachment_id)||assistantReserved(ctx,body.message_id,true))return {discarded:true,newWrite:false,visibility:'private'};
   // Cancel can reach this object while a POST is still validating its bytes.
   // Reserve that chosen UUID so a delayed POST cannot resurrect the file.
   // The identity cap includes these bounded cancellation tombstones; once

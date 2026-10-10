@@ -6,7 +6,7 @@ import {relayOwnerDelivery,recoverRelayOwnerDelivery,relayOwnerSubscriptionStatu
 import {FRONTEND_ORIGINS} from './origins.js';
 import {relayOwnerPasswordSchema, relayOwnerPasswordStore} from './relay-owner-password.js';
 import {relayOwnerJobSchema, relayOwnerJobEnsure, relayOwnerJobSpecification, relayOwnerJobSpecify, relayOwnerJobRead, relayOwnerJobsList, relayOwnerJobsChanges, relayOwnerJobCancel, relayOwnerJobRetryPrepare, relayOwnerJobRetryLink, relayOwnerJobReplyCheck, relayOwnerJobReplySaved, relayOwnerJobValidateRpc, relayOwnerJobRpc} from './relay-owner-jobs.js';
-import {ATTACHMENT_BODY_LIMIT, relayAttachmentSchema, relayAttachmentMetadata, relayAttachmentAdmit, relayAttachmentPrecheck, relayAttachmentPrepare, relayAttachmentUpload, relayAttachmentCheckMessage, relayAttachmentLink, relayAttachmentDiscard, relayAttachmentRead, relayAttachmentVerify, relayAttachmentDownload} from './relay-owner-attachments.js';
+import {ATTACHMENT_BODY_LIMIT, relayAttachmentSchema, relayAttachmentMetadata, relayAttachmentAdmit, relayAttachmentPrecheck, relayAttachmentPrepare, relayAttachmentUpload, relayAttachmentCheckMessage, relayAttachmentLink, relayAttachmentDiscard, relayAttachmentRead, relayAttachmentVerify, relayAttachmentDownload,relayAttachmentInboundMessageCheck} from './relay-owner-attachments.js';
 import {relayAssistantAttachmentPrecheck,relayAssistantAttachmentUpload,relayAssistantAttachmentDiscard,relayAssistantAttachmentMetadata,relayAssistantDeliveryList,relayAssistantDeliveryPrepare,relayAssistantDeliverySave} from './relay-owner-assistant-attachments.js';
 
 export {RELAY_OWNER_SCOPE, RELAY_OWNER_INBOX};
@@ -145,6 +145,7 @@ function deliveryStatus(ctx, env, ids, now) {
 function insertMessage(ctx, session, body, enqueue, now,env, specification) {
   if (!uuid(body.id)) fail(400, 'Invalid message ID');
   const previous = rows(ctx, 'SELECT * FROM relay_owner_entries WHERE id=?', body.id)[0];
+  if(!previous)relayAttachmentInboundMessageCheck(ctx,body.id);
   const attachmentIds = relayAttachmentCheckMessage(ctx, session, body.id, body.attachment_ids, now, previous);
   if (typeof body.body !== 'string' || body.body.length > 4000 || !body.body.trim() && !attachmentIds.length) fail(400, 'Invalid message body');
   const content = body.body.trim();
