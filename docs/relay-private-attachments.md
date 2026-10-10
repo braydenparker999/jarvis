@@ -108,4 +108,3 @@ Use synthetic local PNG/JPEG/WebP, UTF-8 and PDF fixtures only.
 Verify missing/expired/revoked authentication; foreign/public/reply/missing original-message targets; wrong device, message or owner attachment linkage; unsupported MIME, spoofed signatures, malformed base64, oversized bodies, image dimensions and unsafe filenames; quota and expiration; immutable/idempotent upload/message/discard behavior; orphan cleanup; atomic rollback if message/event/job admission fails; metadata-only listings; private download headers and exact bytes/hash; denied executable inline rendering; native connector image/text/PDF result shape and unchanged OAuth scope; preservation of accepted replies, jobs, cancellation, completion and public inbox behavior.
 
 No production private-file test upload, owner-data artifact, credential/grant change, new persistent access, live job mutation, new timer or schedule is authorized by this draft.
-
