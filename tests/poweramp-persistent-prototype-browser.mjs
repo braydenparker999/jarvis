@@ -26,19 +26,20 @@ async function open(browser,built,theme){
   // Observe native navigation input before the app installs capture guards.
   // Retain no text, and never alter, replay, or await the observed events.
   await context.addInitScript(()=>{
-    const events=[];
+    const events=[];let sequence=0;
     const record=(type,phase,event)=>{
       const lifecycle=window.fixtureLifecycle,scene=window.fixtureScene,nav=document.querySelector('[data-nav="library"]');
       const replacement=lifecycle?.replacementClicks?.get(event?.pointerId);
-      events.push({type,phase,at:performance.now(),timeStamp:event?.timeStamp,pointerId:event?.pointerId,pointerType:event?.pointerType,
+      events.push({sequence:++sequence,type,phase,at:performance.now(),timeStamp:event?.timeStamp,pointerId:event?.pointerId,pointerType:event?.pointerType,
+        cancelable:event?.cancelable,touches:[...(event?.touches||[])].map(t=>({id:t.identifier,x:t.clientX,y:t.clientY})),changedTouches:[...(event?.changedTouches||[])].map(t=>({id:t.identifier,x:t.clientX,y:t.clientY})),
         trusted:event?.isTrusted,target:event?.target?.id||event?.target?.tagName,nav:event?.target?.closest?.('[data-nav]')?.dataset.nav,
         x:event?.clientX,y:event?.clientY,screen:window.PA?.Nav.cur,focused:document.hasFocus(),
         visibility:document.visibilityState,handler:typeof nav?.onclick,version:lifecycle?.version,contacts:lifecycle?[...lifecycle.contacts]:[],
         scenePhase:scene?.phase,sceneActive:!!(scene?.state||scene?.settling),replacement:replacement?{at:replacement.at,connected:replacement.node.isConnected}:null,event});
       if(events.length>80)events.shift();
     };
-    window.fixtureNavigationTrace={record,capture:()=>events.map(({event,...entry})=>({...entry,defaultPrevented:event?.defaultPrevented}))};
-    for(const type of ['pointerdown','pointerup','pointercancel','click'])for(const capture of [true,false]){
+    window.fixtureNavigationTrace={record,get sequence(){return sequence;},capture:()=>events.map(({event,...entry})=>({...entry,defaultPrevented:event?.defaultPrevented}))};
+    for(const type of ['pointerdown','pointerup','pointercancel','touchstart','touchend','touchcancel','click'])for(const capture of [true,false]){
       document.addEventListener(type,event=>record(type,capture?'capture':'bubble',event),{capture,passive:true});
     }
     for(const type of ['focus','blur','resize'])window.addEventListener(type,event=>record(type,'window',event),{passive:true});
@@ -53,7 +54,26 @@ async function open(browser,built,theme){
   const frame=()=>page.evaluate(()=>new Promise(done=>requestAnimationFrame(done)));
   const settled=async screen=>{try{await page.waitForFunction(screen=>PA.Nav.cur===screen&&!fixtureScene.state&&!fixtureScene.settling&&!PA.LibraryPageMotion.state&&!PA.LibraryPageMotion.finish&&!fixtureLifecycle.gesture&&!document.querySelector('.player-scene-input'),screen);await page.waitForFunction(screen=>{const root=document.querySelector('#sc-'+screen),mini=document.querySelector('#mini');return Number(getComputedStyle(root).opacity)>.9999&&(screen==='player'||Number(getComputedStyle(mini).opacity)>.9999);},screen);await frame();}catch(error){const state=await page.evaluate(expected=>{const rect=n=>{if(!n)return null;const r=n.getBoundingClientRect(),s=getComputedStyle(n);return {hidden:n.hidden,inert:n.inert,opacity:s.opacity,visibility:s.visibility,pointerEvents:s.pointerEvents,rect:{left:r.left,top:r.top,width:r.width,height:r.height}};};const scene=s=>s?{from:s.fromName,target:s.target,progress:s.progress,shared:s.morph?.p,commit:s.commit}:null;return {expected,current:PA.Nav.cur,phase:fixtureScene.phase,state:scene(fixtureScene.state),settling:scene(fixtureScene.settling),gesture:fixtureLifecycle.gesture?{phase:fixtureLifecycle.gesture.phase,node:fixtureLifecycle.gesture.node?.id}:null,contacts:[...fixtureLifecycle.contacts],root:rect(document.querySelector('#sc-'+expected)),mini:rect(document.querySelector('#mini')),nav:rect(document.querySelector('[data-nav="library"]')),plane:!!document.querySelector('.player-scene-input'),historyState:!!PA.LibraryPageMotion.state,historyFinish:!!PA.LibraryPageMotion.finish,visibility:document.visibilityState,focused:document.hasFocus(),inputTrace:fixtureNavigationTrace.capture()};},screen);console.error('POWERAMP_PROTO_SETTLE_FAILURE '+JSON.stringify({source:built.sourceHash,theme,state}));await save('persistent-'+theme+'-'+(built.output.endsWith('v7.html')?'v7':'live')+'-settle-failure.json',state);throw error;}};
   const center=selector=>page.locator(selector).evaluate(n=>{const r=n.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2};});
-  const library=async()=>{await page.locator('[data-nav="library"]').tap();await settled('library');await page.getByRole('button',{name:'All Songs',exact:true}).tap();await settled('list');};
+  const library=async()=>{
+    const selector='[data-nav="library"]',nav=page.locator(selector);
+    // Retain locator actionability, then send one acknowledged touch contact.
+    // Navigation must still be performed by a real browser-generated click.
+    await nav.tap({trial:true});
+    const point=await center(selector);
+    assert.equal(await nav.evaluate((node,p)=>node.contains(document.elementFromPoint(p.x,p.y)),point),true,'Library center receives the setup contact');
+    const before=await page.evaluate(()=>fixtureNavigationTrace.sequence);
+    await start(point.x,point.y);await frame();await end();
+    await settled('library');
+    const input=await page.evaluate(before=>fixtureNavigationTrace.capture().filter(event=>event.sequence>before&&event.phase==='capture'),before);
+    assert.equal(input.filter(event=>event.type==='pointercancel'||event.type==='touchcancel').length,0,'Library setup contact is not cancelled');
+    const one=type=>{const found=input.filter(event=>event.type===type);assert.equal(found.length,1,'one '+type+' for Library setup');assert.equal(found[0].trusted,true,type+' is trusted');assert.equal(found[0].nav,'library',type+' targets Library');return found[0];};
+    const down=one('pointerdown'),up=one('pointerup'),click=one('click');
+    one('touchstart');one('touchend');
+    assert.equal(down.pointerType,'touch');assert.equal(up.pointerType,'touch');assert.equal(click.pointerType,'touch');
+    assert.equal(up.pointerId,down.pointerId);assert.equal(click.pointerId,down.pointerId);
+    assert.equal(click.defaultPrevented,false,'Library click reaches the native navigation handler');
+    await page.getByRole('button',{name:'All Songs',exact:true}).tap();await settled('list');
+  };
   await page.evaluate(()=>{
     const probe=window.fixtureProbe={operations:[],active:0,clones:0,deepClones:0,styleEnumerations:0,propertyReads:0,cssRulesReads:0,creates:0};
     const clone=Node.prototype.cloneNode;Node.prototype.cloneNode=function(deep){if(probe.active){probe.clones++;if(deep)probe.deepClones++;}return clone.call(this,deep);};

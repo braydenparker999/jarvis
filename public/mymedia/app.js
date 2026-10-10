@@ -5,7 +5,7 @@ import {createVideoApi, folderId, mediaURL, thumbnails, parseLibrary, parseProgr
   continueWatching, searchVideos, groupByFolder, formatDuration, srtToVtt,
   PROGRESS_KEY, LIBRARY_KEY} from './library.js';
 import {play} from './player.js';
-import {knownCreators, creatorGroups, videoPresentation, sortDisplayedVideos, browseCountText} from './presentation.js';
+import {knownCreators, creatorGroups, videoPresentation, sortDisplayedVideos, browseCountText, progressBarMarkup} from './presentation.js';
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
@@ -57,7 +57,7 @@ function card(video) {
     `<span class="placeholder" aria-hidden="true">▶</span>` +
     (images.length ? `<img alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" src="${esc(images[0])}" data-fallbacks="${esc(JSON.stringify(images.slice(1)))}">` : '') +
     (duration ? `<span class="length">${formatDuration(duration)}</span>` : '') +
-    (percent ? `<span class="bar"><span data-progress="${percent.toFixed(1)}"></span></span>` : '') +
+    progressBarMarkup(percent) +
     `</div><span class="card-text"><strong>${esc(display.title)}</strong></span></a><div class="card-details">${creator ? display.creator ? `<a class="card-creator" href="#creator=${encodeURIComponent(display.creator)}">${esc(creator)}</a>` : `<span class="card-creator">${esc(creator)}</span>` : ''}${detail ? `<small class="card-status">${detail}</small>` : ''}</div><button class="video-menu" type="button" data-video-menu="${esc(video.id)}" aria-label="Actions for ${esc(video.title)}">${icon('more')}</button></article>`;
 }
 
@@ -457,6 +457,15 @@ $('toggle-folders').addEventListener('click', () => {
   saveOpenFolders();
   updateFolderToggle();
 });
+
+// Mobile keyboards can shrink the visual viewport without resizing CSS layout.
+function updateCompactViewport() {
+  const viewport = window.visualViewport;
+  if (!viewport || viewport.scale === 1) document.body.classList.toggle('compact-media-viewport', (viewport?.height || innerHeight) <= 540);
+}
+updateCompactViewport();
+window.visualViewport?.addEventListener('resize', updateCompactViewport);
+addEventListener('resize', updateCompactViewport);
 
 /* ---- start ------------------------------------------------------------ */
 
