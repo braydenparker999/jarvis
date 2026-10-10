@@ -1,4 +1,3 @@
-import test from 'node:test';
 import assert from 'node:assert/strict';
 import {existsSync} from 'node:fs';
 import {readFile,writeFile,mkdir,mkdtemp,rm} from 'node:fs/promises';
@@ -8,12 +7,16 @@ import {resolve,join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {buildPreview} from '../scripts/build-poweramp-preview.mjs';
 import {chromium} from 'playwright-core';
-import {compareScreenshotPNG} from './helpers/poweramp-png.js';
+import {compareScreenshotPNG} from '../tests/helpers/poweramp-png.js';
+// Diagnostic-only: isolated offline preview, real Chromium touch input.
+const stationary=process.argv.includes('--stationary');
+const iterations=Number(process.env.POWERAMP_INPUT_ITERATIONS||20);
+assert.ok(Number.isInteger(iterations)&&iterations>=1&&iterations<=50);
 const profile={viewport:{width:519,height:988},deviceScaleFactor:2.0818214416503906,isMobile:true,hasTouch:true};
 const executablePath=[process.env.JARVIS_CHROME,'/usr/bin/chromium','/usr/bin/google-chrome',chromium.executablePath()].find(p=>p&&existsSync(p));
 const names=['index.html','audio-analysis.js','audio-core.js','player.js'];
 const baselineRef=process.env.POWERAMP_BASELINE_REF||'HEAD';
-const evidenceDir=resolve(process.env.POWERAMP_EVIDENCE_DIR||'/tmp/poweramp-persistent-evidence');
+const evidenceDir=resolve(process.env.POWERAMP_EVIDENCE_DIR||'/tmp/poweramp-input-'+(stationary?'stationary':'fast'));
 async function save(name,value){await mkdir(evidenceDir,{recursive:true});await writeFile(join(evidenceDir,name),Buffer.isBuffer(value)?value:JSON.stringify(value,null,2)+'\n');}
 async function build(directory,baseline){
   const inputs=baseline?names.map(name=>execFileSync('git',['show',baselineRef+':public/drawercast/'+name],{encoding:'utf8',maxBuffer:4_000_000})):await Promise.all(names.map(name=>readFile(new URL('../public/drawercast/'+name,import.meta.url),'utf8')));
@@ -36,10 +39,10 @@ async function open(browser,built,theme){
         x:event?.clientX,y:event?.clientY,screen:window.PA?.Nav.cur,focused:document.hasFocus(),
         visibility:document.visibilityState,handler:typeof nav?.onclick,version:lifecycle?.version,contacts:lifecycle?[...lifecycle.contacts]:[],
         scenePhase:scene?.phase,sceneActive:!!(scene?.state||scene?.settling),replacement:replacement?{at:replacement.at,connected:replacement.node.isConnected}:null,event});
-      if(events.length>80)events.shift();
+      if(events.length>4000)events.shift();
     };
     window.fixtureNavigationTrace={record,get sequence(){return sequence;},capture:()=>events.map(({event,...entry})=>({...entry,defaultPrevented:event?.defaultPrevented}))};
-    for(const type of ['pointerdown','pointermove','pointerup','pointercancel','touchstart','touchend','touchcancel','click'])for(const capture of [true,false]){
+    for(const type of ['pointerdown','pointermove','pointerup','pointercancel','gotpointercapture','lostpointercapture','touchstart','touchmove','touchend','touchcancel','click','mousedown','mouseup','scroll'])for(const capture of [true,false]){
       document.addEventListener(type,event=>record(type,capture?'capture':'bubble',event),{capture,passive:true});
     }
     for(const type of ['focus','blur','resize'])window.addEventListener(type,event=>record(type,'window',event),{passive:true});
@@ -95,37 +98,10 @@ async function timings(h,results=[]){
   for(const label of ['first-tap','repeat-tap','repeat-playing']){
     if(label==='repeat-playing')await h.page.evaluate(()=>PA.Engine.play());
     const point=await h.center('#mini-title');results.push(await measure(h,label,async()=>{await h.start(point.x,point.y);await h.end();await h.settled('player');}));
-    const art=await h.center('#artA');results.push(await measure(h,label+'-collapse',async()=>{
-      await h.start(art.x,art.y);await h.move(art.x,art.y+169);await h.frame();
-      // Model a drag released at rest. Chrome's emulated-touch fling can outlive
-      // a touch-action:none scene and consume the next navigation tap, even
-      // though its scroll updates are discarded. Its velocity tracker clears
-      // movement after an 80ms stationary contact before UP (Chrome 154).
-      // This is inside the original contact, not a tap retry or settle delay.
-      await h.page.waitForTimeout(100);await h.end();
-      const release=await h.page.evaluate(()=>{
-        const events=fixtureNavigationTrace.capture().filter(e=>e.phase==='capture'),up=events.findLast(e=>e.type==='pointerup');
-        const move=events.findLast(e=>e.type==='pointermove'&&e.pointerId===up?.pointerId);
-        return {stationaryMs:up?.timeStamp-move?.timeStamp};
-      });
-      assert.ok(release.stationaryMs>=80,'native pointer samples establish a stationary release: '+JSON.stringify(release));
-      await h.settled('list');
-    }));await visible(h);
+    const art=await h.center('#artA');results.push(await measure(h,label+'-collapse',async()=>{await h.start(art.x,art.y);await h.move(art.x,art.y+169);await h.frame();if(stationary)await h.page.waitForTimeout(100);await h.end();await h.settled('list');}));await visible(h);
   }
   await h.page.evaluate(()=>{PA.Engine.pause();PA.Engine.seek(42);PA.UI.renderProgress();});
   return results;
-}
-async function hold(h,p){await h.library();const origin=await h.center('#mini-title'),height=await h.page.locator('#sc-list').evaluate(n=>n.clientHeight);await h.start(origin.x,origin.y);await h.move(origin.x,origin.y-16);await h.frame();await h.move(origin.x,origin.y-height*p);await h.frame();return {origin,height};}
-async function snapshot(h,label){
-  const state=await h.page.evaluate(()=>{const m=(fixtureScene.state||fixtureScene.settling)?.morph;if(!m)throw Error('No shared morph');const rect=n=>{const r=n.getBoundingClientRect();return {left:r.left,top:r.top,width:r.width,height:r.height};};const geometry=m.captureMode?{}:{};
-    for(const key of ['art','title','sub','play','seek']){if(m.mask){geometry[key+'-mini']=rect(m.pairs[key].mini);}else if(key==='art'){geometry['art-mini']=rect(m.art);}else geometry[key+'-mini']=rect(m.pairs[key].mini);}
-    geometry.surface=rect(m.mask||m.surface);const ownership=m.mask?{singleOwner:Object.fromEntries(Object.entries(m.pairs).map(([key,nodes])=>[key,{mini:getComputedStyle(nodes.mini).opacity,full:getComputedStyle(key==='art'?m.A:nodes.full).opacity}])),sceneLayers:document.querySelectorAll('#player-live-mask[data-active],#player-live-backdrop-mask[data-active]').length}:null;return {p:m.p,endpoints:m.endpoints,geometry,ownership,track:PA.Engine.current.id,time:PA.Engine.time()};});
-  const png=await h.page.screenshot({fullPage:false,animations:'allow',scale:'device'});await save('persistent-'+h.slug+'-'+label+'.png',png);await save('persistent-'+h.slug+'-'+label+'.json',state);return {label,state,png};
-}
-async function shots(h){
-  const results=[],{origin,height}=await hold(h,.25);for(const p of [.25,.5,.75]){if(p!==.25){await h.move(origin.x,origin.y-height*p);await h.frame();}results.push(await snapshot(h,'held-'+p));}
-  await h.end();await h.settled('player');await h.library();const contact=await hold(h,.25);const ending=h.end(),grabbing=h.start(3,500);await Promise.all([ending,grabbing]);
-  const frozen=await h.page.evaluate(()=>(fixtureScene.state||fixtureScene.settling).morph.p);await h.move(3,500-(.5-frozen)*contact.height);await h.frame();results.push(await snapshot(h,'regrab-0.5'));const after=await snapshot(h,'regrab-held');await h.page.waitForTimeout(120);const later=await snapshot(h,'regrab-later');for(const key of ['left','top','width','height'])assert.ok(Math.abs(after.state.geometry['art-mini'][key]-later.state.geometry['art-mini'][key])<.05,'frozen regrab '+key);const expected=await h.page.evaluate(delta=>{const scene=fixtureScene.state||fixtureScene.settling,deliberate=Math.abs(delta)>Math.max(44,Math.min(scene.height,300)*.2),commit=deliberate?scene.direction*delta>0:scene.commit;return commit?scene.target:scene.fromName;},-(.5-frozen)*contact.height);await h.end();await h.settled(expected);return results;
 }
 async function canonical(h,screen){
   if(screen==='list')await h.library();else{await h.library();await h.page.locator('#mini-title').tap();await h.settled('player');}
@@ -134,27 +110,24 @@ async function canonical(h,screen){
   assert.equal(state.screen,screen);assert.equal(state.hidden,false);assert.equal(state.inert,false);assert.equal(state.opacity,'1');assert.equal(state.visibility,'visible');assert.equal(state.activeMask,false);assert.equal(state.activeInput,false);assert.equal(state.time,42);if(screen==='player')assert.equal(state.label,'0:42');
   return {state,png:await h.page.screenshot({fullPage:false,animations:'allow',scale:'device'})};
 }
-test('persistent single shared owner: exact endpoints, 4x CPU input budget, visibility and tracked regrab',{timeout:240000},async t=>{
-  assert.ok(executablePath,'Chrome is mandatory');const directory=await mkdtemp(join(tmpdir(),'persistent-prototype-'));let browser;
-  const failures=[];const report={profile,cpuThrottling:4,baselineRef,thresholds:{setupMaxMs:33,deepClones:0,styleEnumerations:0,cssRulesReads:0,geometryTolerance:.05,pixelChangedFraction:.0005,pixelMeanDelta:.05},results:[]};
-  try{
-    const baseline=await build(directory,true),candidate=await build(directory,false);report.sources={baseline:baseline.sourceHash,candidate:candidate.sourceHash};browser=await chromium.launch({executablePath,headless:true,args:['--no-sandbox']});
-    for(const theme of ['dark','light']){
-      const a=await open(browser,baseline,theme),b=await open(browser,candidate,theme);const group={theme};report.results.push(group);
-      try{group.baselineTimings=[];await timings(a,group.baselineTimings);group.candidateTimings=[];await timings(b,group.candidateTimings);t.diagnostic('POWERAMP_PERSISTENT_TIMINGS '+JSON.stringify({theme,sources:report.sources,baseline:group.baselineTimings,candidate:group.candidateTimings}));await save('persistent-prototype-report.json',report);
-        group.endpoints=[];for(const screen of ['list','player']){const old=await canonical(a,screen),next=await canonical(b,screen),pixels=compareScreenshotPNG(old.png,next.png);group.endpoints.push({screen,baseline:old.state,candidate:next.state,pixels});await save('persistent-'+theme+'-endpoint-'+screen+'-v7.png',old.png);await save('persistent-'+theme+'-endpoint-'+screen+'-live.png',next.png);if(pixels.changedFraction>report.thresholds.pixelChangedFraction)failures.push(theme+' endpoint '+screen+' changed fraction '+pixels.changedFraction);if(pixels.meanChannelDelta>report.thresholds.pixelMeanDelta)failures.push(theme+' endpoint '+screen+' mean delta '+pixels.meanChannelDelta);}await save('persistent-prototype-report.json',report);
-        await a.page.evaluate(()=>{fixtureProbe.operations=[];});await b.page.evaluate(()=>{fixtureProbe.operations=[];});const oldShots=await shots(a),newShots=await shots(b);group.heldRegrab={baseline:await a.page.evaluate(()=>fixtureProbe.operations),candidate:await b.page.evaluate(()=>fixtureProbe.operations)};group.pairs=[];
-        for(let i=0;i<oldShots.length;i++){const old=oldShots[i],next=newShots[i],pixels=compareScreenshotPNG(old.png,next.png);const pair={label:old.label,baseline:old.state,candidate:next.state,pixels};group.pairs.push(pair);await save('persistent-'+theme+'-'+old.label+'-v7.png',old.png);await save('persistent-'+theme+'-'+old.label+'-live.png',next.png);await save('persistent-prototype-report.json',report);
-          for(const key of Object.keys(old.state.geometry))for(const property of ['left','top','width','height'])if(Math.abs(old.state.geometry[key][property]-next.state.geometry[key][property])>.05)failures.push(theme+' '+old.label+' '+key+'.'+property+': '+old.state.geometry[key][property]+' vs '+next.state.geometry[key][property]);
-          pair.comparison='Known intentional removal of v7 duplicate shared labels/icons and ghost controls. Endpoint pixels remain gated.';for(const [key,owner] of Object.entries(next.state.ownership.singleOwner)){assert.equal(owner.full,'0',key+' original full widget must not duplicate the shared owner');assert.equal(owner.mini,key==='seek'?String(1-next.state.p):'1',key+' one visible shared owner');}assert.equal(next.state.ownership.sceneLayers,2);
-        }
-        const setup=group.candidateTimings.flatMap(r=>r.operations).filter(r=>r.operation==='create');assert.equal(setup.length,6);for(const value of [...setup,...group.heldRegrab.candidate.filter(r=>r.operation==='create')]){assert.equal(value.deepClones,0);assert.equal(value.styleEnumerations,0);assert.equal(value.cssRulesReads,0);assert.ok(value.ms<=33,'absolute 4x setup budget: '+JSON.stringify(value));}
-        assert.deepEqual(a.errors,[]);assert.deepEqual(b.errors,[]);
-      }catch(error){group.error=String(error);await save('persistent-prototype-report.json',report);await save('persistent-'+theme+'-failure.png',await b.page.screenshot());throw error;}finally{
-        for(const h of [a,b])try{await save('persistent-'+h.slug+'-navigation.json',await h.page.evaluate(()=>fixtureNavigationTrace.capture()));}catch(error){console.error('POWERAMP_PROTO_TRACE_UNAVAILABLE '+h.slug+' '+String(error));}
-        await a.context.close();await b.context.close();
-      }
-    }
-    report.failures=failures;await save('persistent-prototype-report.json',report);t.diagnostic('POWERAMP_PERSISTENT_PROTOTYPE '+JSON.stringify(report));assert.deepEqual(failures,[],'canonical endpoint pixel and tracked-geometry gates remain unchanged');
-  }finally{await save('persistent-prototype-report.json',report);await browser?.close();await rm(directory,{recursive:true,force:true});}
-});
+
+const directory=await mkdtemp(join(tmpdir(),'touch-causal-'));
+const built=await build(directory,false);
+const browser=await chromium.launch({executablePath,headless:true,args:['--no-sandbox']});
+const trace=await browser.newBrowserCDPSession(),traceEvents=[];
+trace.on('Tracing.dataCollected',event=>traceEvents.push(...event.value));
+await trace.send('Tracing.start',{categories:'input,latencyInfo,disabled-by-default-devtools.timeline.inputs',transferMode:'ReportEvents'});
+const runs=[];
+try {
+ for(let iteration=0;iteration<iterations;iteration++) {
+  const h=await open(browser,built,'light');
+  const run={iteration,source:built.sourceHash,stationary};runs.push(run);
+  try {await timings(h);await canonical(h,'list');run.passed=true;}
+  catch(error){run.error=String(error);process.exitCode=1;}
+  finally {run.events=await h.page.evaluate(()=>fixtureNavigationTrace.capture());await h.context.close();await save('short-input-runs.json',runs);}
+  console.log(JSON.stringify({iteration,passed:run.passed,error:run.error}));
+  if(run.error)break;
+ }
+} finally {
+ const finished=new Promise(done=>trace.once('Tracing.tracingComplete',done));await trace.send('Tracing.end');await finished;await save('short-input-trace.json',{traceEvents});console.log(JSON.stringify({source:built.sourceHash,stationary,iterations:runs.length,passed:runs.filter(r=>r.passed).length,flings:traceEvents.filter(e=>e.name==='RenderInputRouter::ForwardGestureEvent'&&e.args?.type==='GestureFlingStart').length,tapSuppressions:traceEvents.filter(e=>e.name==='FilterTapSuppression').length,evidenceDir}));await browser.close();await rm(directory,{recursive:true,force:true});
+}
