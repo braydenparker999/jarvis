@@ -46,7 +46,7 @@ class FakeAudio {
   get src() { return this._src; }
   set src(value) {
     this._src = String(value); this.sources.push(this._src);
-    this.currentTime = 0; this.readyState = 0; this.duration = NaN; this.ended = false;
+    this.currentTime = 0; this.readyState = 0; this.duration = NaN; this.ended = false; this.error = null;
   }
   get currentSrc() { return this._src; }
   setAttribute() {}
@@ -383,6 +383,7 @@ for (const kind of ['native-r2', 'legacy-r2', 'drive', 'server', 'local']) {
     const h = harness(kind); h.Engine.play();
     assert.equal(h.Engine.wantsPlayback(), true);
     assert.equal(h.Engine.playing, false, 'a pending play promise is not confirmed output');
+    h.audio().readyState=4; // Native successful playback has future data.
     h.audio().attempts.at(-1).resolve(); await flush();
     assert.equal(h.Engine.playing, true, 'the current successful play promise confirms output');
     assert.equal(h.Engine.wantsPlayback(), true);

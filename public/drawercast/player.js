@@ -2611,7 +2611,10 @@ const Engine = {
   onPlaying:function(i){
     if(i!==this.cur||this._loadingRequest)return;
     const a=this.els[i];if(!this.wantsPlayback()){if(!a.paused)this.pauseElement(a);return;}
-    if(a.paused)return;
+    // A queued playing event or resolved play promise can arrive after a new
+    // waiting/error transition. It is not fresh evidence of flowing output.
+    // Keep the existing no-progress deadline until native readiness returns.
+    if(a.paused||a.ended||a.error||a.readyState<3)return;
     this._r2OfflineSource=null;
     this._mediaStarted={request:this._playRequest,attempt:this._playAttempt,slot:i,source:a.src};
     if(this.ctx&&this.ctx.state!=='running'){this.tracePlayback('element-awaits-context');return;}
@@ -3166,7 +3169,8 @@ const Engine = {
   onTime:function(i){
     if(i!==this.cur||this._loadingRequest) return;
     if(this.playing&&Date.now()-(this._lastCheckpoint||0)>=10000)this.checkpoint();
-    if(this.playing&&this._bufferAt!=null&&this.el().currentTime>this._bufferAt+0.05)this.clearBuffering();
+    const a=this.el();
+    if(this.playing&&!a.paused&&!a.ended&&!a.error&&a.readyState>=3&&this._bufferAt!=null&&a.currentTime>this._bufferAt+0.05)this.clearBuffering();
     if(SET.gapless && !SET.crossfade && this.playing) this.preloadNext();
     if(SET.crossfade && this.playing){
       const a=this.els[i], d=this.duration();
@@ -3187,7 +3191,12 @@ const Engine = {
     this._stallTimer=setTimeout(()=>{
       if(this._bufferToken!==token||this._playRequest!==request||this.el()!==a||a.src!==source||this.current?.id!==track||!this.wantsPlayback()||a.ended)return;
       if(this.ctx&&this.ctx.state!=='running'){this.pause('context-interrupted');return;}
-      if(!this.playing||(a.currentTime||0)<=this._bufferAt+0.05)this.onError(i,'stall');
+      // Timers can resume before queued native events after suspension. A
+      // paused element yields focus; a few final buffered frames do not prove
+      // that a stream with no future data has recovered.
+      if(a.paused){this.onPause(i);return;}
+      if(!this.playing||a.readyState<3||(a.currentTime||0)<=this._bufferAt+0.05)this.onError(i,'stall');
+      else this.clearBuffering();
     },12000);
   },
   async preloadNext(){
@@ -3245,27 +3254,31 @@ const Engine = {
     }, ms+80);
   },
   updateMediaSession:async function(){
-    if(!('mediaSession' in navigator) || !this.current) return;
-    const t=this.current,request=this._playRequest;
-    const art = await getArtURL(t);
-    if(request!==this._playRequest||this.current!==t)return;
-    try{
-      navigator.mediaSession.metadata = new window.MediaMetadata({
-        title: t.title, artist: trackArtist(t), album: trackAlbum(t),
-        artwork: art ? [{src:art, sizes:'512x512', type:'image/jpeg'}] : []
-      });
-      navigator.mediaSession.playbackState = this.playing&&!this.el().paused ? 'playing' : 'paused';
-      const self=this;
-      const H={
-        play:function(){ self.play(); }, pause:function(){ self.pause('media-session'); },
-        previoustrack:function(){ self.prev(); }, nexttrack:function(){ self.next(); },
-        seekbackward:function(d){ self.seekBy(-(d && d.seekOffset || SET.seekStep)); },
-        seekforward:function(d){ self.seekBy(d && d.seekOffset || SET.seekStep); },
-        seekto:function(d){ if(d && d.seekTime!=null) self.seek(d.seekTime); },
-        stop:function(){ self.pause('media-session'); }
-      };
-      for(const k in H){ try{ navigator.mediaSession.setActionHandler(k, SET.headsetButtons?H[k]:null); }catch(e){} }
-    }catch(e){}
+    if(!('mediaSession' in navigator))return;
+    // Transport controls cannot depend on artwork storage/network access or
+    // MediaMetadata validation. Register them synchronously, including changes
+    // to the headset-buttons setting while an older lookup is still pending.
+    const session=navigator.mediaSession,self=this;
+    const H={
+      play:function(){ self.play(); }, pause:function(){ self.pause('media-session'); },
+      previoustrack:function(){ self.prev(); }, nexttrack:function(){ self.next(); },
+      seekbackward:function(d){ self.seekBy(-(d && d.seekOffset || SET.seekStep)); },
+      seekforward:function(d){ self.seekBy(d && d.seekOffset || SET.seekStep); },
+      seekto:function(d){ if(d && d.seekTime!=null) self.seek(d.seekTime); },
+      stop:function(){ self.pause('media-session'); }
+    };
+    for(const k in H){try{session.setActionHandler(k,SET.headsetButtons?H[k]:null);}catch(e){}}
+    try{session.playbackState=this.playing&&!this.el().paused?'playing':'paused';}catch(e){}
+    const t=this.current,request=this._playRequest,version=this._mediaSessionVersion=(this._mediaSessionVersion||0)+1;
+    if(!t){try{session.metadata=null;}catch(e){}return;}
+    const valid=()=>version===this._mediaSessionVersion&&request===this._playRequest&&this.current===t;
+    const metadata=art=>{
+      try{session.metadata=new window.MediaMetadata({title:t.title,artist:trackArtist(t),album:trackAlbum(t),
+        artwork:art?[{src:art,sizes:'512x512',type:'image/jpeg'}]:[]});}catch(e){}
+    };
+    metadata(null);
+    let art;try{art=await getArtURL(t);}catch(e){return;}
+    if(valid()&&art)metadata(art);
   },
   setSleep:function(min){
     clearTimeout(this.sleepTimer);
