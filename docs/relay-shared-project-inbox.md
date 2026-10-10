@@ -138,7 +138,11 @@ internal message provenance retains the sending grant.
 - Six attempts per recovery cycle; explicit no-dispatch (`host_unavailable`)
   releases back off from 2 seconds to
   at most 300 seconds. Exhaustion is durable `blocked`, not deletion. An explicit
-  recovery has a 60-second cooldown and at most two recoveries (18 total claims).
+  recovery has a 60-second cooldown from when the server records `unknown` or
+  `blocked`, including late observation of an expired lease, and at most two
+  recoveries (18 total claims). On held states `nextAttemptAt` records that
+  transition time; retry is allowed at exactly that time plus 60 seconds.
+  Reading or reobserving a held state does not restart the cooldown.
 - The grant registry caps at 128 lifetime rows, including expired/revoked grants.
   No automatic garbage collection or project reset is hidden in this patch.
   Capacity maintenance needs a separate reviewed migration before these limits

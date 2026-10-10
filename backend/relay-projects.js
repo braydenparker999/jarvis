@@ -212,14 +212,14 @@ function operate(ctx, grant, op, args, now) {
     if (row.state === 'claimed' && row.lease_until <= now && !rows(ctx,'SELECT id FROM project_messages WHERE reply_to=?',row.message_id).length) {
       // An expired reservation may already have woken a host. Never silently
       // launch another model merely because transport evidence is missing.
-      sql.exec("UPDATE project_work SET state='unknown',last_error='lease_expired_outcome_unknown' WHERE message_id=?",row.message_id);
+      sql.exec("UPDATE project_work SET state='unknown',next_ms=?,last_error='lease_expired_outcome_unknown' WHERE message_id=?",now,row.message_id);
       return {work:work(rows(ctx,'SELECT * FROM project_work WHERE message_id=?',row.message_id)[0]),claimId:null};
     }
     if (row.next_ms > now) fail(429, 'retry_not_due');
     if (row.run_id === args.runId) fail(409, 'expired_run_id');
     if (row.attempts >= PROJECT_LIMITS.attempts) {
       // Return rather than throw: this durable exhaustion transition commits.
-      sql.exec("UPDATE project_work SET state='blocked',last_error='attempts_exhausted' WHERE message_id=?", row.message_id);
+      sql.exec("UPDATE project_work SET state='blocked',next_ms=?,last_error='attempts_exhausted' WHERE message_id=?", now,row.message_id);
       return {work: work(rows(ctx, 'SELECT * FROM project_work WHERE message_id=?', row.message_id)[0]), claimId: null};
     }
     const claimId = crypto.randomUUID();
@@ -250,7 +250,7 @@ function operate(ctx, grant, op, args, now) {
     const row = claimRow(ctx, grant, args, now);
     const acceptedReply = rows(ctx,'SELECT id FROM project_messages WHERE reply_to=?',row.message_id).length > 0;
     const unknown = args.reason !== 'host_unavailable' && !acceptedReply, blocked = row.attempts >= PROJECT_LIMITS.attempts;
-    sql.exec('UPDATE project_work SET state=?,lease_until=?,next_ms=?,last_error=? WHERE message_id=?', unknown ? 'unknown' : blocked ? 'blocked' : 'pending', now, now + Math.min(300000, 1000 * 2 ** row.attempts), args.reason, row.message_id);
+    sql.exec('UPDATE project_work SET state=?,lease_until=?,next_ms=?,last_error=? WHERE message_id=?', unknown ? 'unknown' : blocked ? 'blocked' : 'pending', now, unknown || blocked ? now : now + Math.min(300000, 1000 * 2 ** row.attempts), args.reason, row.message_id);
     return {work: work(rows(ctx, 'SELECT * FROM project_work WHERE message_id=?', row.message_id)[0])};
   }
   if (op === 'retry') {

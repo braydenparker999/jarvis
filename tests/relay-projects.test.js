@@ -112,9 +112,12 @@ test('concurrent claims have one winner, retries preserve lease, expired fences 
   assert.deepEqual(claims.map(c=>c.status).sort(),[200,409]);
   const first=claims.find(c=>c.status===200).data, a=leaseArgs(first);
   assert.equal((await s.call('claim',{messageId:id,runId:first.work.runId},'mast')).data.claimId,first.claimId);
-  const future=Date.parse(first.work.leaseUntil)+1;
+  let future=Date.parse(first.work.leaseUntil)+1;
   const unknown=await s.direct('claim',{messageId:id,runId:crypto.randomUUID()},'mast',future).json();
   assert.equal(unknown.work.state,'unknown'); assert.equal(unknown.claimId,null);
+  assert.equal(Date.parse(unknown.work.nextAttemptAt),future);
+  assert.equal(s.direct('retry',{messageId:id,confirm:true,resolution:'not_started',evidence:'No launch'},'mast',future+59999).status,409);
+  future+=60000;
   assert.equal(s.direct('retry',{messageId:id,confirm:true},'mast',future).status,400);
   assert.equal(s.direct('retry',{messageId:id,confirm:true,resolution:'not_started',evidence:'Synthetic host run lookup confirmed no launch'},'mast',future).status,200);
   const second=await s.direct('claim',{messageId:id,runId:crypto.randomUUID()},'mast',future).json();
@@ -133,7 +136,7 @@ test('accepted reply survives lease expiry and recovery, including conflicting s
   const first=(await s.call('claim',{messageId:id,runId:crypto.randomUUID()},'mast')).data;
   const input={idempotencyKey:crypto.randomUUID(),recipient:'lucy',kind:'reply',body:'Accepted',replyTo:id,...Object.fromEntries(Object.entries(leaseArgs(first)).filter(([key])=>key!=='messageId'))};
   const accepted=await s.call('send',input,'mast');
-  const future=Date.parse(first.work.leaseUntil)+1;
+  let future=Date.parse(first.work.leaseUntil)+1;
   const next=await s.direct('claim',{messageId:id,runId:crypto.randomUUID()},'mast',future).json();
   assert.equal(s.direct('send',{...input,idempotencyKey:crypto.randomUUID(),body:'Overwrite',claimId:next.claimId,runId:next.work.runId,fence:next.work.fence},'mast',future).status,409);
   assert.equal((await s.direct('send',input,'mast',future).json()).duplicate,true);
@@ -336,3 +339,38 @@ test('timeout after an accepted reply permits report-only recovery and never rep
   assert.equal(result.work.state,'reported');assert.equal(result.work.result.verification,'held');
   assert.equal(count(s,'project_messages'),2);assert.equal(count(s,'project_events'),2);
 });
+
+ test('held-state cooldown begins at recording time for every transition and preserves recovery cap', async t => {
+  const s=await setup(t);
+  for (const mode of ['expired','exhausted','timeout','blocked-release']) {
+    const id=(await s.send(mode)).data.message.id;
+    let now=Date.now()+1000;
+    for(let recovery=0;recovery<3;recovery++) {
+      const claim=await s.direct('claim',{messageId:id,runId:crypto.randomUUID(),leaseMs:300000},'mast',now).json();
+      let held;
+      if(mode==='expired'||mode==='exhausted') {
+        if(mode==='exhausted') {
+          // An accepted answer makes expired claims safe for report-only recovery.
+          const reply={idempotencyKey:crypto.randomUUID(),recipient:'lucy',kind:'reply',body:'answer',replyTo:id,...leaseArgs(claim)};
+          delete reply.messageId;
+          if(recovery===0) assert.equal(s.direct('send',reply,'mast',now).status,200);
+          s.db.prepare('UPDATE project_work SET attempts=6 WHERE message_id=?').run(id);
+        }
+        now+=600000;
+        held=await s.direct('claim',{messageId:id,runId:crypto.randomUUID()},'mast',now).json();
+      } else {
+        if(mode==='blocked-release')s.db.prepare('UPDATE project_work SET attempts=6 WHERE message_id=?').run(id);
+        now+=1000;
+        held=await s.direct('release',{...leaseArgs(claim),reason:mode==='timeout'?'timeout':'host_unavailable'},'mast',now).json();
+      }
+      assert.equal(held.work.state,mode==='expired'||mode==='timeout'?'unknown':'blocked');
+      assert.equal(Date.parse(held.work.nextAttemptAt),now);
+      const retry={messageId:id,confirm:true,...(held.work.state==='unknown'?{resolution:'safe_to_repeat',evidence:'Fixture reconciliation'}:{})};
+      assert.equal(s.direct('retry',retry,'mast',now+59999).status,409);
+      assert.equal(s.direct('claim',{messageId:id,runId:crypto.randomUUID()},'mast',now+59999).status,409);
+      assert.equal(s.direct('retry',retry,'mast',now+60000).status,recovery<2?200:409);
+      now+=60000;
+    }
+  }
+});
+
