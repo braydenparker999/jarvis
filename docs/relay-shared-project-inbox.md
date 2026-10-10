@@ -5,14 +5,14 @@ Jarvis Worker and `jarvis-shared-v2` SQLite Durable Object. It does not import o
 publish GitHub comments. Public Relay, owner-private Relay, publications, alarms,
 existing MCP tools, DNS-pinned callback delivery, and Poweramp UI are unchanged.
 
-The first supported route is durable HTTPS polling. A poll is ordinary code;
-only returned new work/notifications can request a model invocation. This build
-neither installs a hook nor changes a schedule. Host push, model invocation,
-connector support, and actual billing remain unverified until parent qualification.
-There is no new provider, database binding, queue service, or callback endpoint.
-The existing Vercel `jarvis-relay-egress` remains available for a later approved
-callback integration, using its current DNS-pinned transport. Its live health was
-not checked by this build. Do not replace pinning with DNS-check-plus-fetch.
+Mast's proposed route is durable HTTPS polling with the local hook adapter.
+Lucy's supported route is typed tools on the existing OAuth MCP endpoint, backed
+by an explicitly approved server-side project binding. A separately gated MCP
+project event supports off-turn delivery through the existing signed, DNS-pinned
+callback outbox. No hook, schedule, binding, credential, or subscription is
+activated by this build. Delivery acceptance still does not prove model wake,
+execution, or billing. The live health of `jarvis-relay-egress` was not checked.
+Do not replace its DNS pinning with DNS-check-plus-fetch.
 
 ## Authority and approval boundary
 
@@ -35,12 +35,12 @@ not shell code, approval, an infrastructure grant, or proof an action happened.
 | --- | --- |
 | Public browser/workspace key | Not identity proof; rejected by this channel. |
 | Existing owner GitHub OAuth | May administer explicit project grants only while the separate management flag is enabled. No automatic project membership. |
-| Existing Lucy owner connector | Existing permissions stay unchanged; this build does not extract or copy its OAuth token. Its existing tools stay unchanged; two explicit grant-management tools become discoverable only with both project flags and owner access enabled. |
+| Existing Lucy owner connector | Existing permissions stay unchanged; this build does not extract or copy its OAuth token. Typed project tools require a separately approved exact-grant participation binding; existing owner permissions remain separate. Management tools require both project flags and owner access. |
 | Mast's GitHub/comment access | Not an HTTP project credential; no implicit trust or owner grant. |
 | Owner phone/password session | Never shared with either project agent; rejected by this channel. |
 | Existing project grant | Can be reused only if already explicitly approved for the exact project and agent; none were configured by this build. |
 
-**New persistent access is a separate action-time approval:** each named agent,
+**New persistent access is a separate action-time approval:** each token-based named agent,
 project, explicit expiry (at most 365 days), credential storage destination and
 runtime must be approved before generating, registering or installing its token.
 A token has the form `jpi_` plus 32 cryptographically random bytes encoded as 64
@@ -63,6 +63,57 @@ Owner management authorization is also rechecked inside that transaction.
 Revoking the approving owner OAuth family does not implicitly revoke already
 approved project grants: these have independent finite lifetimes and revocation.
 Revoke those grants explicitly if terminating project access.
+
+## OAuth participation and off-turn delivery
+
+`relay_project_<operation>` exposes every operation in the table below as a typed
+MCP tool with `project` plus the same operation fields (`events` uses
+`mode:"pending"|"replay"`). Authorization requires an independently registered
+binding to the **exact current OAuth grant family**, project and logical agent.
+No binding exists by default. `approval_grant` on a token grant is only an audit
+field and never membership. No OAuth token is exported or accepted by the project
+HTTP data endpoints. Sender and claim identity come only from the stored binding.
+
+The management tools are `relay_project_binding_status` (read-only current grant
+ID and binding metadata), `relay_project_binding_register` and
+`relay_project_binding_revoke`. Registration requires `bindingId`, the exact
+inspected `parentGrantId`, `project`, `agent`, canonical finite `expiresAt` (up to
+365 days), and `confirm:true`. The server refuses to bind any other connection.
+Revocation uses exact `bindingId` and confirmation. A binding cannot change agent,
+project or expiry; revoke it before separately approving/registering a new ID.
+The bounded registry retains old rows (128 lifetime bindings).
+
+**Approval scope:** any holder/use of this connected OAuth grant can act as the
+logical agent `lucy` in the named project. This is not proof of a specific thread,
+persona, model, or host process. Same-family refresh retains the binding; reconnect
+or a new grant does not inherit it. Parent revocation/expiry or binding
+revocation/expiry denies participation. The existing connection still has its
+previously approved owner tools; the new project tools return only project data
+and do not add owner-private access to Mast or to project messages. A separate
+project-only OAuth connection would reduce ambient owner capability but requires
+new OAuth scope/consent and connection lifecycle work; it is not implemented here.
+
+With `RELAY_PROJECT_EVENTS_ENABLED=true` **in addition** to project enablement,
+`events/list` advertises `relay.project.message.created`. Subscribe with exact
+`{project,bindingId}` through the existing MCP webhook protocol; the bound agent
+is inferred, never accepted as a filter. The parent must have live `relay:events`
+and `relay:read`. Authorization is checked before callback verification, after
+verification, at activation commit and immediately before delivery. Revoking or
+expiring either parent or binding stops pending delivery. A new binding cannot
+inherit an old subscription because its immutable ID is part of subscription
+identity. Callback secrets and DNS-pinned verification use existing infrastructure.
+
+Every accepted request, reply and note atomically creates both its durable project
+feed event and a metadata-only callback occurrence. The callback includes project,
+recipient, immutable message/event IDs and untrusted-content designation, with no
+message body or owner-private information. Existing outbox retry/backpressure,
+30-day callback replay and retention apply; the project HTTP/MCP feed retains its
+own bounded history independently. Callback receipt does not ACK that feed, claim
+work, verify a report, or prove the model ran. Event delivery requires a separately
+approved host automation/subscription and end-to-end wake evidence. See the
+[official MCP Events contract](https://developers.openai.com/plugins/build/mcp-events)
+and [client identification guidance](https://developers.openai.com/plugins/build/auth#client-identification).
+No new public/private subscriptions are created or altered by this implementation.
 
 ## Transport contract
 
@@ -266,34 +317,28 @@ evidence is an audit trail and is not itself verifier approval or action authori
    Verify the receiver can consume replies in **both** directions. Polling only
    proves checks happen; callback/HTTP acceptance is not model wake or success.
 3. Parent may deploy the reviewed Worker with `RELAY_PROJECT_ENABLED` and
-   `RELAY_PROJECT_ADMIN_ENABLED` absent/false through the existing release flow.
+   `RELAY_PROJECT_ADMIN_ENABLED` and `RELAY_PROJECT_EVENTS_ENABLED` absent/false through the existing release flow.
    No new Wrangler binding or migration tag, provider, callback or schedule is
    needed. Keep existing public/private responder and publication flags unchanged.
-4. Obtain precise action-time approval for two new grants: project `jarvis`,
-   agents `lucy`/`mast`, selected finite expiry, full project participation, each
-   credential's secure storage destination, and temporary management enablement.
-   Generate separate random tokens only then, in approved secret handling. Hash
-   the **complete** `jpi_...` token locally, without printing the token.
-5. With coordinated enablement approval, set `RELAY_PROJECT_ENABLED=true` and
-   temporarily `RELAY_PROJECT_ADMIN_ENABLED=true` on the existing Worker. Use a
-   **existing approved owner OAuth connection** with live `relay:owner`. Refresh
-   its MCP tool catalog and invoke `relay_project_grant_register` with the exact
-   approved fields below except `op` (the tool fixes that itself). The equivalent
-   HTTP API is POST `/relay/projects/_grants` in an already authorized management
-   runtime. Do not extract a connector token, mint owner access or reuse a phone
-   session. Catalog refresh is read-only; invoking registration creates the grant
-   and is the action-time approval boundary. If the approved owner connection
-   cannot discover/call these tools, stop and coordinate host capability repair.
-
-   Exact registration body, once approved:
-
-   ```json
-   {"op":"create","grantId":"<new UUID>","tokenHash":"<SHA-256 hex of full token>","project":"jarvis","agent":"lucy","expiresAt":"<approved UTC ISO timestamp>","confirm":true}
-   ```
-
-   Repeat with independent UUID/hash and `agent:"mast"`. Identical registration
-   retries succeed; changes/reuse/revival fail. Store credentials only in the
-   approved runtimes. Close `RELAY_PROJECT_ADMIN_ENABLED=false` after registration.
+4. Obtain precise action-time approval for Lucy's finite `jarvis` participation
+   binding on the **inspected exact existing OAuth grant**, and Mast's independent
+   finite `jarvis` token grant with verified secure host storage. Explain full
+   project history/send/claim/reply/report/recovery capability, logical identity
+   scope, exclusions and expiry. Approve temporary management enablement separately.
+   Lucy needs no new credential or token export. Mast token generation, hash
+   registration and host installation remain approval-gated. Do not ask the user
+   to paste a token into chat or assume a static bearer fits ChatGPT MCP auth.
+5. After approved enablement, set project and temporary management flags true;
+   use `relay_project_binding_status` to inspect the current parent grant. Call
+   `relay_project_binding_register` with the exact approved values, then register
+   Mast's token SHA-256 using `relay_project_grant_register`. Close management.
+   Independently approve project event enablement and the exact new Lucy
+   automation/subscription destination, project/binding ID and finite lifetime.
+   Refresh event discovery and subscribe using the host's supported event setup;
+   leave public/private subscriptions untouched. A real subscription or signing
+   secret must not be created before that approval. Verify Mast's actual hook
+   source/tests, secure injection, durable path, restart re-registration, precise
+   wake/silent output and run lookup/ACK controls before installing any hook.
 6. Qualify the exact deployed revision and each runtime with `GET identity`, then
    send one explicitly labeled inert test request each way. Verify persisted IDs,
    delivery ACK, actual host run ID/start evidence, one accepted reply, reply event,
@@ -318,13 +363,21 @@ evidence is an audit trail and is not itself verifier approval or action authori
 ## Rollback
 
 Parent sets only `RELAY_PROJECT_ENABLED=false` to stop all project access and
-`RELAY_PROJECT_ADMIN_ENABLED=false` to close management. Disable/pause only the
+`RELAY_PROJECT_ADMIN_ENABLED=false` to close management, and
+`RELAY_PROJECT_EVENTS_ENABLED=false` to stop project callbacks. Disable/pause only the
 new project host dispatch using its approved controls; the adapter fails closed
 on 503. Preserve SQLite rows, local journals and host receipts. Do not remove
 accepted replies, reset IDs, delete grants, change existing MCP/owner flags or
 pause unrelated responders/publications.
 
-Rolling back the Worker code is additive-safe: older code ignores these tables.
+Prefer pausing with the new Worker retained: set the project/event flags false
+and stop only the new host dispatch. **Before code rollback**, unsubscribe every
+project-specific callback under this Worker and verify zero project subscriptions,
+activation reservations and outbox rows remain. Older Workers do not understand
+project bindings or their revocation and could drain leftover callback rows using
+only the parent event scope. Preserve unrelated subscriptions. Then code rollback
+is safe for the project tables, which older code ignores. Retain the versioned
+routing index and original index for compatibility; do not drop project history.
 Before re-enabling direct work, reconcile actual host executions and accepted
 replies so an expired lease does not cause duplicate external actions. Revoking
 project grants is a separate explicit action with the management flag temporarily

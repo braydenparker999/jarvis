@@ -1,3 +1,4 @@
+import {enqueueRelayProjectMessage} from './relay-events.js';
 // Shared project transport. Text is inert; project agents are never owner identities.
 // All authorization and state transitions serialize in the existing SQLite DO.
 import {boundedText, canonical, hash, json, RELAY_OWNER, RELAY_OWNER_SCOPE, RELAY_OAUTH_OBJECT, uuid} from './relay-common.js';
@@ -22,6 +23,8 @@ function schema(ctx) {
     id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, project TEXT NOT NULL,
     agent TEXT NOT NULL CHECK(agent IN ('lucy','mast')), expires_ms INTEGER NOT NULL,
     created_ms INTEGER NOT NULL, revoked_ms INTEGER, approval_grant TEXT NOT NULL)`);
+  sql.exec(`CREATE TABLE IF NOT EXISTS project_bindings (id TEXT PRIMARY KEY, parent_grant TEXT NOT NULL, project TEXT NOT NULL, agent TEXT NOT NULL CHECK(agent IN ('lucy','mast')), expires_ms INTEGER NOT NULL, created_ms INTEGER NOT NULL, revoked_ms INTEGER)`);
+  sql.exec('CREATE UNIQUE INDEX IF NOT EXISTS project_bindings_live ON project_bindings(parent_grant,project) WHERE revoked_ms IS NULL');
   sql.exec('CREATE INDEX IF NOT EXISTS project_grants_member ON project_grants(project,agent,expires_ms)');
   sql.exec(`CREATE TABLE IF NOT EXISTS project_messages (
     seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, project TEXT NOT NULL,
@@ -49,6 +52,35 @@ function authenticate(ctx, tokenHash, projectId, now) {
   if (!grant || grant.revoked_ms !== null || grant.expires_ms <= now) fail(401, 'project_grant_required');
   if (grant.project !== projectId) fail(403, 'project_forbidden');
   return grant;
+}
+function authenticateBinding(ctx, env, principal, projectId, now) {
+  if (!principal || !relayTokenActiveInStore(ctx, env, principal, 'relay:read')) fail(401, 'project_parent_required');
+  const binding = rows(ctx, 'SELECT * FROM project_bindings WHERE parent_grant=? AND project=? AND revoked_ms IS NULL', principal.grantId, projectId)[0];
+  if (!binding || binding.revoked_ms !== null || binding.expires_ms <= now) fail(403, 'project_binding_required');
+  return binding;
+}
+function bindingAdministration(ctx, principal, args, now) {
+  if(args.op === 'binding_revoke') {
+    fields(args,['op','bindingId','confirm'],['op','bindingId','confirm']);
+    if(!uuid(args.bindingId)||args.confirm!==true) fail(400,'explicit_binding_confirmation_required');
+    const row=rows(ctx,'SELECT * FROM project_bindings WHERE id=?',args.bindingId)[0];
+    if(!row)fail(404,'binding_not_found');
+    ctx.storage.sql.exec('UPDATE project_bindings SET revoked_ms=COALESCE(revoked_ms,?) WHERE id=?',now,args.bindingId);
+    return {bindingId:args.bindingId,revoked:true};
+  }
+  fields(args,['op','bindingId','parentGrantId','project','agent','expiresAt','confirm'],['op','bindingId','parentGrantId','project','agent','expiresAt','confirm']);
+  const expiry=Date.parse(args.expiresAt);
+  // Only the authenticated connection can be bound. Explicit expected parent ID
+  // prevents approval for one connection being applied to another connection.
+  if(args.confirm!==true||!uuid(args.bindingId)||args.parentGrantId!==principal.grantId||!project(args.project)||!agent(args.agent)||typeof args.expiresAt!=='string'||!Number.isSafeInteger(expiry)||iso(expiry)!==args.expiresAt||expiry<=now||expiry>now+365*86400000)fail(400,'invalid_explicit_binding');
+  const old=rows(ctx,'SELECT * FROM project_bindings WHERE id=? OR (parent_grant=? AND project=? AND revoked_ms IS NULL)',args.bindingId,principal.grantId,args.project)[0];
+  if(old) {
+    if(old.id!==args.bindingId||old.parent_grant!==principal.grantId||old.project!==args.project||old.agent!==args.agent||old.expires_ms!==expiry||old.revoked_ms!==null)fail(409,'binding_conflict');
+  } else {
+    if(rows(ctx,'SELECT COUNT(*) AS n FROM project_bindings')[0].n>=PROJECT_LIMITS.grants)fail(429,'binding_capacity');
+    ctx.storage.sql.exec('INSERT INTO project_bindings VALUES(?,?,?,?,?,?,NULL)',args.bindingId,principal.grantId,args.project,args.agent,expiry,now);
+  }
+  return {bindingId:args.bindingId,parentGrantId:principal.grantId,project:args.project,agent:args.agent,expiresAt:args.expiresAt};
 }
 function message(row) {
   return {id: row.id, project: row.project, sender: row.sender, recipient: row.recipient, kind: row.kind,
@@ -92,6 +124,11 @@ function claimRow(ctx, grant, args, now, allowFinished = false) {
 function administration(ctx, env, principal, args, now) {
   if (env.RELAY_PROJECT_ADMIN_ENABLED !== 'true' || env.RELAY_OWNER_ENABLED !== 'true' || principal?.principal !== RELAY_OWNER || !principal.scopes?.includes(RELAY_OWNER_SCOPE)
     || !relayTokenActiveInStore(ctx, env, principal, RELAY_OWNER_SCOPE)) fail(403, 'project_admin_required');
+  if (args?.op === 'binding_status') {
+    fields(args,['op'],['op']);
+    return {parentGrantId:principal.grantId,bindings:rows(ctx,'SELECT * FROM project_bindings WHERE parent_grant=?',principal.grantId).map(b=>({bindingId:b.id,project:b.project,agent:b.agent,expiresAt:iso(b.expires_ms),revokedAt:iso(b.revoked_ms)}))};
+  }
+  if (['binding_create','binding_revoke'].includes(args?.op)) return bindingAdministration(ctx, principal, args, now);
   fields(args,['op','grantId','tokenHash','project','agent','expiresAt','confirm'],['op']);
   if (args.op === 'revoke') {
     fields(args, ['op','grantId','confirm'], ['op','grantId','confirm']);
@@ -154,7 +191,9 @@ function operate(ctx, grant, op, args, now) {
     if (retained + reserved + (args.kind === 'request' ? 2 : 1) > PROJECT_LIMITS.history) fail(429, 'project_history_capacity');
     const id = crypto.randomUUID();
     sql.exec('INSERT INTO project_messages(id,project,sender,recipient,kind,reply_to,body,created_ms,sender_grant,idempotency_key,fingerprint) VALUES(?,?,?,?,?,?,?,?,?,?,?)', id, p, who, args.recipient, args.kind, args.replyTo ?? null, args.body, now, grant.id, args.idempotencyKey, fingerprint);
-    sql.exec('INSERT INTO project_events(id,message_id,project,recipient,created_ms) VALUES(?,?,?,?,?)', crypto.randomUUID(), id, p, args.recipient, now);
+    const eventId=crypto.randomUUID();
+    sql.exec('INSERT INTO project_events(id,message_id,project,recipient,created_ms) VALUES(?,?,?,?,?)', eventId, id, p, args.recipient, now);
+    enqueueRelayProjectMessage(ctx,{id,project:p,recipient:args.recipient},eventId,now);
     if (args.kind === 'request') sql.exec("INSERT INTO project_work(message_id,project,recipient,state,next_ms) VALUES(?,?,?,'pending',?)", id, p, args.recipient, now);
     return {message: message(target(ctx, p, id)), duplicate: false};
   }
@@ -276,7 +315,8 @@ export function projectStore(ctx, env, input, now = Date.now()) {
       schema(ctx);
       if (input.op === 'admin') return administration(ctx, env, input.principal, input.args, now);
       if (!project(input.project)) fail(400, 'invalid_project');
-      return operate(ctx, authenticate(ctx, input.tokenHash, input.project, now), input.op, input.args, now);
+      const grant = input.auth === 'oauth-binding' ? authenticateBinding(ctx,env,input.principal,input.project,now) : authenticate(ctx,input.tokenHash,input.project,now);
+      return operate(ctx, grant, input.op, input.args, now);
     });
     return json(result);
   } catch (error) {

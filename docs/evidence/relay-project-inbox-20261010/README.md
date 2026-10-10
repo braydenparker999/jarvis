@@ -7,7 +7,7 @@ history was read and no grant or subscription was changed.
 
 ## Results
 
-- Final focused suite: **21 passed, 0 failed, 0 skipped**, including **16 Python
+- Initial focused suite: **21 passed, 0 failed, 0 skipped**, including **16 Python
   adapter cases** under its Node test wrapper. See [focused.tap](focused.tap).
 - Existing Relay + public/shared/Hub/origin qualification with pinned runtimes:
   **1,335 passed, 0 failed, 0 skipped**. See
@@ -60,7 +60,7 @@ It did not edit repository files or contact external services.
 | Timeout after accepted reply over-held safe reconciliation | Permit report-only recovery using the immutable reply; no replacement or model rerun. |
 | Rollback revocation order was ambiguous | Document revocation before transport disable or approved maintenance before reactivation. |
 
-The final independent review re-ran all 21 focused Node tests, including the
+The initial independent review re-ran all 21 focused Node tests, including the
 16 Python cases, and reproduced accepted-reply timeout reconciliation. The tests
 also cover streamed revocation and reverse-direction requests. The independent SQLite probe is available locally at
 `/tmp/jarvis-project-review.mjs`.
@@ -68,10 +68,45 @@ also cover streamed revocation and reverse-direction requests. The independent S
 ## Remaining live gates
 
 Use [the exact activation and rollback plan](../../relay-shared-project-inbox.md).
-Parent must verify both hosts' authenticated HTTP and durable model-dispatch
-contracts, approve each project credential/grant at action time, integrate the
+Parent must verify Lucy's MCP automation and Mast's actual hook/model-dispatch
+contracts, approve the exact OAuth participation binding and Mast credential/grant at action time, integrate the
 reviewed release, and coordinate deployment/cutover. Existing owner OAuth may
 administer grants through the separately enabled management tools; project agents
 never receive owner tokens or owner-private history. Transport acceptance is not
 model wake, execution success, or proof of external side effects. No true inbound
 host push or exact billing has been established by these local tests.
+
+## OAuth/MCP follow-up qualification
+
+The follow-up adds finite exact-parent OAuth participation bindings, typed project
+operations and separately gated project callback discovery/subscription. No live
+binding, credential, event subscription or automation was created. The original
+published head `d6b995b0fea0ee8ee285da3c42d0fe1cba61eae8` passed all eleven hosted
+checks, including qualified Relay, owner, frontend, Poweramp, migration and source.
+Those results do not qualify the subsequent commits.
+
+Final follow-up focused result: **27/27 passed**, including the same16 Python
+adapter cases, real workerd restart and Python HTTP bridge. New coverage includes
+exact OAuth grant isolation, same-family refresh, finite expiry/revocation,
+explicit binding replacement, sender substitution denial, gated callback discovery,
+addressed reply callbacks, replay/retry, revocation during callback verification,
+pre-delivery expiry/revocation and unauthorized-send alarm isolation.
+
+Additional review corrections:
+
+- Held-state recovery cooldown starts at server observation for every unknown or
+  blocked transition; exact59999ms/60000ms boundaries and two-recovery cap tested.
+- MCP replay schema now exactly matches `mode:pending|replay`.
+- Unauthorized HTTP/unbound MCP sends cannot reserve shared alarms; final
+  authorization still occurs after asynchronous alarm reservation.
+- Code rollback must first remove project-specific callback subscriptions/outbox;
+  an older Worker cannot enforce the new binding gates. Disabled new code is the
+  preferred pause. Existing public/private subscriptions remain untouched.
+
+Independent follow-up review reported no remaining blockers after25 focused tests,
+37 existing callback/schema/delivery regressions, plus independent MCP/callback
+probes. Two further focused tests bring the final local total to27. Reviewer
+explicitly confirmed expiry during HMAC signing prevents delivery, and old/new
+routing indexes coexist. See [MCP-focused log](mcp-focused.tap). Independent local
+probes: `/tmp/jarvis-mcp-binding-review.mjs`,
+`/tmp/jarvis-project-callback-review.mjs` (fictional local fixtures only).

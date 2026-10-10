@@ -12,7 +12,7 @@ export async function setup(t) {
   const s = createRelayFixture({env: {RELAY_PROJECT_ENABLED: 'true', RELAY_PROJECT_ADMIN_ENABLED: 'true', RELAY_OWNER_ENABLED: 'true'}});
   t.after(() => s.close());
   const {ctx, db, hub} = s.object('jarvis-shared-v2');
-  const access = 'e'.repeat(64), grantId = 'fixture-owner-grant', client = 'fixture-client', resource = s.env.RELAY_MCP_ORIGIN + '/relay/mcp', scope = 'relay:read relay:reply relay:events relay:owner';
+  const access = 'e'.repeat(64), grantId = 'a'.repeat(64), client = 'fixture-client', resource = s.env.RELAY_MCP_ORIGIN + '/relay/mcp', scope = 'relay:read relay:reply relay:events relay:owner';
   const registry = b => relayOAuthStore(ctx, b).json();
   await registry({op:'put', key:'client:'+client, category:'client', value:{redirect:RELAY_CALLBACK}, expiresAt:Date.now()+3600000});
   const params = {client_id:client,redirect_uri:RELAY_CALLBACK,code_challenge:await challenge('fictional-code'),scope};
@@ -374,3 +374,161 @@ test('timeout after an accepted reply permits report-only recovery and never rep
   }
 });
 
+test('OAuth participation requires explicit exact-grant binding; typed MCP operations isolate identity and private data', async t => {
+  const s=await setup(t), {relayRpc}=await import('../backend/relay-connector.js');
+  const meta={'io.modelcontextprotocol/protocolVersion':'2026-07-28','io.modelcontextprotocol/clientCapabilities':{}};
+  const rpc=(name,args,principal=s.principal)=>relayRpc(s.ctx,s.env,principal,{method:'tools/call',params:{_meta:meta,name,arguments:args}});
+  assert.equal((await rpc('relay_project_identity',{project:'jarvis'})).isError,true);
+  const status=await rpc('relay_project_binding_status',{});
+  assert.equal(status.structuredContent.parentGrantId,s.principal.grantId);
+  assert.deepEqual(status.structuredContent.bindings,[]);
+  const args={bindingId:crypto.randomUUID(),parentGrantId:s.principal.grantId,project:'jarvis',agent:'lucy',expiresAt:new Date(Date.now()+3600000).toISOString(),confirm:true};
+  assert.equal((await rpc('relay_project_binding_register',{...args,parentGrantId:'another-grant'})).isError,true);
+  assert.equal((await rpc('relay_project_binding_register',args)).isError,false);
+  assert.equal((await rpc('relay_project_binding_register',args)).isError,false);
+  assert.equal((await rpc('relay_project_binding_register',{...args,agent:'mast'})).isError,true);
+  s.env.RELAY_PROJECT_ADMIN_ENABLED='false';
+  assert.equal((await rpc('relay_project_identity',{project:'jarvis'})).structuredContent.agent,'lucy');
+  assert.equal((await rpc('relay_project_identity',{project:'other-project'})).isError,true);
+  for(const extra of [{sender:'mast'},{agent:'mast'},{principal:'owner'},{auth:'oauth-binding'},{tokenHash:s.hashes.mast}]) await assert.rejects(rpc('relay_project_identity',{project:'jarvis',...extra}),/Invalid arguments/);
+  const sent=await rpc('relay_project_send',{project:'jarvis',recipient:'mast',kind:'note',body:'MCP note',idempotencyKey:crypto.randomUUID()});
+  assert.equal(sent.structuredContent.message.sender,'lucy');
+  const incoming=await s.send('Mast note','mast',{kind:'note'});
+  let events=await rpc('relay_project_events',{project:'jarvis'});
+  assert.equal(events.structuredContent.events.length,1);
+  await rpc('relay_project_ack',{project:'jarvis',eventIds:events.structuredContent.events.map(e=>e.id)});
+  assert.equal((await rpc('relay_project_events',{project:'jarvis'})).structuredContent.events.length,0);
+  assert.equal((await rpc('relay_project_events',{project:'jarvis',mode:'replay'})).structuredContent.events[0].messageId,incoming.data.message.id);
+  // Owner-private/public IDs cannot be resolved through project operations.
+  assert.equal((await rpc('relay_project_message',{project:'jarvis',messageId:crypto.randomUUID()})).isError,true);
+  await assert.rejects(rpc('relay_project_messages',{project:'jarvis',inbox_id:'brayden-owner'}),/Invalid arguments/);
+  const direct=(principal,now=Date.now(),project='jarvis')=>projectStore(s.ctx,s.env,{op:'identity',auth:'oauth-binding',principal,project,args:{}},now);
+  // Create a real second fixture OAuth grant, not a forged principal alone.
+  const params={client_id:'fixture-client',redirect_uri:RELAY_CALLBACK,code_challenge:await challenge('second-code'),scope:s.principal.scopes.join(' ')};
+  const resource=s.env.RELAY_MCP_ORIGIN+'/relay/mcp';
+  const secondAuth=await s.registry({op:'authorize',grantId:'b'.repeat(64),codeKey:'code:second',params,resource});
+  assert.ok(!secondAuth.error,JSON.stringify(secondAuth));
+  const accessHash=await hash('f'.repeat(64));
+  const secondExchange=await s.registry({op:'exchange',key:'code:second',match:{client_id:params.client_id,redirect_uri:RELAY_CALLBACK,challenge:params.code_challenge,resource},accessKey:'access:'+accessHash,refreshKey:'refresh:second'});
+  assert.ok(secondExchange.access_token||secondExchange.scope,JSON.stringify(secondExchange));
+  const other={...s.principal,grantId:'b'.repeat(64),accessHash};
+  assert.equal(direct(other).status,403);
+  assert.equal(direct({...s.principal,grantId:'b'.repeat(64)}).status,401);
+  assert.equal(direct(s.principal,Date.parse(args.expiresAt)).status,403);
+  s.env.RELAY_PROJECT_ADMIN_ENABLED='true';
+  assert.equal((await rpc('relay_project_binding_revoke',{bindingId:args.bindingId,confirm:true})).isError,false);
+  assert.equal(direct(s.principal).status,403);
+  assert.equal((await rpc('relay_project_binding_register',args)).isError,true);
+  // Revoked parent independently denies a different otherwise-live binding.
+  const next={...args,bindingId:crypto.randomUUID(),project:'second-project'};
+  assert.equal((await rpc('relay_project_binding_register',next)).isError,false);
+  s.db.prepare("UPDATE relay_oauth SET value=json_set(value,'$.revoked',1) WHERE key=?").run('grant:'+s.principal.grantId);
+  assert.equal(direct(s.principal,Date.now(),'second-project').status,401);
+});
+
+test('project MCP callbacks are separately gated, binding-addressed, replayable and revoked before delivery', async t => {
+  const s=await setup(t);
+  const {relaySubscribe,drainRelayOutbox}=await import('../backend/relay-events.js');
+  const {PROJECT_EVENT}=await import('../backend/relay-project-events.js');
+  const args={op:'binding_create',bindingId:crypto.randomUUID(),parentGrantId:s.principal.grantId,project:'jarvis',agent:'lucy',expiresAt:new Date(Date.now()+3600000).toISOString(),confirm:true};
+  assert.equal(projectStore(s.ctx,s.env,{op:'admin',principal:s.principal,args}).status,200);
+  const p={name:PROJECT_EVENT,arguments:{project:'jarvis',bindingId:args.bindingId},delivery:{mode:'webhook',url:'https://callback.example.test/project',secret:'whsec_'+Buffer.alloc(32,7).toString('base64')},cursor:'relay1:0'};
+  const delivered=[];
+  let failOnce=true;
+  const receiver=async(url,options)=>{
+    const data=JSON.parse(options.body);
+    if(data.type==='webhook_verification')return Response.json({challenge:data.challenge});
+    if(data.challenge)return Response.json({challenge:data.challenge});
+    delivered.push(data);
+    return new Response('',{status:failOnce?(failOnce=false,503):200});
+  };
+  await assert.rejects(relaySubscribe(s.ctx,s.principal,p,s.env,receiver),/not activated|binding required/);
+  s.env.RELAY_PROJECT_EVENTS_ENABLED='true';
+  await assert.rejects(relaySubscribe(s.ctx,s.principal,{...p,arguments:{...p.arguments,project:'other-project'}},s.env,receiver),/binding required/);
+  await assert.rejects(relaySubscribe(s.ctx,s.principal,{...p,arguments:{...p.arguments,recipient:'mast'}},s.env,receiver),/Invalid arguments/);
+  // Both messages precede subscription: replay must select only Lucy's address.
+  const incoming=await s.send('wake lucy','mast',{kind:'note'});
+  await s.send('not for lucy','lucy',{kind:'note'});
+  const sub=await relaySubscribe(s.ctx,s.principal,p,s.env,receiver);
+  await drainRelayOutbox(s.ctx,s.env,receiver);
+  assert.equal(delivered.length,1);assert.equal(delivered[0].name,PROJECT_EVENT);
+  assert.equal(delivered[0].data.message_id,incoming.data.message.id);
+  assert.equal(delivered[0].data.recipient,'lucy');assert.equal('body' in delivered[0].data,false);
+  const due=s.db.prepare('SELECT next_attempt_ms FROM relay_outbox WHERE subscription_id=?').get(sub.id).next_attempt_ms;
+  await drainRelayOutbox(s.ctx,s.env,receiver,due+1);
+  assert.equal(delivered.length,2);assert.deepEqual(delivered[0],delivered[1]);
+  assert.equal((await s.call('events',{},'lucy')).data.events.length,1,'callback transport ACK does not consume project adapter events');
+  await s.send('revocation race','mast',{kind:'note'});
+  assert.equal(projectStore(s.ctx,s.env,{op:'admin',principal:s.principal,args:{op:'binding_revoke',bindingId:args.bindingId,confirm:true}}).status,200);
+  await drainRelayOutbox(s.ctx,s.env,receiver,due+2);
+  assert.equal(delivered.length,2);
+  assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM relay_subscriptions WHERE id=?').get(sub.id).n,0);
+});
+
+test('binding survives same-family refresh, requires explicit replacement after revocation, and denies callback verification races', async t => {
+  const s=await setup(t), {relaySubscribe}=await import('../backend/relay-events.js');
+  s.env.RELAY_PROJECT_EVENTS_ENABLED='true';
+  const args={op:'binding_create',bindingId:crypto.randomUUID(),parentGrantId:s.principal.grantId,project:'jarvis',agent:'lucy',expiresAt:new Date(Date.now()+3600000).toISOString(),confirm:true};
+  const admin=args=>projectStore(s.ctx,s.env,{op:'admin',principal:s.principal,args});
+  assert.equal(admin(args).status,200);
+  const refreshedHash=await hash('c'.repeat(64));
+  const refresh=await s.registry({op:'exchange',key:'refresh:fixture',match:{client_id:'fixture-client',resource:s.env.RELAY_MCP_ORIGIN+'/relay/mcp'},accessKey:'access:'+refreshedHash,refreshKey:'refresh:rotated'});
+  assert.ok(refresh.scope);
+  const identity=principal=>projectStore(s.ctx,s.env,{op:'identity',auth:'oauth-binding',principal,project:'jarvis',args:{}});
+  assert.equal(identity(s.principal).status,401);
+  s.principal.accessHash=refreshedHash;
+  assert.equal(identity(s.principal).status,200);
+  assert.equal(admin({op:'binding_revoke',bindingId:args.bindingId,confirm:true}).status,200);
+  assert.equal(admin({...args,bindingId:crypto.randomUUID()}).status,200);
+  assert.equal(identity(s.principal).status,200);
+  const binding=s.db.prepare('SELECT id FROM project_bindings WHERE revoked_ms IS NULL').get();
+  const p={name:'relay.project.message.created',arguments:{project:'jarvis',bindingId:binding.id},delivery:{mode:'webhook',url:'https://callback.example.test/project',secret:'whsec_'+Buffer.alloc(32,8).toString('base64')}};
+  const receiver=async(url,options)=>{
+    const data=JSON.parse(options.body);
+    assert.equal(admin({op:'binding_revoke',bindingId:binding.id,confirm:true}).status,200);
+    return Response.json({challenge:data.challenge});
+  };
+  await assert.rejects(relaySubscribe(s.ctx,s.principal,p,s.env,receiver),/binding required/);
+  assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM relay_subscriptions').get().n,0);
+});
+
+test('unauthorized HTTP and MCP project sends cannot reserve shared alarms', async t => {
+  const s=await setup(t),{relayRpc}=await import('../backend/relay-connector.js');
+  let alarms=0;
+  s.ctx.storage.setAlarm=async()=>{alarms++;};
+  const response=await s.request('/relay/projects/jarvis/send',{method:'POST',headers:{Authorization:'Bearer jpi_'+'9'.repeat(64),'Content-Type':'application/json'},body:JSON.stringify({recipient:'mast',kind:'note',body:'unauthorized',idempotencyKey:crypto.randomUUID()})});
+  assert.equal(response.status,401);assert.equal(alarms,0);
+  const result=await relayRpc(s.ctx,s.env,s.principal,{method:'tools/call',params:{_meta:{'io.modelcontextprotocol/protocolVersion':'2026-07-28','io.modelcontextprotocol/clientCapabilities':{}},name:'relay_project_send',arguments:{project:'jarvis',recipient:'mast',kind:'note',body:'unbound',idempotencyKey:crypto.randomUUID()}}},{withCoreWake:()=>{throw Error('Unauthenticated wake');}});
+  assert.equal(result.isError,true);assert.equal(alarms,0);
+});
+
+test('project event discovery is gated and callbacks stop on binding expiry, parent revocation or flag disablement', async t => {
+  const {relaySubscribe,drainRelayOutbox,relayUnsubscribe}=await import('../backend/relay-events.js');
+  const {relayRpc}=await import('../backend/relay-connector.js');
+  for(const reason of ['expiry','parent','flag']) {
+    const s=await setup(t),meta={'io.modelcontextprotocol/protocolVersion':'2026-07-28','io.modelcontextprotocol/clientCapabilities':{}};
+    const list=()=>relayRpc(s.ctx,s.env,s.principal,{method:'events/list',params:{_meta:meta}});
+    assert.ok(!(await list()).events.some(e=>e.name==='relay.project.message.created'));
+    s.env.RELAY_PROJECT_EVENTS_ENABLED='true';
+    assert.ok((await list()).events.some(e=>e.name==='relay.project.message.created'));
+    const args={op:'binding_create',bindingId:crypto.randomUUID(),parentGrantId:s.principal.grantId,project:'jarvis',agent:'lucy',expiresAt:new Date(Date.now()+3600000).toISOString(),confirm:true};
+    assert.equal(projectStore(s.ctx,s.env,{op:'admin',principal:s.principal,args}).status,200);
+    const p={name:'relay.project.message.created',arguments:{project:'jarvis',bindingId:args.bindingId},delivery:{mode:'webhook',url:'https://callback.example.test/project',secret:'whsec_'+Buffer.alloc(32,9).toString('base64')}};
+    let calls=0;
+    const receiver=async(url,options)=>{const data=JSON.parse(options.body);if(data.challenge)return Response.json({challenge:data.challenge});calls++;return new Response('',{status:200});};
+    await relaySubscribe(s.ctx,s.principal,p,s.env,receiver);
+    // Explicit reply is a new callback occurrence, with no owner/public routing.
+    const request=(await s.send()).data.message.id;
+    const claim=(await s.call('claim',{messageId:request,runId:crypto.randomUUID()},'mast')).data;
+    const tuple=leaseArgs(claim);delete tuple.messageId;
+    const reply=await s.send('accepted answer','mast',{kind:'reply',replyTo:request,...tuple});
+    const queued=s.db.prepare('SELECT body FROM relay_outbox').all().map(r=>JSON.parse(r.body));
+    assert.equal(queued.length,1);assert.equal(queued[0].data.message_id,reply.data.message.id);
+    if(reason==='expiry')s.db.prepare('UPDATE project_bindings SET expires_ms=? WHERE id=?').run(Date.now()-1,args.bindingId);
+    if(reason==='parent')s.db.prepare("UPDATE relay_oauth SET value=json_set(value,'$.revoked',1) WHERE key=?").run('grant:'+s.principal.grantId);
+    if(reason==='flag')s.env.RELAY_PROJECT_EVENTS_ENABLED='false';
+    await drainRelayOutbox(s.ctx,s.env,receiver);
+    assert.equal(calls,0);
+    if(reason!=='parent')await relayUnsubscribe(s.ctx,s.principal,{name:p.name,arguments:p.arguments,delivery:{mode:'webhook',url:p.delivery.url}},Date.now(),s.env);
+  }
+});

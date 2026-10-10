@@ -154,7 +154,15 @@ export class Hub {
   }
   async fetch(request){
     const path=new URL(request.url).pathname;
-    if(path==='/internal/relay/projects')return projectStore(this.ctx,this.env,await request.json());
+    if(path==='/internal/relay/projects'){
+      const input=await request.json(),operation=()=>projectStore(this.ctx,this.env,input);
+      if(input.op==='send'){
+        const authorized=projectStore(this.ctx,this.env,{...input,op:'identity',args:{}});
+        if(!authorized.ok)return authorized;
+        return this.withCoreWake(operation);
+      }
+      return operation();
+    }
     if(path==='/internal/relay/oauth')return relayOAuthStore(this.ctx,await request.json());
     if(path==='/internal/relay/owner'){
       try {
@@ -166,7 +174,7 @@ export class Hub {
       } catch { return json({error:'Owner Relay storage unavailable'},503); }
     }
     if(path==='/internal/relay/rpc'){
-      try{const {principal,rpc}=await request.json();return json({result:await relayRpc(this.ctx,this.env,principal,rpc,{syncPublicRead:()=>this.syncPublicRead()})});}
+      try{const {principal,rpc}=await request.json();return json({result:await relayRpc(this.ctx,this.env,principal,rpc,{syncPublicRead:()=>this.syncPublicRead(),withCoreWake:operation=>this.withCoreWake(operation)})});}
       catch(error){return json({error:{code:error instanceof RelayError?error.code:-32603,message:error instanceof RelayError?error.message:'Relay storage unavailable',...(error instanceof RelayError&&error.data?{data:error.data}:{})}});}
     }
     if(path.startsWith('/internal/shared/')) {
