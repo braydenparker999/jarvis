@@ -109,7 +109,7 @@ test('Relay choice sheets, owner connection and pending public timestamps retain
   await page.getByRole('button',{name:'Close connection details',exact:true}).click();
   const id=crypto.randomUUID();assert.equal(sharedStore(j.h.ctx,'/internal/shared/message',{id,body:'Fictional public question awaiting a reply.'}).status,201);
   await conversationMenu(page,'Public chat');await page.evaluate(()=>dispatchEvent(new Event('online')));const pending=page.locator('#messages [data-message-id="'+id+'"] .message-footer>.message-time[data-pending=true]');await pending.waitFor();
-  const colors=await pending.evaluate(n=>({text:getComputedStyle(n).color,background:getComputedStyle(document.body).backgroundColor}));assert.ok(contrast(colors.text,colors.background)>=4.5,JSON.stringify(colors));assert.match(await pending.innerText(),/Awaiting reply/);
+  const colors=await pending.evaluate(n=>({text:getComputedStyle(n).color,background:getComputedStyle(n.closest('.bubble')).backgroundColor}));assert.ok(contrast(colors.text,colors.background)>=4.5,JSON.stringify(colors));assert.match(await pending.innerText(),/Awaiting reply/);
   await writeSyntheticEvidence(phone,'redesign-public-pending-contrast',{synthetic:true,colors,contrast:contrast(colors.text,colors.background)});assertBrowserContained(phone);
   if(process.env.JARVIS_SCREENSHOT_DIR){
     const helper=fileURLToPath(new URL('./helpers/relay-modernization-visual-fixture.mjs',import.meta.url));
@@ -130,4 +130,24 @@ test('approved Relay font, menu and reduced motion preserve the real public/priv
   await conversationMenu(page,'Public chat');await page.locator('#message-text').waitFor();await page.locator('#relay-menu-button').click();await page.getByRole('dialog').getByRole('button',{name:'Saved',exact:true}).click();assert.equal(await page.locator('.conversation-identity .brand').textContent(),'Saved');
   assert.equal(await page.locator('body').textContent().then(x=>x.includes('PRIVATE-V6-')),false);await page.locator('#relay-menu-button').click();await page.getByRole('dialog').getByRole('button',{name:'Settings',exact:true}).click();await page.getByRole('dialog').getByRole('button',{name:'Font & credits',exact:true}).click();await page.getByRole('dialog').locator('summary').click();const license=await page.getByRole('dialog').locator('pre').textContent();assert.match(license,/SIL OPEN FONT LICENSE Version 1.1/);assert.match(license,/TERMINATION/);assert.match(license,/DISCLAIMER/);
   assert.equal(phone.records.some(r=>/fonts\.googleapis|fonts\.gstatic|raw\.githubusercontent/.test(r.url)),false,'The licensed font loads from the deployed CSS without a third-party font request');assertBrowserContained(phone);await assertNoPrivatePersistence(page,['PRIVATE-V6-TASK-6941','PRIVATE-V6-SCOPE-7732','PRIVATE-V6-PROJECT-1825']);
+});
+
+test('rendered Relay code and recovery notices retain readable inner-surface contrast',{timeout:120000},async t=>{
+  const j=await journey(t);if(!j)return;const question=crypto.randomUUID();
+  assert.equal(sharedStore(j.h.ctx,'/internal/shared/message',{id:question,body:'Fictional public formatting question.'}).status,201);
+  assert.equal(sharedStore(j.h.ctx,'/internal/shared/reply',{id:crypto.randomUUID(),replyTo:question,body:'Fictional code example:\n\n```js\nconsole.log("fixture");\n```\n\nUse `fixture_value` only in this example.'}).status,201);
+  const phone=await j.open(),page=phone.page,checks=[];
+  const colors=async locator=>locator.evaluate(n=>{
+    const text=getComputedStyle(n).color;let node=n,background;
+    while(node){background=getComputedStyle(node).backgroundColor;if(background!=='rgba(0, 0, 0, 0)'&&background!=='transparent')break;node=node.parentElement;}
+    return {text,background};
+  });
+  await conversationMenu(page,'Public chat');await page.evaluate(()=>dispatchEvent(new Event('online')));const code=page.locator('#messages .code-block pre');await code.waitFor();
+  for(const locator of [code,page.locator('#messages .rich-body p code'),page.locator('#messages .code-copy'),page.locator('#messages .outgoing .message-body p'),page.locator('#messages .outgoing .message-footer>.message-time')])checks.push(await colors(locator));
+  await writeSyntheticEvidence(phone,'redesign-inner-code',{synthetic:true,colors:checks.slice()});
+  await conversationMenu(page,'Owner chat');await page.locator('#relay-owner-message-text').waitFor();
+  phone.rule(r=>r.method==='GET'&&r.path==='/relay/owner/messages',async({forward})=>{const response=await forward();return Response.json({error:'Fictional unavailable fixture'},{status:503,headers:response.headers});});
+  await conversationMenu(page,'Refresh private inbox');const error=page.locator('.conversation-notice[data-kind=error] p');await error.waitFor();checks.push(await colors(error),await colors(page.locator('.conversation-notice[data-kind=error] button')));await writeSyntheticEvidence(phone,'redesign-inner-error',{synthetic:true,colors:checks.slice(-2)});
+  await conversationMenu(page,'Refresh private inbox');await page.waitForFunction(()=>document.querySelector('.conversation-notice')?.hidden===true);await page.locator('#relay-owner-message-text').fill('Fictional retained draft for a safe local notice.');await conversationMenu(page,'Requests');await page.locator('#relay-owner-new-task').click();const note=page.locator('.conversation-notice[data-kind=note] p');await note.waitFor();checks.push(await colors(note));await writeSyntheticEvidence(phone,'redesign-inner-note',{synthetic:true,colors:checks.slice(-1)});
+  for(const value of checks)assert.ok(contrast(value.text,value.background)>=4.5,JSON.stringify({...value,contrast:contrast(value.text,value.background)}));assertBrowserContained(phone);
 });

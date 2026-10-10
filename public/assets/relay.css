@@ -311,14 +311,14 @@ body.relay-page #relay-menu-button{left:14px}
 body.relay-page #relay-work-button{right:14px}
 body.relay-page #relay-work-button svg{width:23px;height:23px}
 body.relay-page #relay-work-button span{font-size:9px;line-height:12px}
-body.relay-page #relay-work-button[aria-pressed=true]{background:#6e8eb5;color:#fff;border-color:#7c9dc4}
+body.relay-page #relay-work-button[aria-pressed=true]{background:#506d92;color:#fff;border-color:#7c9dc4}
 body.relay-page main#content{grid-row:1;height:100%;background:#000}
 body.relay-page .chat-panel{height:100%;background:#000}
 body.relay-page .messages{padding:122px 16px 20px;scroll-padding-top:120px;background:#000}
 body.relay-page .message-row{margin-bottom:17px;gap:0}
 body.relay-page .message-heading{display:none}
 body.relay-page .bubble{max-width:76%;padding:13px 16px 10px;background:#333;border:0;border-radius:23px;font-size:17px;line-height:1.31;color:#f8f8f8;letter-spacing:-.01em}
-body.relay-page .outgoing .bubble{background:#6e8eb5;color:#fff;border-radius:23px}
+body.relay-page .outgoing .bubble{background:#506d92;color:#fff;border-radius:23px}
 body.relay-page .message-group-continuation{margin-top:-10px}
 body.relay-page .message-body p{margin:0 0 16px}
 body.relay-page .message-body>:last-child{margin-bottom:0}
@@ -366,7 +366,7 @@ body.relay-page main#content .messages{padding:122px 16px 20px;background:#000}
 body.relay-page main#content:has(>.conversation-search:not([hidden])) .messages{padding-top:20px}
 body.relay-page main#content .relay-owner-panel:not(.relay-owner-chat){padding:130px 20px 40px}
 body.relay-page main#content .message-row .bubble{max-width:76%;padding:13px 16px 10px;background:#333;color:#f8f8f8;border:0;border-radius:23px;font-size:17px;line-height:1.31}
-body.relay-page main#content .message-row.outgoing .bubble{background:#6e8eb5;color:#fff;border-radius:23px}
+body.relay-page main#content .message-row.outgoing .bubble{background:#506d92;color:#fff;border-radius:23px}
 
 /* Consistent conversation header and focused task editor. */
 
@@ -405,7 +405,7 @@ body.relay-page .relay-owner-chat[data-work-view=true]:has(.conversation-search:
 body.relay-page .owner-work .owner-work-heading{display:flex;flex-wrap:nowrap;align-items:center;gap:10px;margin:0 0 14px}
 body.relay-page .owner-work .owner-work-heading>.owner-work-filters{flex:1;min-width:0;margin:0}
 body.relay-page .owner-work .owner-work-filters select{flex:1;width:100%;min-width:0;min-height:48px;border:1px solid #4b4b4b;border-radius:24px;background:#303030;color:#e7e7e7;padding:10px 34px 10px 14px;font-size:14px}
-body.relay-page .owner-work #relay-owner-new-task{min-width:112px;min-height:48px;border:1px solid #7899c0;border-radius:24px;background:#6e8eb5;color:white;font-size:14px;line-height:20px;padding:10px 15px;white-space:nowrap}
+body.relay-page .owner-work #relay-owner-new-task{min-width:112px;min-height:48px;border:1px solid #7899c0;border-radius:24px;background:#506d92;color:white;font-size:14px;line-height:20px;padding:10px 15px;white-space:nowrap}
 body.relay-page .owner-work button.owner-work-task{display:grid;grid-template-columns:minmax(0,1fr) 22px;align-items:center;gap:10px;width:100%;min-height:88px;padding:14px 15px;margin:8px 0;border:1px solid #333;border-radius:20px;background:#232323;text-align:left;color:#f7f7f7}
 body.relay-page .owner-work button.owner-work-task:hover{background:#2d2d2d}
 body.relay-page .owner-work .owner-work-row-content{min-width:0;display:flex;flex-direction:column;align-items:flex-start;gap:4px}
@@ -443,7 +443,7 @@ body.relay-page #relay-owner-request-dialog .request-next-card{background:#1d283
 body.relay-page #relay-owner-request-dialog .request-next-card h3{color:#b5cae4}
 body.relay-page #relay-owner-request-dialog .request-actions{display:flex;flex-wrap:wrap;gap:8px;margin:16px 0 0}
 body.relay-page #relay-owner-request-dialog :is(.primary,.secondary){min-height:48px;min-width:48px;border:1px solid #535353;border-radius:24px;padding:10px 17px;font-size:14px;line-height:20px;white-space:normal;background:#333;color:#f7f7f7}
-body.relay-page #relay-owner-request-dialog .primary{border-color:#7c9dc4;background:#6e8eb5;color:#fff}
+body.relay-page #relay-owner-request-dialog .primary{border-color:#7c9dc4;background:#506d92;color:#fff}
 body.relay-page #relay-owner-request-dialog :is(.primary,.secondary):disabled{opacity:.5}
 body.relay-page #relay-owner-request-dialog details{border:0;margin:0}
 body.relay-page #relay-owner-request-dialog .request-disclosure{margin:10px 0;border:1px solid #333;border-radius:20px;background:#202020;padding:0 17px}
@@ -457,7 +457,7 @@ body.relay-page #relay-owner-request-dialog .request-events li>.request-meta{mar
 body.relay-page #relay-owner-request-dialog .request-result-version{padding:0 0 16px;margin:0 0 14px;border-bottom:1px solid #3e3e3e}
 body.relay-page #relay-owner-request-dialog #relay-owner-result-rationale{border:0;padding:0}
 body.relay-page .relay-owner-chat[data-task-editor=true] :is(input,select,textarea){border:1px solid #505050;border-radius:18px;background:#303030;color:#f7f7f7;min-height:48px}
-body.relay-page .relay-owner-chat[data-task-editor=true] .owner-task-actions .send-icon{border-radius:24px;background:#6e8eb5;border:1px solid #7c9dc4;color:#fff}
+body.relay-page .relay-owner-chat[data-task-editor=true] .owner-task-actions .send-icon{border-radius:24px;background:#506d92;border:1px solid #7c9dc4;color:#fff}
 body.relay-page .relay-owner-chat[data-task-editor=true] #relay-owner-task-back{min-height:48px;min-width:76px;color:#ddd}
 @media(min-width:800px){body.relay-page .app-sheet{max-width:540px;border-radius:26px}body.relay-page #relay-owner-request-dialog{padding-inline:32px;border-radius:0}}
 @media(max-width:360px){body.relay-page .owner-work .owner-work-title{font-size:15px}body.relay-page .owner-work #relay-owner-new-task{min-width:104px;padding-inline:12px}body.relay-page #relay-owner-request-dialog .request-title{font-size:23px;line-height:29px}}
@@ -599,4 +599,16 @@ body.relay-page main#content:has(>#relay-transfer-notice) .relay-owner-panel:not
 body.relay-page .relay-menu-home{display:flex;align-items:center;justify-content:center;min-height:48px;color:#aaa;font-size:12px;border-top:1px solid #3d3d3d;margin-top:10px}
 body.relay-page main#content .relay-owner-panel:not(.relay-owner-chat){color:#f7f7f7}
 body.relay-page main#content .relay-owner-panel:not(.relay-owner-chat) :is(input,select){background:#303030;border:1px solid #686868;border-radius:16px;color:#f7f7f7;min-height:48px}
-body.relay-page main#content .relay-owner-panel:not(.relay-owner-chat) .primary{background:#6e8eb5;border-radius:24px;color:#fff}
+body.relay-page main#content .relay-owner-panel:not(.relay-owner-chat) .primary{background:#506d92;border-radius:24px;color:#fff}
+
+/* Keep every inner reading/recovery surface legible in Relay's dark palette. */
+body.relay-page .rich-body .code-block{background:#202020;border-color:#505050;color:#f7f7f7}
+body.relay-page .rich-body .code-block pre{background:transparent;color:#f7f7f7}
+body.relay-page .rich-body :not(pre)>code{background:#252525;color:#f7f7f7}
+body.relay-page .rich-body .code-copy{background:#383838;color:#d7e7fa}
+body.relay-page .conversation-notice{background:#38292f;color:#f4d6df}
+body.relay-page .conversation-notice p{background:transparent;color:#f4d6df}
+body.relay-page .conversation-notice button{color:#f4d6df}
+body.relay-page .conversation-notice[data-kind=note]{background:#25354a;color:#dce8f8}
+body.relay-page .conversation-notice[data-kind=note] p{background:transparent;color:#dce8f8}
+body.relay-page .relay-owner-content .relay-owner-error{color:#f4d6df}
