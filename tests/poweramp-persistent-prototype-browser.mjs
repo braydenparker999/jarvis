@@ -56,9 +56,11 @@ async function open(browser,built,theme){
   const center=selector=>page.locator(selector).evaluate(n=>{const r=n.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2};});
   const library=async()=>{
     const selector='[data-nav="library"]',nav=page.locator(selector);
-    // Retain locator actionability, then send one acknowledged touch contact.
-    // Navigation must still be performed by a real browser-generated click.
-    await nav.tap({trial:true});
+    // Playwright trial taps dispatch an intercepted contact. Use non-input
+    // actionability checks before the single browser-generated navigation click.
+    await nav.scrollIntoViewIfNeeded();
+    assert.equal(await nav.isVisible(),true,'Library is visible before setup contact');
+    assert.equal(await nav.isEnabled(),true,'Library is enabled before setup contact');
     const point=await center(selector);
     assert.equal(await nav.evaluate((node,p)=>node.contains(document.elementFromPoint(p.x,p.y)),point),true,'Library center receives the setup contact');
     const before=await page.evaluate(()=>fixtureNavigationTrace.sequence);
