@@ -69,7 +69,7 @@ test('cached YouTube results share the live video lane and obey provider filters
   for(const enabled of [true,false]){
     const state={currentPage:'search',searchSequence:0,metaCache:new Map([['video',item]]),homeItems:[],library:{}};
     const route={current:()=>true,onDispose(){}};
-    const c=vm.createContext({state,youtube:{browseToken:0},youtubeEnabled:()=>enabled,YT:{api:{videoIdFromInput:()=>''}},Routes:{},AstraSearchIntent:{parse:()=>({text:'Paco',type:''}),matches:()=>true},AstraSearch:{groupSources:()=>[],matchRank:()=>0,merge:(a,b)=>[...a,...b]},allCatalogs:()=>[],isYouTubeMeta:m=>m.type==='youtube',renderSearchRun(){},searchYouTube(){},searchProviderGroup(){}});
+    const c=vm.createContext({state,clearTimeout,searchTimer:null,youtube:{browseToken:0},youtubeEnabled:()=>enabled,YT:{api:{videoIdFromInput:()=>''}},Routes:{},AstraSearchIntent:{parse:()=>({text:'Paco',type:''}),matches:()=>true},AstraSearch:{groupSources:()=>[],matchRank:()=>0,merge:(a,b)=>[...a,...b]},allCatalogs:()=>[],isYouTubeMeta:m=>m.type==='youtube',renderSearchRun(){},searchYouTube(){},searchProviderGroup(){}});
     vm.runInContext(functionSource('search'),c);c.search('Paco',route);
     const lanes=state.searchRun.groups.filter(group=>group.key==='youtube');
     assert.equal(lanes.length,enabled?1:0);

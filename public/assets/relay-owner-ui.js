@@ -399,16 +399,20 @@ export function ownerWorkAttention(tasks) {
   return attentionLabels.map(([reason,label])=>({reason,label,count:tasks.filter(task=>task.status.attention===reason).length}));
 }
 
+const workTitle=job=>job.presentation?.work?.title||job.title;
+const linkedWork=job=>job.presentation?.work?.revision===0?job.presentation.work.workId:null;
+const actionableWork=job=>!!job.presentation?.work||job.actionKind!=='unclassified'||job.attempt>1||!!job.execution||!!job.completion;
+
 export function groupOwnerWork(jobs, {query='', filter='all', now=Date.now()}={}) {
   query=query.trim().toLowerCase();
   const roots=new Map(),activity=new Map();
-  for(const job of jobs){const attempts=roots.get(job.rootJobId)||[];attempts.push(job);roots.set(job.rootJobId,attempts);}
+  for(const job of jobs){if(linkedWork(job))continue;const attempts=roots.get(job.rootJobId)||[];attempts.push(job);roots.set(job.rootJobId,attempts);}
   const tasks=[...roots.values()].map(attempts=>{
     attempts.sort((a,b)=>a.attempt-b.attempt||a.sequence-b.sequence);
     const job=attempts.at(-1);activity.set(job.id,Date.parse(ownerWorkActivity(job)));return {job,attempts,status:ownerWorkStatus(job,now)};
-  }).filter(({job,attempts})=>job.actionKind!=='unclassified'||job.attempt>1||attempts.some(attempt=>attempt.execution||attempt.completion))
+  }).filter(({job,attempts})=>actionableWork(job)||attempts.some(attempt=>attempt.execution||attempt.completion))
     .filter(({status})=>filter==='all'||status.state===filter||status.attention===filter)
-    .filter(({job})=>!query||[job.title,job.body,job.presentation?.projectTitle,job.presentation?.goalTitle,job.presentation?.latestUpdate?.summary,job.latestResult?.body||job.result?.body,job.latestResult?.correctionSummary].some(text=>text?.toLowerCase().includes(query)));
+    .filter(({job})=>!query||[workTitle(job),job.presentation?.work?.goal,...(job.presentation?.work?.plan||[]),job.body,job.presentation?.projectTitle,job.presentation?.goalTitle,job.presentation?.latestUpdate?.summary,job.latestResult?.body||job.result?.body,job.latestResult?.correctionSummary].some(text=>text?.toLowerCase().includes(query)));
   tasks.sort((a,b)=>activity.get(b.job.id)-activity.get(a.job.id)||b.job.sequence-a.job.sequence);
   return tasks;
 }
@@ -534,12 +538,20 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
     const content=make('div','','request-screen-content');detailDialog.append(content);
     const data=state.jobDetail,job=data?.job;
     if(!job){content.append(make('p',state.jobDetailError||'Opening task…','sheet-context'));const refresh=action('Try again',()=>controller.inspectJob(state.jobDetailId,{refresh:true}));refresh.disabled=state.jobDetailBusy;refresh.hidden=!state.jobDetailError;content.append(refresh);return;}
-    const status=ownerWorkStatus(job),title=make('h2',job.title,'request-title');title.id='relay-owner-detail-title';title.dataset.readingAnchor='request-title';detailDialog.setAttribute('aria-labelledby',title.id);content.append(title);
+    const status=ownerWorkStatus(job),title=make('h2',workTitle(job),'request-title');title.id='relay-owner-detail-title';title.dataset.readingAnchor='request-title';detailDialog.setAttribute('aria-labelledby',title.id);content.append(title);
     const labels=job.presentation;if(labels?.projectTitle)content.append(make('p',[labels.projectTitle,labels.goalTitle].filter(Boolean).join(' · '),'request-meta request-project'));
     const stateLabel=make('p',jobLabel(job),'request-state');stateLabel.dataset.attention=status.attention||status.state;content.append(stateLabel);
     if(state.jobDetailStale||state.syncStale||state.jobsError)content.append(make('p','Last saved status · refresh unavailable','relay-owner-note'));
     const update=meaningfulUpdate(job,data.events),latest=job.latestResult||job.result;
     const card=(title,cls='')=>{const section=make('section','','request-card '+cls);section.append(make('h3',title));return section;};
+    const workPlan=job.presentation?.work;
+    if(workPlan?.revision){
+      const overview=card('Goal and plan');overview.id='relay-owner-work-plan';overview.append(make('p',workPlan.goal,'request-body'));
+      const steps=make('ol');for(const step of workPlan.plan)steps.append(make('li',step,'request-copy'));overview.append(steps,make('p','Plan revision '+workPlan.revision+' · planning does not confirm execution','request-meta'));content.append(overview);
+    }
+    if(linkedWork(job))content.append(action('View original work',()=>controller.inspectJob(linkedWork(job)),'secondary'));
+    const followUps=state.jobs.filter(other=>linkedWork(other)===job.id);
+    if(followUps.length){const related=card('Follow-up messages');for(const follow of followUps)related.append(action(follow.body.slice(0,100),()=>controller.inspectJob(follow.id),'text-button'));content.append(related);}
     if(latest){
       const output=card('Output','request-output'),body=make('div','','request-body rich-body');body.id='relay-owner-result-latest';body.dataset.readingAnchor='saved-result';body.dataset.resultVersion=String(latest.version||job.resultVersion||1);richText(body,latest.body);output.append(body,make('p','Version '+(latest.version||job.resultVersion||1)+' · '+stamp(latest.createdAt),'request-meta'));content.append(output);
     }else if(update){
@@ -608,7 +620,7 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
     if(state.syncStale||state.jobsError){const stale=make('p','Last known records · '+(state.jobsError||'refresh unavailable'),'relay-owner-note');stale.setAttribute('role','status');body.append(stale);}
     function taskRow(task){
       const {job,status}=task,row=action('',()=>controller.inspectJob(job.id),'owner-work-task');row.id='owner-work-task-'+job.id;row.dataset.jobId=job.id;row.dataset.workAnchor='task:'+job.id;row.dataset.state=status.state;if(status.attention)row.dataset.attention=status.attention;
-      const content=make('span','','owner-work-row-content');content.append(make('span',job.title,'owner-work-title'));const context=[job.presentation?.projectTitle,job.presentation?.goalTitle].filter(Boolean).join(' · ');if(context)content.append(make('span',context,'owner-work-project-label'));content.append(make('span',plainWorkLabel(job,status),'job-state'));const arrow=make('span','','owner-work-row-arrow');arrow.innerHTML=icon('chevron');row.append(content,arrow);return row;
+      const content=make('span','','owner-work-row-content');content.append(make('span',workTitle(job),'owner-work-title'));const context=[job.presentation?.projectTitle,job.presentation?.goalTitle].filter(Boolean).join(' · ');if(context)content.append(make('span',context,'owner-work-project-label'));content.append(make('span',plainWorkLabel(job,status),'job-state'));const arrow=make('span','','owner-work-row-arrow');arrow.innerHTML=icon('chevron');row.append(content,arrow);return row;
     }
     function flatTasks(list,container){for(const task of list)container.append(taskRow(task));}
     const current=tasks.filter(t=>t.status.state!=='finished'),finished=tasks.filter(t=>t.status.state==='finished');
@@ -636,13 +648,13 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
     for (const m of selected) {
       const day=messageDay(m.createdAt),dayStart=day.key!==previousDay?day.label:'';previousDay=day.key;
       const grouped=!!previousMessage&&previousMessage.role===m.role&&!dayStart&&Date.parse(m.createdAt)-Date.parse(previousMessage.createdAt)<300000;previousMessage=m;
-      const job=jobs.get(m.id),replyJob=m.replyTo?jobs.get(m.replyTo):null,stale=state.syncStale||state.jobsError||state.jobDetailStale&&state.jobDetailId===job?.id,signature=JSON.stringify([m,job,replyJob?.resultVersion,state.busy,state.sending,stale,job?jobLabel(job):null,dayStart,grouped]);let row=existing.get(m.id);
+      const candidate=jobs.get(m.id),job=candidate&&(actionableWork(candidate)||candidate.result)?candidate:null,replyJob=m.replyTo?jobs.get(m.replyTo):null,stale=state.syncStale||state.jobsError||state.jobDetailStale&&state.jobDetailId===job?.id,signature=JSON.stringify([m,job,replyJob?.resultVersion,state.busy,state.sending,stale,job?jobLabel(job):null,dayStart,grouped]);let row=existing.get(m.id);
       if(row?._signature===signature){nodes.push(row);continue;}
       row = make('article', '', 'message-row ' + (m.role === 'user' ? 'outgoing' : 'incoming')+(grouped?' message-group-continuation':''));row._signature=signature;
       row.dataset.messageId = m.id;
       if(dayStart)row.append(make('p',dayStart,'message-day'));
       const heading=make('div','','message-heading'),copy=action('',async()=>{copy.setAttribute('aria-label',await copyText(m.body)?'Private message copied':'Copy private message');},'message-actions');copy.innerHTML=icon('copy');copy.setAttribute('aria-label','Copy private message');heading.append(make('span',m.role==='user'?'You':'dot','message-author'));row.append(heading);
-      if(job&&job.title!=='Owner request')row.append(make('p',job.title,'owner-request-title'));
+      if(job&&workTitle(job)!=='Owner request')row.append(make('p',workTitle(job),'owner-request-title'));
       // Request text is inert. The inspector alone formats the saved result.
       const bubble=make('div','','bubble');bubble.append(make('p',m.body,'message-body'));row.append(bubble);
       let status='';
@@ -650,7 +662,7 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
         const labels={saved:'Saved privately · awaiting reply',queued:'Saved · awaiting assistant',callback_accepted:'Sent · awaiting reply',delivery_failed:'Delivery needs retry',reply_saved:'Reply saved'};
         status=job?'':labels[m.delivery?.state]||'Saved privately';
         if(job){
-          row.dataset.jobId=job.id;const info=make('div','','message-job');info.dataset.state=job.stage;const inspect=action('Inspect request',()=>controller.inspectJob(job.id),'text-button');inspect.id='relay-owner-inspect-'+job.id;info.append(make('span',(stale?'Last known: ':'')+jobLabel(job),'job-state'),inspect);row.append(info);
+          row.dataset.jobId=job.id;const info=make('div','','message-job');info.dataset.state=job.stage;const inspect=action(linkedWork(job)?'View original work':'Inspect request',()=>controller.inspectJob(linkedWork(job)||job.id),'text-button');inspect.id='relay-owner-inspect-'+job.id;info.append(make('span',(stale?'Last known: ':'')+(linkedWork(job)?'Follow-up · ':'')+jobLabel(job),'job-state'),inspect);const progress=job.presentation?.latestUpdate;if(progress)info.append(make('p',progress.summary,'request-copy'));row.append(info);
         }else if(m.delivery?.retryable){
           const retry=action('Retry callback delivery',()=>controller.retryDelivery(m.id));
           retry.disabled=state.busy||state.sending;row.append(retry);
@@ -660,7 +672,7 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
       }
       const footer=make('div','','message-footer');footer.append(make('span',messageStamp(m.createdAt)+(status?' · '+status:''),'message-time'),copy);bubble.append(footer);nodes.push(row);
     }
-    if (!selected.length&&!work){const empty=make('div','','chat-empty');empty.append(make('p','Private owner conversation','empty-label'),make('h2',state.query?'No matching messages':state.requestsOnly?'No requests to show':state.busy?'Opening your conversation…':'What would you like to work on?'),make('p',state.query?'Try a different phrase.':state.requestsOnly?'Send a message or a work request. Both stay in your private conversation.':state.busy?'Checking your private inbox.':state.jobsEnabled?'Message dot or turn a thought into a work request. Saved replies and results appear here.':'Message dot privately. Replies appear here after the assistant checks the inbox.'));nodes.push(empty);}
+    if (!selected.length&&!work){const empty=make('div','','chat-empty');empty.append(make('p','Private owner conversation','empty-label'),make('h2',state.query?'No matching messages':state.requestsOnly?'No requests to show':state.busy?'Opening your conversation…':'What would you like to work on?'),make('p',state.query?'Try a different phrase.':state.requestsOnly?'Send a message or a work request. Both stay in your private conversation.':state.busy?'Checking your private inbox.':state.jobsEnabled?'Ask naturally. When the assistant identifies actionable work, its plan and progress appear here and in Work.':'Message dot privately. Replies appear here after the assistant checks the inbox.'));nodes.push(empty);}
     if(!work){if(panel.insertBefore){const wanted=new Set(nodes);for(const child of [...panel.children])if(!wanted.has(child))child.remove();for(let i=0;i<nodes.length;i++)if(panel.children[i]!==nodes[i])panel.insertBefore(nodes[i],panel.children[i]||null);}else panel.replaceChildren(...nodes);restorePosition(panel,anchor);}chatNodes.first=false;
     if (chatNodes.input.value !== state.draft) { chatNodes.input.value = state.draft; autosize(chatNodes.input); }
     chatNodes.section.dataset.workView=String(work);chatNodes.section.dataset.taskEditor=String(state.jobMode);chatNodes.section.dataset.taskDraft=String(controller.hasTaskDraft);
