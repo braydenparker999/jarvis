@@ -12,6 +12,7 @@ import {drainRelayOutbox,scheduleRelayAlarm,enqueueRelayOwnerMessage,webhookTran
 import {reserveRelayCoreWake,releaseRelayCoreWake,assertRelayCoreWake,beginRelayCoreAlarm,abandonRelayCoreAlarm} from './relay-core-alarm.js';
 import {relayOwnerPublic,relayOwnerStore} from './relay-owner.js';
 import {RelayError,boundedText} from './relay-common.js';
+import {projectTransport,projectStore} from './relay-projects.js';
 const paths = new Set(['/v1/state', '/v1/messages', '/v1/board', '/v1/responder/connect', '/v1/responder/revoke', '/v1/agent/inbox', '/v1/agent/replies', '/v1/agent/board']);
 const digest = async value => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))),b=>b.toString(16).padStart(2,'0')).join('');
 const randomKey = () => Array.from(crypto.getRandomValues(new Uint8Array(32)),b=>b.toString(16).padStart(2,'0')).join('');
@@ -20,6 +21,7 @@ const publicState = state => ({messages:state.messages, posts:state.posts});
 const unanswered = state => state.messages.filter(m=>m.role==='user' && !state.messages.some(r=>r.kind==='reply' && r.replyTo===m.id));
 export default {
   async fetch(request, env) {
+    const project=await projectTransport(request,env);if(project)return project;
     const relay=await relayConnector(request,env);if(relay)return relay;
     const owner=await relayOwnerPublic(request,env);if(owner)return owner;
     const native=await nativeMusic(request,env);if(native)return native;
@@ -152,6 +154,15 @@ export class Hub {
   }
   async fetch(request){
     const path=new URL(request.url).pathname;
+    if(path==='/internal/relay/projects'){
+      const input=await request.json(),operation=()=>projectStore(this.ctx,this.env,input);
+      if(input.op==='send'){
+        const authorized=projectStore(this.ctx,this.env,{...input,op:'identity',args:{}});
+        if(!authorized.ok)return authorized;
+        return this.withCoreWake(operation);
+      }
+      return operation();
+    }
     if(path==='/internal/relay/oauth')return relayOAuthStore(this.ctx,await request.json());
     if(path==='/internal/relay/owner'){
       try {
@@ -163,7 +174,7 @@ export class Hub {
       } catch { return json({error:'Owner Relay storage unavailable'},503); }
     }
     if(path==='/internal/relay/rpc'){
-      try{const {principal,rpc}=await request.json();return json({result:await relayRpc(this.ctx,this.env,principal,rpc,{syncPublicRead:()=>this.syncPublicRead()})});}
+      try{const {principal,rpc}=await request.json();return json({result:await relayRpc(this.ctx,this.env,principal,rpc,{syncPublicRead:()=>this.syncPublicRead(),withCoreWake:operation=>this.withCoreWake(operation)})});}
       catch(error){return json({error:{code:error instanceof RelayError?error.code:-32603,message:error instanceof RelayError?error.message:'Relay storage unavailable',...(error instanceof RelayError&&error.data?{data:error.data}:{})}});}
     }
     if(path.startsWith('/internal/shared/')) {

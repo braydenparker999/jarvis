@@ -53,7 +53,7 @@ class FakeAudio {
   get src() { return this._src; }
   set src(value) {
     this._src = String(value); this.sources.push(this._src);
-    this.currentTime = 0; this.readyState = 0; this.duration = NaN; this.ended = false;
+    this.currentTime = 0; this.readyState = 0; this.duration = NaN; this.ended = false; this.error = null;
   }
   get currentSrc() { return this._src; }
   setAttribute() {}
@@ -624,3 +624,67 @@ for(const kind of ['native-r2','legacy-r2']) {
     assert.equal(a.sources.slice(before.sources).filter(Boolean).length,1,'only one retry URL reload per loop');
   });
 }
+
+for (const notification of ['playing event', 'play completion']) test(`late ${notification} cannot erase a current no-data deadline`, async () => {
+  const h=harness(),a=h.audio();h.Engine.play();
+  a.metadata();a.readyState=2;a.emit('waiting');const deadline=h.Engine._stallTimer;
+  await h.clock.advance(6000);
+  if(notification==='playing event')a.emit('playing');else a.attempts.at(-1).resolve();
+  await flush();
+  assert.equal(h.Engine._stallTimer,deadline,'queued startup notification must preserve the original deadline');
+  assert.equal(h.Engine.playing,false);
+  await h.clock.advance(6800);
+  assert.equal(h.diagnosticReport().events.filter(e=>e.event==='r2-retry-start').length,1);
+});
+
+test('Media Session actions remain usable while artwork is unresolved and after it rejects', async () => {
+  const h=harness();let reject;
+  h.ctx.getArtURL=()=>new Promise((_,no)=>{reject=no;});
+  const update=h.Engine.updateMediaSession();
+  assert.equal(typeof h.mediaHandlers.get('nexttrack'),'function','controls must register before metadata I/O');
+  reject(Error('fixture artwork unavailable'));await assert.doesNotReject(update);
+  const next=addNext(h);await h.start();h.mediaHandlers.get('nexttrack')();await flush();
+  assert.equal(h.Engine.current.id,next.id);h.audio().metadata();h.audio().playing();await flush();
+  h.mediaHandlers.get('pause')();assert.equal(h.Engine.wantsPlayback(),false);
+  h.ctx.SET.headsetButtons=false;void h.Engine.updateMediaSession();
+  assert.equal(h.mediaHandlers.get('nexttrack'),null,'disabling controls cannot wait for artwork');
+});
+
+test('invalid MediaMetadata does not prevent handler registration', async () => {
+  const h=harness();h.ctx.window.MediaMetadata=class {constructor(){throw new TypeError('fixture invalid artwork');}};
+  await h.Engine.updateMediaSession();assert.equal(typeof h.mediaHandlers.get('nexttrack'),'function');
+});
+
+test('an old same-selection artwork completion cannot replace newer Media Session metadata', async()=>{
+  const h=harness(),pending=[];h.ctx.getArtURL=()=>new Promise(resolve=>pending.push(resolve));
+  const older=h.Engine.updateMediaSession(),newer=h.Engine.updateMediaSession();
+  pending[1]('https://fixture.test/new.jpg');await newer;
+  pending[0]('https://fixture.test/old.jpg');await older;
+  assert.equal(h.ctx.navigator.mediaSession.metadata.artwork[0].src,'https://fixture.test/new.jpg');
+});
+
+test('late playing during an established stall preserves recovery and Pause still cancels it', async()=>{
+  for(const cancel of [false,true]){
+    const h=harness();await h.start(46);const a=h.audio();a.readyState=2;a.emit('waiting');
+    const timer=h.Engine._stallTimer;await h.clock.advance(6000);a.emit('playing');
+    assert.equal(h.Engine._stallTimer,timer);
+    if(cancel)h.Engine.pause();
+    await h.clock.advance(6800);
+    assert.equal(h.diagnosticReport().events.filter(e=>e.event==='r2-retry-start').length,cancel?0:1);
+    assert.equal(h.Engine.wantsPlayback(),!cancel);
+  }
+});
+
+test('late timeupdate without future data cannot consume a stalled stream deadline', async()=>{
+  const h=harness();await h.start(46);const a=h.audio();a.readyState=2;a.emit('waiting');
+  const timer=h.Engine._stallTimer;await h.clock.advance(6000);a.progress(46.2);
+  assert.equal(h.Engine._stallTimer,timer,'last buffered frames are not proof that the stall recovered');
+  await h.clock.advance(6800);
+  assert.equal(h.diagnosticReport().events.filter(e=>e.event==='r2-retry-start').length,1);
+});
+
+test('watchdog observes native interruption even when the pause notification is missing', async()=>{
+  const h=harness();await h.start(46);const a=h.audio();a.readyState=2;a.emit('waiting');
+  a.paused=true;const before=loadSnapshot(a);await h.clock.advance(20000);
+  assertNoNewAudio(a,before);assert.equal(h.Engine.wantsPlayback(),false);
+});

@@ -271,7 +271,7 @@ test('rapid skip starts the final selected song and ignores late prior sources',
   const {Engine,ctx}=installed(),pending=[];ctx.getFileFor=t=>new Promise(resolve=>pending.push({id:t.id,resolve}));
   Engine.queue=['a','b','c'].map(id=>({id,source:'drive'}));Engine.order=[0,1,2];Engine.current=Engine.queue[0];Engine.pos=0;Engine.playing=true;
   const first=Engine.playIndex(1,true);Engine.next();pending[1].resolve({__remoteURL:'https://audio.test/c'});await new Promise(setImmediate);
-  assert.equal(Engine.wantsPlayback(),true);assert.equal(Engine.playing,false,'a pending play promise is not actual playback');Engine.onPlaying(Engine.cur);assert.equal(Engine.playing,true);assert.match(Engine.el().src,/\/c$/);
+  assert.equal(Engine.wantsPlayback(),true);assert.equal(Engine.playing,false,'a pending play promise is not actual playback');Engine.el().readyState=4;Engine.onPlaying(Engine.cur);assert.equal(Engine.playing,true);assert.match(Engine.el().src,/\/c$/);
   pending[0].resolve({__remoteURL:'https://audio.test/b'});await first;assert.match(Engine.el().src,/\/c$/);Engine.clearBuffering();
 });
 test('restored remote position is shown before loading and applied when metadata is ready',async()=>{
