@@ -7,7 +7,7 @@ export function createAttachmentDraft({maxFiles=4,maxBytes=1024*1024,onChange=()
   const snapshot=()=>({items:items.map(({file,abort,...item})=>({...item})),notice,locked,messageId,available:typeof upload==='function'&&enabled()});
   function remove(id){if(locked)return;const item=items.find(item=>item.id===id);item?.abort?.abort();items=items.filter(item=>item.id!==id);emit();if(item?.attempted&&discard)Promise.resolve(discard(messageId,id)).catch(()=>{notice='File removed locally. Server cleanup is unconfirmed; unsent uploads expire after 24 hours.';emit();});}
   async function add(files){
-    if(locked)return;const generation=selectionGeneration,ownsSelection=()=>generation===selectionGeneration&&!locked;notice='';
+    if(locked)return;const generation=selectionGeneration,ownsSelection=()=>generation===selectionGeneration&&!locked,pending=[];notice='';
     for(let file of files){
       if(!ownsSelection())return;
       if(!file.type){const extension=file.name.split('.').at(-1)?.toLowerCase(),type={txt:'text/plain',md:'text/markdown',csv:'text/csv',json:'application/json',pdf:'application/pdf',png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',webp:'image/webp'}[extension];if(type)file=new File([file],file.name,{type,lastModified:file.lastModified});}
@@ -16,10 +16,14 @@ export function createAttachmentDraft({maxFiles=4,maxBytes=1024*1024,onChange=()
       if(!file.size||file.size>maxBytes){notice=`${file.name}: choose a nonempty file under ${Math.round(maxBytes/1024/1024)} MB.`;continue;}
       if(!RELAY_ATTACHMENT_TYPES.includes(file.type)){notice=`${file.name}: choose PNG, JPEG, WebP, PDF, plain text, Markdown, CSV or JSON.`;continue;}
       if(items.some(item=>item.name===file.name&&item.size===file.size&&item.modified===file.lastModified)){notice='That file is already selected.';continue;}
-      const item={id:crypto.randomUUID(),file,name:file.name,size:file.size,type:file.type,modified:file.lastModified,status:'selected',progress:0,error:'',preview:null,attachment:null};items.push(item);emit();
-      try{const value=await preview(file);if(!ownsSelection())return;if(items.includes(item)){item.preview=value;emit();}}catch{if(!ownsSelection())return;if(items.includes(item)){item.error='Preview unavailable. The selected file is unchanged.';emit();}}
+      const item={id:crypto.randomUUID(),file,name:file.name,size:file.size,type:file.type,modified:file.lastModified,status:'selected',progress:0,error:'',preview:null,attachment:null};items.push(item);pending.push(item);
     }
+    // Commit the whole chooser batch before preview IO or any render callback can send it.
     emit();
+    await Promise.all(pending.map(async item=>{
+      if(!ownsSelection())return;
+      try{const value=await preview(item.file);if(!ownsSelection())return;if(items.includes(item)){item.preview=value;emit();}}catch{if(!ownsSelection())return;if(items.includes(item)){item.error='Preview unavailable. The selected file is unchanged.';emit();}}
+    }));
   }
   async function start(){
     if(!upload||!enabled()){notice='Sending attachments is not available yet. Files remain on this device.';emit();return false;}

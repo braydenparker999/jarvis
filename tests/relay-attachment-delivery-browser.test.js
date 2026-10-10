@@ -57,3 +57,12 @@ test('closing private view cancels delayed previews and owner loss clears select
  const j=await journey(t);if(!j)return;const {phone,page}=j;await select(page,[imageFile]);await page.getByRole('button',{name:'Send private message',exact:true}).click();await page.locator('.relay-linked-attachment').waitFor();
  const held=phone.hold(r=>r.method==='GET'&&r.path==='/relay/owner/attachments/content');await page.getByRole('button',{name:'Preview private-image.png',exact:true}).click();await held.entered;await conversationMenu(page,'Public chat');held.release();await page.waitForFunction(()=>liveAttachmentURLs.size===0);assert.equal(await page.locator('.relay-linked-preview').count(),0);await conversationMenu(page,'Owner chat');await select(page,[textFile]);await page.evaluate(key=>{localStorage.removeItem(key);dispatchEvent(new StorageEvent('storage',{key,newValue:null,storageArea:localStorage}));},OWNER_KEY);await page.waitForFunction(()=>!document.querySelector('.relay-attachment-summary'));assert.equal(await page.locator('.relay-linked-attachment').count(),0);assertBrowserContained(phone);
 });
+
+test('Send includes the complete chooser batch while its first image preview remains held',{timeout:120000},async t=>{
+ const j=await journey(t);if(!j)return;const {h,phone,page}=j;
+ await page.evaluate(()=>{const original=FileReader.prototype.readAsDataURL;FileReader.prototype.readAsDataURL=function(file){window.releaseFirstPreview=()=>original.call(this,file);};});
+ await select(page,[imageFile,textFile]);assert.equal(await page.locator('.relay-attachment-chip').count(),2);
+ await page.getByRole('button',{name:'Send private message',exact:true}).click();await page.locator('.relay-linked-attachment').nth(1).waitFor();
+ let rows=h.rows('SELECT message_id,id,state FROM relay_owner_attachments');assert.equal(rows.length,2);assert.ok(rows.every(row=>row.state==='linked'));assert.equal(new Set(rows.map(row=>row.message_id)).size,1);assert.equal(h.rows("SELECT id FROM relay_owner_entries WHERE kind='user'").length,1);
+ await page.evaluate(async()=>{releaseFirstPreview();await new Promise(resolve=>setTimeout(resolve,100));});assert.equal(await page.locator('.relay-attachment-chip').count(),0);assert.equal(await page.locator('.relay-linked-attachment').count(),2);assert.equal(h.rows("SELECT id FROM relay_owner_entries WHERE kind='user'").length,1);assertBrowserContained(phone);
+});

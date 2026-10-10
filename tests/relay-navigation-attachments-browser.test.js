@@ -48,11 +48,11 @@ test('a delayed private file chooser cannot attach its file to a newly selected 
 for(const boundary of ['channel change','access loss'])test(`held multi-file preview cannot continue after ${boundary}`,{timeout:120000},async t=>{
  const browser=await launchQualifiedBrowser(t);if(!browser)return;const h=createConversationFixture(t),pages=[];
  try{const owner=await h.pair(await h.oauth()),phone=await openConversationPage(browser,h,{owner,clock:false});pages.push(phone);const page=phone.page;await page.goto(RELAY_URL);await page.locator('#relay-owner-message-text').waitFor();
-  await page.evaluate(()=>{const original=FileReader.prototype.readAsDataURL;FileReader.prototype.readAsDataURL=function(file){window.releaseHeldPreview=()=>original.call(this,file);};});
+  await page.evaluate(()=>{const original=FileReader.prototype.readAsDataURL;FileReader.prototype.readAsDataURL=function(file){(window.heldPreviews??=[]).push(()=>original.call(this,file));window.releaseHeldPreview=()=>heldPreviews.splice(0).forEach(release=>release());};});
   await page.locator('#relay-compose-menu').click();await page.getByRole('dialog').getByLabel('Choose images',{exact:true}).setInputFiles([{name:'held-first.png',mimeType:'image/png',buffer:png},{name:'held-second.png',mimeType:'image/png',buffer:png}]);await page.getByRole('dialog').getByRole('button',{name:'Remove held-first.png',exact:true}).waitFor();await page.keyboard.press('Escape');await page.getByRole('dialog').waitFor({state:'detached'});
   if(boundary==='channel change'){await conversationMenu(page,'Public chat');await page.locator('#message-text').waitFor();}else{await page.evaluate(key=>{localStorage.removeItem(key);dispatchEvent(new StorageEvent('storage',{key,newValue:null,storageArea:localStorage}));},OWNER_KEY);await page.waitForFunction(()=>!document.querySelector('.relay-attachment-summary'));}
   await page.evaluate(async()=>{releaseHeldPreview();await new Promise(resolve=>setTimeout(resolve,100));});assert.equal(await page.locator('.relay-attachment-chip').count(),0);
-  if(boundary==='channel change'){await conversationMenu(page,'Owner chat');await page.locator('#relay-owner-message-text').waitFor();assert.equal(await page.locator('.relay-attachment-chip').count(),1);assert.equal(await page.getByRole('button',{name:'Remove held-second.png',exact:true}).count(),0);}
+  if(boundary==='channel change'){await conversationMenu(page,'Owner chat');await page.locator('#relay-owner-message-text').waitFor();assert.equal(await page.locator('.relay-attachment-chip').count(),2);assert.equal(await page.getByRole('button',{name:'Remove held-second.png',exact:true}).count(),1);}
   assertBrowserContained(phone);
  }finally{await closeConversationHarness(browser,h,pages);}
 });

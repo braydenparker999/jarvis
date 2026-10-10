@@ -25,10 +25,10 @@ test('private attachment policy rejects unsupported types and the first byte ove
  assert.equal(draft.snapshot().items.length,4);assert.equal(draft.snapshot().available,false);
 });
 
-test('a held first preview cannot append the second file after Send locks the immutable set',async()=>{
+test('a chooser batch is atomic and Send includes both files while previews are held',async()=>{
  const held=deferred(),uploaded=[];const draft=createAttachmentDraft({preview:()=>held.promise,upload:async(file,{id})=>{uploaded.push(file.name);return {id};}});
  const adding=draft.add([file('first.txt'),file('second.txt')]);assert.equal(await draft.start(),true);draft.lock();const submitted=draft.snapshot();held.resolve(null);await adding;
- assert.deepEqual(uploaded,['first.txt']);assert.deepEqual(draft.snapshot(),submitted);
+ assert.deepEqual(uploaded,['first.txt','second.txt']);assert.deepEqual(draft.snapshot(),submitted);
 });
 for(const action of ['clear','cancelSelection'])test(`a held multi-file selection cannot continue after ${action}`,async()=>{
  const held=deferred();const draft=createAttachmentDraft({preview:()=>held.promise});const adding=draft.add([file('first.txt'),file('second.txt')]);draft[action]();const state=draft.snapshot();held.resolve('late preview');await adding;assert.deepEqual(draft.snapshot(),state);
