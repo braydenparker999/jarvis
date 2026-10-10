@@ -11,14 +11,14 @@ const show={id:'fixture-show',title:'The Sound of History',author:'A thoughtful 
 const episodes=Array.from({length:5},(_,i)=>({id:'episode-'+i,title:['A remarkable beginning','The music of a city','An overlooked story','Across the mountains','A new chapter'][i],description:'Episode notes with <script>untrusted text</script> and useful details.',duration:60,publishedAt:new Date(Date.UTC(2026,9,3-i)).toISOString(),audioUrl:'https://audio.example.org/'+i+'.wav',type:'audio/wav',bytes:960044}));
 function wav() {const rate=8000,samples=rate*60,b=Buffer.alloc(44+samples*2);b.write('RIFF',0);b.writeUInt32LE(b.length-8,4);b.write('WAVEfmt ',8);b.writeUInt32LE(16,16);b.writeUInt16LE(1,20);b.writeUInt16LE(1,22);b.writeUInt32LE(rate,24);b.writeUInt32LE(rate*2,28);b.writeUInt16LE(2,32);b.writeUInt16LE(16,34);b.write('data',36);b.writeUInt32LE(samples*2,40);return b;}
 test('podcast mobile flows, real offline audio, seeking, timers and queue',{skip:!chrome||!existsSync(chrome),timeout:120000},async t=>{
- const audioBytes=wav();let failPrimaryAudio=false;
+ const audioBytes=wav();let failPrimaryAudio=false,feedRequests=0;const directoryQueries=[];
  const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
  const server=createServer(async(req,res)=>{try{
   const url=new URL(req.url,'http://local');
   const json=data=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(data));};
   if(url.pathname==='/assets/config.js'){res.writeHead(200,{'Content-Type':'text/javascript'});res.end('export const API_ORIGIN=location.origin;');return;}
-  if(['/podcasts/search','/podcasts/browse'].includes(url.pathname)){if(url.searchParams.get('q')==='slow')await delay(500);if(url.searchParams.get('q')==='unavailable'){res.writeHead(503);res.end();return;}if(url.searchParams.get('q')==='fallback'){res.writeHead(502,{'Content-Type':'application/json'});res.end('{"error":"Directory blocked in this region"}');return;}json({shows:['empty','race'].includes(url.searchParams.get('q'))?[]:[show,{...show,id:'two',title:'Science in motion',feedUrl:'https://feeds.example.org/science.xml'}]});return;}
-  if(url.pathname==='/podcasts/feed'){
+  if(['/podcasts/search','/podcasts/browse'].includes(url.pathname)){directoryQueries.push(Object.fromEntries(url.searchParams));if(url.searchParams.get('q')==='slow')await delay(500);if(url.searchParams.get('q')==='unavailable'){res.writeHead(503);res.end();return;}if(url.searchParams.get('q')==='fallback'){res.writeHead(502,{'Content-Type':'application/json'});res.end('{"error":"Directory blocked in this region"}');return;}json({shows:['empty','race'].includes(url.searchParams.get('q'))?[]:[show,{...show,id:'two',title:'Science in motion',feedUrl:'https://feeds.example.org/science.xml'}]});return;}
+  if(url.pathname==='/podcasts/feed'){feedRequests++;
    if(url.searchParams.get('url')?.includes('slow.xml'))await delay(500);
    const archive=url.searchParams.get('url')?.includes('archive'),offset=Number(url.searchParams.get('offset') || 0);
    const items=archive?Array.from({length:95},(_,i)=>({...episodes[0],id:'archive-'+i,title:'Archive episode '+i})):episodes;
@@ -188,6 +188,33 @@ test('podcast mobile flows, real offline audio, seeking, timers and queue',{skip
    await page.setViewportSize({width:390,height:844});await page.goto(origin+'/podcasts/#search=history');await page.locator('.show-tile').first().waitFor();await shot('search');
    await page.locator('.show-tile').first().click();await page.locator('.episode-row').first().waitFor();await page.locator('#query').evaluate(e=>e.blur());await shot('compact-player');
    assert.equal(await page.evaluate(()=>document.fonts.check('16px "Podcast Manrope"')),true);assert.deepEqual(errors,[]);
+  });
+  await t.test('Show Back skips the closed dialog history entry after reload',async()=>{
+   await page.goto(origin+'/podcasts/#search=history');await page.locator('.show-tile').first().click();await page.locator('.episode-row').first().waitFor();
+   await page.locator('#open-player').click();await page.reload();await page.locator('#show-back').waitFor();assert.equal(await page.locator('#player').evaluate(d=>d.open),false);
+   await page.locator('#show-back').click();await page.waitForURL('**/#search=history');assert.equal(new URL(page.url()).hash,'#search=history');await page.getByRole('heading',{name:'Results for “history”'}).waitFor();
+  });
+  await t.test('Show Back returns to search after Forward into a dismissed player entry',async()=>{
+   await page.goto(origin+'/podcasts/#search=history');await page.locator('.show-tile').first().click();await page.locator('.episode-row').first().waitFor();
+   await page.locator('#open-player').click();await page.locator('#close-player').click();await page.waitForFunction(()=>!document.querySelector('#player').open);await page.goForward();
+   await page.locator('#show-back').click();await page.waitForURL('**/#search=history');assert.equal(new URL(page.url()).hash,'#search=history');await page.getByRole('heading',{name:'Results for “history”'}).waitFor();
+   await page.goForward();await page.locator('#show-back').waitFor();assert.equal(await page.locator('#player').evaluate(d=>d.open),false);await page.goForward();await page.goBack();await page.waitForURL('**/#search=history');await page.getByRole('heading',{name:'Results for “history”'}).waitFor();
+  });
+  await t.test('browser Back skips a dismissed player entry after reload',async()=>{
+   await page.goto(origin+'/podcasts/#search=history');await page.locator('.show-tile').first().click();await page.locator('#show-back').waitFor();await page.locator('#open-player').click();
+   await page.reload();await page.locator('#show-back').waitFor();await page.goBack();await page.waitForURL('**/#search=history');await page.getByRole('heading',{name:'Results for “history”'}).waitFor();
+  });
+  await t.test('show refresh remains visible and preserves filters; the last episode clears fixed controls',async()=>{
+   await page.goto(origin+'/podcasts/#show='+encodeURIComponent(show.feedUrl));await page.locator('#episode-query').fill('music');const before=feedRequests;
+   await page.getByRole('button',{name:'Refresh episodes',exact:true}).click();await page.waitForFunction(()=>document.querySelector('#results').getAttribute('aria-busy')==='false');
+   assert.ok(feedRequests>before);assert.equal(await page.locator('#episode-query').inputValue(),'music');assert.equal(await page.locator('.episode-row').count(),1);
+   await page.locator('#episode-query').fill('');await page.locator('.episode-row').last().scrollIntoViewIfNeeded();const last=await page.locator('.episode-row').last().boundingBox(),mini=await page.locator('#mini-player').boundingBox();assert.ok(last.y+last.height<=mini.y,'Last episode and actions remain reachable above the mini-player');
+  });
+  await t.test('global directory fallback never implies selected-country provenance',async()=>{
+   const blockApple=route=>route.abort('failed');await context.route('https://itunes.apple.com/**',blockApple);
+   await page.locator('[data-view=discover]').click();await page.locator('#settings').click();await page.locator('#country').selectOption('ar');await page.getByRole('button',{name:'Save',exact:true}).click();await page.locator('.show-tile').first().waitFor();
+   assert.equal(directoryQueries.at(-1).country,'ar');assert.equal(await page.locator('.directory-caption').textContent(),'Browse by topic');
+   await context.unroute('https://itunes.apple.com/**',blockApple);
   });
  } finally {await browser.close();}
 });

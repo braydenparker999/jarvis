@@ -4,7 +4,7 @@ Draft PR: https://github.com/braydenparker999/jarvis/pull/95
 Branch: `design/podcasts-release-20261010`
 Verified implementation commit: `56f726f29908fcc75890a9266197180a464c11e7`
 Base: `06d1f26a1da1b2154b7a54bf113bcd781b7064b2` on `release/astra-live-backport-20261009`.
-Status: draft only; no merge, deployment or counterpart edit performed.
+Status: draft only; no merge, deployment or counterpart edit performed. The original broad local run below used the wrong toolchain and is historical, not qualification. See the qualification follow-up in this folder for matching controls and exact supported pins.
 
 ## Delivered
 
@@ -57,8 +57,8 @@ Broad-run failure details: 72 leaf checks fail the Relay approved-Node gate (req
 
 - `podcasts-before-discovery-fixture.png`, `podcasts-before-show-fixture.png`: original deterministic baseline.
 - `podcasts-offline-show-fixture.png`: explicit offline/saved-feed state using fixture data.
-- `podcasts-1.2-discovery.png`, `podcasts-1.2-search.png`, `podcasts-1.2-show.png`, `podcasts-1.2-player.png`, `podcasts-1.2-mini-player.png`: candidate UI using actual directory/publisher metadata and artwork at 390×844. The final accessibility follow-up does not alter their visible design.
+- `podcasts-1.2-discovery.png`, `podcasts-1.2-search.png`, `podcasts-1.2-show.png`, `podcasts-1.2-player.png`, `podcasts-1.2-mini-player.png`: candidate UI using actual directory/publisher metadata and artwork at 390×844. The five real-content screenshots were refreshed with Chrome for Testing 154 after the navigation/refresh/provenance review fixes. The offline fixture screenshot was refreshed from the corrected candidate run.
 
 Library delivery was attempted through the current Library prepared-upload helper and failed at authorization (HTTP 401 during tool discovery), before any upload was created. The complete screenshot pack is therefore retained in this PR’s `docs/evidence/podcasts-release-20261010/` folder. Library delivery remains blocked pending connector authorization.
 
-No remaining podcast implementation blocker was found. Integration is intentionally gated on the release lead's review and qualified cross-module/device checks. Awaiting parent coordination; no other modules are being expanded.
+The original handoff was followed by independently reproduced dialog-history edge cases and a hidden show Refresh regression; both are corrected and regression-tested. Discovery no longer implies country provenance for a global fallback. Integration remains gated on the exact corrective head’s hosted checks and release-lead/device verification. Awaiting parent coordination; no other modules are being expanded.

@@ -131,7 +131,8 @@ body.podcast-page{--accent:#97bbff;--text:#edf1f8;--muted:#a5afbf;--surface:#1a2
 .podcast-page .recent-searches>div>button{display:flex;align-items:center;gap:8px;min-height:48px;flex-shrink:0;padding:0 12px;background:#1b212a;border-radius:10px;max-width:240px;overflow:hidden;font-size:13px}
 .podcast-page .recent-searches svg{width:16px;min-width:16px}
 .podcast-page.show-view .page-heading{display:none}
-.podcast-page.show-view .show-back{margin:4px 0 16px;min-height:48px;color:var(--muted)}
+.podcast-page .show-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:4px 0 16px}
+.podcast-page.show-view .show-back{margin:0;min-height:48px;color:var(--muted)}
 .podcast-page .show-header{display:grid;grid-template-columns:100px minmax(0,1fr);gap:18px;text-align:left;align-items:start;padding:0 0 20px}
 .podcast-page .show-header>.artwork{width:100px}
 .podcast-page .show-header>.show-copy{display:block;grid-column:2;grid-row:1}

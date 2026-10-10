@@ -27,8 +27,8 @@ let current = state.current, currentBlob, loadToken = 0, loadedKey = '', timer =
 let sourceLoading=false, sourceURLs=[], sourceIndex=0, pendingPosition=0;
 const directoryCache=new Map(), routeViews=new Map();
 let activeRoute=location.hash || '#discover', paintEpisodes=null;
+let historyIndex=Number.isSafeInteger(history.state?.podcastIndex)?history.state.podcastIndex:0;
 if ('scrollRestoration' in history) history.scrollRestoration='manual';
-const regions={us:'United States',ar:'Argentina',gb:'United Kingdom',es:'Spain'};
 function rememberView() {
   routeViews.set(activeRoute,{scroll:scrollY,query:$('episode-query')?.value || '',sort:$('episode-sort')?.value || 'newest',count:Number($('episodes')?.dataset.visibleCount)||40});
   if(routeViews.size>40)routeViews.delete(routeViews.keys().next().value);
@@ -58,10 +58,11 @@ function playbackStatus(message='',error=false) {
 // Dialogs occupy same-URL history entries: Android/browser Back dismisses one
 // layer before leaving the show. Actions wait for that traversal before routing.
 let dialogStack=[], closingDialog=null;
-history.replaceState({...history.state,podcastDialogs:[]},'');
+history.replaceState({...history.state,podcastIndex:historyIndex,podcastDialogs:[]},'');
+function pushHistory(state,url=location.href) {history.pushState({...state,podcastIndex:++historyIndex},'',url);}
 function openDialog(d) {
   if(d.open)return;
-  dialogStack.push(d.id);history.pushState({...history.state,podcastDialogs:[...dialogStack]},'');d.showModal();
+  dialogStack.push(d.id);pushHistory({...history.state,podcastDialogs:[...dialogStack]});d.showModal();
 }
 function closeDialog(d) {
   if(closingDialog)return closingDialog.promise;
@@ -71,10 +72,16 @@ function closeDialog(d) {
 }
 function closeSheet() { return closeDialog($('sheet')); }
 function onHistory() {
+  const previousIndex=historyIndex,hadDialogs=dialogStack.length>0;
+  historyIndex=Number.isSafeInteger(history.state?.podcastIndex)?history.state.podcastIndex:previousIndex+1;
+  if(!Number.isSafeInteger(history.state?.podcastIndex))history.replaceState({...history.state,podcastIndex:historyIndex},'');
   const route=location.hash || '#discover',target=route===activeRoute?(history.state?.podcastDialogs || []):[];
   while(dialogStack.length>target.length || (dialogStack.length && dialogStack.some((id,i)=>target[i]!==id)))$(dialogStack.pop()).close();
   // Forward must not resurrect an old menu with actions for a different episode.
   if(target.length>dialogStack.length)history.replaceState({...history.state,podcastDialogs:[...dialogStack]},'');
+  // Reload and Forward can leave dismissed same-URL dialog entries. A normal
+  // Back with no open dialog must traverse those entries, not appear inert.
+  if(route===activeRoute&&!hadDialogs&&historyIndex<previousIndex){history.back();return;}
   const pending=closingDialog;closingDialog=null;
   if(route!==activeRoute){rememberView();renderRoute();}
   pending?.resolve();
@@ -140,7 +147,7 @@ const empty = (title,body) => `<div class="empty-state"><h2>${esc(title)}</h2><p
 function setNav() { const selected=view==='search'?'discover':view==='show'?(state.follows.some(s=>s.feedUrl===feedData?.show.feedUrl)?'library':'discover'):view;document.querySelectorAll('[data-view]').forEach(a=>{if(a.dataset.view===selected)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current');}); }
 function setRoute(hash) {
   rememberView();
-  if(location.hash!==hash)history.pushState(hash.startsWith('#show=')?{podcastReturn:activeRoute}:{},'',hash);
+  if(location.hash!==hash)pushHistory(hash.startsWith('#show=')?{podcastReturn:activeRoute,podcastReturnIndex:historyIndex}:{},hash);
   renderRoute();
 }
 const skeleton = () => '<div class="show-grid loading-grid" aria-hidden="true">'+Array.from({length:6},()=>'<div class="skeleton-tile"><div></div><span></span><span></span></div>').join('')+'</div>';
@@ -162,7 +169,7 @@ async function renderRoute() {
       if(view==='search' && (query.trim().length<2 || query.length>120)){root.innerHTML=empty('What would you like to hear?','Enter 2–120 characters: a show, host, or topic.');return;}
       root.innerHTML=topics+skeleton();status('Finding shows…');
       const result=await searchDirectory(view==='search'?'search':'browse',view==='search'?{q:query,country:state.country}:{category,country:state.country},signal);
-      if(token!==renderToken)return;status();root.innerHTML=topics+(result.shows.length?`<div class="section-title result-heading"><h2>${view==='search'?'Results for “'+esc(query)+'”':category==='popular'?'Explore shows':esc(categories.find(c=>c[0]===category)?.[1])+' shows'}</h2><span>${result.shows.length} shows</span></div>`+(view==='discover'?`<p class="directory-caption">Browse by topic · ${esc(regions[state.country] || state.country)} directory</p>`:'')+showTiles(result.shows,{featured:true}):empty('No shows found','Try a show title, host, or a broader topic. You can also add an RSS feed with the + button.'));restoreView(token);return;
+      if(token!==renderToken)return;status();root.innerHTML=topics+(result.shows.length?`<div class="section-title result-heading"><h2>${view==='search'?'Results for “'+esc(query)+'”':category==='popular'?'Explore shows':esc(categories.find(c=>c[0]===category)?.[1])+' shows'}</h2><span>${result.shows.length} shows</span></div>`+(view==='discover'?`<p class="directory-caption">Browse by topic</p>`:'')+showTiles(result.shows,{featured:true}):empty('No shows found','Try a show title, host, or a broader topic. You can also add an RSS feed with the + button.'));restoreView(token);return;
     }
     if(view==='show') {
       window.scrollTo({top:0});status('Opening the podcast…');root.innerHTML='<div class="show-loading" aria-hidden="true"><div></div><span></span><span></span></div>';const data=await feed(showURL,{signal});if(token!==renderToken)return;feedData=data;
@@ -176,9 +183,9 @@ async function renderRoute() {
 function renderShow() {
   const {show,episodes}=feedData;const followed=state.follows.some(s=>s.feedUrl===show.feedUrl);
   if(episodes[0])episodeRefs.set(keyOf(episode(episodes[0],show)),episode(episodes[0],show));
-  $('results').innerHTML=`<button class="show-back" id="show-back">${icon('back')}Back to browsing</button><section class="show-header">${art(show.artwork,'artwork',true)}<div class="show-copy"><h1>${esc(show.title)}</h1><p>${esc(show.author)}</p></div><div class="show-actions">${episodes[0]?`<button class="primary" data-play="${esc(keyOf(episode(episodes[0],show)))}" aria-label="Play latest episode">${icon('play')}<span>Play latest</span></button>`:''}<button id="follow-show" class="secondary" aria-pressed="${followed}">${icon(followed?'check':'plus')}<span>${followed?'Following':'Follow show'}</span></button></div></section><details class="show-description"><summary>About this show</summary>${esc(show.description || 'No show description provided.')}<div class="show-links">${safeURL(show.directoryUrl)?`<a href="${esc(show.directoryUrl)}" target="_blank" rel="noopener">Apple Podcasts</a>`:''}${safeURL(show.website)?`<a href="${esc(show.website)}" target="_blank" rel="noopener">Show website</a>`:''}</div></details><div class="section-title"><h2>Episodes</h2><span id="episode-count">${episodes.length}${feedData.nextOffset!=null?'+':''}</span></div><div class="episode-filter"><label class="sr-only" for="episode-query">Search this show’s episodes</label><input id="episode-query" type="search" placeholder="Search episodes"><label class="sr-only" for="episode-sort">Episode order</label><select id="episode-sort"><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="unplayed">Unplayed</option></select></div><p class="episode-scope">Search and sort apply to the episodes loaded below.</p><div id="episodes"></div><button id="more-episodes" class="secondary" hidden>Show more episodes</button>`;
+  $('results').innerHTML=`<div class="show-toolbar"><button class="show-back" id="show-back">${icon('back')}Back to browsing</button><button id="show-refresh" class="icon-button" aria-label="Refresh episodes">${icon('refresh')}</button></div><section class="show-header">${art(show.artwork,'artwork',true)}<div class="show-copy"><h1>${esc(show.title)}</h1><p>${esc(show.author)}</p></div><div class="show-actions">${episodes[0]?`<button class="primary" data-play="${esc(keyOf(episode(episodes[0],show)))}" aria-label="Play latest episode">${icon('play')}<span>Play latest</span></button>`:''}<button id="follow-show" class="secondary" aria-pressed="${followed}">${icon(followed?'check':'plus')}<span>${followed?'Following':'Follow show'}</span></button></div></section><details class="show-description"><summary>About this show</summary>${esc(show.description || 'No show description provided.')}<div class="show-links">${safeURL(show.directoryUrl)?`<a href="${esc(show.directoryUrl)}" target="_blank" rel="noopener">Apple Podcasts</a>`:''}${safeURL(show.website)?`<a href="${esc(show.website)}" target="_blank" rel="noopener">Show website</a>`:''}</div></details><div class="section-title"><h2>Episodes</h2><span id="episode-count">${episodes.length}${feedData.nextOffset!=null?'+':''}</span></div><div class="episode-filter"><label class="sr-only" for="episode-query">Search this show’s episodes</label><input id="episode-query" type="search" placeholder="Search episodes"><label class="sr-only" for="episode-sort">Episode order</label><select id="episode-sort"><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="unplayed">Unplayed</option></select></div><p class="episode-scope">Search and sort apply to the episodes loaded below.</p><div id="episodes"></div><button id="more-episodes" class="secondary" hidden>Show more episodes</button>`;
   $('show-back').textContent=history.state?.podcastReturn?.startsWith('#search=')?'← Back to search':history.state?.podcastReturn==='#library'?'← Back to library':'← Back to browsing';
-  $('show-back').onclick=()=>{if(history.state?.podcastReturn)history.back();else setRoute('#discover');};$('follow-show').onclick=()=>{toggleFollow(show);const active=state.follows.some(s=>s.feedUrl===show.feedUrl);$('follow-show').innerHTML=icon(active?'check':'plus')+'<span>'+(active?'Following':'Follow show')+'</span>';$('follow-show').setAttribute('aria-pressed',String(active));};
+  $('show-back').onclick=()=>{const origin=history.state?.podcastReturnIndex;if(Number.isSafeInteger(origin)&&origin<historyIndex)history.go(origin-historyIndex);else setRoute(history.state?.podcastReturn || '#discover');};$('show-refresh').onclick=refreshView;$('follow-show').onclick=()=>{toggleFollow(show);const active=state.follows.some(s=>s.feedUrl===show.feedUrl);$('follow-show').innerHTML=icon(active?'check':'plus')+'<span>'+(active?'Following':'Follow show')+'</span>';$('follow-show').setAttribute('aria-pressed',String(active));};
   const savedView=routeViews.get(activeRoute);$('episode-query').value=savedView?.query || '';$('episode-sort').value=savedView?.sort || 'newest';
   let count=savedView?.count || 40;
   const paint=()=>{let list=episodes.map(e=>episode(e,show)).filter(e=>(e.title+' '+e.description).toLowerCase().includes($('episode-query').value.toLowerCase()));
@@ -254,11 +261,12 @@ document.addEventListener('click',e=>{
 $('search-form').onsubmit=e=>{e.preventDefault();submitSearch($('query').value);$('query').blur();};
 $('query').oninput=()=>{$('clear-search').hidden=!$('query').value;};
 $('clear-search').onclick=()=>{setRoute('#discover');$('query').focus();};
-$('refresh').onclick=()=>{if(view==='show'&&feedData){feeds.delete(feedData.show.feedUrl);}else directoryCache.clear();renderRoute();};
+function refreshView() {rememberView();if(view==='show'&&feedData){feeds.delete(feedData.show.feedUrl);}else directoryCache.clear();renderRoute();}
+$('refresh').onclick=refreshView;
 $('add-feed').onclick=()=>formSheet('Add RSS feed','<label for="feed-url">Podcast RSS address</label><input id="feed-url" name="url" type="url" placeholder="https://…" required><p>Paste the show’s public RSS feed. Private feeds with passwords are not supported.</p>',async data=>{const url=safeURL(data.get('url'));if(!url)throw Error('Enter an http or https RSS feed URL.');await closeSheet();setRoute('#show='+encodeURIComponent(url));});
 $('settings').onclick=async()=>{
   const token=renderToken,estimate=await navigator.storage?.estimate().catch(()=>null);if(token!==renderToken)return;
-  formSheet('Podcast settings',`<label for="country">Podcast directory</label><select id="country" name="country"><option value="us" ${state.country==='us'?'selected':''}>United States</option><option value="ar" ${state.country==='ar'?'selected':''}>Argentina</option><option value="gb" ${state.country==='gb'?'selected':''}>United Kingdom</option><option value="es" ${state.country==='es'?'selected':''}>Spain</option></select><label class="check-row"><input type="checkbox" name="autoplay" ${state.autoplay?'checked':''}>Play the next queued episode</label><p>Follows, progress, queue, and downloads stay on this device. Downloads use browser storage; keep this page open until they finish.</p>${estimate?`<p class="storage-info">${size(estimate.usage)} used of ${size(estimate.quota)} browser storage.</p>`:''}`,async data=>{state.country=data.get('country');state.autoplay=data.has('autoplay');commit();await closeSheet();renderRoute();});
+  formSheet('Podcast settings',`<label for="country">Podcast directory</label><select id="country" name="country"><option value="us" ${state.country==='us'?'selected':''}>United States</option><option value="ar" ${state.country==='ar'?'selected':''}>Argentina</option><option value="gb" ${state.country==='gb'?'selected':''}>United Kingdom</option><option value="es" ${state.country==='es'?'selected':''}>Spain</option></select><p>Region applies to Apple’s directory. Other providers may return global matches.</p><label class="check-row"><input type="checkbox" name="autoplay" ${state.autoplay?'checked':''}>Play the next queued episode</label><p>Follows, progress, queue, and downloads stay on this device. Downloads use browser storage; keep this page open until they finish.</p>${estimate?`<p class="storage-info">${size(estimate.usage)} used of ${size(estimate.quota)} browser storage.</p>`:''}`,async data=>{state.country=data.get('country');state.autoplay=data.has('autoplay');commit();await closeSheet();renderRoute();});
 };
 
 const audioURL = e => {const u=new URL('/podcasts/audio',API_ORIGIN);u.searchParams.set('feed',e.show.feedUrl);u.searchParams.set('id',e.id);return u.href;};
