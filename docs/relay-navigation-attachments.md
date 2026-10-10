@@ -1,5 +1,8 @@
 # Relay navigation and attachment frontend
 
+This records the independently qualified PR109 navigation checkpoint. For the
+subsequent gated transport integration, see [private attachment frontend](relay-private-attachment-frontend.md).
+
 The hamburger opens a left-side navigation panel. Chats keeps the Private/Public
 switch in navigation, including the current channel. The redundant top dropdown
 is removed. Settings and action sheets retain their own layouts. Existing menu

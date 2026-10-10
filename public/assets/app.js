@@ -33,7 +33,8 @@ const relayMenuHistory=createRelayMenuHistory({history,getURL:()=>location.href}
 function relaySheet(title,entries){return sheet(title,entries,relayMenuHistory);}
 const ownerController = createRelayOwnerController({onModeChange:next=>{if(next!=='public')savedView=false;if(route==='chat')drawShell();}});
 const ownerUI = createRelayOwnerUI({controller:ownerController});
-const attachments=createRelayAttachmentUI({openSheet:relaySheet,notify,getContext:()=>({key:route!=='chat'?null:ownerUI.mode==='public'?null:ownerController.status==='approved'?'owner:'+ownerController.snapshot().device?.id:null,ownerAuthorized:ownerController.status==='approved'})});
+const attachments=createRelayAttachmentUI({openSheet:relaySheet,notify,controller:ownerController,getContext:()=>({key:route!=='chat'?null:ownerUI.mode==='public'?null:ownerController.status==='approved'?'owner:'+ownerController.snapshot().device?.id:null,ownerAuthorized:ownerController.status==='approved',attachmentsEnabled:ownerController.snapshot().attachmentsEnabled})});
+ownerController.bindAttachments(()=>attachments.draft());
 let relayTransfers, transferNotice = '';
 try{relayTransfers=createRelayTransferStore();}catch{transferNotice='Could not read the transferred draft. Keep this tab open and allow browser storage.';}
 ownerController.subscribe(()=>{updateConversationIdentity();updateRelayNavigation();if(route==='chat'&&ownerUI.mode!=='public')drawTransferNotice();});

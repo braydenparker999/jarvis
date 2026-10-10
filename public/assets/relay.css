@@ -631,3 +631,12 @@ body.relay-page .relay-attachment-sheet .relay-attachment-list:empty{display:non
 @media(prefers-reduced-motion:no-preference){body.relay-page .relay-navigation-sheet[open]{animation:relay-side-in 160ms ease-out both;transform-origin:left center}@keyframes relay-side-in{from{opacity:.8;transform:translateX(-16px)}to{opacity:1;transform:translateX(0)}}}
 
 body.relay-page .relay-composer-plus[hidden]{display:none}
+
+body.relay-page .relay-linked-attachment{margin-top:12px;padding-top:12px;border-top:1px solid #555;max-width:100%;min-width:0}
+body.relay-page .relay-linked-attachment button{min-width:48px;min-height:48px;white-space:normal}
+body.relay-page .relay-linked-preview{display:block;width:auto;height:auto;max-width:min(100%,400px);max-height:320px;object-fit:contain;border-radius:12px;margin:8px 0}
+
+body.relay-page .relay-linked-attachment :is(.request-meta,.text-button){color:#f7f7f7}
+body.relay-page .relay-linked-attachment:first-child{margin-top:0;padding-top:0;border-top:0}
+
+body.relay-page .relay-attachment-chip>div{min-width:0}
