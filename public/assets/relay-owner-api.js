@@ -332,8 +332,9 @@ export function createRelayOwnerApi({ fetcher = globalThis.fetch, origin = API_O
       return {...data,messages:data.messages.map(entry=>({...entry,attachments:parseAttachments(entry)}))};
     },
     async uploadAttachment(messageId,id,file,{signal}={}){
+      const token=credential?.device_token;if(!token)throw new OwnerApiError('unauthorized');
       if(!attachmentUuid(messageId)||!attachmentUuid(id)||!file||!RELAY_ATTACHMENT_TYPES.includes(file.type)||!file.size||file.size>RELAY_ATTACHMENT_MAX_BYTES)throw new OwnerApiError('attachment_invalid');
-      const bytes=new Uint8Array(await file.arrayBuffer());if(signal?.aborted)throw new OwnerApiError('attachment_cancelled');
+      const bytes=new Uint8Array(await file.arrayBuffer());if(credential?.device_token!==token)throw new OwnerApiError('unauthorized');if(signal?.aborted)throw new OwnerApiError('attachment_cancelled');
       let binary='';for(let offset=0;offset<bytes.length;offset+=8192)binary+=String.fromCharCode(...bytes.subarray(offset,offset+8192));
       const data=await attachmentCall('/relay/owner/attachments',{body:{id,message_id:messageId,name:file.name,mime_type:file.type,data_base64:btoa(binary)},signal});
       let attachment;try{attachment=attachmentMetadata(data.attachment,{messageId});}catch{throw new OwnerApiError('invalid');}
@@ -346,6 +347,7 @@ export function createRelayOwnerApi({ fetcher = globalThis.fetch, origin = API_O
       return attachmentCall('/relay/owner/attachments/discard',{body:{message_id:messageId,attachment_id:id}});
     },
     async attachmentContent(metadata,{preview=false,signal}={}){
+      const token=credential?.device_token;if(!token)throw new OwnerApiError('unauthorized');
       let item;try{item=attachmentMetadata(metadata,{state:'linked'});}catch{throw new OwnerApiError('invalid');}
       if(preview&&!['image/png','image/jpeg','image/webp'].includes(item.mimeType))throw new OwnerApiError('attachment_invalid');
       const query=new URLSearchParams({message_id:item.messageId,attachment_id:item.id,...(preview?{preview:'1'}:{})});
@@ -355,6 +357,7 @@ export function createRelayOwnerApi({ fetcher = globalThis.fetch, origin = API_O
       try{for(;;){const {done,value}=await reader.read();if(done)break;size+=value.length;if(size>item.sizeBytes||signal?.aborted)throw new OwnerApiError(signal?.aborted?'attachment_cancelled':'invalid');chunks.push(value);}}catch(error){await reader.cancel().catch(()=>{});throw error instanceof OwnerApiError?error:new OwnerApiError('network');}
       if(size!==item.sizeBytes)throw new OwnerApiError('invalid');const blob=new Blob(chunks,{type:item.mimeType});
       const hash=[...new Uint8Array(await crypto.subtle.digest('SHA-256',await blob.arrayBuffer()))].map(v=>v.toString(16).padStart(2,'0')).join('');
+      if(credential?.device_token!==token)throw new OwnerApiError('unauthorized');if(signal?.aborted)throw new OwnerApiError('attachment_cancelled');
       if(hash!==item.sha256)throw new OwnerApiError('invalid');return blob;
     },
     async deliveries(messageIds){
