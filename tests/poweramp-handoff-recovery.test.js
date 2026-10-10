@@ -46,7 +46,7 @@ class FakeAudio {
   get src() { return this._src; }
   set src(value) {
     this._src = String(value); this.sources.push(this._src);
-    this.currentTime = 0; this.readyState = 0; this.duration = NaN; this.ended = false;
+    this.currentTime = 0; this.readyState = 0; this.duration = NaN; this.ended = false; this.error = null;
   }
   get currentSrc() { return this._src; }
   setAttribute() {}
