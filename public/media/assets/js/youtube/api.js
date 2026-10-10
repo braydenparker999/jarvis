@@ -719,9 +719,14 @@
      * that answers with a title and nothing playable has not resolved the
      * video, and treating that as success would hand the player an empty plan.
      */
-    function isPipedStreamsBody(body) {
-      if (!body || typeof body !== "object") return false;
-      return Array.isArray(body.videoStreams) && (body.videoStreams.length > 0 || Array.isArray(body.audioStreams));
+    function isPipedStreamsBody(body, instance) {
+      if (!body || typeof body !== "object" || !Array.isArray(body.videoStreams)) return false;
+      // Live responses may carry only a manifest. Apply the same instance
+      // boundary as normalization; an empty array alone proves nothing.
+      return body.videoStreams.length > 0 ||
+        (Array.isArray(body.audioStreams) && body.audioStreams.length > 0) ||
+        (typeof body.hls === "string" && !!instanceUrl(body.hls, instance)) ||
+        (typeof body.dash === "string" && !!instanceUrl(body.dash, instance));
     }
 
     var PIPED_FILTER = { video: "videos", channel: "channels", playlist: "playlists", all: "all" };
@@ -829,7 +834,11 @@
         key,
         function (instance) {
           if (instance.api === "piped") {
-            return { path: "/streams/" + id, params: null, validate: isPipedStreamsBody };
+            return {
+              path: "/streams/" + id,
+              params: null,
+              validate: function (body) { return isPipedStreamsBody(body, instance.url); }
+            };
           }
           return { path: "/api/v1/videos/" + id, params: null, validate: isVideoBody };
         },
