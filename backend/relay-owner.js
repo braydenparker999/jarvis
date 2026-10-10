@@ -7,6 +7,7 @@ import {FRONTEND_ORIGINS} from './origins.js';
 import {relayOwnerPasswordSchema, relayOwnerPasswordStore} from './relay-owner-password.js';
 import {relayOwnerJobSchema, relayOwnerJobEnsure, relayOwnerJobSpecification, relayOwnerJobSpecify, relayOwnerJobRead, relayOwnerJobsList, relayOwnerJobsChanges, relayOwnerJobCancel, relayOwnerJobRetryPrepare, relayOwnerJobRetryLink, relayOwnerJobReplyCheck, relayOwnerJobReplySaved, relayOwnerJobValidateRpc, relayOwnerJobRpc} from './relay-owner-jobs.js';
 import {ATTACHMENT_BODY_LIMIT, relayAttachmentSchema, relayAttachmentMetadata, relayAttachmentAdmit, relayAttachmentPrecheck, relayAttachmentPrepare, relayAttachmentUpload, relayAttachmentCheckMessage, relayAttachmentLink, relayAttachmentDiscard, relayAttachmentRead, relayAttachmentVerify, relayAttachmentDownload} from './relay-owner-attachments.js';
+import {relayAssistantAttachmentPrecheck,relayAssistantAttachmentUpload,relayAssistantAttachmentDiscard,relayAssistantAttachmentMetadata,relayAssistantDeliveryList,relayAssistantDeliveryPrepare,relayAssistantDeliverySave} from './relay-owner-assistant-attachments.js';
 
 export {RELAY_OWNER_SCOPE, RELAY_OWNER_INBOX};
 export const RELAY_OWNER_SESSION_MS = 365 * 86400000;
@@ -47,7 +48,7 @@ export function relayOwnerSchema(ctx) {
   relayAttachmentSchema(ctx);
 }
 function entry(row,ctx,env) {
-  const attachments = ctx && row.kind === 'user' ? relayAttachmentMetadata(ctx, row.id) : [];
+  const attachments = ctx ? row.kind === 'user' ? relayAttachmentMetadata(ctx, row.id) : relayAssistantAttachmentMetadata(ctx, row.id) : [];
   return {id: row.id, sequence: row.seq, body: row.body, role: row.kind === 'user' ? 'user' : 'assistant', createdAt: row.created_at,
     author_authenticated: true, principal: row.principal, device_id: row.device_id,
     authentication_source: row.authentication_source, visibility: 'private',
@@ -119,7 +120,8 @@ function conversation(ctx, messageId,env) {
   if (!message) fail(404, 'Original private message not found');
   const reply = rows(ctx, "SELECT * FROM relay_owner_entries WHERE reply_to=? AND kind='reply' AND principal=?", messageId, RELAY_OWNER)[0];
   const context = rows(ctx, 'SELECT * FROM relay_owner_entries WHERE seq<? AND principal=? ORDER BY seq DESC LIMIT 25', message.seq, RELAY_OWNER).reverse().map(row=>entry(row,ctx,env));
-  return {message: entry(message,ctx,env), reply: reply ? entry(reply) : null, context};
+  const later=relayAssistantDeliveryList(ctx,messageId);
+  return {message: entry(message,ctx,env), reply: reply ? entry(reply,ctx) : null, context,deliverables:later.deliverables,deliverablesNextCursor:later.nextCursor};
 }
 function deliveryMessageIds(ids) {
   if (!Array.isArray(ids) || ids.length < 1 || ids.length > 50 || ids.some(id => !uuid(id)) || new Set(ids).size !== ids.length) fail(400, 'Invalid delivery message IDs');
@@ -215,11 +217,11 @@ export async function relayOwnerStore(ctx, env, body, enqueueOwnerMessage = () =
     const allowed = {
       pair_status: ['request_id'], session: [], messages_list: ['after', 'limit'], message: ['id', 'body', 'attachment_ids'],
       attachment_admit: [], attachment_upload: ['id', 'message_id', 'name', 'mime_type', 'data_base64'], attachment_discard: ['message_id', 'attachment_id'], attachment_content: ['message_id', 'attachment_id', 'preview'],
-      conversation: ['message_id'], delivery_list: ['message_ids'], delivery_retry: ['message_id'], devices_list: [], device_revoke: ['device_id'],
+      conversation: ['message_id'], deliverables_list: ['message_id','after','limit'], delivery_list: ['message_ids'], delivery_retry: ['message_id'], devices_list: [], device_revoke: ['device_id'],
       jobs_list: ['after', 'limit'], jobs_changes: ['after', 'limit', 'through'], job_read: ['job_id'], job_create: ['id', 'title', 'body', 'action_kind', 'project_title', 'goal_title'], job_cancel: ['job_id'], job_retry: ['job_id', 'id', 'confirm_duplicate_risk'],
     };
     if (!body || !Object.hasOwn(allowed, body.op)) fail(400, 'Invalid owner operation');
-    const required = ['pair_status', 'message', 'conversation', 'device_revoke', 'delivery_list', 'delivery_retry', 'job_read', 'job_create', 'job_cancel', 'job_retry', 'attachment_upload', 'attachment_discard', 'attachment_content'].includes(body.op)
+    const required = body.op==='deliverables_list'?['message_id']:['pair_status', 'message', 'conversation', 'device_revoke', 'delivery_list', 'delivery_retry', 'job_read', 'job_create', 'job_cancel', 'job_retry', 'attachment_upload', 'attachment_discard', 'attachment_content'].includes(body.op)
       ? allowed[body.op].filter(key => !['confirm_duplicate_risk', 'project_title', 'goal_title', 'attachment_ids', 'preview'].includes(key)) : [];
     fields(body, ['op', 'token_hash', ...allowed[body.op]], ['op', 'token_hash', ...required]);
     if (!hex(body.token_hash)) fail(401, 'Owner device authentication required');
@@ -281,6 +283,7 @@ export async function relayOwnerStore(ctx, env, body, enqueueOwnerMessage = () =
       if (body.op === 'session') result = {status: 'approved', device: shortDevice({...session, expires_ms: now + RELAY_OWNER_SESSION_MS}), jobs_enabled: true, attachments_enabled: true};
       if (body.op === 'messages_list') result = listMessages(ctx, body.after, body.limit,false,env);
       if (body.op === 'conversation') result = conversation(ctx, body.message_id,env);
+      if (body.op === 'deliverables_list') result = {...relayAssistantDeliveryList(ctx,body.message_id,body.after,body.limit),visibility:'private'};
       if (body.op === 'message') result = insertMessage(ctx, session, body, enqueueOwnerMessage, now,env);
       if (body.op === 'attachment_discard') result = relayAttachmentDiscard(ctx, session, body, now);
       if (body.op === 'jobs_list') result = relayOwnerJobsList(ctx, env, body.after, body.limit, now, true);
@@ -333,9 +336,54 @@ export async function relayOwnerStore(ctx, env, body, enqueueOwnerMessage = () =
 // MCP never returns a token or its hash. relay:read/reply/events or a claimed
 // owner identity are insufficient; the live OAuth token and grant must both
 // hold the new explicitly-consented relay:owner capability.
+export function relayOwnerAssistantAttachmentIngress(ctx,env,principal){
+  relayOwnerSchema(ctx);
+  return ctx.storage.transactionSync(()=>{
+    requireOwner(ctx,env,principal);
+    relayAttachmentAdmit(ctx,Date.now(),'ingress');
+    return {admitted:true};
+  });
+}
 export async function relayOwnerRpc(ctx, env, principal, name, args, enqueueOwnerMessage = () => {}) {
   relayOwnerSchema(ctx);
   requireOwner(ctx, env, principal);
+  if(['relay_owner_attachment_upload','relay_owner_attachment_discard','relay_owner_reply_with_attachments','relay_owner_deliverable_send','relay_owner_deliverables_list'].includes(name)){
+    const allowed=name==='relay_owner_attachment_upload'?['inbox_id','message_id','delivery_id','attachment_id','name','mime_type','data_base64']
+      :name==='relay_owner_attachment_discard'?['inbox_id','message_id','delivery_id','attachment_id']
+      :name==='relay_owner_deliverables_list'?['inbox_id','message_id','cursor','limit']:['inbox_id','message_id','delivery_id','body','attachment_ids'];
+    fields(args,allowed,name==='relay_owner_deliverables_list'?['inbox_id','message_id']:allowed);
+    if(args.inbox_id!==RELAY_OWNER_INBOX)fail(403,'Forbidden private inbox');
+    if(name==='relay_owner_attachment_upload'){
+      const now=ctx.storage.transactionSync(()=>{
+        requireOwner(ctx,env,principal);const now=Date.now();
+        relayAttachmentAdmit(ctx,now);return now;
+      });
+      relayAssistantAttachmentPrecheck(ctx,principal,args,now);
+      const prepared=await relayAttachmentPrepare({id:args.attachment_id,message_id:args.message_id,name:args.name,mime_type:args.mime_type,data_base64:args.data_base64});
+      return ctx.storage.transactionSync(()=>{
+        requireOwner(ctx,env,principal);
+        return {inbox_id:RELAY_OWNER_INBOX,...relayAssistantAttachmentUpload(ctx,principal,args,prepared,Date.now())};
+      });
+    }
+    if(name==='relay_owner_attachment_discard')ctx.storage.transactionSync(()=>{
+      requireOwner(ctx,env,principal);relayAttachmentAdmit(ctx,Date.now(),'discard');
+    });
+    return ctx.storage.transactionSync(()=>{
+      requireOwner(ctx,env,principal);const now=Date.now();
+      if(name==='relay_owner_attachment_discard')return {inbox_id:RELAY_OWNER_INBOX,...relayAssistantAttachmentDiscard(ctx,principal,args,now)};
+      if(name==='relay_owner_deliverables_list')return {inbox_id:RELAY_OWNER_INBOX,...relayAssistantDeliveryList(ctx,args.message_id,args.cursor,args.limit),visibility:'private'};
+      const kind=name==='relay_owner_reply_with_attachments'?'reply':'deliverable';
+      const prepared=relayAssistantDeliveryPrepare(ctx,principal,args,kind,now);
+      if(prepared.existing)return {inbox_id:RELAY_OWNER_INBOX,delivery:prepared.existing,newWrite:false,visibility:'private'};
+      relayOwnerJobReplyCheck(ctx,args.message_id,principal,now);
+      const result=relayAssistantDeliverySave(ctx,principal,args,kind,prepared.body,now);
+      if(kind==='reply'){
+        ctx.storage.sql.exec("INSERT INTO relay_owner_entries(id,kind,reply_to,body,created_at,principal,device_id,authentication_source) VALUES(?,'reply',?,?,?,?,?,?)",args.delivery_id,args.message_id,prepared.body,iso(now),RELAY_OWNER,prepared.message.device_id,'owner-oauth-mcp');
+        relayOwnerJobReplySaved(ctx,rows(ctx,'SELECT * FROM relay_owner_entries WHERE id=?',args.delivery_id)[0]);
+      }
+      return {inbox_id:RELAY_OWNER_INBOX,...result};
+    });
+  }
   if (name === 'relay_owner_attachment_read') {
     fields(args, ['inbox_id', 'message_id', 'attachment_id'], ['inbox_id', 'message_id', 'attachment_id']);
     if (args.inbox_id !== RELAY_OWNER_INBOX) fail(403, 'Forbidden private inbox');
@@ -439,10 +487,11 @@ export async function relayOwnerPublic(request, env) {
     routes['/attachments'] = ['POST', 'attachment_upload'];
     routes['/attachments/discard'] = ['POST', 'attachment_discard'];
     routes['/attachments/content'] = ['GET', 'attachment_content'];
+    routes['/deliverables'] = ['GET','deliverables_list'];
     const suffix = path.slice('/relay/owner'.length), route = Object.hasOwn(routes, suffix) ? routes[suffix] : null;
     if (!route) return wrap(json({error: 'Not found'}, 404));
     if (request.method !== route[0]) return wrap(json({error: 'Method not allowed'}, 405, {Allow: route[0] + ', OPTIONS'}));
-    const queryFields = route[1] === 'attachment_content' ? ['message_id', 'attachment_id', 'preview'] : route[1] === 'jobs_changes' ? ['after', 'limit', 'through'] : ['messages_list', 'jobs_list'].includes(route[1]) ? ['after', 'limit'] : route[1] === 'conversation' ? ['message_id'] : route[1] === 'job_read' ? ['job_id'] : [];
+    const queryFields = route[1] === 'deliverables_list'?['message_id','after','limit']:route[1] === 'attachment_content' ? ['message_id', 'attachment_id', 'preview'] : route[1] === 'jobs_changes' ? ['after', 'limit', 'through'] : ['messages_list', 'jobs_list'].includes(route[1]) ? ['after', 'limit'] : route[1] === 'conversation' ? ['message_id'] : route[1] === 'job_read' ? ['job_id'] : [];
     if ([...url.searchParams.keys()].some(k => !queryFields.includes(k) || url.searchParams.getAll(k).length !== 1)) fail(400, 'Invalid owner query');
     let body = {};
     let admittedHash;
@@ -470,7 +519,7 @@ export async function relayOwnerPublic(request, env) {
       if (!token) fail(401, 'Owner device bearer required');
       input.token_hash = admittedHash || await hash(token);
     }
-    if (['messages_list', 'jobs_list', 'jobs_changes'].includes(route[1])) {
+    if (['messages_list', 'jobs_list', 'jobs_changes','deliverables_list'].includes(route[1])) {
       if (url.searchParams.has('after')) input.after = url.searchParams.get('after');
       if (url.searchParams.has('limit')) {
         const limit = url.searchParams.get('limit');
@@ -479,7 +528,7 @@ export async function relayOwnerPublic(request, env) {
       }
     }
     if (route[1] === 'jobs_changes' && url.searchParams.has('through')) input.through = url.searchParams.get('through');
-    if (route[1] === 'conversation') input.message_id = url.searchParams.get('message_id');
+    if (['conversation','deliverables_list'].includes(route[1])) input.message_id = url.searchParams.get('message_id');
     if (route[1] === 'job_read') input.job_id = url.searchParams.get('job_id');
     if (route[1] === 'attachment_content') {
       input.message_id = url.searchParams.get('message_id');

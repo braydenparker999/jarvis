@@ -19,7 +19,7 @@ export class AttachmentRuntimeHub extends Hub {
    this.fixturePrincipal={principal:RELAY_OWNER,grantId,scopes:scope.split(' '),accessHash};
    const pair=await(await relayOwnerStore(this.ctx,this.env,{op:'pair_start',label:'Synthetic workerd phone',rate_hash:await hash(random())})).json();
    const approved=await relayOwnerRpc(this.ctx,this.env,this.fixturePrincipal,'relay_owner_pairing_approve',{request_id:pair.request_id,code:pair.code,access_days:365,confirm:true});
-   return Response.json({token:pair.device_token,device_id:approved.device.id});
+   return Response.json({token:pair.device_token,device_id:approved.device.id,access});
   }
   if(path==='/fixture/tool'){
    const body=await request.json();

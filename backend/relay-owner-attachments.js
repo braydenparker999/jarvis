@@ -19,6 +19,12 @@ export function relayAttachmentSchema(ctx){
  ctx.storage.sql.exec('CREATE INDEX IF NOT EXISTS relay_owner_attachment_message ON relay_owner_attachments(message_id,state,position)');
  ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS relay_owner_attachment_rates (day TEXT PRIMARY KEY,uploads INTEGER NOT NULL,bytes INTEGER NOT NULL)');
  ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS relay_owner_attachment_attempts (bucket TEXT PRIMARY KEY,attempts INTEGER NOT NULL)');
+ // Preserve the attachment table's positional layout for older Workers.
+ // Assistant staging and immutable deliveries use separate private relations.
+ ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS relay_owner_assistant_attachment_targets (attachment_id TEXT PRIMARY KEY,delivery_id TEXT NOT NULL,grant_id TEXT NOT NULL)');
+ ctx.storage.sql.exec('CREATE INDEX IF NOT EXISTS relay_owner_assistant_attachment_target ON relay_owner_assistant_attachment_targets(delivery_id)');
+ ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS relay_owner_assistant_deliveries (seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NULL UNIQUE,message_id TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('reply','deliverable')),body TEXT NOT NULL,created_at TEXT NOT NULL,principal TEXT NOT NULL,grant_id TEXT NOT NULL)");
+ ctx.storage.sql.exec('CREATE INDEX IF NOT EXISTS relay_owner_assistant_delivery_message ON relay_owner_assistant_deliveries(message_id,seq)');
 }
 // Commit this small allowance independently of parsing/codec work. Invalid
 // files and quota failures consume attempts; they cannot roll the count back.
@@ -50,7 +56,7 @@ export function relayAttachmentPrecheck(ctx,session,body,now){
  if(usage.staged>=ATTACHMENT_LIMITS.stagedPerOwner||count>=4||usage.bytes+estimate>ATTACHMENT_LIMITS.retainedBytes||(rate?.uploads||0)>=ATTACHMENT_LIMITS.uploadsPerDay||(rate?.bytes||0)+estimate>ATTACHMENT_LIMITS.dailyBytes)fail(429,'attachment_quota_exceeded','Private attachment quota reached');
 }
 const metadata=r=>({id:r.id,messageId:r.message_id,name:r.name,mimeType:r.mime_type,sizeBytes:r.size_bytes,sha256:r.sha256,createdAt:new Date(r.created_ms).toISOString(),state:r.state,visibility:'private'});
-export function relayAttachmentMetadata(ctx,messageId){return rows(ctx,"SELECT id,message_id,name,mime_type,size_bytes,sha256,created_ms,state FROM relay_owner_attachments WHERE message_id=? AND principal=? AND state='linked' ORDER BY position",messageId,RELAY_OWNER).map(metadata);}
+export function relayAttachmentMetadata(ctx,messageId){return rows(ctx,"SELECT a.id,a.message_id,a.name,a.mime_type,a.size_bytes,a.sha256,a.created_ms,a.state FROM relay_owner_attachments a WHERE a.message_id=? AND a.principal=? AND a.state='linked' AND NOT EXISTS(SELECT 1 FROM relay_owner_assistant_attachment_targets t WHERE t.attachment_id=a.id) ORDER BY a.position",messageId,RELAY_OWNER).map(metadata);}
 function ids(messageId,attachmentId){if(!uuid(messageId)||!uuid(attachmentId))invalid('Invalid private attachment identifier');}
 const geometry=(w,h)=>{if(!Number.isInteger(w)||!Number.isInteger(h)||w<1||h<1||w>8192||h>8192||w*h>16000000)fail(413,'attachment_too_large','Image dimensions exceed the attachment limit');};
 function crc32(bytes){let c=0xffffffff;for(const byte of bytes){c^=byte;for(let i=0;i<8;i++)c=(c>>>1)^((c&1)?0xedb88320:0);}return(c^0xffffffff)>>>0;}

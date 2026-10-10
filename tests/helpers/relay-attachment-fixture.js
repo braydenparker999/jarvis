@@ -41,7 +41,7 @@ export async function attachmentFixture(t){
   const h=new Headers(headers);if(origin!==null)h.set('Origin',origin);if(token!==null)h.set('Authorization','Bearer '+token);if(body!==undefined)h.set('Content-Type','application/json');
   return relayOwnerPublic(new Request(env.RELAY_MCP_ORIGIN+'/relay/owner'+path,{method,headers:h,...(body===undefined?{}:{body:typeof body==='string'?body:JSON.stringify(body)})}),env);
  };
- return {db,ctx,env,sql,store,queued,phone,first,upload,send,rpc,connector,http,principal,inbox:RELAY_OWNER_INBOX,registry};
+ return {db,ctx,env,sql,store,queued,phone,first,upload,send,rpc,connector,http,principal,access,inbox:RELAY_OWNER_INBOX,registry};
 }
 export const output=async response=>({status:response.status,body:await response.json()});
 export async function saved(response){assert.equal(response.status,201,JSON.stringify(await response.clone().json()));return(await response.json()).attachment;}

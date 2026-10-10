@@ -1,10 +1,12 @@
 # Private assistant attachment delivery contract
 
-Status: draft contract for backend and frontend coordination. This branch starts from active release 97b048abfde97426da7b5eb3a310964631ce724c. Implementation and qualification are pending. It does not enable production changes.
+Status: implemented draft for independent review and paired frontend qualification. This branch starts from active release 97b048abfde97426da7b5eb3a310964631ce724c. Synthetic local attachment checks pass, including actual workerd/public MCP routing. It does not enable production changes.
 
 ## Native MCP delivery from available bytes
 
 All tools are flat, require the existing live relay:owner OAuth capability, and return metadata only for writes. Supply actual available file bytes encoded as canonical base64; there is no URL/path fetch, invented artifact ID, public object URL, credential argument or new grant.
+
+The local helper scripts/relay-assistant-file-args.mjs validates and packages an available image/PDF/supported file into the exact upload arguments, using bounded reads, stable supplied UUIDs and a local SHA-256. It has no credentials, network or write capability. A caller can load its JSON output programmatically and pass arguments to the refreshed native upload tool without printing private file bytes into the conversation or publishing them in logs. Invocation: node scripts/relay-assistant-file-args.mjs <local-file> <original-message-UUID> <delivery-UUID> <attachment-UUID> [MIME]. A local filesystem path is consumed only by this helper, never accepted or fetched by the backend MCP tool. After staging, compare the receipt hash/size and commit with the same stable IDs. Do not treat successful packaging as file delivery.
 
 1. relay_owner_attachment_upload({inbox_id:"brayden-owner",message_id,delivery_id,attachment_id,name,mime_type,data_base64})
    - message_id is the existing authenticated private original user message.
@@ -54,4 +56,10 @@ Reuse the supported static PNG/JPEG/WebP, PDF, UTF-8 text/Markdown/CSV and JSON 
 The large MCP envelope is allowed only for an authenticated owner attachment-upload tool header. Admission attempts are charged before its body is read, and codec attempts before expensive validation. Other MCP requests retain their existing small limit. Authentication is rechecked after asynchronous validation and inside the final synchronous write/link transaction.
 
 No frontend implementation, live upload, deployment, credential/scope change, new storage provider, schedule or job-completion control is included in this backend draft. Native host file-byte availability/catalog refresh and actual host-to-live private delivery remain explicit release acceptance checks.
+
+## Synthetic qualification evidence
+
+The focused inbound/outbound attachment suite passes 75 checks without skips. Tests cover lost stage/commit responses and identical retries; ordered file manifests; cross-message/delivery/grant isolation and actual public/reply/foreign-owner rows; cancellation during hashing and permanent identity tombstones; quota races and admission before body/codec work; revocation; active execution ownership; atomic reply/event/link rollback; preservation of accepted text replies/result versions; later deliveries before an accepted reply; identity collision protection; and pagination at the 32-delivery limit.
+
+The local workerd test uses actual public /relay/mcp requests, OAuth token validation, production Worker/Hub routes and SQLite. It stages a genuine image, commits a file-only first reply, appends a genuine PDF and maximum 1 MiB UTF-8 file, retries commits, checks native read results and exact authenticated download bytes/hash, rejects wrong-original and unauthorized downloads, verifies session revocation and records zero outbound egress. This is local native transport/runtime evidence, not a claim of live ChatGPT host delivery or production TLS/CORS qualification.
 
