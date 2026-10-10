@@ -40,6 +40,18 @@ test('assistant files: later deliverables never consume the accepted reply slot'
  const reply=await s.rpc('relay_owner_reply',{inbox_id:s.inbox,message_id:message,body:'Synthetic first text reply after a file.'});assert.equal(reply.newWrite,true);
  assert.equal((await s.rpc('relay_owner_read_conversation',{inbox_id:s.inbox,message_id:message})).deliverables[0].id,delivery);
 });
+test('assistant files: later delivery leaves a completed job, accepted result and execution attestation unchanged',async t=>{
+ const s=await assistantFixture(t),message=id(),run=id();
+ assert.equal((await s.store({op:'job_create',token_hash:s.first.token_hash,id:message,title:'Synthetic file generation',body:'Synthetic requested file',action_kind:'read_only'})).status,201);
+ await s.rpc('relay_owner_job_claim',{inbox_id:s.inbox,job_id:message,run_id:run,event_id:id()});
+ const reply=await s.rpc('relay_owner_reply',{inbox_id:s.inbox,message_id:message,body:'Synthetic accepted result.'});
+ await s.rpc('relay_owner_job_update',{inbox_id:s.inbox,job_id:message,run_id:run,event_id:id(),stage:'completed',expected_reply_id:reply.entry.id,expected_version:1,summary:'Synthetic requested work completed in this fixture.',outcome:'known'});
+ const before=await s.rpc('relay_owner_job_read',{inbox_id:s.inbox,job_id:message}),jobs=s.sql('SELECT * FROM relay_owner_jobs'),events=s.sql('SELECT * FROM relay_owner_job_events'),entries=s.sql('SELECT * FROM relay_owner_entries');
+ const delivery=id(),file=await stage(s,message,delivery);await s.commit(message,delivery,[file]);
+ const after=await s.rpc('relay_owner_job_read',{inbox_id:s.inbox,job_id:message});
+ assert.deepEqual(after.job,before.job);assert.deepEqual(s.sql('SELECT * FROM relay_owner_jobs'),jobs);assert.deepEqual(s.sql('SELECT * FROM relay_owner_job_events'),events);assert.deepEqual(s.sql('SELECT * FROM relay_owner_entries'),entries);
+ assert.equal(after.job.completion.replyId,reply.entry.id);assert.equal(after.job.resultVersion,1);
+});
 test('assistant files: uncertain stage and commit responses retry exact IDs without duplicate records',async t=>{
  const s=await assistantFixture(t),message=id(),delivery=id();await s.send(message);
  const args=s.uploadArgs(message,delivery);

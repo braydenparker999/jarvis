@@ -121,7 +121,7 @@ function conversation(ctx, messageId,env) {
   const reply = rows(ctx, "SELECT * FROM relay_owner_entries WHERE reply_to=? AND kind='reply' AND principal=?", messageId, RELAY_OWNER)[0];
   const context = rows(ctx, 'SELECT * FROM relay_owner_entries WHERE seq<? AND principal=? ORDER BY seq DESC LIMIT 25', message.seq, RELAY_OWNER).reverse().map(row=>entry(row,ctx,env));
   const later=relayAssistantDeliveryList(ctx,messageId);
-  return {message: entry(message,ctx,env), reply: reply ? entry(reply,ctx) : null, context,deliverables:later.deliverables,deliverablesNextCursor:later.nextCursor};
+  return {message: entry(message,ctx,env), reply: reply ? entry(reply,ctx) : null, context,...(later.deliverables.length?{deliverables:later.deliverables,deliverablesNextCursor:later.nextCursor}:{})};
 }
 function deliveryMessageIds(ids) {
   if (!Array.isArray(ids) || ids.length < 1 || ids.length > 50 || ids.some(id => !uuid(id)) || new Set(ids).size !== ids.length) fail(400, 'Invalid delivery message IDs');
@@ -282,7 +282,7 @@ export async function relayOwnerStore(ctx, env, body, enqueueOwnerMessage = () =
       let result;
       if (body.op === 'session') result = {status: 'approved', device: shortDevice({...session, expires_ms: now + RELAY_OWNER_SESSION_MS}), jobs_enabled: true, attachments_enabled: true};
       if (body.op === 'messages_list') result = listMessages(ctx, body.after, body.limit,false,env);
-      if (body.op === 'conversation') result = conversation(ctx, body.message_id,env);
+      if (body.op === 'conversation') {const data=conversation(ctx,body.message_id,env);result={...data,deliverables:data.deliverables||[],deliverablesNextCursor:data.deliverablesNextCursor??null};}
       if (body.op === 'deliverables_list') result = {...relayAssistantDeliveryList(ctx,body.message_id,body.after,body.limit),visibility:'private'};
       if (body.op === 'message') result = insertMessage(ctx, session, body, enqueueOwnerMessage, now,env);
       if (body.op === 'attachment_discard') result = relayAttachmentDiscard(ctx, session, body, now);
