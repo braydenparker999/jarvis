@@ -273,6 +273,7 @@ test('launcher browser behavior', { skip: executablePath ? false : 'Install Chro
       assert.deepEqual(stored.journal, state.outbox[0], 'The original queued UUID and complete body are independently durable');
       await page.locator('#message-text').fill('Draft after rename');
       await page.locator('#relay-menu-button').click();await page.getByRole('link',{name:'Jarvis home',exact:true}).click();
+      await page.waitForURL(origin + '/');await page.locator('body.launcher-page #app-directory').waitFor();
       await page.goBack();
       assert.equal(new URL(page.url()).pathname, '/jarvis/');
       assert.equal(await page.locator('#message-text').inputValue(), 'Draft after rename');
