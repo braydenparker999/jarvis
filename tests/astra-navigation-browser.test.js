@@ -135,3 +135,34 @@ test('Astra search and navigation keep the latest user intent',{timeout:90000},a
     });
   }finally{await browser.close();await fixture.dispose();}
 });
+
+test('Astra catalog choices distinguish movie and series catalogs with the same provider name',{timeout:30000},async()=>{
+  const catalogs=['Popular','New','Featured'].flatMap((name,index)=>['movie','series'].map(type=>({id:'catalog'+index,name,type})));
+  const fixture=await serveMediaReliabilityFixture({handleRequest:({pathname,json})=>{
+    if(pathname==='/fixture/manifest.json'){
+      json({id:'catalog-label-fixture',name:'Cinemeta',version:'1.0.0',resources:['catalog'],types:['movie','series'],catalogs});return true;
+    }
+    const match=/^\/fixture\/catalog\/(movie|series)\/(catalog\d)\.json$/.exec(pathname);
+    if(match){json({metas:[{id:match[1]+'-'+match[2],type:match[1],name:match[1]+' '+catalogs.find(c=>c.id===match[2]).name}]});return true;}
+    return false;
+  }});
+  const browser=await chromium.launch({executablePath:requireBrowser(),headless:true,args:['--no-sandbox']});
+  try{
+    const h=await openAstraFixture(browser,fixture);await h.page.emulateMedia({reducedMotion:'reduce'});
+    await h.page.locator('#mobileNav [data-nav="search"]').click();
+    const picker=h.page.locator('#discoverCatalog');await picker.waitFor();
+    const options=await picker.locator('option').evaluateAll(nodes=>nodes.slice(1).map(n=>({value:n.value,label:n.textContent})));
+    assert.equal(options.length,6,'both content types must remain selectable');
+    assert.equal(new Set(options.map(o=>o.value)).size,6,'catalog identities must remain distinct');
+    assert.equal(new Set(options.map(o=>o.label)).size,6,'different catalogs must not have indistinguishable labels');
+    for(const title of ['Popular','New','Featured'])for(const [type,label] of [['movie','Movie'],['series','Series']]){
+      await picker.selectOption({label:`${title} · ${label} · Cinemeta`});
+      await h.page.waitForFunction(expected=>{
+        const cards=[...document.querySelectorAll('#discoverResults .card[data-open]')];
+        return cards.length===1&&cards[0].textContent.includes(expected);
+      },type+' '+title);
+    }
+    await picker.selectOption('all');await h.page.waitForFunction(()=>document.querySelectorAll('#discoverResults .card[data-open]').length===6);
+    assert.deepEqual(h.errors,[]);
+  }finally{await browser.close();await fixture.close();}
+});
