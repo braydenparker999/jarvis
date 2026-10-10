@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {deflateSync} from 'node:zlib';
+import {readFileSync} from 'node:fs';
 import {attachmentFixture,id,saved,raster,output} from './helpers/relay-attachment-fixture.js';
 import {relayAttachmentPrepare,ATTACHMENT_LIMITS} from '../backend/relay-owner-attachments.js';
 test('private attachments: cancellation before an upload settles reserves its UUID and blocks delayed bytes',async t=>{
@@ -61,6 +62,27 @@ test('private attachments: JPEG repeated/conflicting dimensions and oversized sa
   const override=Buffer.from([255,marker,0,4,255,255]);
   await assert.rejects(prepareRaster('image/jpeg',Buffer.concat([original.subarray(0,2),override,original.subarray(2)])),e=>e.data.status===415);
  }
+});
+const pdf=Buffer.from(JSON.parse(readFileSync(new URL('./fixtures/relay-attachment-document.json',import.meta.url))).pdf,'base64');
+const preparePdf=bytes=>relayAttachmentPrepare({id:id(),message_id:id(),name:'fixture.pdf',mime_type:'application/pdf',data_base64:bytes.toString('base64')});
+const invalidPdf=e=>e.data.status===400&&e.data.code==='attachment_invalid'&&e.message==='PDF signature or ending mismatch';
+test('private attachments: PDF header-only and genuine documents missing EOF are rejected',async()=>{
+ assert.equal(pdf.subarray(-5).toString('ascii'),'%%EOF');
+ await assert.rejects(preparePdf(Buffer.from('%PDF-1.7\n')),invalidPdf);
+ await assert.rejects(preparePdf(pdf.subarray(0,-5)),invalidPdf);
+});
+test('private attachments: genuine PDF permits only the specified trailing whitespace and preserves bytes',async()=>{
+ for(const suffix of [Buffer.alloc(0),Buffer.from([0,9,10,12,13,32])]){
+  const bytes=Buffer.concat([pdf,suffix]),result=await preparePdf(bytes);
+  assert.deepEqual(Buffer.from(result.bytes),bytes);
+  assert.match(result.sha256,/^[a-f0-9]{64}$/);
+ }
+ for(const suffix of [Buffer.from([11]),Buffer.from([127]),Buffer.from('\ntrailing text')])await assert.rejects(preparePdf(Buffer.concat([pdf,suffix])),invalidPdf);
+});
+test('private attachments: complete PDF EOF marker must fit inside the final 1024 bytes',async()=>{
+ const atBoundary=Buffer.concat([pdf,Buffer.alloc(1019,32)]);
+ assert.deepEqual(Buffer.from((await preparePdf(atBoundary)).bytes),atBoundary);
+ await assert.rejects(preparePdf(Buffer.concat([pdf,Buffer.alloc(1020,32)])),invalidPdf);
 });
 function seedIdentities(s,count,state='discarded',size=1){
  for(let i=0;i<count;i++)s.sql('INSERT INTO relay_owner_attachments VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',id(),id(),s.principal.principal,s.first.device_id,'synthetic.txt','text/plain',size,'0'.repeat(64),state==='discarded'?null:Buffer.from('x'),Date.now(),Date.now()+86400000,state,null);

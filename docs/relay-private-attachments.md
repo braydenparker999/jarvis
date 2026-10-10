@@ -90,7 +90,7 @@ PNG is restricted to non-interlaced8-bit static images, with chunk CRCs and boun
 Compressed PNG ancillary metadata (iCCP/zTXt/iTXt) is unsupported to avoid another unbounded decompression path. Unsupported bit depth/interlacing/metadata receives an explicit415 error.
 
 JPEG dynamic/hierarchical dimension markers are unsupported, including DNL. They cannot override the unique bounded frame geometry.
-- application/pdf: require PDF signature and ending marker; download/resource content only. This is bounded transport validation, not a complete PDF parser.
+- application/pdf: require PDF signature and a complete %%EOF ending marker within the final 1,024 bytes. Only PDF whitespace (NUL, tab, LF, form feed, CR or space) may follow it, up to 1,019 bytes. Download/resource content only. This is bounded transport validation, not a complete PDF parser.
 - text/plain, text/markdown, text/csv, application/json: require valid UTF-8; deliver as untrusted plain text/resource content, never HTML or executable markup.
 
 SVG, HTML, JavaScript, executable MIME, URLs and unsupported formats fail415. Oversized payloads fail413 before persistent writes. Filenames are bounded basenames with control characters, CR/LF, path separators and misleading direction controls rejected. Content-Disposition filenames are safely encoded; no file is written to a path derived from a submitted name.
