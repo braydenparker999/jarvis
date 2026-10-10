@@ -92,7 +92,7 @@ function privateJob(value){
         ||w.authentication_source!=='owner-oauth-mcp'||w.author_authenticated!==true||w.visibility!=='private'
         ||!Array.isArray(w.plan)||w.plan.length>8||w.plan.some(step=>typeof step!=='string'||!step.trim()||step.length>1000)
         ||(w.revision===0 ? w.title!==null||w.goal!==null||w.plan.length!==0||w.updatedAt!==null||w.workId===value.id
-          : w.workId!==value.id||!label(w.title)||w.title===null||typeof w.goal!=='string'||!w.goal.trim()||w.goal.length>1000||!w.plan.length||!validDate(w.updatedAt)))throw new OwnerApiError('invalid');
+          : w.workId!==value.rootJobId||!label(w.title)||w.title===null||typeof w.goal!=='string'||!w.goal.trim()||w.goal.length>1000||!w.plan.length||!validDate(w.updatedAt)))throw new OwnerApiError('invalid');
       work={workId:w.workId,revision:w.revision,title:w.title,goal:w.goal,plan:[...w.plan],updatedAt:w.updatedAt,
         authentication_source:'owner-oauth-mcp',author_authenticated:true,visibility:'private'};
     }

@@ -110,3 +110,29 @@ test('organization shares the bounded progress journal while retaining terminal 
   await s.rpc('relay_owner_job_update',{job_id:request.id,run_id,event_id:crypto.randomUUID(),stage:'completed',summary:'Fictional report complete.',outcome:'known',expected_reply_id:reply.entry.id,expected_version:1});
   const read=await s.rpc('relay_owner_job_read',{job_id:request.id});assert.equal(read.job.stage,'completed');assert.ok(read.events.length<=110);
 });
+
+test('multiple guarded retries inherit root organization without root execution, replies or completion',async t=>{
+  const s=await setup(t),request=await s.message('Prepare fictional retryable work.'),plan=s.plan(request);
+  await s.rpc('relay_owner_job_plan',plan);
+  const originalMetadata=(await s.rpc('relay_owner_job_work_read',{job_id:request.id})).work;
+  const rootPlans=()=>s.h.rows("SELECT * FROM relay_owner_job_events WHERE job_id=? AND kind='work_planned'",request.id);
+  const originalPlans=rootPlans();let parent=request.id;
+  for(let attempt=2;attempt<=3;attempt++){
+    const run_id=crypto.randomUUID();await s.rpc('relay_owner_job_claim',{job_id:parent,run_id,event_id:crypto.randomUUID()});
+    await s.rpc('relay_owner_reply',{message_id:parent,body:'Fictional source missing; no work performed.'});
+    await s.rpc('relay_owner_job_update',{job_id:parent,run_id,event_id:crypto.randomUUID(),stage:'failed',summary:'Fictional work never started.',outcome:'not_started'});
+    const response=await s.h.phone('/jobs/retry',{job_id:parent,id:crypto.randomUUID(),confirm_duplicate_risk:true},s.phone.device_token);assert.equal(response.status,201);
+    const child=(await response.json()).job;assert.equal(child.attempt,attempt);assert.equal(child.rootJobId,request.id);
+    assert.deepEqual(child.presentation.work,originalMetadata);assert.equal(child.stage,'queued');assert.equal(child.execution,null);assert.equal(child.result,null);assert.equal(child.completion,null);assert.equal(child.resultVersion,0);assert.equal(child.cancelRequested,false);
+    const detail=await s.api.jobDetail(child.id);assert.deepEqual(detail.job.presentation.work,originalMetadata);
+    const work=groupOwnerWork((await s.api.jobs()).jobs);assert.equal(work.length,1);assert.equal(work[0].job.id,child.id);assert.deepEqual(work[0].job.presentation.work,originalMetadata);
+    assert.deepEqual(rootPlans(),originalPlans,'Retries never copy or rewrite root plan records');
+    await s.reject('relay_owner_job_plan',{...plan,job_id:child.id,event_id:crypto.randomUUID(),expected_revision:1});parent=child.id;
+  }
+  assert.deepEqual((await s.rpc('relay_owner_job_work_read',{job_id:request.id})).work,originalMetadata);
+  // Later root revisions invalidate all retry presentations via the change feed.
+  const cursor=String(s.h.rows('SELECT MAX(cursor) AS n FROM relay_owner_job_changes')[0].n);
+  await s.rpc('relay_owner_job_plan',{...plan,event_id:crypto.randomUUID(),expected_revision:1,title:'Revised fictional root plan'});
+  const delta=await s.api.jobChanges(cursor);assert.ok(delta.changes.some(change=>change.job.id===parent));
+  const revised=await s.api.jobDetail(parent);assert.equal(revised.job.presentation.work.revision,2);assert.equal(revised.job.presentation.work.title,'Revised fictional root plan');assert.equal(revised.job.execution,null);
+});

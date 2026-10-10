@@ -70,3 +70,40 @@ or other security-sensitive reconfiguration, stop that step for approval.
 Until discovery succeeds, responders must not claim plans/links were saved; use
 ordinary private replies and retain explicit completion uncertainty as needed.
 Automation schedules and live owner messages were not touched during development.
+
+## Release-lead activation checklist (existing access only)
+
+1. Deploy the independently reviewed combined release through the existing
+   release process. Keep the current connector URL, owner OAuth grant and
+   responder schedules unchanged.
+2. Refresh/reload the existing connector's tool discovery in the host. This is
+   catalog refresh, not disconnect/reconnect or new authorization. If the host
+   offers only a new authorization/grant flow, leave activation on hold and
+   request the separate approval; do not create credentials as a workaround.
+3. Inspect the actual callable declarations (not only the server source or a
+   successful HTTP `tools/list`). Confirm these flat required arguments:
+   - `relay_owner_job_work_read`: inbox_id, job_id.
+   - `relay_owner_job_plan`: inbox_id, job_id, event_id, expected_revision,
+     title, goal, plan.
+   - `relay_owner_job_link`: inbox_id, job_id, event_id, work_id, reason.
+   - `relay_owner_job_update`: inbox_id, job_id, event_id, stage at the root;
+     run_id, summary, outcome, expected_reply_id and expected_version must also
+     be visible/callable, with the existing stage-specific validation retained.
+4. Through the actual connector, call work_read on a fresh, explicitly fictional
+   UUID. Expect `Original private request not found` with status404. After that
+   no-target confirmation, a syntactically complete plan/link/update call using
+   that same nonexistent job ID must reach the same missing-target error rather
+   than an omitted-arguments failure. Use only fictional text and fresh event,
+   run and target IDs. This verifies invocation without altering live messages.
+5. Keep activation on hold if any tool is absent or arguments are stripped. A
+   server catalog or fixture pass alone does not prove host usability. Once
+   discovery and no-target calls pass, existing responders can follow the
+   procedure above using the same schedules and authorization. A later owner
+   request can verify the complete real workflow; never manufacture a private
+   owner request or completion report just to demonstrate rollout.
+
+Retry presentation resolves title, goal and plan from the original work record.
+Up to five attempts share that organization without copying or changing it.
+Each attempt retains independent execution, lease, reply and completion evidence.
+Plan changes target the root work revision and refresh all retry presentations
+through the existing change feed; a retry cannot silently fork the root plan.

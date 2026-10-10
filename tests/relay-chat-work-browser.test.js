@@ -31,3 +31,23 @@ test('natural chat shows authenticated plan and progress in place, groups explic
     assertBrowserContained(phone);await assertNoPrivatePersistence(page,['Fictional garden options','Compared the two fictional layouts']);
   }finally{await closeConversationHarness(browser,h,pages);}
 });
+
+test('latest retry Work card and inspector retain the assistant root title, goal and plan',{timeout:120000},async t=>{
+  const browser=await launchQualifiedBrowser(t);if(!browser)return;const h=createConversationFixture(t),pages=[];
+  try{
+    const auth=await h.oauth(),owner=await h.pair(auth),rpc=(name,args)=>h.rpc(auth,name,{inbox_id:RELAY_OWNER_INBOX,...args});
+    const saved=await h.phone('/messages',{id:crypto.randomUUID(),body:'Prepare fictional retry options.'},owner.device_token),root=(await saved.json()).entry;
+    await rpc('relay_owner_job_plan',{job_id:root.id,event_id:crypto.randomUUID(),expected_revision:0,title:'Fictional garden retry',goal:'Choose a quiet fictional path',plan:['Compare fictional paths','Prepare the fictional draft']});
+    let id=root.id;
+    for(let i=0;i<2;i++){
+      const run_id=crypto.randomUUID();await rpc('relay_owner_job_claim',{job_id:id,run_id,event_id:crypto.randomUUID()});
+      await rpc('relay_owner_job_update',{job_id:id,run_id,event_id:crypto.randomUUID(),stage:'failed',summary:'Fictional work not started.',outcome:'not_started'});
+      const response=await h.phone('/jobs/retry',{job_id:id,id:crypto.randomUUID(),confirm_duplicate_risk:true},owner.device_token);assert.equal(response.status,201);id=(await response.json()).job.id;
+    }
+    const phone=await openConversationPage(browser,h,{owner,clock:false,width:320,height:740});pages.push(phone);const page=phone.page;
+    await page.goto(RELAY_URL);await page.locator('#relay-owner-message-text').waitFor();await conversationMenu(page,'Requests');
+    const cards=page.locator('#relay-owner-current-work button[data-job-id]');assert.equal(await cards.count(),1);assert.equal(await cards.first().getAttribute('data-job-id'),id);assert.match(await cards.first().innerText(),/Fictional garden retry/);
+    await cards.first().click();await page.locator('#relay-owner-work-plan').waitFor();assert.equal(await page.locator('#relay-owner-detail-title').innerText(),'Fictional garden retry');assert.match(await page.locator('#relay-owner-work-plan').innerText(),/Choose a quiet fictional path/);assert.match(await page.locator('#relay-owner-work-plan').innerText(),/Prepare the fictional draft/);assert.equal(await page.locator('.request-state').innerText(),'Queued');
+    assertBrowserContained(phone);
+  }finally{await closeConversationHarness(browser,h,pages);}
+});

@@ -644,6 +644,9 @@ export function relayOwnerJobRpc(ctx, env, principal, name, args, now) {
 // Organization is append-only metadata in the existing authenticated journal.
 // It never mutates request text, accepted replies, execution or action scope.
 function workMetadata(ctx, row) {
+  // Retry attempts share root organization only. Their request, execution,
+  // lease, accepted reply and completion remain independently projected.
+  if (row.root_job_id !== row.id) return workMetadata(ctx, jobRow(ctx, row.root_job_id));
   const link = rows(ctx, "SELECT argument_json FROM relay_owner_job_events WHERE job_id=? AND kind='work_linked'", row.id)[0];
   const planned = rows(ctx, "SELECT id,argument_json,created_ms FROM relay_owner_job_events WHERE job_id=? AND kind='work_planned' ORDER BY seq DESC LIMIT 1", row.id)[0];
   if (!link && !planned) return null;
@@ -673,10 +676,18 @@ function workRpc(ctx, env, principal, name, args, now) {
   requireBudget(row.id);
   const current = workMetadata(ctx, row);
   if (name === 'relay_owner_job_plan') {
-    if (current && current.workId !== row.id) fail(409, 'Plan belongs to the linked work; read that exact work first');
+    if (row.root_job_id !== row.id || current && current.workId !== row.id) fail(409, 'Plan belongs to the original work; read that exact work first');
     if ((current?.revision ?? 0) !== args.expected_revision) fail(409, 'Private work revision conflict');
     appendEvent(ctx, {id: args.event_id, jobId: row.id, kind: argument.kind, message: 'Work plan saved: ' + argument.title,
       now, source: 'owner-oauth-mcp', arguments: argument, writer: principal.grantId});
+    // Refresh the at-most-four retry presentations through the existing change
+    // feed. Follow the indexed unique parent chain; never scan the inbox.
+    let parentId = row.id;
+    for (let attempt = 1; attempt < RELAY_OWNER_JOB_MAX_ATTEMPTS; attempt++) {
+      const child = rows(ctx, 'SELECT id FROM relay_owner_jobs WHERE parent_job_id=?', parentId)[0];
+      if (!child) break;
+      markChanged(ctx, child.id); parentId = child.id;
+    }
   } else {
     if (current || row.specified || row.parent_job_id) fail(409, 'Message already belongs to work');
     const target = relayOwnerJobEnsure(ctx, original(ctx, args.work_id));
