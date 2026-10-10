@@ -9,6 +9,8 @@ test('side navigation keeps channel access, focus and drafts while plus opens a 
   const auth=await h.oauth(),owner=await h.pair(auth);
   for(const size of [{width:390,height:844},{width:1280,height:900}]){
    const phone=await openConversationPage(browser,h,{owner,clock:false,...size});pages.push(phone);const page=phone.page;
+   // This scenario verifies an older/disabled service even when the paired backend supports files.
+   phone.rule(r=>r.method==='GET'&&r.path==='/relay/owner/session',async({forward})=>{const response=await forward();if(!response.ok)return response;return Response.json({...await response.json(),attachments_enabled:false},{status:response.status,headers:response.headers});},100);
    await page.goto(RELAY_URL);const composer=page.locator('#relay-owner-message-text');await composer.waitFor();await composer.fill('Fictional attachment draft, kept unsent.');assert.equal(await page.locator('#relay-scope-toggle').count(),0);
    await page.locator('#relay-menu-button').click();let dialog=page.getByRole('dialog');await dialog.waitFor();await dialog.evaluate(node=>Promise.allSettled(node.getAnimations().map(animation=>animation.finished)));const bounds=await dialog.boundingBox();assert.equal(bounds.x,0);assert.equal(bounds.y,0);assert.ok(bounds.width<=340&&bounds.width<size.width&&bounds.height>=size.height-1);assert.match(await dialog.innerText(),/Private owner chat/);await writeSyntheticEvidence(phone,'relay-side-nav-'+size.width,{bounds});
    for(let i=0;i<10;i++){await page.keyboard.press('Tab');assert.equal(await dialog.evaluate(node=>node.contains(document.activeElement)),true);}
@@ -40,5 +42,17 @@ test('picker selections survive Close and stale Forward safely but clear after o
 test('a delayed private file chooser cannot attach its file to a newly selected public channel',{timeout:120000},async t=>{
  const browser=await launchQualifiedBrowser(t);if(!browser)return;const h=createConversationFixture(t),pages=[];
  try{const owner=await h.pair(await h.oauth()),phone=await openConversationPage(browser,h,{owner,clock:false});pages.push(phone);const page=phone.page;await page.goto(RELAY_URL);await page.locator('#relay-owner-message-text').waitFor();await page.locator('#relay-compose-menu').click();await page.getByRole('dialog').getByLabel('Choose files',{exact:true}).evaluate(node=>window.stalePrivatePicker=node);await page.keyboard.press('Escape');await page.getByRole('dialog').waitFor({state:'detached'});await conversationMenu(page,'Public chat');await page.locator('#message-text').waitFor();await page.evaluate(()=>{const data=new DataTransfer();data.items.add(new File(['Synthetic private contents'],'late-private-file.txt',{type:'text/plain'}));stalePrivatePicker.files=data.files;stalePrivatePicker.dispatchEvent(new Event('change'));});assert.equal(await page.locator('.relay-attachment-chip').count(),0);await conversationMenu(page,'Owner chat');assert.equal(await page.locator('.relay-attachment-chip').count(),0);assertBrowserContained(phone);
+ }finally{await closeConversationHarness(browser,h,pages);}
+});
+
+for(const boundary of ['channel change','access loss'])test(`held multi-file preview cannot continue after ${boundary}`,{timeout:120000},async t=>{
+ const browser=await launchQualifiedBrowser(t);if(!browser)return;const h=createConversationFixture(t),pages=[];
+ try{const owner=await h.pair(await h.oauth()),phone=await openConversationPage(browser,h,{owner,clock:false});pages.push(phone);const page=phone.page;await page.goto(RELAY_URL);await page.locator('#relay-owner-message-text').waitFor();
+  await page.evaluate(()=>{const original=FileReader.prototype.readAsDataURL;FileReader.prototype.readAsDataURL=function(file){(window.heldPreviews??=[]).push(()=>original.call(this,file));window.releaseHeldPreview=()=>heldPreviews.splice(0).forEach(release=>release());};});
+  await page.locator('#relay-compose-menu').click();await page.getByRole('dialog').getByLabel('Choose images',{exact:true}).setInputFiles([{name:'held-first.png',mimeType:'image/png',buffer:png},{name:'held-second.png',mimeType:'image/png',buffer:png}]);await page.getByRole('dialog').getByRole('button',{name:'Remove held-first.png',exact:true}).waitFor();await page.keyboard.press('Escape');await page.getByRole('dialog').waitFor({state:'detached'});
+  if(boundary==='channel change'){await conversationMenu(page,'Public chat');await page.locator('#message-text').waitFor();}else{await page.evaluate(key=>{localStorage.removeItem(key);dispatchEvent(new StorageEvent('storage',{key,newValue:null,storageArea:localStorage}));},OWNER_KEY);await page.waitForFunction(()=>!document.querySelector('.relay-attachment-summary'));}
+  await page.evaluate(async()=>{releaseHeldPreview();await new Promise(resolve=>setTimeout(resolve,100));});assert.equal(await page.locator('.relay-attachment-chip').count(),0);
+  if(boundary==='channel change'){await conversationMenu(page,'Owner chat');await page.locator('#relay-owner-message-text').waitFor();assert.equal(await page.locator('.relay-attachment-chip').count(),2);assert.equal(await page.getByRole('button',{name:'Remove held-second.png',exact:true}).count(),1);}
+  assertBrowserContained(phone);
  }finally{await closeConversationHarness(browser,h,pages);}
 });
