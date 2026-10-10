@@ -13,7 +13,16 @@ export function attachmentMetadata(value,{messageId,state}={}){
 }
 export function messageAttachments(entry){
   if(entry.attachments===undefined)return [];
-  if(!Array.isArray(entry.attachments)||entry.attachments.length>4||entry.attachments.length&&entry.role!=='user')throw Error('Invalid message attachments');
-  const items=entry.attachments.map(item=>attachmentMetadata(item,{messageId:entry.id,state:'linked'}));
+  if(!Array.isArray(entry.attachments)||entry.attachments.length>4)throw Error('Invalid message attachments');
+  if(entry.attachments.length&&entry.role!=='user'&&(entry.role!=='assistant'||entry.visibility!=='private'||entry.author_authenticated!==true
+    ||entry.principal!=='github:183016859'||entry.authentication_source!=='owner-oauth-mcp'||!attachmentUuid(entry.replyTo)||entry.replyTo===entry.id))throw Error('Invalid assistant attachment provenance');
+  const items=entry.attachments.map(item=>attachmentMetadata(item,{messageId:entry.role==='assistant'?entry.replyTo:entry.id,state:'linked'}));
   if(new Set(items.map(item=>item.id)).size!==items.length)throw Error('Duplicate attachments');return items;
+}
+
+export function assistantDeliverable(value,messageId){
+  if(!value||value.role!=='assistant'||value.kind!=='deliverable'||value.messageId!==messageId||!attachmentUuid(value.id)||value.id===messageId
+    ||typeof value.body!=='string'||value.body.length>6000||!Number.isFinite(Date.parse(value.createdAt))||!Array.isArray(value.attachments)||!value.attachments.length)throw Error('Invalid private deliverable');
+  const attachments=messageAttachments({...value,replyTo:messageId});
+  return {id:value.id,messageId,kind:'deliverable',role:'assistant',body:value.body,createdAt:value.createdAt,attachments};
 }
