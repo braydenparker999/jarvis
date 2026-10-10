@@ -45,3 +45,11 @@ export function browseCountText(shown, total) {
   if (total <= shown) return `${total} video${total === 1 ? '' : 's'}`;
   return `${shown} of ${total} videos`;
 }
+
+// Accessible resume-progress bar for a card thumbnail. Empty when there is no
+// progress to show; otherwise a progressbar role with a human-readable value.
+export function progressBarMarkup(percent) {
+  if (!percent) return '';
+  const rounded = Math.max(0, Math.min(100, Math.round(percent)));
+  return `<span class="bar" role="progressbar" aria-valuenow="${rounded}" aria-valuemin="0" aria-valuemax="100" aria-label="Watched ${rounded} percent"><span data-progress="${percent.toFixed(1)}"></span></span>`;
+}
