@@ -591,6 +591,11 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
 
 body.relay-page .relay-scope-toggle{min-height:48px;min-width:48px}
 body.relay-page .relay-owner-chat:is([data-task-editor=true],[data-task-draft=true]) #relay-owner-job-toggle:not([hidden]){display:inline-flex!important;min-height:48px;min-width:48px}
+body.relay-page #relay-transfer-notice{margin-top:152px;background:#30262b;color:#f4d6df}
+body.relay-page #relay-transfer-notice p{color:#f4d6df}
+body.relay-page main#content:has(>#relay-transfer-notice) .messages{padding-top:16px}
+body.relay-page main#content:has(>#relay-transfer-notice) .conversation-search{margin-top:0}
+body.relay-page main#content:has(>#relay-transfer-notice) .relay-owner-panel:not(.relay-owner-chat){padding-top:16px}
 body.relay-page .relay-menu-home{display:flex;align-items:center;justify-content:center;min-height:48px;color:#aaa;font-size:12px;border-top:1px solid #3d3d3d;margin-top:10px}
 body.relay-page main#content .relay-owner-panel:not(.relay-owner-chat){color:#f7f7f7}
 body.relay-page main#content .relay-owner-panel:not(.relay-owner-chat) :is(input,select){background:#303030;border:1px solid #686868;border-radius:16px;color:#f7f7f7;min-height:48px}

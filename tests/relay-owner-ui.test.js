@@ -280,7 +280,7 @@ test('confirmed401 prevents a concurrent successful read from repopulating priva
 function fakeDocument() {
   const nodes = [];
   class Node {
-    constructor(tag) { this.tagName = tag.toUpperCase(); this.children = []; this.dataset = {}; this.attributes = {}; this.style = {}; this.value = ''; this.scrollHeight = 240; this.clientHeight = 160; this.scrollTop = 0; this.isConnected = true; this.classList = { add: (...values) => { this.className = [this.className || '', ...values].join(' '); }, toggle: (value, force) => { const names = new Set((this.className || '').split(' ').filter(Boolean)); const enabled = force ?? !names.has(value); if (enabled) names.add(value); else names.delete(value); this.className = [...names].join(' '); return enabled; } }; nodes.push(this); }
+    constructor(tag) { this.tagName = tag.toUpperCase(); this.children = []; this.dataset = {}; this.attributes = {}; this.style = {}; this.value = ''; this.scrollHeight = 240; this.clientHeight = 160; this.scrollTop = 0; this.isConnected = true; this.classList = { add: (...values) => { this.className = [this.className || '', ...values].join(' '); } }; nodes.push(this); }
     append(...items) { this.children.push(...items); for (const item of items) item.parentNode = this; }
     replaceChildren(...items) { for (const child of this.children) child.isConnected = false; this.children = []; this.append(...items); }
     setAttribute(key, value) { this.attributes[key] = value; }

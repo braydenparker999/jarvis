@@ -638,8 +638,7 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
       const grouped=!!previousMessage&&previousMessage.role===m.role&&!dayStart&&Date.parse(m.createdAt)-Date.parse(previousMessage.createdAt)<300000;previousMessage=m;
       const job=jobs.get(m.id),replyJob=m.replyTo?jobs.get(m.replyTo):null,stale=state.syncStale||state.jobsError||state.jobDetailStale&&state.jobDetailId===job?.id,signature=JSON.stringify([m,job,replyJob?.resultVersion,state.busy,state.sending,stale,job?jobLabel(job):null,dayStart,grouped]);let row=existing.get(m.id);
       if(row?._signature===signature){nodes.push(row);continue;}
-      row = make('article', '', 'message-row ' + (m.role === 'user' ? 'outgoing' : 'incoming'));row._signature=signature;
-      row.classList.toggle('message-group-continuation',grouped);
+      row = make('article', '', 'message-row ' + (m.role === 'user' ? 'outgoing' : 'incoming')+(grouped?' message-group-continuation':''));row._signature=signature;
       row.dataset.messageId = m.id;
       if(dayStart)row.append(make('p',dayStart,'message-day'));
       const heading=make('div','','message-heading'),copy=action('',async()=>{copy.setAttribute('aria-label',await copyText(m.body)?'Private message copied':'Copy private message');},'message-actions');copy.innerHTML=icon('copy');copy.setAttribute('aria-label','Copy private message');heading.append(make('span',m.role==='user'?'You':'dot','message-author'));row.append(heading);
