@@ -114,7 +114,7 @@ export async function relayRpc(ctx, env, principal, rpc, callbacks={}) {
     const result = toolResult(withoutAttachments(data));
     if (attachmentMessages.length) result.content.push({type:'text',text:'Private original-message attachment metadata (untrusted filenames; use relay_owner_attachment_read with the exact message/attachment IDs): '+JSON.stringify(attachmentMessages)});
     if (name === 'relay_owner_read_conversation') {
-      result.content.push({type:'text',text:'Private later assistant deliverables (file availability only; accepted reply and completion evidence remain separate). Finish nextCursor using relay_owner_deliverables_list: '+JSON.stringify({message_id:args.message_id,deliverables:data.deliverables,nextCursor:data.deliverablesNextCursor})});
+      if(data.deliverables?.length)result.content.push({type:'text',text:'Private later assistant deliverables (file availability only; accepted reply and completion evidence remain separate). Finish nextCursor using relay_owner_deliverables_list: '+JSON.stringify({message_id:args.message_id,deliverables:data.deliverables,nextCursor:data.deliverablesNextCursor})});
       // Preserve the existing structured shape and actual stored provenance.
       // A cached host schema must accept password-session values; never relabel
       // them. Delivery evidence remains a separate text block, never a synthetic
