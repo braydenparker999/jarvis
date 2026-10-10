@@ -152,8 +152,8 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), draftS
       const page=state.deliveryPages[id]={items:previous?.items||[],nextCursor:previous?.nextCursor??null,open:true,busy:true,error:''};emit();
       try{
         const data=await api.deliverables(id,after,{signal:abort.signal});if(epoch!==generation||abort.signal.aborted||deliveryReads.get(id)!==abort)return;
-        const items=new Map((more?page.items:[]).map(item=>[item.id,item]));
-        for(const item of data.deliverables){if(state.messages.some(m=>m.id===item.id)||items.has(item.id)&&JSON.stringify(items.get(item.id))!==JSON.stringify(item))throw new OwnerApiError('invalid');items.set(item.id,item);}
+        const known=new Map(page.items.map(item=>[item.id,item])),items=new Map(more?known:[]);
+        for(const item of data.deliverables){if(state.messages.some(m=>m.id===item.id)||known.has(item.id)&&JSON.stringify(known.get(item.id))!==JSON.stringify(item))throw new OwnerApiError('invalid');items.set(item.id,item);}
         if(items.size>32)throw new OwnerApiError('invalid');page.items=[...items.values()];page.nextCursor=data.nextCursor;
       }catch(error){if(epoch===generation&&!abort.signal.aborted){if(['expired','revoked','unauthorized'].includes(error.kind))failure(error);else page.error=error instanceof OwnerApiError?error.message:'Could not load private files. Try again.';}}
       finally{if(deliveryReads.get(id)===abort){deliveryReads.delete(id);page.busy=false;emit();}}

@@ -10,7 +10,7 @@ async function original(j){const id=crypto.randomUUID();assert.equal((await j.h.
 async function stage(j,message_id,delivery_id,name,mime_type,bytes){const args={inbox_id,message_id,delivery_id,attachment_id:crypto.randomUUID(),name,mime_type,data_base64:bytes.toString('base64')};const value=await j.h.rpc(j.auth,'relay_owner_attachment_upload',args);return {args,attachment:value.attachment};}
 const commit=(j,message_id,delivery_id,files,body='',kind='deliverable')=>j.h.rpc(j.auth,kind==='reply'?'relay_owner_reply_with_attachments':'relay_owner_deliverable_send',{inbox_id,message_id,delivery_id,body,attachment_ids:files.map(f=>f.attachment.id)});
 
-test('actual MCP later image and PDF delivery preserves accepted text, retries immutably, downloads privately and clears on access loss',{timeout:120000},async t=>{
+test('actual MCP later image and PDF preserves text, retries after a synthetic post-success throw, and clears on local credential removal',{timeout:120000},async t=>{
  const j=await journey(t);if(!j)return;const {page,h,phone}=j,message=await original(j),delivery=crypto.randomUUID();
  const reply=await h.rpc(j.auth,'relay_owner_reply',{inbox_id,message_id:message,body:'Accepted synthetic text remains unchanged.'});
  const raster=JSON.parse(await readFile(new URL('./fixtures/relay-attachment-raster.json',import.meta.url),'utf8')),docs=JSON.parse(await readFile(new URL('./fixtures/relay-attachment-document.json',import.meta.url),'utf8'));
@@ -35,4 +35,15 @@ test('actual first file-only reply and later paginated deliveries remain separat
  await page.goto(RELAY_URL);await page.getByRole('button',{name:'Download First reply.txt',exact:true}).waitFor();await page.getByRole('button',{name:'Files from assistant',exact:true}).click();await page.getByRole('button',{name:'Load more files',exact:true}).waitFor();assert.equal(await page.locator('[data-delivery-id]').count(),10);
  await page.getByRole('button',{name:'Load more files',exact:true}).click();await page.getByRole('button',{name:'Download Later 10.txt',exact:true}).waitFor();assert.equal(await page.locator('[data-delivery-id]').count(),11);assert.equal(await page.getByRole('button',{name:'Load more files',exact:true}).count(),0);
  assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));await page.getByRole('button',{name:'Close assistant files',exact:true}).click();assert.equal(await page.locator('[data-delivery-id]').count(),0);assert.equal(await page.getByRole('button',{name:'Download First reply.txt',exact:true}).count(),1);assertBrowserContained(j.phone);
+});
+
+test('server-only revocation rejects the next actual file request and clears cached files, previews and credentials',{timeout:120000},async t=>{
+ const j=await journey(t);if(!j)return;const {page,h,phone}=j,message=await original(j),delivery=crypto.randomUUID();
+ const raster=JSON.parse(await readFile(new URL('./fixtures/relay-attachment-raster.json',import.meta.url),'utf8'));const image=await stage(j,message,delivery,'Revocation image.png','image/png',Buffer.from(raster.png,'base64')),text=await stage(j,message,delivery,'Revocation document.txt','text/plain',Buffer.from('Synthetic revocation download'));
+ await commit(j,message,delivery,[image,text]);await page.addInitScript(()=>{window.activePrivateURLs=new Set();const create=URL.createObjectURL.bind(URL),revoke=URL.revokeObjectURL.bind(URL);URL.createObjectURL=blob=>{const url=create(blob);activePrivateURLs.add(url);return url;};URL.revokeObjectURL=url=>{activePrivateURLs.delete(url);return revoke(url);};});
+ await page.goto(RELAY_URL);await page.getByRole('button',{name:'Files from assistant',exact:true}).click();await page.getByRole('button',{name:'Preview Revocation image.png',exact:true}).click();await page.waitForFunction(()=>document.querySelector('.relay-linked-preview')?.naturalWidth>0);assert.equal(await page.evaluate(()=>activePrivateURLs.size),1);
+ // Revoke through the real server only. Do not edit browser storage or dispatch storage events.
+ assert.equal((await h.phone('/devices/revoke',{device_id:j.owner.device.id},j.owner.device_token)).status,200);assert.ok(await page.evaluate(key=>localStorage.getItem(key),OWNER_KEY));
+ await page.getByRole('button',{name:'Download Revocation document.txt',exact:true}).click();await page.waitForFunction(()=>!document.querySelector('.relay-linked-attachment')&&activePrivateURLs.size===0);
+ assert.ok(phone.records.some(r=>r.path==='/relay/owner/attachments/content'&&r.status===401));assert.equal(await page.evaluate(key=>localStorage.getItem(key),OWNER_KEY),null);assert.equal(await page.locator('[data-delivery-id],.relay-linked-preview').count(),0);assertBrowserContained(phone);
 });

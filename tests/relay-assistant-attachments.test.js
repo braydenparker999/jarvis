@@ -36,3 +36,10 @@ test('later delivery reads preserve loaded files on error and reject late auth-l
  const controller=createRelayOwnerController({api,draftStore:{read:()=>'',save:()=>true}});await controller.refresh();await controller.loadDeliverables(originalId);mode='error';await controller.loadDeliverables(originalId);assert.equal(controller.snapshot().deliveryPages[originalId].items.length,1);assert.match(controller.snapshot().deliveryPages[originalId].error,/Could not load/);assert.equal(controller.snapshot().messages.find(m=>m.id===replyId).body,reply.body);
  mode='hold';const pending=controller.loadDeliverables(originalId);controller.storedSessionChanged();resolve({deliverables:[file],nextCursor:null});await pending;assert.deepEqual(controller.snapshot().deliveryPages,{});
 });
+
+test('refresh rejects changed immutable delivery records and preserves the entire loaded cache',async()=>{
+ const first={...delivery,messageId:originalId,kind:'deliverable'},second={...first,id:crypto.randomUUID(),body:'Previously loaded second page'};let response={deliverables:[first],nextCursor:'10'};
+ const api={hasCredential:true,selectedMode:'owner',session:async()=>({device:{id:deviceId},attachments_enabled:true}),messages:async()=>({messages:[original,reply],nextCursor:null}),deliverables:async()=>response};
+ const controller=createRelayOwnerController({api,draftStore:{read:()=>'',save:()=>true}});await controller.refresh();await controller.loadDeliverables(originalId);response={deliverables:[second],nextCursor:null};await controller.loadDeliverables(originalId,{more:true});const accepted=controller.snapshot().deliveryPages[originalId];
+ for(const changed of [{...first,body:'Changed original delivery'},{...second,attachments:[{...metadata,name:'Changed filename.pdf'}]}]){response={deliverables:[changed],nextCursor:'10'};await controller.loadDeliverables(originalId);const page=controller.snapshot().deliveryPages[originalId];assert.deepEqual(page.items,accepted.items);assert.equal(page.nextCursor,accepted.nextCursor);assert.ok(page.error);assert.equal(controller.snapshot().messages.find(m=>m.id===replyId).body,reply.body);}
+});
