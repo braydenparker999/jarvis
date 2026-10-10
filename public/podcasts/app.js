@@ -1,5 +1,5 @@
 import {API_ORIGIN} from '/assets/config.js';
-import {STORAGE_KEY,AUDIO_CACHE,MAX_DOWNLOAD,categories,readState,keyOf,offlinePath,clock,minutes,size,resumePosition,nextQueued,shouldSleep,progressEntry,compactProgress,storedFeed,saveFeed} from './core.js';
+import {STORAGE_KEY,AUDIO_CACHE,MAX_DOWNLOAD,categories,readState,keyOf,offlinePath,clock,positionText,minutes,size,resumePosition,nextQueued,shouldSleep,progressEntry,compactProgress,storedFeed,saveFeed} from './core.js';
 import {clientDirectory} from './directory.js';
 
 const $ = id => document.getElementById(id);
@@ -323,7 +323,7 @@ function updateCurrent() {
 }
 function updatePosition() {
   const duration=Number.isFinite(audio.duration)&&audio.duration>0?audio.duration:current?.duration || 0, pos=loadedKey?audio.currentTime:resumePosition(state.progress[current?keyOf(current):''],duration);
-  if(!seeking)for(const id of ['seek','mini-seek']){$(id).max=String(duration || 100);$(id).value=String(pos);$(id).disabled=!loadedKey || !duration || sourceLoading;$(id).style.setProperty('--progress',Math.min(100,duration?pos/duration*100:0)+'%');}
+  if(!seeking)for(const id of ['seek','mini-seek']){$(id).max=String(duration || 100);$(id).value=String(pos);$(id).disabled=!loadedKey || !duration || sourceLoading;$(id+'-position-text').textContent=positionText(pos,duration)+($(id).disabled?'; play audio to enable seeking':'');$(id).setAttribute('aria-valuetext',$(id+'-position-text').textContent);$(id).style.setProperty('--progress',Math.min(100,duration?pos/duration*100:0)+'%');}
   $('mini-elapsed').textContent=clock(pos);$('elapsed').textContent=clock(pos);$('remaining').textContent='−'+clock(Math.max(0,duration-pos));
   updateTimerLabel();
   if(timer){$('sleep-label').textContent=timer.endOfEpisode?'End of episode':clock(Math.max(0,(timer.deadline-Date.now())/1000));if(shouldSleep(timer,Date.now()))stopForSleep();}
@@ -350,7 +350,7 @@ async function startSources(e,token,position,index=0) {
 async function playEpisode(e) {
   if(current&&keyOf(current)===keyOf(e)&&(sourceLoading||loadedKey===keyOf(e))){togglePlay();return;}
   const token=++loadToken;if(current&&loadedKey)saveProgress();loadedKey='';sourceLoading=true;audio.pause();audio.removeAttribute('src');audio.load();wantPlay=true;
-  current=e;state.current=e;commit();updateCurrent();playbackStatus('Opening audio…');
+  current=e;state.current=e;commit();updateCurrent();updatePosition();playbackStatus('Opening audio…');
   if(currentBlob){URL.revokeObjectURL(currentBlob);currentBlob=null;}
   try {
     const cached=await cachedAudio(e);if(token!==loadToken)return;
@@ -375,9 +375,9 @@ for(const id of ['play','mini-play'])$(id).onclick=togglePlay;
 $('mini-back').onclick=$('back-15').onclick=()=>skip(-15);$('forward-30').onclick=()=>skip(30);
 for(const id of ['seek','mini-seek']) {
   const input=$(id);input.addEventListener('pointerdown',()=>seeking=true);
-  input.oninput=()=>{seeking=true;$('elapsed').textContent=clock(Number(input.value));input.style.setProperty('--progress',Number(input.value)/Number(input.max)*100+'%');};
+  input.oninput=()=>{seeking=true;input.setAttribute('aria-valuetext',positionText(input.value,input.max));$(id+'-position-text').textContent=input.getAttribute('aria-valuetext');$('mini-elapsed').textContent=clock(Number(input.value));$('elapsed').textContent=clock(Number(input.value));input.style.setProperty('--progress',Number(input.value)/Number(input.max)*100+'%');};
   input.onchange=()=>{if(loadedKey)audio.currentTime=Number(input.value);seeking=false;updatePosition();saveProgress();};
-  input.addEventListener('pointercancel',()=>{seeking=false;updatePosition();});input.addEventListener('blur',()=>seeking=false);
+  input.addEventListener('pointercancel',()=>{seeking=false;updatePosition();});input.addEventListener('blur',()=>{seeking=false;updatePosition();});
 }
 $('speed').onclick=()=>sheet('Playback speed',[0.75,1,1.25,1.5,1.75,2,2.5].map(speed=>({label:speed+'×'+(state.speed===speed?' · Selected':''),icon:state.speed===speed?'check':'play',action:()=>{state.speed=speed;audio.playbackRate=speed;audio.preservesPitch=true;commit();$('speed').textContent=speed+'× speed';}})));
 function stopForSleep() {timer=null;wantPlay=false;if(sourceLoading){++loadToken;sourceLoading=false;loadedKey='';}audio.pause();playbackStatus();$('sleep-label').textContent='Sleep timer';updateTimerLabel();saveProgress(audio.ended);notify('Sleep timer finished');setPlayIcons();}

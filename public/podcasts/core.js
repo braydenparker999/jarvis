@@ -13,6 +13,13 @@ export const keyOf = e => e.show.feedUrl + '#' + e.id;
 export function hash(s) { let n=2166136261;for(let i=0;i<s.length;i++)n=Math.imul(n^s.charCodeAt(i),16777619);return (n>>>0).toString(16); }
 export const offlinePath = e => '/podcasts/offline/' + hash(e.show.feedUrl) + '-' + e.id;
 export function clock(n) { n=Math.max(0,Math.floor(Number(n)||0));return (n>=3600?Math.floor(n/3600)+':':'')+String(Math.floor(n/60)%60).padStart(n>=3600?2:1,'0')+':'+String(n%60).padStart(2,'0'); }
+export function positionText(position, duration) {
+  const spoken = value => {
+    const total=Math.max(0,Math.floor(Number(value)||0)),hours=Math.floor(total/3600),mins=Math.floor(total%3600/60),seconds=total%60;
+    return [[hours,'hour'],[mins,'minute'],[seconds,'second']].filter(([n])=>n>0).map(([n,unit])=>n+' '+unit+(n===1?'':'s')).join(' ') || '0 seconds';
+  };
+  return spoken(position)+(duration>0?' of '+spoken(duration):'; duration unavailable');
+}
 export const minutes = n => n ? (n >= 3600 ? Math.floor(n/3600)+' hr '+Math.round(n%3600/60)+' min' : Math.max(1,Math.round(n/60))+' min') : '';
 export const size = n => n>=1024*1024 ? (n/1024/1024).toFixed(1)+' MB' : Math.round(n/1024)+' KB';
 export function resumePosition(progress, duration) { return progress?.played ? 0 : Math.max(0,Math.min(progress?.position || 0,duration>0 ? Math.max(0,duration-1) : Infinity)); }
