@@ -10,7 +10,7 @@ import {relayConnector,relayRpc} from './relay-connector.js';
 import {relayOAuthStore} from './relay-oauth.js';
 import {drainRelayOutbox,scheduleRelayAlarm,enqueueRelayOwnerMessage,webhookTransport} from './relay-events.js';
 import {reserveRelayCoreWake,releaseRelayCoreWake,assertRelayCoreWake,beginRelayCoreAlarm,abandonRelayCoreAlarm} from './relay-core-alarm.js';
-import {relayOwnerPublic,relayOwnerStore} from './relay-owner.js';
+import {relayOwnerPublic,relayOwnerStore,relayOwnerAssistantAttachmentIngress} from './relay-owner.js';
 import {RelayError,boundedText} from './relay-common.js';
 const paths = new Set(['/v1/state', '/v1/messages', '/v1/board', '/v1/responder/connect', '/v1/responder/revoke', '/v1/agent/inbox', '/v1/agent/replies', '/v1/agent/board']);
 const digest = async value => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))),b=>b.toString(16).padStart(2,'0')).join('');
@@ -161,6 +161,10 @@ export class Hub {
         const operation=()=>relayOwnerStore(this.ctx,this.env,body,enqueueRelayOwnerMessage);
         return ['message','job_create','job_retry','delivery_retry'].includes(body?.op)?await this.withCoreWake(operation):await operation();
       } catch { return json({error:'Owner Relay storage unavailable'},503); }
+    }
+    if(path==='/internal/relay/assistant-attachment-admit'){
+      try{const {principal}=await request.json();return json(relayOwnerAssistantAttachmentIngress(this.ctx,this.env,principal));}
+      catch(error){return json({error:{code:error instanceof RelayError?error.code:-32603,message:error instanceof RelayError?error.message:'Relay attachment admission unavailable',...(error instanceof RelayError&&error.data?{data:error.data}:{})}});}
     }
     if(path==='/internal/relay/rpc'){
       try{const {principal,rpc}=await request.json();return json({result:await relayRpc(this.ctx,this.env,principal,rpc,{syncPublicRead:()=>this.syncPublicRead()})});}
