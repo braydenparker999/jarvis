@@ -1,0 +1,32 @@
+✔ actual MCP later image and PDF preserves text, retries after a synthetic post-success throw, and clears on local credential removal (5990.197879ms)
+✔ actual first file-only reply and later paginated deliveries remain separate and close safely (2739.612929ms)
+✔ server-only revocation rejects the next actual file request and clears cached files, previews and credentials (2328.088488ms)
+✔ private assistant file metadata requires authenticated owner MCP provenance and exact delivery linkage (3.017863ms)
+✔ owner message API accepts authenticated assistant files and rejects foreign or public metadata (75.940122ms)
+✔ later file pagination keeps the accepted text reply separate and ignores a late response after clear (3.050483ms)
+✔ later deliverable API enforces original linkage, provenance, unique IDs and advancing bounded cursors (8.794057ms)
+✔ later delivery reads preserve loaded files on error and reject late auth-loss responses (1.718264ms)
+✔ refresh rejects changed immutable delivery records and preserves the entire loaded cache (1.197525ms)
+✔ held upload POST cancellation discards staged bytes and a late HTTP response cannot restore the file (3624.587809ms)
+✔ removal before server admission never sends a message and late orphan bytes expire on real cleanup (2431.87223ms)
+✔ revocation and local session loss cancel a held upload; late admission cannot write private bytes (2340.053143ms)
+✔ channel changes isolate a held private upload and its late receipt; no public write is made (3856.560201ms)
+✔ lost upload and message responses keep UUIDs immutable and repeated sends never duplicate accepted state (2337.293701ms)
+✔ an already accepted message response arriving after session loss cannot recreate private UI (2119.501061ms)
+✔ browser replay after an empty HTTP connection loss preserves the same upload identity (2103.662004ms)
+✔ private attachment API binds exact IDs and bytes, validates receipt, sends ordered IDs and fetches verified content (64.505688ms)
+✔ malformed receipts, mismatched content, unsupported metadata and authentication failure fail closed (4.706653ms)
+✔ quota and type errors are safe actionable messages without response text (1.782371ms)
+✔ attachment-only sends use reserved message identity and lost responses retry immutable body and files (5.852399ms)
+✔ removing an in-flight selected file cancels staging and cannot send a subset or empty message (6.274664ms)
+✔ session loss during file preparation sends no old draft and late private reads release no bytes (17.584818ms)
+✔ definitively expired staged files unlock for removal while transport failures retain immutable retries (4.688225ms)
+✔ unknown post-submit errors cannot unlock the original attachment attempt (8.530087ms)
+ℹ tests 24
+ℹ suites 0
+ℹ pass 24
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 19334.537899
