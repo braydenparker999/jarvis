@@ -120,3 +120,20 @@ test('OAuth connector reads, replies, publishes, rotates tokens and respects rev
  assert.equal((await rpc('jarvis_read_inbox',{},refreshed.access_token)).status,401);
  assert.equal((await req('/oauth/token',form({...refresh,refresh_token:refreshed.refresh_token}))).status,400);
 });
+
+test('Server reports schedule status as unverifiable without treating connectivity as schedule evidence',async()=>{
+ const {renderUtility}=await import('../public/assets/hub.js');
+ for(const connection of ['Connected','Offline']){
+  const nodes=new Map(['#server-details','#server-refresh','#server-state'].map(id=>[id,{}]));
+  const root={innerHTML:'',querySelector:id=>nodes.get(id)};
+  let synced=0;
+  renderUtility('server',root,{connection:()=>connection,showConnection:()=>{},sync:async()=>{synced++;}});
+  const schedule=()=>root.innerHTML.match(/<h2>Scheduled replies<\/h2><p>(.*?)<\/p>/)?.[1];
+  assert.equal(schedule(),'Schedule status cannot be verified from this page.');
+  assert.equal(synced,0,'rendering must not add status requests');
+  const button={disabled:false};await nodes.get('#server-refresh').onclick({target:button});
+  assert.equal(synced,1);assert.equal(button.disabled,false);
+  assert.equal(nodes.get('#server-state').textContent,connection);
+  assert.equal(schedule(),'Schedule status cannot be verified from this page.');
+ }
+});
