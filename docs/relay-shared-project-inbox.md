@@ -376,8 +376,8 @@ project-specific callback under this Worker and verify zero project subscription
 activation reservations and outbox rows remain. Older Workers do not understand
 project bindings or their revocation and could drain leftover callback rows using
 only the parent event scope. Preserve unrelated subscriptions. Then code rollback
-is safe for the project tables, which older code ignores. Retain the versioned
-routing index and original index for compatibility; do not drop project history.
+is safe for the project tables, which older code ignores. The existing routing index is unchanged; project occurrences use its public
+bucket with exact project/address filters and bounded scans. Do not drop project history.
 Before re-enabling direct work, reconcile actual host executions and accepted
 replies so an expired lease does not cause duplicate external actions. Revoking
 project grants is a separate explicit action with the management flag temporarily

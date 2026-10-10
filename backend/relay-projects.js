@@ -73,6 +73,7 @@ function bindingAdministration(ctx, principal, args, now) {
   // Only the authenticated connection can be bound. Explicit expected parent ID
   // prevents approval for one connection being applied to another connection.
   if(args.confirm!==true||!uuid(args.bindingId)||args.parentGrantId!==principal.grantId||!project(args.project)||!agent(args.agent)||typeof args.expiresAt!=='string'||!Number.isSafeInteger(expiry)||iso(expiry)!==args.expiresAt||expiry<=now||expiry>now+365*86400000)fail(400,'invalid_explicit_binding');
+  if(rows(ctx,'SELECT id FROM project_grants WHERE id=?',args.bindingId).length)fail(409,'binding_identity_conflict');
   const old=rows(ctx,'SELECT * FROM project_bindings WHERE id=? OR (parent_grant=? AND project=? AND revoked_ms IS NULL)',args.bindingId,principal.grantId,args.project)[0];
   if(old) {
     if(old.id!==args.bindingId||old.parent_grant!==principal.grantId||old.project!==args.project||old.agent!==args.agent||old.expires_ms!==expiry||old.revoked_ms!==null)fail(409,'binding_conflict');
@@ -142,6 +143,7 @@ function administration(ctx, env, principal, args, now) {
   const expiry = Date.parse(args.expiresAt);
   if (args.op !== 'create' || args.confirm !== true || !uuid(args.grantId) || !hex(args.tokenHash) || !project(args.project) || !agent(args.agent)
     || typeof args.expiresAt !== 'string' || !Number.isSafeInteger(expiry) || iso(expiry) !== args.expiresAt || expiry <= now || expiry > now + 365 * 86400000) fail(400, 'invalid_explicit_grant');
+  if(rows(ctx,'SELECT id FROM project_bindings WHERE id=?',args.grantId).length)fail(409,'grant_identity_conflict');
   const existing = rows(ctx, 'SELECT * FROM project_grants WHERE id=? OR token_hash=?', args.grantId, args.tokenHash)[0];
   if (existing) {
     if (existing.id !== args.grantId || existing.token_hash !== args.tokenHash || existing.project !== args.project || existing.agent !== args.agent || existing.expires_ms !== expiry || existing.revoked_ms !== null) fail(409, 'grant_conflict');

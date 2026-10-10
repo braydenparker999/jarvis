@@ -106,7 +106,15 @@ Additional review corrections:
 Independent follow-up review reported no remaining blockers after25 focused tests,
 37 existing callback/schema/delivery regressions, plus independent MCP/callback
 probes. Two further focused tests bring the final local total to27. Reviewer
-explicitly confirmed expiry during HMAC signing prevents delivery, and old/new
-routing indexes coexist. See [MCP-focused log](mcp-focused.tap). Independent local
+explicitly confirmed expiry during HMAC signing prevents delivery, and callback isolation holds. See [MCP-focused log](mcp-focused.tap). Independent local
 probes: `/tmp/jarvis-mcp-binding-review.mjs`,
 `/tmp/jarvis-project-callback-review.mjs` (fictional local fixtures only).
+
+The full follow-up aggregate found one real native write-cost regression:
+1341 passed,1 failed of1342. A second routing index added one write to every
+existing owner occurrence. Removed that index and kept the original routing
+expression unchanged; project replay uses its public bucket with exact filters
+and bounded input pages. Existing cost gate remains unchanged. All31 targeted
+native-cost/schema/project tests pass after the fix. Final exact-tree aggregate
+and hosted CI must qualify the committed correction. Cross-registry grant/binding
+ID collisions are also rejected, preserving claim credential fencing.

@@ -384,9 +384,11 @@ test('OAuth participation requires explicit exact-grant binding; typed MCP opera
   assert.deepEqual(status.structuredContent.bindings,[]);
   const args={bindingId:crypto.randomUUID(),parentGrantId:s.principal.grantId,project:'jarvis',agent:'lucy',expiresAt:new Date(Date.now()+3600000).toISOString(),confirm:true};
   assert.equal((await rpc('relay_project_binding_register',{...args,parentGrantId:'another-grant'})).isError,true);
+  assert.equal((await rpc('relay_project_binding_register',{...args,bindingId:s.grants.lucy.grantId})).isError,true);
   assert.equal((await rpc('relay_project_binding_register',args)).isError,false);
   assert.equal((await rpc('relay_project_binding_register',args)).isError,false);
   assert.equal((await rpc('relay_project_binding_register',{...args,agent:'mast'})).isError,true);
+  assert.equal((await s.admin({...s.grants.other,grantId:args.bindingId,tokenHash:'8'.repeat(64)})).status,409);
   s.env.RELAY_PROJECT_ADMIN_ENABLED='false';
   assert.equal((await rpc('relay_project_identity',{project:'jarvis'})).structuredContent.agent,'lucy');
   assert.equal((await rpc('relay_project_identity',{project:'other-project'})).isError,true);
@@ -444,6 +446,9 @@ test('project MCP callbacks are separately gated, binding-addressed, replayable 
   };
   await assert.rejects(relaySubscribe(s.ctx,s.principal,p,s.env,receiver),/not activated|binding required/);
   s.env.RELAY_PROJECT_EVENTS_ENABLED='true';
+  s.db.prepare("UPDATE relay_oauth SET value=json_set(value,'$.scope',?) WHERE key=?").run('relay:events','access:'+s.principal.accessHash);
+  await assert.rejects(relaySubscribe(s.ctx,s.principal,p,s.env,receiver),/binding required/);
+  s.db.prepare("UPDATE relay_oauth SET value=json_set(value,'$.scope',?) WHERE key=?").run(s.principal.scopes.join(' '),'access:'+s.principal.accessHash);
   await assert.rejects(relaySubscribe(s.ctx,s.principal,{...p,arguments:{...p.arguments,project:'other-project'}},s.env,receiver),/binding required/);
   await assert.rejects(relaySubscribe(s.ctx,s.principal,{...p,arguments:{...p.arguments,recipient:'mast'}},s.env,receiver),/Invalid arguments/);
   // Both messages precede subscription: replay must select only Lucy's address.
