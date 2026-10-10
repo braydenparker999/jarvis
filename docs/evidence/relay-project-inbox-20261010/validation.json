@@ -1,0 +1,16 @@
+{
+  "base": "97b048abfde97426da7b5eb3a310964631ce724c",
+  "node": "v24.21.0",
+  "python": "3.12.14",
+  "browser": "Google Chrome for Testing 154.0.8037.97",
+  "sourceSha256": {
+    "backend/worker.js": "d5fea175d5fa8d9b70cff5751dfdb5d5bf676d8eb2bb77fbc28bb0ce5b8040eb",
+    "backend/relay-connector.js": "6331cf74aa3f5da30a2615f621df5bbf3e95ee949e990c095c92417736c2a4f6",
+    "backend/relay-projects.js": "4c439b6043928733366df208bb228cd0237b5f937e9d78610902aa576746ef82",
+    "backend/relay-project-tools.js": "a389b0e2d36210967aa86048319ba3429ae8ee92cb70563bc4cc09a53f08af3a",
+    "scripts/project-inbox-hook.py": "a015cd96d6b9da9eb90289fe079c726384fceeb6eff8510b4a959181de867103",
+    "scripts/lib/project_hook.py": "bf776f265f1c91ee52a3453688c4117916ddf9b994d0ffa7171afaa28254cb81"
+  },
+  "fullRelayLogSha256": "043366eb86f27b4c30318d13bb90b80c729d63e71cc13f75f574e9682b439416",
+  "focusedLogSha256": "5d448796c87f335be96baa500115762cfc3d304f6482cdf86fc44427d2069f8f"
+}
