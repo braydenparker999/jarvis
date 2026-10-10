@@ -47,6 +47,7 @@ body.relay-page .outgoing .message-heading {max-width:88%}
 body.relay-page .bubble {font-size:16px;line-height:25px;color:var(--text);max-width:100%;background:transparent;padding:0;border:0;white-space:pre-wrap}
 body.relay-page .outgoing .bubble {max-width:88%;padding:12px 16px;background:#EEEFFC;border:0;border-radius:16px}
 body.relay-page .message-time {font-size:13px;line-height:18px;color:var(--muted);max-width:100%}
+body.relay-page .message-time[data-pending=true] {color:var(--muted)}
 body.relay-page .message-day {width:100%;align-self:stretch;text-align:center;font-size:13px;line-height:18px;color:var(--muted);margin:0 0 18px}
 body.relay-page .message-footer {display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;min-height:48px}
 body.relay-page .message-footer .message-time {min-width:0;overflow-wrap:anywhere}
@@ -152,6 +153,7 @@ body.relay-page .owner-task-actions .send-icon:disabled {color:#777E8B}
 body.relay-page dialog {background:var(--surface);color:var(--text);border-color:var(--line)}
 body.relay-page dialog::backdrop {background:#20242B40}
 body.relay-page .app-sheet {background:var(--surface);border-color:var(--line);border-radius:20px 20px 0 0;box-shadow:0 -8px 36px #20242B12;color:var(--text)}
+body.relay-page .conversation-sheet .dialog-heading {background:var(--surface);border-color:var(--line)}
 body.relay-page .app-sheet .dialog-heading h2 {color:var(--text);font-size:20px;line-height:26px}
 body.relay-page .sheet-action {color:var(--text);min-height:48px;font-size:16px;line-height:24px;gap:12px;border-radius:8px}
 body.relay-page .sheet-action svg {color:var(--muted)}

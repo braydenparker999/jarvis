@@ -1,7 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {execFile} from 'node:child_process';
+import {promisify} from 'node:util';
+import {resolve} from 'node:path';
+import {fileURLToPath} from 'node:url';
 import {createConversationFixture,launchQualifiedBrowser,openConversationPage,conversationMenu,closeConversationHarness,assertBrowserContained,assertNoPrivatePersistence,writeSyntheticEvidence,RELAY_URL} from './helpers/relay-conversation-browser-fixture.js';
 import {RELAY_OWNER_INBOX} from '../backend/relay-common.js';
+import {sharedStore} from '../backend/shared.js';
+
+// The qualification workflow already publishes JARVIS_SCREENSHOT_DIR. Keep
+// fictional Relay evidence in its own subdirectory without altering that recipe.
+if(!process.env.RELAY_QA_EVIDENCE_DIR&&process.env.JARVIS_SCREENSHOT_DIR)process.env.RELAY_QA_EVIDENCE_DIR=resolve(process.env.JARVIS_SCREENSHOT_DIR,'relay-modernization-checks');
 
 async function journey(t){
   const browser=await launchQualifiedBrowser(t);if(!browser)return;
@@ -17,6 +26,7 @@ async function geometry(page){return page.evaluate(()=>{
   return {width:innerWidth,documentWidth:document.documentElement.scrollWidth,appHeight:parseFloat(document.documentElement.style.getPropertyValue('--app-height')),targets};
 });}
 function assertGeometry(value){assert.ok(value.documentWidth<=value.width+1,JSON.stringify(value));for(const t of value.targets){assert.ok(t.width>=48&&t.height>=48,JSON.stringify(t));}}
+function contrast(foreground,background){const luminance=value=>{const rgb=value.match(/[\d.]+/g).slice(0,3).map(c=>Number(c)/255).map(c=>c<=.04045?c/12.92:((c+.055)/1.055)**2.4);return rgb[0]*.2126+rgb[1]*.7152+rgb[2]*.0722;};const a=luminance(foreground),b=luminance(background);return (Math.max(a,b)+.05)/(Math.min(a,b)+.05);}
 async function chatAnchor(page){return page.locator('.relay-owner-chat .messages').evaluate(panel=>{const b=panel.getBoundingClientRect(),r=[...panel.children].find(n=>n.dataset.messageId&&n.getBoundingClientRect().bottom>b.top);return {id:r?.dataset.messageId,offset:r?r.getBoundingClientRect().top-b.top:0,scroll:panel.scrollTop};});}
 
 test('visible Chat and Work preserve local context, reading and private draft without expansion requests',{timeout:120000},async t=>{
@@ -85,4 +95,26 @@ test('reflow, enlarged text and visual-viewport-only keyboard keep real controls
   await page.locator('#relay-nav-work').click();await page.setViewportSize({width:320,height:568});assertGeometry(await geometry(page));assert.equal(await page.locator('.relay-navigation').isVisible(),true,'A short viewport without a keyboard retains both destinations');
   await page.evaluate(()=>{const sizes=[...document.querySelectorAll('h1,h2,h3,p,span,button,label,input,select,textarea,summary,a,li')].map(n=>{const s=getComputedStyle(n);return {n,font:parseFloat(s.fontSize),line:parseFloat(s.lineHeight)};});for(const {n,font,line}of sizes){n.style.fontSize=font*2+'px';n.style.lineHeight=(Number.isFinite(line)?line*2:font*3)+'px';}});
   const enlarged=await geometry(page);assertGeometry(enlarged);await writeSyntheticEvidence(phone,'redesign-work-320-enlarged',{synthetic:true,geometry:enlarged,textScale:2,keyboardSimulation:'mock VisualViewport height only; no physical IME'});assertBrowserContained(phone);
+});
+
+test('Relay choice sheets, owner connection and pending public timestamps retain readable rendered contrast',{timeout:120000},async t=>{
+  const j=await journey(t);if(!j)return;const phone=await j.open(),page=phone.page;
+  const assertHeading=async(name)=>{
+    const colors=await page.locator('dialog[open] .dialog-heading').evaluate(n=>({background:getComputedStyle(n).backgroundColor,text:getComputedStyle(n.querySelector('h2')).color}));
+    assert.equal(colors.background,'rgb(255, 255, 255)');assert.equal(colors.text,'rgb(32, 36, 43)');assert.ok(contrast(colors.text,colors.background)>=4.5,JSON.stringify(colors));assertGeometry(await geometry(page));
+    await writeSyntheticEvidence(phone,name,{synthetic:true,colors,contrast:contrast(colors.text,colors.background)});
+  };
+  await page.locator('#chat-menu').click();await assertHeading('redesign-conversation-menu-contrast');
+  await page.getByRole('dialog').getByRole('button',{name:'Connection details',exact:true}).click();await page.getByRole('dialog',{name:'Private owner connection',exact:true}).waitFor();await assertHeading('redesign-owner-connection-contrast');
+  await page.getByRole('button',{name:'Close connection details',exact:true}).click();
+  const id=crypto.randomUUID();assert.equal(sharedStore(j.h.ctx,'/internal/shared/message',{id,body:'Fictional public question awaiting a reply.'}).status,201);
+  await conversationMenu(page,'Public chat');await page.evaluate(()=>dispatchEvent(new Event('online')));const pending=page.locator('#messages [data-message-id="'+id+'"] .message-footer>.message-time[data-pending=true]');await pending.waitFor();
+  const colors=await pending.evaluate(n=>({text:getComputedStyle(n).color,background:getComputedStyle(document.body).backgroundColor}));assert.equal(colors.text,'rgb(98, 104, 115)');assert.ok(contrast(colors.text,colors.background)>=4.5,JSON.stringify(colors));assert.match(await pending.innerText(),/Awaiting reply/);
+  await writeSyntheticEvidence(phone,'redesign-public-pending-contrast',{synthetic:true,colors,contrast:contrast(colors.text,colors.background)});assertBrowserContained(phone);
+  if(process.env.JARVIS_SCREENSHOT_DIR){
+    const helper=fileURLToPath(new URL('./helpers/relay-modernization-visual-fixture.mjs',import.meta.url));
+    const output=resolve(process.env.JARVIS_SCREENSHOT_DIR,'relay-visual-review');
+    const result=await promisify(execFile)(process.execPath,[helper,output],{timeout:90000,maxBuffer:1024*1024});
+    assert.match(result.stdout,/"captures":31,"unexpected":\[\],"browserErrors":\[\]/,'The fictional review artifact must contain all 31 rendered after scenarios without uncontained routes or browser errors');
+  }
 });
