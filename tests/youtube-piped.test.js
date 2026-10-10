@@ -155,13 +155,14 @@ test('Piped live HLS with empty arrays retains a real HLS playback plan',async()
   assert.equal(built.variants[0].url,A+'/live.m3u8');
 });
 
-test('Piped manifest validation follows the attempted instance and preserves relative DASH URLs',async t=>{
-  for(const [field,path] of [['hls','/live.m3u8'],['dash','/manifest.mpd']])await t.test(field,async()=>{
-    const h=harness({[A]:answer(empty()),[B]:answer({...empty(),livestream:field==='hls',[field]:path})});
+test('Piped manifest validation follows the attempted instance and preserves relative URLs',async t=>{
+  const manifests=[['hls','/live.m3u8'],['hls',B+'/live.m3u8'],['dash','/manifest.mpd'],['dash',B+'/manifest.mpd']];
+  for(const [field,url] of manifests)await t.test(field+' '+url,async()=>{
+    const h=harness({[A]:answer(empty()),[B]:answer({...empty(),livestream:field==='hls',[field]:url})});
     const record=await h.client.video(ID);
     assert.deepEqual(origins(h),[A,B]);
     assert.equal(record.instance,B);
-    assert.equal(record[field==='hls'?'hlsUrl':'dashUrl'],B+path);
+    assert.equal(record[field==='hls'?'hlsUrl':'dashUrl'],new URL(url,B).href);
     assert.equal(health(h,A).lastError,'malformed');
     assert.equal(h.manager.pinned,B);
   });
