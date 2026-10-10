@@ -1,3 +1,4 @@
+import {RELAY_ATTACHMENT_TYPES,RELAY_ATTACHMENT_MAX_BYTES,attachmentUuid,attachmentMetadata,messageAttachments} from './relay-attachment-contract.js';
 import { API_ORIGIN } from './config.js';
 
 // This key is deliberately unrelated to public inbox, drafts, transfers or module state.
@@ -56,7 +57,7 @@ function resultRecord(value,original){
 }
 function privateJob(value){
   if(!value||!jobIdentifier(value.id)||value.messageId!==value.id||!Number.isSafeInteger(value.sequence)||value.sequence<1
-    ||typeof value.title!=='string'||!value.title.trim()||value.title.length>120||typeof value.body!=='string'||!value.body.trim()||value.body.length>4000
+    ||typeof value.title!=='string'||!value.title.trim()||value.title.length>120||typeof value.body!=='string'||value.body.length>4000
     ||!jobStages.includes(value.stage)||!jobKinds.includes(value.actionKind)||!validDate(value.createdAt)||!validDate(value.updatedAt)
     ||!(value.finishedAt===null||validDate(value.finishedAt))||value.visibility!=='private'||value.author_authenticated!==true
     ||value.principal!=='github:183016859'||!identifier(value.device_id)||!['owner-device-session','owner-password-session'].includes(value.authentication_source)
@@ -116,6 +117,16 @@ function privateJob(value){
 export class OwnerApiError extends Error {
   constructor(kind = 'network', status = 0) {
     const messages = {
+      attachment_cancelled: 'Attachment transfer cancelled.',
+      attachment_too_large: 'Choose files no larger than 1 MB each.',
+      attachment_type_unsupported: 'This file format is not supported.',
+      attachment_invalid: 'This file could not be accepted. Check its format and name.',
+      attachment_quota_exceeded: 'Private file storage or today’s upload allowance is full. Try a smaller file or retry later.',
+      attachment_expired: 'This upload has expired. Remove the file and select it again.',
+      attachment_not_found: 'This private file is no longer available.',
+      attachment_already_linked: 'This file is already attached to a saved message.',
+      attachment_id_conflict: 'This file upload conflicts with an earlier attempt. Retry the original selection.',
+      attachment_message_conflict: 'This message must be retried with its original files.',
       network: 'Owner connection unavailable. Check your connection and retry.',
       invalid: 'The owner service returned an unreadable response. Retry later.',
       expired: 'This owner session has expired. Connect this phone again.',
@@ -173,7 +184,7 @@ export function createRelayOwnerApi({ fetcher = globalThis.fetch, origin = API_O
       storageWarning = '';
     } catch { storageWarning = 'This phone is connected for this page only. Browser storage could not remember it.'; }
   }
-  async function call(path, { body, token } = {}) {
+  async function call(path, { body, token, signal, binary=false } = {}) {
     let response;
     try {
       response = await fetcher(origin + path, {
@@ -181,9 +192,10 @@ export function createRelayOwnerApi({ fetcher = globalThis.fetch, origin = API_O
         credentials: 'omit', cache: 'no-store', redirect: 'error',
         headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}), ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
         body: body === undefined ? undefined : JSON.stringify(body),
-        signal: AbortSignal.timeout(15000)
+        signal: signal?AbortSignal.any([signal,AbortSignal.timeout(30000)]):AbortSignal.timeout(15000)
       });
-    } catch { throw new OwnerApiError('network'); }
+    } catch { throw new OwnerApiError(signal?.aborted?'attachment_cancelled':'network'); }
+    if(binary&&response.ok)return response;
     let data;
     try { data = await response.json(); } catch { data = null; }
     if (!response.ok) {
@@ -200,7 +212,8 @@ export function createRelayOwnerApi({ fetcher = globalThis.fetch, origin = API_O
       }
       const unauthenticated = (response.status === 401 && reported !== 'invalid_credentials') || (response.status === 403 && ['session_expired', 'session_revoked', 'invalid_session'].includes(reported));
       if (unauthenticated && token) clearCredential(token);
-      const kind = reported === 'invalid_credentials' ? 'login_failed'
+      const attachmentErrors=['attachment_too_large','attachment_type_unsupported','attachment_invalid','attachment_quota_exceeded','attachment_expired','attachment_not_found','attachment_already_linked','attachment_id_conflict','attachment_message_conflict'];
+      const kind = path.startsWith('/relay/owner/attachments')&&attachmentErrors.includes(reported)?reported:reported === 'invalid_credentials' ? 'login_failed'
         : response.status === 429 ? 'rate_limited'
         : reported === 'device_unavailable' ? 'device_unavailable'
         : reported === 'credential_conflict' ? 'credential_conflict'
@@ -227,6 +240,13 @@ export function createRelayOwnerApi({ fetcher = globalThis.fetch, origin = API_O
     if (!credential) throw new OwnerApiError('unauthorized');
     return call(path, { body, token: credential.device_token });
   };
+  async function attachmentCall(path,options={}){
+    if(!credential)throw new OwnerApiError('unauthorized');
+    const token=credential.device_token,result=await call(path,{...options,token});
+    if(credential?.device_token!==token)throw new OwnerApiError('unauthorized');
+    if(options.signal?.aborted)throw new OwnerApiError('attachment_cancelled');return result;
+  }
+  function parseAttachments(entry){try{return messageAttachments(entry);}catch{throw new OwnerApiError('invalid');}}
   return {
     get hasCredential() { return !!credential; },
     get deviceId() { return credential?.device_id || null; },
@@ -248,7 +268,7 @@ export function createRelayOwnerApi({ fetcher = globalThis.fetch, origin = API_O
       if (previousToken) clearCredential(previousToken);
       credential = { device_token: data.device_token, device_id: device.id };
       persist();
-      return { status: data.status, device, access_days: data.access_days, ...(data.jobs_enabled===true?{jobs_enabled:true}:{}) };
+      return { status: data.status, device, access_days: data.access_days, ...(data.jobs_enabled===true?{jobs_enabled:true}:{}),...(data.attachments_enabled===true?{attachments_enabled:true}:{}) };
     },
     async credentials() {
       const data = await authenticated('/relay/owner/credentials');
@@ -309,7 +329,33 @@ export function createRelayOwnerApi({ fetcher = globalThis.fetch, origin = API_O
         || m.visibility !== 'private' || m.author_authenticated !== true
         || m.delivery!==undefined&&!validDelivery(m.delivery))
         || !(data.nextCursor === null || /^\d{1,15}$/.test(String(data.nextCursor)))) throw new OwnerApiError('invalid');
-      return data;
+      return {...data,messages:data.messages.map(entry=>({...entry,attachments:parseAttachments(entry)}))};
+    },
+    async uploadAttachment(messageId,id,file,{signal}={}){
+      if(!attachmentUuid(messageId)||!attachmentUuid(id)||!file||!RELAY_ATTACHMENT_TYPES.includes(file.type)||!file.size||file.size>RELAY_ATTACHMENT_MAX_BYTES)throw new OwnerApiError('attachment_invalid');
+      const bytes=new Uint8Array(await file.arrayBuffer());if(signal?.aborted)throw new OwnerApiError('attachment_cancelled');
+      let binary='';for(let offset=0;offset<bytes.length;offset+=8192)binary+=String.fromCharCode(...bytes.subarray(offset,offset+8192));
+      const data=await attachmentCall('/relay/owner/attachments',{body:{id,message_id:messageId,name:file.name,mime_type:file.type,data_base64:btoa(binary)},signal});
+      let attachment;try{attachment=attachmentMetadata(data.attachment,{messageId});}catch{throw new OwnerApiError('invalid');}
+      if(data.visibility!=='private'||typeof data.newWrite!=='boolean'||attachment.id!==id||attachment.name!==file.name||attachment.mimeType!==file.type||attachment.sizeBytes!==bytes.length)throw new OwnerApiError('invalid');
+      const hash=[...new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))].map(v=>v.toString(16).padStart(2,'0')).join('');
+      if(attachment.sha256!==hash)throw new OwnerApiError('invalid');return attachment;
+    },
+    async discardAttachment(messageId,id){
+      if(!attachmentUuid(messageId)||!attachmentUuid(id))throw new OwnerApiError('invalid');
+      return attachmentCall('/relay/owner/attachments/discard',{body:{message_id:messageId,attachment_id:id}});
+    },
+    async attachmentContent(metadata,{preview=false,signal}={}){
+      let item;try{item=attachmentMetadata(metadata,{state:'linked'});}catch{throw new OwnerApiError('invalid');}
+      if(preview&&!['image/png','image/jpeg','image/webp'].includes(item.mimeType))throw new OwnerApiError('attachment_invalid');
+      const query=new URLSearchParams({message_id:item.messageId,attachment_id:item.id,...(preview?{preview:'1'}:{})});
+      const response=await attachmentCall('/relay/owner/attachments/content?'+query,{binary:true,signal});
+      if(response.headers.get('content-type')?.split(';')[0].trim()!==item.mimeType)throw new OwnerApiError('invalid');
+      const chunks=[];let size=0;const reader=response.body.getReader();
+      try{for(;;){const {done,value}=await reader.read();if(done)break;size+=value.length;if(size>item.sizeBytes||signal?.aborted)throw new OwnerApiError(signal?.aborted?'attachment_cancelled':'invalid');chunks.push(value);}}catch(error){await reader.cancel().catch(()=>{});throw error instanceof OwnerApiError?error:new OwnerApiError('network');}
+      if(size!==item.sizeBytes)throw new OwnerApiError('invalid');const blob=new Blob(chunks,{type:item.mimeType});
+      const hash=[...new Uint8Array(await crypto.subtle.digest('SHA-256',await blob.arrayBuffer()))].map(v=>v.toString(16).padStart(2,'0')).join('');
+      if(hash!==item.sha256)throw new OwnerApiError('invalid');return blob;
     },
     async deliveries(messageIds){
       if(!Array.isArray(messageIds)||messageIds.length>50||messageIds.some(id=>!identifier(id))||new Set(messageIds).size!==messageIds.length)throw new OwnerApiError('invalid');
@@ -325,14 +371,15 @@ export function createRelayOwnerApi({ fetcher = globalThis.fetch, origin = API_O
       if(!Number.isSafeInteger(data.retried)||data.retried<0||data.retried>8)throw new OwnerApiError('invalid');
       return {retried:data.retried};
     },
-    async sendMessage(id, body) {
-      if(!identifier(id)||typeof body!=='string'||!body.trim()||body.length>4000)throw new OwnerApiError('invalid');
-      const data=await authenticated('/relay/owner/messages', { id, body });
+    async sendMessage(id, body, attachmentIds=[]) {
+      if(!identifier(id)||typeof body!=='string'||!body.trim()&&!attachmentIds.length||body.length>4000||!Array.isArray(attachmentIds)||attachmentIds.length>4||attachmentIds.some(id=>!attachmentUuid(id))||new Set(attachmentIds).size!==attachmentIds.length)throw new OwnerApiError('invalid');
+      const data=await authenticated('/relay/owner/messages', { id, body,...(attachmentIds.length?{attachment_ids:attachmentIds}:{}) });
       const entry=data.entry;
       if(!entry||entry.id!==id||entry.body!==body.trim()||entry.role!=='user'||entry.visibility!=='private'
         ||entry.author_authenticated!==true||!Number.isFinite(Date.parse(entry.createdAt))||typeof data.newWrite!=='boolean'
         ||entry.delivery!==undefined&&!validDelivery(entry.delivery))throw new OwnerApiError('invalid');
-      return data;
+      const attachments=parseAttachments(entry);if(JSON.stringify(attachments.map(item=>item.id))!==JSON.stringify(attachmentIds))throw new OwnerApiError('invalid');
+      return {...data,entry:{...entry,attachments}};
     },
     async jobs(after='0'){
       if(!/^\d{1,15}$/.test(String(after)))throw new OwnerApiError('invalid');
