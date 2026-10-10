@@ -1,24 +1,38 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {existsSync} from 'node:fs';
 import {readFile} from 'node:fs/promises';
-import {createHash} from 'node:crypto';
-import {createConversationFixture,launchQualifiedBrowser,openConversationPage,closeConversationHarness,assertBrowserContained,assertNoPrivatePersistence,conversationMenu,RELAY_URL,OWNER_KEY,SITE} from './helpers/relay-conversation-browser-fixture.js';
-// Frontend contract fixtures only. These do not qualify the pending MCP delivery route.
-const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aO1sAAAAASUVORK5CYII=','base64');
-const pdf=Buffer.from('%PDF-1.4\n% Synthetic assistant file\n%%EOF\n');
-test('incoming private file rows preserve text, search filenames, preview images and download documents safely',{timeout:120000},async t=>{
- const browser=await launchQualifiedBrowser(t);if(!browser)return;const h=createConversationFixture(t),pages=[];
- try{const owner=await h.pair(await h.oauth()),phone=await openConversationPage(browser,h,{owner,clock:false,width:320,height:568});pages.push(phone);const page=phone.page,original=crypto.randomUUID(),reply=crypto.randomUUID(),delivery=crypto.randomUUID();
-  const files=[{id:crypto.randomUUID(),name:'Synthetic illustration.png',mimeType:'image/png',bytes:png},{id:crypto.randomUUID(),name:'Synthetic report.pdf',mimeType:'application/pdf',bytes:pdf}];
-  const common={visibility:'private',author_authenticated:true,principal:'github:183016859',authentication_source:'owner-oauth-mcp'};
-  const messages=[{...common,id:original,role:'user',body:'Synthetic report request',sequence:1,createdAt:'2026-10-10T18:00:00Z'},{...common,id:reply,role:'assistant',kind:'reply',replyTo:original,body:'Accepted text reply stays visible.',sequence:2,createdAt:'2026-10-10T18:00:01Z'},{...common,id:delivery,role:'assistant',replyTo:original,body:'',sequence:3,createdAt:'2026-10-10T18:00:02Z',attachments:files.map(({bytes,...item})=>({...item,messageId:delivery,sizeBytes:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex'),state:'linked',visibility:'private',createdAt:'2026-10-10T18:00:02Z'}))}];
-  phone.rule(r=>r.method==='GET'&&r.path==='/relay/owner/messages',async()=>Response.json({messages,nextCursor:null},{headers:{'Access-Control-Allow-Origin':SITE}}),100);
-  phone.rule(r=>r.method==='GET'&&r.path==='/relay/owner/attachments/content',async({record})=>{assert.equal(record.headers.authorization,'Bearer '+owner.device_token);const url=new URL(record.url);assert.equal(url.searchParams.get('message_id'),delivery);const file=files.find(f=>f.id===url.searchParams.get('attachment_id'));assert.ok(file);return new Response(file.bytes,{headers:{'Content-Type':file.mimeType,'Access-Control-Allow-Origin':SITE}});},100);
-  await page.goto(RELAY_URL);await page.getByRole('button',{name:'Download Synthetic report.pdf',exact:true}).waitFor();assert.equal(await page.getByText('Accepted text reply stays visible.',{exact:true}).count(),1);assert.equal(await page.locator(`[data-message-id="${delivery}"] .message-actions:visible`).count(),0);
-  await conversationMenu(page,'Search messages');await page.locator('#relay-owner-search').fill('report.pdf');await page.getByRole('button',{name:'Download Synthetic report.pdf',exact:true}).waitFor();assert.equal(await page.locator('[data-message-id]').count(),1);await page.locator('#relay-owner-search').fill('');
-  await page.getByRole('button',{name:'Preview Synthetic illustration.png',exact:true}).click();await page.waitForFunction(()=>document.querySelector('.relay-linked-preview')?.naturalWidth===1);assert.equal(await page.locator('iframe,embed,object').count(),0);assert.equal(await page.getByRole('button',{name:'Preview Synthetic report.pdf',exact:true}).count(),0);
-  const downloading=page.waitForEvent('download');await page.getByRole('button',{name:'Download Synthetic report.pdf',exact:true}).click();const downloaded=await downloading;assert.deepEqual(await readFile(await downloaded.path()),pdf);
-  assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));await conversationMenu(page,'Public chat');assert.equal(await page.locator('.relay-linked-attachment,.relay-linked-preview').count(),0);await conversationMenu(page,'Owner chat');await page.getByRole('button',{name:'Download Synthetic report.pdf',exact:true}).waitFor();
-  await page.evaluate(key=>{localStorage.removeItem(key);dispatchEvent(new StorageEvent('storage',{key,newValue:null,storageArea:localStorage}));},OWNER_KEY);await page.waitForFunction(()=>!document.querySelector('.relay-linked-attachment'));await assertNoPrivatePersistence(page,files.map(f=>f.name));assertBrowserContained(phone);
- }finally{await closeConversationHarness(browser,h,pages);}
+import {createConversationFixture,launchQualifiedBrowser,openConversationPage,closeConversationHarness,assertBrowserContained,assertNoPrivatePersistence,conversationMenu,RELAY_URL,OWNER_KEY} from './helpers/relay-conversation-browser-fixture.js';
+const available=existsSync(new URL('../backend/relay-owner-assistant-attachments.js',import.meta.url));
+const inbox_id='brayden-owner';
+async function journey(t){if(!available){t.skip('Requires exact assistant delivery backend pair.');return;}const browser=await launchQualifiedBrowser(t);if(!browser)return;const h=createConversationFixture(t),pages=[];t.after(()=>closeConversationHarness(browser,h,pages));const auth=await h.oauth(),owner=await h.pair(auth),phone=await openConversationPage(browser,h,{owner,clock:false,width:320,height:568});pages.push(phone);const page=phone.page;return {h,auth,owner,phone,page};}
+async function original(j){const id=crypto.randomUUID();assert.equal((await j.h.phone('/messages',{id,body:'Synthetic requested files'},j.owner.device_token)).status,201);return id;}
+async function stage(j,message_id,delivery_id,name,mime_type,bytes){const args={inbox_id,message_id,delivery_id,attachment_id:crypto.randomUUID(),name,mime_type,data_base64:bytes.toString('base64')};const value=await j.h.rpc(j.auth,'relay_owner_attachment_upload',args);return {args,attachment:value.attachment};}
+const commit=(j,message_id,delivery_id,files,body='',kind='deliverable')=>j.h.rpc(j.auth,kind==='reply'?'relay_owner_reply_with_attachments':'relay_owner_deliverable_send',{inbox_id,message_id,delivery_id,body,attachment_ids:files.map(f=>f.attachment.id)});
+
+test('actual MCP later image and PDF delivery preserves accepted text, retries immutably, downloads privately and clears on access loss',{timeout:120000},async t=>{
+ const j=await journey(t);if(!j)return;const {page,h,phone}=j,message=await original(j),delivery=crypto.randomUUID();
+ const reply=await h.rpc(j.auth,'relay_owner_reply',{inbox_id,message_id:message,body:'Accepted synthetic text remains unchanged.'});
+ const raster=JSON.parse(await readFile(new URL('./fixtures/relay-attachment-raster.json',import.meta.url),'utf8')),docs=JSON.parse(await readFile(new URL('./fixtures/relay-attachment-document.json',import.meta.url),'utf8'));
+ const png=Buffer.from(raster.png,'base64'),pdf=Buffer.from(docs.pdf,'base64');
+ const image=await stage(j,message,delivery,'Synthetic illustration.png','image/png',png),document=await stage(j,message,delivery,'Synthetic report.pdf','application/pdf',pdf);
+ assert.equal((await h.rpc(j.auth,'relay_owner_attachment_upload',image.args)).newWrite,false);
+ await assert.rejects((async()=>{await commit(j,message,delivery,[image,document]);throw Error('Synthetic lost response after persistence');})(),/lost response/);
+ assert.equal((await commit(j,message,delivery,[image,document])).newWrite,false);
+ await page.goto(RELAY_URL);await page.getByText('Accepted synthetic text remains unchanged.',{exact:true}).waitFor();await page.getByRole('button',{name:'Files from assistant',exact:true}).click();await page.getByRole('button',{name:'Download Synthetic report.pdf',exact:true}).waitFor();assert.equal(await page.locator('[data-delivery-id]').count(),1);await conversationMenu(page,'Search messages');await page.locator('#relay-owner-search').fill('report.pdf');await page.getByRole('button',{name:'Download Synthetic report.pdf',exact:true}).waitFor();await page.locator('#relay-owner-search').fill('');
+ await page.getByRole('button',{name:'Preview Synthetic illustration.png',exact:true}).click();await page.waitForFunction(()=>document.querySelector('.relay-linked-preview')?.naturalWidth>0);assert.equal(await page.locator('iframe,embed,object').count(),0);
+ const download=page.waitForEvent('download');await page.getByRole('button',{name:'Download Synthetic report.pdf',exact:true}).click();assert.deepEqual(await readFile(await(await download).path()),pdf);
+ const conversation=await(await h.phone('/conversation?message_id='+message,undefined,j.owner.device_token)).json();assert.equal(conversation.reply.id,reply.entry.id);assert.equal(conversation.reply.body,reply.entry.body);assert.equal(conversation.deliverables.length,1);
+ await conversationMenu(page,'Public chat');assert.equal(await page.locator('.relay-linked-attachment').count(),0);await conversationMenu(page,'Owner chat');await page.getByRole('button',{name:'Preview Synthetic illustration.png',exact:true}).waitFor();
+ const held=phone.hold(r=>r.method==='GET'&&r.path==='/relay/owner/attachments/content');await page.getByRole('button',{name:'Preview Synthetic illustration.png',exact:true}).click();await held.entered;
+ assert.equal((await h.phone('/devices/revoke',{device_id:j.owner.device.id},j.owner.device_token)).status,200);
+ await page.evaluate(key=>{localStorage.removeItem(key);dispatchEvent(new StorageEvent('storage',{key,newValue:null,storageArea:localStorage}));},OWNER_KEY);held.release();await page.waitForFunction(()=>!document.querySelector('.relay-linked-attachment'));assert.equal(await page.locator('.relay-linked-preview').count(),0);await assertNoPrivatePersistence(page,['Synthetic illustration.png','Synthetic report.pdf']);assertBrowserContained(phone);
+});
+
+test('actual first file-only reply and later paginated deliveries remain separate and close safely',{timeout:120000},async t=>{
+ const j=await journey(t);if(!j)return;const {page}=j,message=await original(j),first=crypto.randomUUID();const file=await stage(j,message,first,'First reply.txt','text/plain',Buffer.from('Synthetic first file-only reply'));await commit(j,message,first,[file],'','reply');
+ for(let i=0;i<11;i++){const id=crypto.randomUUID(),file=await stage(j,message,id,'Later '+i+'.txt','text/plain',Buffer.from('Synthetic page '+i));await commit(j,message,id,[file]);}
+ await page.goto(RELAY_URL);await page.getByRole('button',{name:'Download First reply.txt',exact:true}).waitFor();await page.getByRole('button',{name:'Files from assistant',exact:true}).click();await page.getByRole('button',{name:'Load more files',exact:true}).waitFor();assert.equal(await page.locator('[data-delivery-id]').count(),10);
+ await page.getByRole('button',{name:'Load more files',exact:true}).click();await page.getByRole('button',{name:'Download Later 10.txt',exact:true}).waitFor();assert.equal(await page.locator('[data-delivery-id]').count(),11);assert.equal(await page.getByRole('button',{name:'Load more files',exact:true}).count(),0);
+ assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));await page.getByRole('button',{name:'Close assistant files',exact:true}).click();assert.equal(await page.locator('[data-delivery-id]').count(),0);assert.equal(await page.getByRole('button',{name:'Download First reply.txt',exact:true}).count(),1);assertBrowserContained(j.phone);
 });
