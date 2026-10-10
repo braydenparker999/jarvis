@@ -24,6 +24,7 @@
     <main id="library-view">
       <div class="creator-header" id="creator-header" hidden><span id="creator-monogram" class="creator-monogram" aria-hidden="true"></span><div><p class="creator-kicker">Creator</p><h1 id="creator-title"></h1><p id="creator-summary"></p></div></div>
       <div class="library-title" id="library-title"><h1 id="view-title">Explore</h1><button id="surprise" class="text-button" type="button">Surprise me</button></div>
+      <div class="library-toolbar" id="library-toolbar">
       <div class="library-tools" id="library-search" role="search">
         <label class="sr-only" for="search">Search videos</label>
         <input id="search" type="search" placeholder="Search your videos" autocomplete="off">
@@ -39,6 +40,7 @@
         </select>
       </div>
       <div class="discovery-filters" id="browse-filters" aria-label="Browse filters"><button id="all-videos" type="button" aria-pressed="true">All videos</button><button id="time-filter" type="button">Any length</button><button id="unwatched-filter" type="button" aria-pressed="false">Unwatched</button><span id="creator-filters" class="creator-filters" hidden></span><button id="browse-all" type="button" hidden>Clear collection</button></div>
+      </div>
       <p class="sort-note" id="sort-note" role="status" hidden></p>
       <section class="creator-strip" id="creator-strip" aria-label="Browse creators" hidden></section>
       <p id="status" class="status" role="status">Loading your videos…</p>
