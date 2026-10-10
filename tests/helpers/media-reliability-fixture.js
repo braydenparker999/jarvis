@@ -14,7 +14,7 @@ export async function silentVideo(){
   return Buffer.from(encoded,'base64');
 }
 
-export async function serveMediaReliabilityFixture(){
+export async function serveMediaReliabilityFixture({handleRequest}={}){
   const root=resolve(fileURLToPath(new URL('../../public/',import.meta.url)));
   const policy=JSON.parse(await readFile(join(root,'staticwebapp.config.json'),'utf8'));
   const frozenApp=process.env.ASTRA_APP_SOURCE?await readFile(process.env.ASTRA_APP_SOURCE):null;
@@ -34,6 +34,7 @@ export async function serveMediaReliabilityFixture(){
     res.on('close',()=>{if(!res.writableEnded){log.aborted=true;mark(log,'aborted')}});
     const json=value=>{log.status=200;res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(value))};
     try{
+      if(handleRequest&&await handleRequest({req,res,pathname,log,json,mark:event=>mark(log,event)}))return;
       if(frozenApp&&pathname==='/media/assets/js/app.js'){log.status=200;res.writeHead(200,{'Content-Type':'text/javascript'});return res.end(frozenApp);}
       if(pathname==='/fixture/manifest.json')return json({id:'org.jarvis.media.fixture',name:'Media Fixture',version:'1.0.0',resources:['catalog','meta','stream'],types:['movie','music'],catalogs:metas.map(m=>({type:m.type,id:m.id,name:m.name}))});
       if(pathname.startsWith('/fixture/catalog/'))return json({metas:metas.filter(m=>pathname.includes('/'+m.type+'/'))});

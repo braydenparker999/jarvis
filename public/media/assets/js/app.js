@@ -697,6 +697,8 @@
       });
     }
     function search(q,route=Routes.begin('search')){
+      // Every explicit search owns the query, including recent-search taps.
+      clearTimeout(searchTimer);
       q=String(q||'').trim();
       state.query=q;
       if(!route.current()||state.currentPage!=='search')return;
