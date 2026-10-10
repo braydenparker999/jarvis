@@ -38,3 +38,10 @@ export function sortDisplayedVideos(videos, mode, creators = []) {
   const titles = new Map(videos.map(video => [video, videoPresentation(video, creators).title]));
   return [...videos].sort((a, b) => titles.get(a).localeCompare(titles.get(b), undefined, {numeric:true, sensitivity:'base'}));
 }
+
+// Focused-browse count wording: shown-of-total ("60 of 120 videos") when the
+// grid is paginated, plain total ("120 videos") when everything is on screen.
+export function browseCountText(shown, total) {
+  if (total <= shown) return `${total} video${total === 1 ? '' : 's'}`;
+  return `${shown} of ${total} videos`;
+}
