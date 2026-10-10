@@ -99,6 +99,7 @@ function jpeg(bytes){
   if(bytes[p++]!==255)invalid('Invalid JPEG marker');
   while(bytes[p]===255)p++;
   const marker=bytes[p++];if(marker===217){if(!frame||!scan||p!==bytes.length)invalid('Invalid JPEG ending');ended=true;break;}
+  if([200,220,222,223].includes(marker))fail(415,'attachment_type_unsupported','Dynamic or hierarchical JPEG dimensions are not supported');
   if(marker===0||marker===216||marker>=208&&marker<=215)invalid('Invalid JPEG marker');
   if(p+2>bytes.length)invalid('Truncated JPEG');
   const length=view.getUint16(p),end=p+length;if(length<2||end>bytes.length)invalid('Invalid JPEG segment');
@@ -160,7 +161,7 @@ export async function relayAttachmentPrepare(body){
  if(body.mime_type==='image/png')await png(bytes);
  else if(body.mime_type==='image/jpeg')jpeg(bytes);
  else if(body.mime_type==='image/webp')webp(bytes);
- else if(body.mime_type==='application/pdf'){if(!/^%PDF-1\.[0-9]|^%PDF-2\.0/.test(new TextDecoder().decode(bytes.subarray(0,8))))invalid('PDF signature mismatch');}
+ else if(body.mime_type==='application/pdf'){if(!/^(?:%PDF-1\.[0-9]|%PDF-2\.0)/.test(new TextDecoder().decode(bytes.subarray(0,8)))||!/%%EOF[\x00\x09\x0a\x0c\x0d\x20]*$/.test(new TextDecoder().decode(bytes.subarray(Math.max(0,bytes.length-1024)))))invalid('PDF signature or ending mismatch');}
  else{let value;try{value=utf8.decode(bytes);}catch{invalid('Attachment text must be valid UTF-8');}if(body.mime_type==='application/json')try{JSON.parse(value);}catch{invalid('Attachment JSON is invalid');}}
  const digest=await crypto.subtle.digest('SHA-256',bytes);
  return {bytes,sha256:[...new Uint8Array(digest)].map(x=>x.toString(16).padStart(2,'0')).join('')};
