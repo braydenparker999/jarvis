@@ -137,7 +137,10 @@ test('My Media rendered refinement: geometry, access, focus, compact viewport an
     await page.locator('dialog[open]').waitFor();
     for(let i=0;i<10;i++) {
       await page.keyboard.press('Tab');
-      assert.equal(await page.evaluate(()=>document.querySelector('dialog').contains(document.activeElement)),true,'dialog keeps keyboard focus');
+      const focus=await page.evaluate(()=>({inDialog:document.querySelector('dialog').contains(document.activeElement),tag:document.activeElement.tagName,id:document.activeElement.id,label:document.activeElement.getAttribute('aria-label'),text:document.activeElement.tagName==='BODY'?'':document.activeElement.textContent,documentFocused:document.hasFocus()}));
+      report.measurements.push({tab:i+1,...focus});
+      if(!focus.inDialog)await screenshot(page,'diagnostic-menu-focus-exit');
+      assert.equal(focus.inDialog,true,'dialog keyboard focus after Tab '+(i+1)+': '+JSON.stringify(focus));
     }
     await screenshot(page,'candidate-keyboard-menu');
     await page.keyboard.press('Escape');
