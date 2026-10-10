@@ -62,7 +62,9 @@ single/suffix/open Range support, 206/416 handling, HEAD behavior, ETags,
 conditional object identity checks and exposed CORS Range headers. Existing
 native R2 and delivery tests cover these paths; this candidate does not modify
 or attribute a new defect to server delivery. A bounded live probe reached the
-configured R2 catalog but received HTTP 403 from this environment. No live
+configured R2 catalog but received HTTP 403 with `error code: 1010` from this environment.
+That is consistent with documented Cloudflare client-signature access denial;
+the specific rule and backend health were not established. No bypass was attempted. No live
 track Range request was possible; this is a live-verification blocker, not
 evidence that delivery is failing on other clients.
 
@@ -116,7 +118,9 @@ passed, 2 failed, 1 skipped**. Only the unchanged external archive-cover
 subtest and its parent failed; live podcast coverage remained opt-in and skipped.
 The historical comparison and Relay replay passed in this complete rerun. All
 Poweramp tests passed, including the added missing-pause watchdog regression;
-the four canonical dark/light endpoints again had zero changed pixels. This
+both list endpoints matched exactly; both player endpoints differed by 1,080
+pixels in the bottom row (fraction 0.0004861448711716091, below the unchanged
+0.0005 limit). This corrects the earlier zero-pixel statement. This
 full run still does **not** qualify a release.
 
 The render-trace gate's combined-source fingerprint is updated to
@@ -162,3 +166,33 @@ network loss with a track change, and another app taking audio focus. Export
 the existing bounded playback report promptly after any failure. Independent
 review and the coordinated pinned release remain required; this work neither
 merges nor deploys the candidate.
+
+## Follow-up evidence correction and qualification blockers
+
+An exact-base full run under the same Node/browser configuration reproduced the
+archive-cover failure and opt-in live podcast skip: 2,527 tests, 2,523 passed,
+three failed, one skipped. The third failure was the existing Relay attachment
+replay timeout; it passed in the candidate full run. The archive fixture allows
+real `i.ytimg.com` images; a bounded request to its first thumbnail received
+`Tunnel connection failed: 403 Forbidden`. This supports an environment access
+blocker, not a route defect. No gate was disabled or replaced. The podcast skip
+is caused by unset `PODCAST_LIVE_URL`; hosted hermetic coverage does not turn it
+into a live-publisher pass.
+
+Fresh endpoint captures were retained for exact base and candidate head
+`7fa82b4419c502fec2487ae181dbf0acef5b737d`. All eight same-renderer comparisons
+across these sources have zero changed pixels at channel tolerance zero.
+Within each source, the retained reference renderer versus persistent live
+renderer comparison reproduces the same bottom-row difference in both themes.
+These are different comparison axes. The original final aggregate did not retain
+PNGs, so fresh captures do not retroactively supply its missing images. The
+fixture is paused at 42 seconds and asserts no audio requests; dynamic playback
+is not an established explanation. The bottom-edge difference predates this
+patch; its underlying rasterization cause remains unassigned. See `followup/`
+for exact pixel reports, image hashes and player screenshots.
+
+Hosted run 38079663508 at the candidate head passed frontend, playback and
+performance qualification, but Relay and the dependent source aggregate failed.
+The Relay OAuth CSRF case recorded `Fetch.fulfillRequest: Invalid InterceptionId`
+in its intercepted browser fixture. This is an unresolved qualification failure,
+not a green release; this playback change does not alter that fixture.
