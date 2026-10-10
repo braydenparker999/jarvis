@@ -9,6 +9,8 @@ test('side navigation keeps channel access, focus and drafts while plus opens a 
   const auth=await h.oauth(),owner=await h.pair(auth);
   for(const size of [{width:390,height:844},{width:1280,height:900}]){
    const phone=await openConversationPage(browser,h,{owner,clock:false,...size});pages.push(phone);const page=phone.page;
+   // This scenario verifies an older/disabled service even when the paired backend supports files.
+   phone.rule(r=>r.method==='GET'&&r.path==='/relay/owner/session',async({forward})=>{const response=await forward();if(!response.ok)return response;return Response.json({...await response.json(),attachments_enabled:false},{status:response.status,headers:response.headers});},100);
    await page.goto(RELAY_URL);const composer=page.locator('#relay-owner-message-text');await composer.waitFor();await composer.fill('Fictional attachment draft, kept unsent.');assert.equal(await page.locator('#relay-scope-toggle').count(),0);
    await page.locator('#relay-menu-button').click();let dialog=page.getByRole('dialog');await dialog.waitFor();await dialog.evaluate(node=>Promise.allSettled(node.getAnimations().map(animation=>animation.finished)));const bounds=await dialog.boundingBox();assert.equal(bounds.x,0);assert.equal(bounds.y,0);assert.ok(bounds.width<=340&&bounds.width<size.width&&bounds.height>=size.height-1);assert.match(await dialog.innerText(),/Private owner chat/);await writeSyntheticEvidence(phone,'relay-side-nav-'+size.width,{bounds});
    for(let i=0;i<10;i++){await page.keyboard.press('Tab');assert.equal(await dialog.evaluate(node=>node.contains(document.activeElement)),true);}

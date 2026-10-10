@@ -6,8 +6,7 @@ The backend is owned by PR108; this branch changes no backend implementation.
 ## Capability and transport
 
 The client enables sending only when the authenticated owner response explicitly
-contains `attachments_enabled: true`. This additive signal is pending coordination
-with the backend companion; absent/false retains the honest local-preview gate.
+contains `attachments_enabled: true`. Backend PR108 e8f9e2b now supplies this additive signal; absent/false retains the honest local-preview gate.
 Public chat stays text-only. No credential, scope, storage service or schedule is
 introduced. Only `/jarvis*` gains `blob:` in `img-src` for authenticated raster
 previews; other modules' CSP and styles are unchanged.
@@ -79,5 +78,6 @@ the approved synthetic origin before invoking the Worker. It does not qualify
 production CORS/TLS, physical Android, real owner messages or live connector
 behavior. No message acceptance is fabricated. The initial seven-case run passed
 against e3f4c1a only with the previously disclosed capability/BLOB diagnostic
-adapters. Those adapters are absent from the committed harness. A clean run
-requires the formally corrected PR108 backend and remains a release hold.
+adapters. Those adapters are absent from the committed harness. The first clean run with corrected PR108 e8f9e2b and frontend8dea17b
+passed all24 focused attachment checks with no skips or adapters. Full combined
+release qualification and independent review remain required before promotion.
