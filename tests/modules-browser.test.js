@@ -1,3 +1,4 @@
+import {conversationMenu} from './helpers/relay-conversation-browser-fixture.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {existsSync} from 'node:fs';
@@ -62,12 +63,12 @@ test('redesigned modules: mobile flows, retained state, safe text and notation p
    const token=await page.locator('.message-row').first().evaluate(n=>{n._sentinel='retained';return n.dataset.messageId;});
    const before=await page.locator('#messages').evaluate(p=>p.scrollTop);
    s.addMessage({id:messageId(27),role:'assistant',kind:'reply',replyTo:messageId(24),body:'New reply',createdAt:stamp});
-   await page.locator('#chat-menu').click();await page.getByRole('button',{name:'Refresh inbox',exact:true}).click();await page.locator('[data-message-id="'+messageId(27)+'"]').waitFor();
+   await conversationMenu(page,'Refresh inbox');await page.locator('[data-message-id="'+messageId(27)+'"]').waitFor();
    assert.equal(await page.locator('.message-row').first().evaluate(n=>n._sentinel),'retained');assert.equal(await page.locator('#message-text').inputValue(),'An unfinished thought');assert.ok(Math.abs(await page.locator('#messages').evaluate(p=>p.scrollTop)-before)<3);
    await page.locator('[data-message-id="'+token+'"] .message-actions').click();await page.getByRole('button',{name:'Bookmark',exact:true}).click();assert.equal(await page.locator('.bookmarked').count(),1);
-   await page.locator('#chat-menu').click();await page.getByRole('button',{name:'Bookmarks',exact:true}).click();assert.equal(await page.locator('.message-row').count(),1);
+   await conversationMenu(page,'Bookmarks');assert.equal(await page.locator('.message-row').count(),1);
    await page.locator('.message-actions').click();await page.getByRole('button',{name:'Quote in reply',exact:true}).click();assert.match(await page.locator('#message-text').inputValue(),/> A question/);
-   await page.locator('#chat-menu').click();await page.getByRole('button',{name:'Latest messages',exact:true}).click();await checkLayout(page);await screenshot(page,'relay');assert.deepEqual(s.errors,[]);await s.context.close();
+   await conversationMenu(page,'Latest messages');await checkLayout(page);await screenshot(page,'relay');assert.deepEqual(s.errors,[]);await s.context.close();
   });
   await t.test('Quick AI streams formatted replies, opens saved chats, and transfers a draft to Relay',async()=>{
    const s=await session(),{page}=s;await page.goto(origin+'/quick-ai/');await page.locator('#prompt').fill('Explain this clearly');await page.locator('#send').click();await page.locator('.ai-message.assistant .reply-menu').waitFor();assert.equal(await page.locator('.ai-message.assistant h3').textContent(),'A clear answer');assert.equal(await page.locator('.ai-message.assistant li').count(),2);

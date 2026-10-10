@@ -41,16 +41,17 @@ export function conversation({panel, composer, channel, author, body=m=>m.body, 
       if(!row){row=el('article','','message-row '+(m.role==='user'?'outgoing':'incoming'));row.dataset.messageId=m.id;
         const header=el('div','','message-heading');header.append(el('span',m.role==='user'?'You':author,'message-author'));
         const action=el('button','','message-actions');action.type='button';action.dataset.messageActions=m.id;action.setAttribute('aria-label','Message actions');action.innerHTML=icon('more');header.append(action);
-        if(dateGroups){const footer=el('div','','message-footer');footer.append(el('span','','message-time'),action);row.append(header,el('div','','bubble rich-body'),footer);}else row.append(header,el('div','','bubble rich-body'),el('span','','message-time'));
+        if(dateGroups&&channel==='relay'){const footer=el('div','','message-footer'),bubble=el('div','','bubble');footer.append(el('span','','message-time'),action);bubble.append(el('div','','message-body rich-body'),footer);row.append(header,bubble);}else if(dateGroups){const footer=el('div','','message-footer');footer.append(el('span','','message-time'),action);row.append(header,el('div','','bubble rich-body'),footer);}else row.append(header,el('div','','bubble rich-body'),el('span','','message-time'));
       }
       if(dateGroups){const day=messageDay(m.createdAt),label=previousDay!==day.key?day.label:'';previousDay=day.key;let divider=row.querySelector('.message-day');if(label){if(!divider){divider=el('p','','message-day');row.insertBefore(divider,row.firstChild);}divider.textContent=label;}else divider?.remove();}
       row.classList.toggle('bookmarked',bookmarks.has(m.id));
+      const prior=selected[i-1];row.classList.toggle('message-group-continuation',channel==='relay'&&!!prior&&prior.role===m.role&&publicReportLabel(prior)===publicReportLabel(m)&&messageDay(prior.createdAt).key===messageDay(m.createdAt).key&&Date.parse(m.createdAt)-Date.parse(prior.createdAt)<300000);
       const reportLabel=publicReportLabel(m);
       row.querySelector('.message-author').textContent=reportLabel|| (m.role==='user'?'You':author);
       if(reportLabel)row.setAttribute('aria-label',reportLabel+' · public report; no private execution authority');
-      const content=body(m);if(row._body!==content){richText(row.querySelector('.bubble'),content);row._body=content;}
+      const content=body(m);if(row._body!==content){richText(row.querySelector('.message-body')||row.querySelector('.bubble'),content);row._body=content;}
       if(m.kind==='coordination'&&row._report!==JSON.stringify(m.publicReport)){
-        const bubble=row.querySelector('.bubble');richText(bubble,content);
+        const bubble=row.querySelector('.message-body')||row.querySelector('.bubble');richText(bubble,content);
         for(const item of m.publicReport.artifacts){const p=el('p'),link=el('a',item.label+' · revision '+item.revision);link.href=item.url;link.target='_blank';link.rel='noopener noreferrer';p.append(link);bubble.append(p);}
         const note=el('p','Public report · private execution unverified.','message-time');bubble.append(note);
         row._report=JSON.stringify(m.publicReport);
@@ -67,5 +68,5 @@ export function conversation({panel, composer, channel, author, body=m=>m.body, 
     if(first){first=false;if(savedPosition?.id){const row=[...panel.children].find(n=>n.dataset.messageId===savedPosition.id);if(row)panel.scrollTop+=row.getBoundingClientRect().top-panel.getBoundingClientRect().top-savedPosition.offset;else panel.scrollTop=panel.scrollHeight;}else panel.scrollTop=panel.scrollHeight;}
     else if(!query&&!savedOnly){if(anchor.bottom){panel.scrollTop=panel.scrollHeight;jump.hidden=true;}else{const row=[...panel.children].find(n=>n.dataset.messageId===anchor.id);if(row)panel.scrollTop+=row.getBoundingClientRect().top-panel.getBoundingClientRect().top-anchor.offset;if(next.some(m=>!oldIds.has(m.id)))jump.hidden=false;}}
   }
-  return {update,setDelivery({busy=false,error=false}={}){deliveryBusy=busy;deliveryError=error;update(messages);},search(value){query=value.trim().toLowerCase();savedOnly=false;update(messages);panel.scrollTop=0;},bookmarks(){savedOnly=!savedOnly;query='';update(messages);panel.scrollTop=0;return savedOnly;},latest(){query='';savedOnly=false;update(messages);panel.scrollTop=panel.scrollHeight;},savePosition(){writeLocal('jarvis.'+channel+'.reading.v1',position());},actions:showActions};
+  return {update,setDelivery({busy=false,error=false}={}){deliveryBusy=busy;deliveryError=error;update(messages);},search(value){query=value.trim().toLowerCase();savedOnly=false;update(messages);panel.scrollTop=0;},bookmarks(value){savedOnly=typeof value==='boolean'?value:!savedOnly;query='';update(messages);panel.scrollTop=0;return savedOnly;},latest(){query='';savedOnly=false;update(messages);panel.scrollTop=panel.scrollHeight;},savePosition(){writeLocal('jarvis.'+channel+'.reading.v1',position());},actions:showActions};
 }

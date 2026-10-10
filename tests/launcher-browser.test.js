@@ -1,3 +1,4 @@
+import {conversationMenu} from './helpers/relay-conversation-browser-fixture.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
@@ -254,7 +255,7 @@ test('launcher browser behavior', { skip: executablePath ? false : 'Install Chro
       assert.equal(await page.title(), 'Relay · Jarvis');
       assert.equal(await page.locator('.conversation-page').count(),1);
       assert.equal(await page.getByRole('textbox', { name: 'Message Relay' }).inputValue(), state.composer);
-      assert.deepEqual(await page.locator('.bubble').allTextContents(), ['Earlier thought', 'Earlier reply', 'Queued thought']);
+      assert.deepEqual(await page.locator('.bubble .message-body').allTextContents(), ['Earlier thought', 'Earlier reply', 'Queued thought']);
       assert.equal(await page.locator('.incoming .message-author').textContent(), 'Jarvis');
       const stored = await page.evaluate(({ key, pendingId }) => ({
         state: JSON.parse(localStorage.getItem(key)),
@@ -271,13 +272,12 @@ test('launcher browser behavior', { skip: executablePath ? false : 'Install Chro
       assert.deepEqual(stored.journalKeys, [STORAGE_KEY + '.pending.' + pending.id]);
       assert.deepEqual(stored.journal, state.outbox[0], 'The original queued UUID and complete body are independently durable');
       await page.locator('#message-text').fill('Draft after rename');
-      await page.getByRole('link', { name: 'Back to Home' }).click();
+      await page.locator('#relay-menu-button').click();await page.getByRole('link',{name:'Jarvis home',exact:true}).click();
       await page.goBack();
       assert.equal(new URL(page.url()).pathname, '/jarvis/');
       assert.equal(await page.locator('#message-text').inputValue(), 'Draft after rename');
       api.offline = false;
-      await page.getByRole('button', { name: 'Conversation menu' }).click();
-      await page.getByRole('button', { name: 'Connection details',exact:true }).click();
+      await conversationMenu(page,'Connection details');
       await page.getByRole('button', { name: 'Refresh messages' }).click();
       await page.waitForFunction(key => JSON.parse(localStorage.getItem(key)).outbox.length === 0, STORAGE_KEY);
       assert.deepEqual(api.sent, [{ id: pending.id, body: pending.body }]);
@@ -311,7 +311,7 @@ test('launcher browser behavior', { skip: executablePath ? false : 'Install Chro
         await page.goto(origin + '/jarvis/');
         await page.locator('#relay-sync-error').filter({ hasText: 'Offline fixture' }).waitFor();
         assert.equal(await page.locator('#message-text').inputValue(), 'Legacy draft');
-        assert.deepEqual(await page.locator('.bubble').allTextContents(), ['Legacy thought']);
+        assert.deepEqual(await page.locator('.bubble .message-body').allTextContents(), ['Legacy thought']);
         assert.equal(await page.evaluate(key => localStorage.getItem(key), LEGACY_KEY), legacyRaw);
         const localTime = await page.locator('[data-message-id="legacy-message"] .message-time').textContent();
         assert.match(localTime, /local|on this device/i, 'Older readable text stays explicitly local');
@@ -329,18 +329,17 @@ test('launcher browser behavior', { skip: executablePath ? false : 'Install Chro
         await page.reload();
         await page.locator('#relay-sync-error').filter({ hasText: 'Offline fixture' }).waitFor();
         assert.equal(await page.locator('#message-text').inputValue(), 'Legacy draft');
-        assert.deepEqual(await page.locator('.bubble').allTextContents(), ['Legacy thought']);
+        assert.deepEqual(await page.locator('.bubble .message-body').allTextContents(), ['Legacy thought']);
         assert.equal(await page.evaluate(key => localStorage.getItem(key), LEGACY_KEY), legacyRaw);
         assert.deepEqual(api.sent, []);
         assert.deepEqual(api.mutations, []);
         api.offline = false;
-        await page.getByRole('button', { name: 'Conversation menu' }).click();
-        await page.getByRole('button', { name: 'Connection details', exact: true }).click();
+        await conversationMenu(page,'Connection details');
         const sharedRead = page.waitForResponse(response => new URL(response.url()).pathname === '/shared/state' && response.request().method() === 'GET');
         await page.getByRole('button', { name: 'Refresh messages' }).click();
         await sharedRead;
         await page.waitForFunction(() => document.querySelector('#sync-now')?.disabled === false);
-        assert.deepEqual(await page.locator('.bubble').allTextContents(), ['Legacy thought'], 'A complete empty public read cannot erase the older local copy');
+        assert.deepEqual(await page.locator('.bubble .message-body').allTextContents(), ['Legacy thought'], 'A complete empty public read cannot erase the older local copy');
         assert.equal(await page.locator('#message-text').inputValue(), 'Legacy draft');
         assert.equal(await page.evaluate(key => localStorage.getItem(key), LEGACY_KEY), legacyRaw);
         assert.notEqual(await page.evaluate(key => JSON.parse(localStorage.getItem(key)).messages.find(message => message.id === 'legacy-message')?.saved, STORAGE_KEY), true);

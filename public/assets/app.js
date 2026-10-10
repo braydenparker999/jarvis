@@ -24,8 +24,10 @@ const svg = name => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" 
 let state, deliveryStore, storageError = '', syncError = '', busy = false, toastTimer;
 try { deliveryStore=createPublicReaderDeliveryStore({storage:localStorage,tabStorage:sessionStorage,key:STORAGE_KEY,read:readState});state=deliveryStore.restore();state=deliveryStore.commit(state); }
 catch (e) { storageError = e.message || 'Device storage is unavailable.'; }
-let route = getRoute(), chatUI;
-const ownerController = createRelayOwnerController({onModeChange:()=>{if(route==='chat')drawShell();}});
+let route = getRoute(), chatUI, workReturn='public', savedView=false, surfaceMotionKey='';
+const reducedMotion=window.matchMedia('(prefers-reduced-motion: reduce)');
+reducedMotion.addEventListener('change',event=>{if(event.matches)document.getAnimations().forEach(animation=>animation.cancel());});
+const ownerController = createRelayOwnerController({onModeChange:next=>{if(next!=='public')savedView=false;if(route==='chat')drawShell();}});
 const ownerUI = createRelayOwnerUI({controller:ownerController});
 let relayTransfers, transferNotice = '';
 try{relayTransfers=createRelayTransferStore();}catch{transferNotice='Could not read the transferred draft. Keep this tab open and allow browser storage.';}
@@ -76,13 +78,13 @@ function drawShell() {
   chatUI?.savePosition(); chatUI=null;
   for(const cls of ['module-page','conversation-page','relay-page'])document.body.classList.toggle(cls,route==='chat');
   if(route==='chat'&&!document.querySelector('link[href^="/assets/conversation.css"]')){const css=document.createElement('link');css.rel='stylesheet';css.href='/assets/conversation.css?v=20261008';document.head.append(css);}
-  if(route==='chat'&&!document.querySelector('link[href^="/assets/relay.css"]')){const css=document.createElement('link');css.rel='stylesheet';css.href='/assets/relay.css?v=20261010';document.head.append(css);}
+  if(route==='chat'&&!document.querySelector('link[href^="/assets/relay.css"]')){const css=document.createElement('link');css.rel='stylesheet';css.href='/assets/relay.css?v=20261010-v6';document.head.append(css);}
   document.body.dataset.conversationMode=route==='chat'&&ownerUI.mode!=='public'?'owner':'public';
   const hub = ['home','favorites','settings'].includes(route);
   const launcher = ['home','favorites'].includes(route);
   clearTimeout(clockTimer);
   document.body.classList.toggle('launcher-page', launcher);
-  document.querySelector('meta[name="theme-color"]').content = route==='chat'?'#FAF9F6':launcher ? '#090a0c' : '#121212';
+  document.querySelector('meta[name="theme-color"]').content = route==='chat'?'#000000':launcher ? '#090a0c' : '#121212';
   document.title = `${labels[route]} · Jarvis`;
   const header = launcher
     ? `<header class="topbar launcher-topbar"><a class="brand" href="/" data-route="home">Jarvis</a><nav class="toolbar-actions" aria-label="Launcher tools"><button class="icon-button" id="search-button" aria-label="Search apps" aria-expanded="${route==='home'&&searchOpen}" ${route==='home'?'aria-controls="launcher-search"':''}>${icon('search')}</button><a class="icon-button" href="/favorites/" data-route="favorites" aria-label="Favorites" ${route==='favorites'?'aria-current="page"':''}>${icon('favorites')}</a><button class="icon-button" id="connection-button" aria-label="Connection details">${icon('more')}<span class="sr-only">${connection()}</span></button></nav></header>`
@@ -108,7 +110,7 @@ function drawShell() {
     ]);identity.append(scope);
     updateConversationIdentity();
     updateRelayNavigation();
-    $('connection-button').hidden=true;
+    $('connection-button').hidden=true; $('connection-button').onclick=openRelaySettings;
     $('chat-search-toggle').onclick=()=>{
       if(ownerUI.mode!=='public'){ownerUI.toggleSearch();return;}
       const bar=$('chat-search-bar');if(!bar)return;bar.hidden=!bar.hidden;if(!bar.hidden)$('conversation-search').focus();else{ $('conversation-search').value='';chatUI?.search('');}
@@ -139,11 +141,54 @@ function updateConversationIdentity(){
   const scope=$('relay-scope-toggle');if(scope){scope.textContent=privateView?'Private':'Public';scope.setAttribute('aria-description',node.textContent);}
 }
 function updateRelayNavigation(){
-  if(route!=='chat')return;const state=ownerController,work=state.mode!=='public'&&state.requestsOnly;
+  if(route!=='chat')return;const state=ownerController,work=state.mode==='owner'&&state.requestsOnly;
   document.body.dataset.relayDestination=work?'work':'chat';
   document.body.dataset.relayTaskOpen=String(state.mode!=='public'&&state.status==='approved'&&state.jobMode);
   for(const [id,current]of [['relay-nav-chat',!work],['relay-nav-work',work]]){const button=$(id);if(button){if(current)button.setAttribute('aria-current','page');else button.removeAttribute('aria-current');}}
   const search=$('chat-search-toggle');if(search){search.hidden=ownerUI.mode!=='public'&&state.status!=='approved';search.setAttribute('aria-label',work?'Search current work':ownerUI.mode!=='public'?'Search private messages':'Search messages');}
+  relayControls();
+}
+const MANROPE_LICENSE="Copyright 2018 The Manrope Project Authors (https://github.com/googlefonts/manrope)\n\nThis Font Software is licensed under the SIL Open Font License, Version 1.1.\nThis license is copied below, and is also available with a FAQ at:\nhttp://scripts.sil.org/OFL\n\n\n-----------------------------------------------------------\nSIL OPEN FONT LICENSE Version 1.1 - 26 February 2007\n-----------------------------------------------------------\n\nPREAMBLE\nThe goals of the Open Font License (OFL) are to stimulate worldwide\ndevelopment of collaborative font projects, to support the font creation\nefforts of academic and linguistic communities, and to provide a free and\nopen framework in which fonts may be shared and improved in partnership\nwith others.\n\nThe OFL allows the licensed fonts to be used, studied, modified and\nredistributed freely as long as they are not sold by themselves. The\nfonts, including any derivative works, can be bundled, embedded, \nredistributed and/or sold with any software provided that any reserved\nnames are not used by derivative works. The fonts and derivatives,\nhowever, cannot be released under any other type of license. The\nrequirement for fonts to remain under this license does not apply\nto any document created using the fonts or their derivatives.\n\nDEFINITIONS\n\"Font Software\" refers to the set of files released by the Copyright\nHolder(s) under this license and clearly marked as such. This may\ninclude source files, build scripts and documentation.\n\n\"Reserved Font Name\" refers to any names specified as such after the\ncopyright statement(s).\n\n\"Original Version\" refers to the collection of Font Software components as\ndistributed by the Copyright Holder(s).\n\n\"Modified Version\" refers to any derivative made by adding to, deleting,\nor substituting -- in part or in whole -- any of the components of the\nOriginal Version, by changing formats or by porting the Font Software to a\nnew environment.\n\n\"Author\" refers to any designer, engineer, programmer, technical\nwriter or other person who contributed to the Font Software.\n\nPERMISSION & CONDITIONS\nPermission is hereby granted, free of charge, to any person obtaining\na copy of the Font Software, to use, study, copy, merge, embed, modify,\nredistribute, and sell modified and unmodified copies of the Font\nSoftware, subject to the following conditions:\n\n1) Neither the Font Software nor any of its individual components,\nin Original or Modified Versions, may be sold by itself.\n\n2) Original or Modified Versions of the Font Software may be bundled,\nredistributed and/or sold with any software, provided that each copy\ncontains the above copyright notice and this license. These can be\nincluded either as stand-alone text files, human-readable headers or\nin the appropriate machine-readable metadata fields within text or\nbinary files as long as those fields can be easily viewed by the user.\n\n3) No Modified Version of the Font Software may use the Reserved Font\nName(s) unless explicit written permission is granted by the corresponding\nCopyright Holder. This restriction only applies to the primary font name as\npresented to the users.\n\n4) The name(s) of the Copyright Holder(s) or the Author(s) of the Font\nSoftware shall not be used to promote, endorse or advertise any\nModified Version, except to acknowledge the contribution(s) of the\nCopyright Holder(s) and the Author(s) or with their explicit written\npermission.\n\n5) The Font Software, modified or unmodified, in part or in whole,\nmust be distributed entirely under this license, and must not be\ndistributed under any other license. The requirement for fonts to\nremain under this license does not apply to any document created\nusing the Font Software.\n\nTERMINATION\nThis license becomes null and void if any of the above conditions are\nnot met.\n\nDISCLAIMER\nTHE FONT SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND,\nEXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF\nMERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT\nOF COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL THE\nCOPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,\nINCLUDING ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL\nDAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING\nFROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM\nOTHER DEALINGS IN THE FONT SOFTWARE.\n";
+function relayControls(){
+  if(route!=='chat')return;
+  const work=ownerController.mode==='owner'&&ownerController.requestsOnly,header=document.querySelector('.topbar');
+  let menu=$('relay-menu-button'),workButton=$('relay-work-button');
+  if(header&&!menu){menu=document.createElement('button');menu.type='button';menu.id='relay-menu-button';menu.className='relay-floating-control';menu.onclick=()=>{if(ownerController.mode==='owner'&&ownerController.requestsOnly)returnToChat();else openRelayMenu();};header.prepend(menu);}
+  if(header&&!workButton){workButton=document.createElement('button');workButton.type='button';workButton.id='relay-work-button';workButton.className='relay-floating-control';header.append(workButton);}
+  if(menu){const label=work?'Back to chat':'Open Relay menu',key=work?'back':'menu';menu.setAttribute('aria-label',label);if(menu.dataset.icon!==key){menu.dataset.icon=key;menu.innerHTML=work?uiIcon('back'):'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M5 8h14M5 15h9"/></svg>';}}
+  if(workButton){workButton.setAttribute('aria-pressed',String(work));workButton.setAttribute('aria-label',work?'Search current work':'Open current work');const key=work?'search':'work';if(workButton.dataset.icon!==key){workButton.dataset.icon=key;workButton.innerHTML=work?uiIcon('search'):uiIcon('check')+'<span>Work</span>';}workButton.onclick=work?()=>ownerUI.toggleSearch():openWork;}
+  const brand=header?.querySelector('.conversation-identity .brand'),title=work?'Work':ownerController.mode==='account'?'Account':ownerController.mode==='devices'?'Devices':savedView?'Saved':'Relay';if(brand&&brand.textContent!==title)brand.textContent=title;
+  const identity=header?.querySelector('.conversation-identity');if(identity&&!identity.querySelector('.relay-identity-mark')){const mark=document.createElement('span');mark.className='relay-identity-mark';mark.innerHTML=uiIcon('chat');identity.prepend(mark);}
+  const input=document.querySelector('.composer-input');if(input&&!input.querySelector('#relay-compose-menu')){const plus=document.createElement('button');plus.type='button';plus.id='relay-compose-menu';plus.className='relay-composer-plus';plus.setAttribute('aria-label','Open Relay menu');plus.innerHTML=uiIcon('plus');plus.onclick=openRelayMenu;input.prepend(plus);}
+  animateRelaySurface(work);
+}
+function animateRelaySurface(work){
+  const key=ownerController.mode==='owner'&&ownerController.jobMode?'task-editor':work?'work':savedView?'saved':ownerUI.mode==='public'?'public-chat':ownerUI.mode;
+  if(key===surfaceMotionKey)return;
+  const node=key==='task-editor'?$('relay-owner-message-form'):key==='work'?$('relay-owner-current-work'):document.querySelector('main#content .messages')||document.querySelector('.relay-owner-panel');
+  if(!node)return;surfaceMotionKey=key;
+  if(!reducedMotion.matches&&node.animate)node.animate([{opacity:.88,transform:'translateY(5px)'},{opacity:1,transform:'translateY(0)'}],{duration:170,easing:'cubic-bezier(.2,.7,.2,1)'});
+}
+function openFontCredits(){
+  const dialog=sheet('Font & credits',[]),note=document.createElement('p');note.className='sheet-context';note.textContent='Manrope by Mikhail Sharanda and the Manrope Project Authors. Embedded for offline use under the SIL Open Font License 1.1.';dialog.append(note);
+  const details=document.createElement('details');details.className='font-license';const summary=document.createElement('summary');summary.textContent='Full font license';const text=document.createElement('pre');text.textContent=MANROPE_LICENSE;details.append(summary,text);dialog.append(details);
+}
+function openRelaySettings(){
+  const privateView=ownerUI.mode!=='public',items=[{label:'Connection details',icon:'info',action:()=>privateView?ownerUI.connection():showConnection()},{label:privateView?'Refresh private inbox':'Refresh inbox',icon:'refresh',action:()=>privateView?ownerUI.refresh():sync(),disabled:privateView&&!ownerController.hasCredential&&ownerController.status!=='pending'}];
+  // These remain the existing authenticated forms and disconnect operation.
+  if(ownerController.hasCredential)items.push({label:'Account sign-in',icon:'info',action:()=>ownerController.showAccount()},{label:'Devices',icon:'info',action:()=>ownerController.showDevices()},{label:'Disconnect this phone',icon:'close',action:()=>ownerController.disconnect()});
+  items.push({label:'Font & credits',icon:'info',action:openFontCredits});sheet('Settings',items);
+}
+function openWork(){savedView=false;if(!(ownerController.mode==='owner'&&ownerController.requestsOnly))workReturn=ownerUI.mode;$('relay-nav-work')?.click();$('relay-menu-button')?.focus({preventScroll:true});}
+function returnToChat(){savedView=false;ownerController.setRequestsOnly(false);ownerController.setJobMode(false);if(workReturn==='public')ownerController.showPublic();else ownerController.showOwner();updateRelayNavigation();$('relay-compose-menu')?.focus({preventScroll:true});}
+function openChats(){savedView=false;sheet('Chats',[{label:'Private',icon:'chat',action:()=>{ownerController.showOwner();ownerController.setJobMode(false);ownerController.setRequestsOnly(false);updateRelayNavigation();}},{label:'Public',icon:'chat',action:()=>{ownerController.showPublic();chatUI?.latest();relayControls();}}]);}
+function openSaved(){savedView=true;ownerController.showPublic();chatUI?.bookmarks(true);relayControls();}
+function openRelayMenu(){
+  const state=ownerController.snapshot(),privateView=ownerUI.mode!=='public';
+  const entries=[{label:state.requestsOnly&&privateView?'Search current work':'Search messages',icon:'search',disabled:privateView&&state.status!=='approved',action:()=>$('chat-search-toggle')?.click()},
+    {label:'Chats',icon:'chat',action:openChats},{label:'Work',icon:'check',action:openWork},{label:'Saved',icon:'bookmark',action:openSaved},{label:'Settings',icon:'info',action:openRelaySettings}];
+  const dialog=sheet('Relay',entries);dialog.classList.add('relay-navigation-sheet');[...dialog.querySelectorAll('.sheet-action')].forEach((node,i)=>{node.setAttribute('aria-label',entries[i].label);if(entries[i].label==='Saved')node.setAttribute('aria-description','Saved public messages on this device');});
+  const home=document.createElement('a');home.href='/';home.dataset.route='home';home.className='relay-menu-home';home.textContent='Jarvis home';home.onclick=()=>dialog.close();dialog.append(home);
 }
 function drawPage() {
   if (route === 'home' || route === 'favorites') { drawHome(); return; }
@@ -351,6 +396,7 @@ if(initialTransfer&&!initialTransfer.legacy&&route==='chat'){
   if(initialTransfer.destination==='owner')ownerController.showOwner();else ownerController.showPublic();
 }
 drawShell();
+new MutationObserver(()=>{if(route==='chat')relayControls();}).observe($('app'),{childList:true,subtree:true});
 if (API_ORIGIN) sync();
 
 
