@@ -1,6 +1,7 @@
 import {icon, sheet, readLocal, writeLocal} from '../assets/ui.js';
 import { API_ORIGIN } from '/assets/config.js';
 import { filename, createDownload, nativeSaveMode, saveToDevice, triggerDownload, withDeadline, renderInWorker } from './runtime.js';
+import { allGuitarValue, resolveParts } from './track-selection.js';
 const $ = id => document.getElementById(id);
 let busy = false, current = null, results = [], readyDownload = null, scoreCache=null, previewURLs=[], libraryView='recent';
 const stored=readLocal('jarvis.guitar.library.v1',{});
@@ -65,7 +66,11 @@ async function choose(id) {
   try {
     const data = await withDeadline(signal => api(`songs/${id}`, signal), 20000);
     if (!data.song?.tracks?.length) throw Error('No usable tracks in this Songsterr version.');
-    clearPreview();current = data.song; rememberSong();showSong();status('');$('tab-library').hidden=true;history.replaceState(null,'','#song='+current.songId);
+    // Render first, then persist: showSong() must read the previous visit's
+    // remembered selection from `recent` before rememberSong() overwrites it.
+    // (Calling rememberSong() first let snapshot() capture the checked radio
+    // of the previously viewed song and leak it into the new song.)
+    clearPreview(); current = data.song; const parts = showSong(); rememberSong(parts); status(''); $('tab-library').hidden = true; history.replaceState(null, '', '#song=' + current.songId);
   } catch (e) { status(e.message, true); } finally { lock(false); }
 }
 function showSong() {
@@ -76,8 +81,12 @@ function showSong() {
   root.append(back, text('h2', current.title), text('p', current.artist, 'song-artist'));
   const guitars = current.tracks.filter(t => t.kind === 'guitar');
   const preferred = guitars.length ? guitars : current.tracks;
-  const remembered=recent.find(x=>x.songId===current.songId)?.parts;
-  const chosen=current.tracks.find(t=>String(t.partId)===remembered)||preferred[0];
+  // Resolve the effective selection: a remembered value is honored only when
+  // it names a real option for THIS song; otherwise fall back to the guitar
+  // default ("All guitar tracks" when offered, else first guitar track).
+  const allValue = allGuitarValue(current.tracks);
+  const chosenValue = resolveParts(current.tracks, recent.find(x => x.songId === current.songId)?.parts, saved.find(x => x.songId === current.songId)?.parts);
+  const chosen = current.tracks.find(t => String(t.partId) === chosenValue) || preferred[0];
   const select = document.createElement('fieldset'); select.className = 'track-list';
   function option(value, name, instrument, checked = false) {
     const label = document.createElement('label'); label.className = 'track-option';
@@ -88,16 +97,16 @@ function showSong() {
   if(current.tracks.length===1) root.append(text('p', `${chosen.name}${chosen.instrument && chosen.name !== chosen.instrument ? ' · ' + chosen.instrument : ''}`, 'single-track'));
   else {
     select.append(text('legend', 'Track'));
-    for (const t of preferred) select.append(option(String(t.partId), t.name, t.instrument || t.kind, t === chosen));
-    if (guitars.length > 1 && guitars.length <= 12) select.append(option(guitars.map(t => t.partId).join(','), 'All guitar tracks', '',remembered===guitars.map(t=>t.partId).join(',')));
+    for (const t of preferred) select.append(option(String(t.partId), t.name, t.instrument || t.kind, String(t.partId) === chosenValue));
+    if (allValue) select.append(option(allValue, 'All guitar tracks', '', chosenValue === allValue));
     const others = current.tracks.filter(t => !preferred.includes(t));
     if (others.length) {
       const details = document.createElement('details'); details.append(text('summary', 'Other instruments'));
-      for (const t of others) details.append(option(String(t.partId), t.name, `${t.kind} · ${t.instrument}`,t===chosen));
+      for (const t of others) details.append(option(String(t.partId), t.name, `${t.kind} · ${t.instrument}`, String(t.partId) === chosenValue));
       select.append(details);
     }
-    const picker=text('button',remembered?.includes(',')?'All guitar tracks':chosen.name,'track-picker');picker.type='button';picker.id='track-picker';picker.insertAdjacentHTML('beforeend',icon('chevron'));
-    const dialog=document.createElement('dialog');dialog.className='app-sheet';const head=document.createElement('div');head.className='dialog-heading';head.append(text('h2','Choose track'));const close=text('button','×','icon-button');close.type='button';close.setAttribute('aria-label','Close track picker');close.onclick=()=>dialog.close();head.append(close);dialog.append(head,select);root.append(picker,dialog);picker.onclick=()=>dialog.showModal();select.addEventListener('change',()=>{const parts=select.querySelector('input:checked')?.value;picker.firstChild.textContent=parts?.includes(',')?'All guitar tracks':current.tracks.find(t=>String(t.partId)===parts)?.name||'Track';rememberSong(parts);dialog.close();});
+    const picker=text('button',chosenValue===allValue?'All guitar tracks':chosen.name,'track-picker');picker.type='button';picker.id='track-picker';picker.insertAdjacentHTML('beforeend',icon('chevron'));
+    const dialog=document.createElement('dialog');dialog.className='app-sheet';const head=document.createElement('div');head.className='dialog-heading';head.append(text('h2','Choose track'));const close=text('button','×','icon-button');close.type='button';close.setAttribute('aria-label','Close track picker');close.onclick=()=>dialog.close();head.append(close);dialog.append(head,select);root.append(picker,dialog);picker.onclick=()=>dialog.showModal();select.addEventListener('change',()=>{const parts=select.querySelector('input:checked')?.value;picker.firstChild.textContent=parts===allValue?'All guitar tracks':current.tracks.find(t=>String(t.partId)===parts)?.name||'Track';rememberSong(parts);dialog.close();});
   }
   const download = text('button', 'Save PDF', 'primary guitar-download'); download.type = 'button'; download.id = 'download-pdf';
   const actions = document.createElement('div'); actions.id = 'pdf-actions'; actions.className = 'pdf-actions'; actions.hidden = true;
@@ -122,14 +131,15 @@ function showSong() {
   direct.onclick = () => status('Direct download requested. Check Chrome Downloads.');
   actions.append(save, open, direct);
   if(current.tracks.length>1)select.onchange=()=>{clearReadyDownload();clearPreview();status('');};
-  download.onclick = () => { clearReadyDownload(); generate(current.tracks.length === 1 ? String(chosen.partId) : select.querySelector('input:checked')?.value, download, actions, open, direct, save); };
+  download.onclick = () => { clearReadyDownload(); generate(parts(), download, actions, open, direct, save); };
   const saveTab=text('button',saved.some(x=>x.songId===current.songId)?'Saved tab':'Save tab','text-button');saveTab.type='button';saveTab.id='save-tab';saveTab.onclick=()=>{toggleSaved();saveTab.textContent=saved.some(x=>x.songId===current.songId)?'Saved tab':'Save tab';};root.insertBefore(saveTab,root.querySelector('h2'));
   const preview=text('button','Preview tab','secondary guitar-download');preview.id='preview-tab';preview.type='button';
   const paper=text('div','','notation-paper notation-fit');paper.id='notation-preview';paper.append(text('p','Preview the selected track before saving.','notation-placeholder'));
-  const parts=()=>current.tracks.length===1?String(chosen.partId):select.querySelector('input:checked')?.value;
+  const parts=()=>current.tracks.length===1?String(chosen.partId):select.querySelector('input:checked')?.value||chosenValue;
   preview.onclick=async()=>{if(busy)return;lock(true);status('Preparing notation…');try{const cached=await prepareScore(parts());showPreview(cached.score);status(cached.score.warnings.length?'Preview ready. Some notation could not be converted exactly.':'Preview ready');}catch(e){status(e.message,true);}finally{lock(false);}};
   const collection=text('button','Organize saved tab','text-button');collection.type='button';collection.onclick=()=>sheet('Save to a collection',['Learning','Repertoire','Favorites'].map(name=>({label:name,action:()=>{const item={...snapshot(),collection:name};saved=saved.filter(x=>x.songId!==item.songId);saved.unshift(item);persistLibrary();saveTab.textContent='Saved tab';}})));
   root.append(preview,paper,download,actions,collection);
+  return chosenValue;
 }
 async function generate(parts, download, actions, open, direct, save) {
   if (busy || !current || !parts) return;
@@ -154,9 +164,15 @@ async function generate(parts, download, actions, open, direct, save) {
   finally { lock(false); }
 }
 
-function snapshot(parts){return {songId:current.songId,title:current.title,artist:current.artist,parts:parts||$('song').querySelector('input:checked')?.value||String(current.tracks[0].partId),at:Date.now()};}
+function snapshot(parts){return {songId:current.songId,title:current.title,artist:current.artist,parts:resolveParts(current.tracks,parts??$('song').querySelector('input:checked')?.value),at:Date.now()};}
 function persistLibrary(){if(!writeLocal('jarvis.guitar.library.v1',{recent:recent.slice(0,30),saved:saved.slice(0,100)}))status('Could not save your tab library on this device.',true);}
-function rememberSong(parts){const old=recent.find(x=>x.songId===current.songId);const item={...snapshot(parts),parts:parts||old?.parts||snapshot().parts};recent=recent.filter(x=>x.songId!==item.songId);recent.unshift(item);persistLibrary();}
+function rememberSong(parts){
+  const item=snapshot(parts);
+  recent=recent.filter(x=>x.songId!==item.songId);recent.unshift(item);
+  // Saved tabs must retain the current choice even after the recent list evicts it.
+  saved=saved.map(entry=>entry.songId===item.songId?{...entry,parts:item.parts}:entry);
+  persistLibrary();
+}
 function toggleSaved(){const found=saved.some(x=>x.songId===current.songId);saved=found?saved.filter(x=>x.songId!==current.songId):[{...snapshot(),collection:'Learning'},...saved];persistLibrary();}
 function clearPreview(){for(const url of previewURLs)URL.revokeObjectURL(url);previewURLs=[];scoreCache=null;const root=$('notation-preview');if(root)root.replaceChildren(text('p','Preview the selected track before saving.','notation-placeholder'));}
 async function prepareScore(parts,externalSignal){
