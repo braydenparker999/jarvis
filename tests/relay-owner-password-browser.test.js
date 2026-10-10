@@ -1,3 +1,4 @@
+import {conversationMenu} from './helpers/relay-conversation-browser-fixture.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {existsSync} from 'node:fs';
@@ -213,8 +214,7 @@ async function openBrowser(browser, h) {
 }
 const session = page => page.evaluate(key => localStorage.getItem(key), OWNER_SESSION_KEY);
 async function menu(page, label) {
-  await page.getByRole('button', {name: 'Conversation menu', exact: true}).click();
-  await page.getByRole('dialog').getByRole('button', {name: label, exact: true}).click();
+  await conversationMenu(page, label);
   assert.equal(page.url(), RELAY_URL);
 }
 async function ownerReady(page) {await page.locator('#relay-owner-message-text').waitFor(); assert.equal(page.url(), RELAY_URL);}

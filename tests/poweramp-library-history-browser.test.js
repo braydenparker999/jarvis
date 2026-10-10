@@ -93,13 +93,26 @@ test('Poweramp mandatory Chromium library history contracts',{timeout:120000},as
       await start(p.x,p.y);for(let i=1;i<=5;i++){await move(p.x,p.y-i*24);await frame();}await end();await page.waitForTimeout(80);assert.equal(await page.evaluate(()=>PA.Nav.cur),'library');assert.equal(await page.evaluate(()=>PA.LibraryPageHistory.index),index);assert.ok(await page.locator('#lib-cats').evaluate(n=>n.scrollTop)>0);
     });
     await run('trusted horizontal intent during generic vertical arrival leaves its geometry continuous',async h=>{
-      const {page,start,move,end}=h;await page.evaluate(()=>{
+      const {page,start,move,end}=h;
+      // Host/CDP latency can outlive the 220ms arrival after a geometry poll.
+      // Hold its real CSS transitions and fallback clock at an intermediate
+      // frame so trusted input must exercise the overlapping scene owners.
+      const fixtureTime=new Date('2026-10-10T00:00:00Z');
+      await page.clock.install({time:fixtureTime});await page.clock.pauseAt(fixtureTime);
+      await page.evaluate(()=>{
         PA.SET.animations='disabled';PA.Nav.go('settings');PA.SET.animations='normal';PA.Nav.go('library');window.crossAxisTrace=null;
-        document.addEventListener('pointermove',e=>{if(!e.target.closest('#sc-library'))return;const n=document.querySelector('#sc-library');crossAxisTrace={trusted:e.isTrusted,read_at_ms:performance.now(),before:new DOMMatrixReadOnly(getComputedStyle(n).transform).m42};},true);
-        document.addEventListener('pointermove',e=>{if(!e.target.closest('#sc-library')||!crossAxisTrace)return;crossAxisTrace.after=new DOMMatrixReadOnly(getComputedStyle(PA.LibraryPageMotion.state?.from||document.querySelector('#sc-library')).transform).m42;crossAxisTrace.after_at_ms=performance.now();});
+        const incoming=document.querySelector('#sc-library'),animations=incoming.getAnimations();
+        for(const selector of ['#sc-settings','#sc-library'])for(const animation of document.querySelector(selector).getAnimations()){
+          animation.pause();animation.currentTime=Number(animation.effect.getTiming().duration)/3;
+        }
+        const rect=incoming.getBoundingClientRect();window.crossAxisPose={animations:animations.length,scene:incoming.dataset.scene,top:rect.top,bottom:rect.bottom};
+        document.addEventListener('pointermove',e=>{if(!e.target.closest('#sc-library'))return;const n=document.querySelector('#sc-library');crossAxisTrace={trusted:e.isTrusted,read_at_ms:performance.now(),scene:n.dataset.scene,before:new DOMMatrixReadOnly(getComputedStyle(n).transform).m42};},true);
+        document.addEventListener('pointermove',e=>{if(!e.target.closest('#sc-library')||!crossAxisTrace)return;const s=PA.LibraryPageMotion.state;crossAxisTrace.after=new DOMMatrixReadOnly(getComputedStyle(s?.from||document.querySelector('#sc-library')).transform).m42;crossAxisTrace.backdrop=s?.backdrop?.node.dataset.librarySnapshot;crossAxisTrace.after_at_ms=performance.now();});
       });
-      await page.waitForFunction(()=>document.querySelector('#sc-library').getBoundingClientRect().bottom>350&&document.querySelector('#sc-library').getBoundingClientRect().top<-35);await start(120,100);await move(240,100);
-      const trace=await page.evaluate(()=>crossAxisTrace);assert.ok(trace?.trusted);assert.ok(Math.abs(trace.before-trace.after)<3);assert.equal(await page.evaluate(()=>PA.LibraryPageMotion.state?.backdrop?.node.dataset.librarySnapshot),'settings');await end();await page.waitForFunction(()=>document.querySelector('#library-page-motion').hidden);assert.equal(await page.evaluate(()=>PA.Nav.cur),'library');
+      const pose=await page.evaluate(()=>crossAxisPose);assert.ok(pose.animations>0);assert.equal(pose.scene,'1');assert.ok(pose.bottom>350&&pose.top<-35,JSON.stringify(pose));
+      await start(120,100);await move(240,100);
+      const trace=await page.evaluate(()=>crossAxisTrace);assert.ok(trace?.trusted);assert.equal(trace.scene,'1');assert.ok(trace.before<-35,JSON.stringify(trace));assert.ok(Math.abs(trace.before-trace.after)<3);assert.equal(trace.backdrop,'settings');assert.equal(await page.evaluate(()=>PA.LibraryPageMotion.state?.backdrop?.node.dataset.librarySnapshot),'settings');
+      await end();await page.clock.runFor(500);await page.waitForFunction(()=>document.querySelector('#library-page-motion').hidden);assert.equal(await page.evaluate(()=>PA.Nav.cur),'library');
     });
     await run('trusted settle regrab freezes displayed pages, stays inert, and reverses once',async h=>{
       const {page,library,start,move,end,frame,center}=h;await library();const initial=await page.evaluate(()=>({index:PA.LibraryPageHistory.index}));

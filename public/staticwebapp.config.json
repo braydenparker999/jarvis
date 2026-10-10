@@ -7,6 +7,12 @@
   },
   "routes": [
     {
+      "route": "/jarvis*",
+      "headers": {
+        "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; font-src data:; img-src 'self' data:; connect-src 'self' https://jarvis-hub-api.braydenparker999.workers.dev; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; frame-src 'self' blob:"
+      }
+    },
+    {
       "route": "/podcasts*",
       "headers": {
         "Content-Security-Policy": "default-src 'none'; script-src 'self' https://itunes.apple.com; style-src 'self'; img-src 'self' data: https:; media-src 'self' blob: https:; connect-src 'self' https:; worker-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"

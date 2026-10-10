@@ -1,3 +1,4 @@
+import {conversationMenu} from './helpers/relay-conversation-browser-fixture.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
@@ -399,7 +400,7 @@ test('browser fixture: existing Relay URL, public draft and owner-private isolat
     page.on('framenavigated', frame => { if (frame === page.mainFrame()) unexpectedNavigations.push(frame.url()); });
     const originalHistory = await page.evaluate(() => history.length);
     await page.locator('#message-text').fill('Public unsent draft');
-    const menu = async label => { await page.locator('#chat-menu').click(); await page.getByRole('button', { name: label, exact: true }).click(); };
+    const menu = label => conversationMenu(page, label);
     await menu('Connect this phone');
     assert.equal(await page.locator('#relay-owner-remember').isChecked(), false);
     await page.locator('#relay-owner-label').fill('Restricted phone'); await page.locator('#relay-owner-remember').check();

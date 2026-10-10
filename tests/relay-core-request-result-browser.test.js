@@ -94,7 +94,7 @@ test('actual private typed request recovers lost save once, retains edited draft
   const auth=await h.oauth(),owner=await h.pair(auth),phone=await openConversationPage(browser,h,{owner});phones.push(phone);
   const {page}=phone,ownerInput=page.locator('#relay-owner-message-text'),dialog=page.locator('#relay-owner-request-dialog');
   await page.goto(RELAY_URL);await ownerInput.waitFor();
-  await page.locator('#relay-owner-job-toggle').click();await page.locator('#relay-owner-job-title').fill('Fictional complete private report');
+  await conversationMenu(page,'Requests');await page.locator('#relay-owner-new-task').click();await page.locator('#relay-owner-job-title').fill('Fictional complete private report');
   await page.locator('#relay-owner-job-kind').selectOption('read_only');
   const request='PRIVATE-FICTIONAL-COMPLETE-REQUEST-4301',draft='PRIVATE-FICTIONAL-EDITED-UNSENT-4302';await ownerInput.fill(request);
   phone.rule(record=>record.path==='/relay/owner/jobs'&&record.method==='POST',async({forward})=>{
@@ -107,7 +107,7 @@ test('actual private typed request recovers lost save once, retains edited draft
   assert.equal(h.rows('SELECT COUNT(*) AS n FROM relay_owner_jobs')[0].n,1);
   await page.getByRole('button',{name:'Retry private send',exact:true}).click();
   await page.waitForFunction(()=>!/(?:Saving privately|Refreshing private inbox)/.test(document.querySelector('.relay-owner-chat .composer [role="status"]')?.textContent||''));
-  await page.locator('#relay-owner-task-back').click();
+  await page.locator('#relay-owner-task-back').click();await page.getByRole('button',{name:'Back to chat',exact:true}).click();
   await page.locator(`[data-job-id="${payload.id}"] .job-state`).waitFor();
   await page.waitForFunction(()=>!/(?:Saving privately|Refreshing private inbox)/.test(document.querySelector('.relay-owner-chat .composer [role="status"]')?.textContent||''));
   const writes=phone.records.filter(record=>record.path==='/relay/owner/jobs'&&record.method==='POST');
@@ -140,8 +140,8 @@ test('actual private typed request recovers lost save once, retains edited draft
   assert.equal(await dialog.locator('#relay-owner-result-latest').textContent(),corrected);
   assert.equal(await dialog.locator('#relay-owner-completion').getAttribute('data-result-version'),'1');
   assert.equal(await dialog.locator('#relay-owner-completion-summary').textContent(),summary);
-  assert.match(await dialog.locator('#relay-owner-completion').textContent(),/does not certify factual claims or external outcomes/);
-  await dialog.getByRole('button',{name:'Close private request',exact:true}).click();
+  assert.match(await dialog.locator('#relay-owner-request-properties').textContent(),/does not certify factual claims or external outcomes/);
+  await dialog.getByRole('button',{name:'Back from task',exact:true}).click();
   await page.reload();await ownerInput.waitFor();await page.locator('.relay-owner-chat .messages').getByText(original,{exact:true}).waitFor();
   assert.equal(await ownerInput.inputValue(),draft);
   await page.locator(`[data-job-id="${payload.id}"]`).getByRole('button',{name:'Inspect request',exact:true}).click();

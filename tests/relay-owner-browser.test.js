@@ -1,3 +1,4 @@
+import {conversationMenu} from './helpers/relay-conversation-browser-fixture.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {existsSync} from 'node:fs';
@@ -185,8 +186,7 @@ async function openPhone(browser, h, width) {
 }
 
 async function menu(page, label) {
-  await page.getByRole('button', {name: 'Conversation menu', exact: true}).click();
-  await page.getByRole('dialog').getByRole('button', {name: label, exact: true}).click();
+  await conversationMenu(page, label);
   assert.equal(page.url(), RELAY_URL);
 }
 const stored = page => page.evaluate(key => localStorage.getItem(key), SESSION_KEY);
