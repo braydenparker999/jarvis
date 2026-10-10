@@ -59,3 +59,25 @@ The initial diagnostic combined checkout used backend e3f4c1a and temporarily
 supplied the pending capability field and normalized ArrayBuffer bindings for
 Node SQLite. Those diagnostics are not production or paired-head qualification.
 Final exact commits, checks and blockers belong in the follow-up PR description.
+
+## Held POST qualification
+
+`relay-attachment-http-cancellation-browser.test.js` uses a controllable loopback
+HTTP server with the actual Worker/SQLite fixture. It holds requests before
+admission or responses after persistence, drops connections, and truncates
+response bodies. Browser Network cancellation evidence and server socket closure
+must identify the exact POST; the shared GET-only CDP guard is unchanged.
+
+Seven cases cover staged discard plus a late response, pre-admission cancellation
+and orphan expiry, revocation/session loss, channel isolation, uncertain upload
+and message outcomes, immutable retries/repeated submission, late accepted
+responses after logout, and the pinned browser's automatic POST replay. Orphan
+expiry advances the fixture clock; it is not a real 24-hour endurance test.
+
+The loopback proxy rewrites only the served API origin and maps local requests to
+the approved synthetic origin before invoking the Worker. It does not qualify
+production CORS/TLS, physical Android, real owner messages or live connector
+behavior. No message acceptance is fabricated. The initial seven-case run passed
+against e3f4c1a only with the previously disclosed capability/BLOB diagnostic
+adapters. Those adapters are absent from the committed harness. A clean run
+requires the formally corrected PR108 backend and remains a release hold.
