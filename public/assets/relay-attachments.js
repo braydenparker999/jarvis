@@ -3,12 +3,13 @@
 import {RELAY_ATTACHMENT_TYPES,attachmentFilename} from './relay-attachment-contract.js';
 export {RELAY_ATTACHMENT_TYPES};
 export function createAttachmentDraft({maxFiles=4,maxBytes=1024*1024,onChange=()=>{},preview=async()=>null,upload=null,enabled=()=>true,discard=null}={}){
-  let items=[],notice='',locked=false,messageId=crypto.randomUUID();const emit=()=>onChange(snapshot());
+  let items=[],notice='',locked=false,messageId=crypto.randomUUID(),selectionGeneration=0;const emit=()=>onChange(snapshot());
   const snapshot=()=>({items:items.map(({file,abort,...item})=>({...item})),notice,locked,messageId,available:typeof upload==='function'&&enabled()});
   function remove(id){if(locked)return;const item=items.find(item=>item.id===id);item?.abort?.abort();items=items.filter(item=>item.id!==id);emit();if(item?.attempted&&discard)Promise.resolve(discard(messageId,id)).catch(()=>{notice='File removed locally. Server cleanup is unconfirmed; unsent uploads expire after 24 hours.';emit();});}
   async function add(files){
-    if(locked)return;notice='';
+    if(locked)return;const generation=selectionGeneration,ownsSelection=()=>generation===selectionGeneration&&!locked;notice='';
     for(let file of files){
+      if(!ownsSelection())return;
       if(!file.type){const extension=file.name.split('.').at(-1)?.toLowerCase(),type={txt:'text/plain',md:'text/markdown',csv:'text/csv',json:'application/json',pdf:'application/pdf',png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',webp:'image/webp'}[extension];if(type)file=new File([file],file.name,{type,lastModified:file.lastModified});}
       if(!attachmentFilename(file.name)){notice='Choose a file with a simple name under 240 bytes, without path separators or control characters.';continue;}
       if(items.length>=maxFiles){notice=`Choose up to ${maxFiles} files.`;break;}
@@ -16,12 +17,13 @@ export function createAttachmentDraft({maxFiles=4,maxBytes=1024*1024,onChange=()
       if(!RELAY_ATTACHMENT_TYPES.includes(file.type)){notice=`${file.name}: choose PNG, JPEG, WebP, PDF, plain text, Markdown, CSV or JSON.`;continue;}
       if(items.some(item=>item.name===file.name&&item.size===file.size&&item.modified===file.lastModified)){notice='That file is already selected.';continue;}
       const item={id:crypto.randomUUID(),file,name:file.name,size:file.size,type:file.type,modified:file.lastModified,status:'selected',progress:0,error:'',preview:null,attachment:null};items.push(item);emit();
-      try{const value=await preview(file);if(items.includes(item)){item.preview=value;emit();}}catch{if(items.includes(item)){item.error='Preview unavailable. The selected file is unchanged.';emit();}}
+      try{const value=await preview(file);if(!ownsSelection())return;if(items.includes(item)){item.preview=value;emit();}}catch{if(!ownsSelection())return;if(items.includes(item)){item.error='Preview unavailable. The selected file is unchanged.';emit();}}
     }
     emit();
   }
   async function start(){
     if(!upload||!enabled()){notice='Sending attachments is not available yet. Files remain on this device.';emit();return false;}
+    selectionGeneration++;
     await Promise.all(items.filter(item=>!['uploading','ready'].includes(item.status)).map(async item=>{
       const abort=new AbortController();item.abort=abort;item.attempted=true;item.status='uploading';item.error='';item.progress=0;emit();
       try{
@@ -32,7 +34,7 @@ export function createAttachmentDraft({maxFiles=4,maxBytes=1024*1024,onChange=()
       }catch(error){if(items.includes(item)&&!abort.signal.aborted){item.status='error';item.error=error?.name==='OwnerApiError'?error.message:'Upload failed. Your file is still selected; retry or remove it.';emit();}}
     }));return items.length>0&&items.every(item=>item.status==='ready');
   }
-  return {snapshot,add,remove,start,lock(){locked=true;emit();},reject(message){locked=false;notice=message;for(const item of items){item.status='error';item.error=message;item.attachment=null;item.progress=0;}emit();},clear(){for(const item of items)item.abort?.abort();items=[];notice='';locked=false;messageId=crypto.randomUUID();emit();}};
+  return {snapshot,add,remove,start,cancelSelection(){selectionGeneration++;},lock(){selectionGeneration++;locked=true;emit();},reject(message){locked=false;notice=message;for(const item of items){item.status='error';item.error=message;item.attachment=null;item.progress=0;}emit();},clear(){selectionGeneration++;for(const item of items)item.abort?.abort();items=[];notice='';locked=false;messageId=crypto.randomUUID();emit();}};
 }
 
 export function createRelayAttachmentUI({getContext,openSheet,notify,controller,document:doc=document}={}){
@@ -60,7 +62,7 @@ export function createRelayAttachmentUI({getContext,openSheet,notify,controller,
     for(const item of state?.items||[]){const row=make('article','','relay-attachment-item');if(item.preview){const image=make('img');image.src=item.preview;image.alt='Preview of '+item.name;row.append(image);}const info=make('div');info.append(make('p',item.name,'relay-attachment-name'),make('p',`${Math.ceil(item.size/1024)} KB · ${item.status==='selected'?'Selected on this device':item.status==='ready'?'Uploaded, not sent':item.status==='uploading'?'Uploading':'Upload needs retry'}`,'request-meta'));if(item.status==='uploading'){const progress=make('progress');progress.max=100;if(item.progress)progress.value=item.progress;progress.setAttribute('aria-label','Uploading '+item.name);info.append(progress);}if(item.error)info.append(make('p',item.error,'relay-owner-error'));row.append(info,removeButton(item,draft));list.append(row);}
     if(focusedId){const region=insideDialog?dialog:doc.querySelector('.relay-attachment-summary');const next=[...region?.querySelectorAll('[data-attachment-id]')||[]].find(node=>node.dataset.attachmentId===focusedId)||region?.querySelector('button')||plus;next?.focus({preventScroll:true});}
   }
-  function sync(){const context=getContext();if(!context.ownerAuthorized)for(const [key,draft]of drafts)if(key.startsWith('owner:')){draft.clear();drafts.delete(key);}activeKey=context.ownerAuthorized&&context.key?.startsWith('owner:')?context.key:null;render();}
+  function sync(){const context=getContext();const nextKey=context.ownerAuthorized&&context.key?.startsWith('owner:')?context.key:null;if(nextKey!==activeKey)drafts.get(activeKey)?.cancelSelection();if(!context.ownerAuthorized)for(const [key,draft]of drafts)if(key.startsWith('owner:')){draft.clear();drafts.delete(key);}activeKey=context.ownerAuthorized&&context.key?.startsWith('owner:')?context.key:null;render();}
   function open(){sync();if(!activeKey){notify('Connect to private chat before selecting files.');return;}if(dialog?.isConnected)return;
     dialog=openSheet('Attachments',[]);dialog.classList.add('relay-attachment-sheet');dialog.setAttribute('aria-label','Attachments');trapRelayDialogFocus(dialog);
     const pickerKey=activeKey,pickerDraft=current();
