@@ -313,7 +313,13 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), draftS
         failedSend = null;
         await readMessages(epoch);
         await readJobs(epoch);
-      } catch (error) { if (epoch === generation) {state.sendUnconfirmed=!accepted&&!!failedSend;state.attachmentRetry=!accepted&&!failedSend&&!!item.attachmentDraft?.snapshot().items.length;failure(error);} }
+      } catch (error) { if (epoch === generation) {
+        // Only explicit pre-acceptance attachment rejection releases the send
+        // lock. Transport failures and conflicts retain the immutable attempt.
+        const rejected={attachment_expired:410,attachment_not_found:404,attachment_invalid:400,attachment_type_unsupported:415,attachment_too_large:413};
+        if(!accepted&&item.attachmentDraft&&error instanceof OwnerApiError&&Object.hasOwn(rejected,error.kind)&&rejected[error.kind]===error.status){failedSend=null;item.attachmentDraft.reject(error.message);}
+        state.sendUnconfirmed=!accepted&&!!failedSend;state.attachmentRetry=!accepted&&!failedSend&&!!item.attachmentDraft?.snapshot().items.length;failure(error);
+      } }
       finally { if (epoch === generation) { state.sending = false; emit(); } }
     },
     retryUnconfirmed(){if(failedSend)return controller.send({retryOriginal:true});},

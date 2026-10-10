@@ -213,7 +213,7 @@ export function createRelayOwnerApi({ fetcher = globalThis.fetch, origin = API_O
       const unauthenticated = (response.status === 401 && reported !== 'invalid_credentials') || (response.status === 403 && ['session_expired', 'session_revoked', 'invalid_session'].includes(reported));
       if (unauthenticated && token) clearCredential(token);
       const attachmentErrors=['attachment_too_large','attachment_type_unsupported','attachment_invalid','attachment_quota_exceeded','attachment_expired','attachment_not_found','attachment_already_linked','attachment_id_conflict','attachment_message_conflict'];
-      const kind = path.startsWith('/relay/owner/attachments')&&attachmentErrors.includes(reported)?reported:reported === 'invalid_credentials' ? 'login_failed'
+      const kind = (path.startsWith('/relay/owner/attachments')||path==='/relay/owner/messages')&&attachmentErrors.includes(reported)?reported:reported === 'invalid_credentials' ? 'login_failed'
         : response.status === 429 ? 'rate_limited'
         : reported === 'device_unavailable' ? 'device_unavailable'
         : reported === 'credential_conflict' ? 'credential_conflict'

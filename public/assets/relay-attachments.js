@@ -32,7 +32,7 @@ export function createAttachmentDraft({maxFiles=4,maxBytes=1024*1024,onChange=()
       }catch(error){if(items.includes(item)&&!abort.signal.aborted){item.status='error';item.error=error?.name==='OwnerApiError'?error.message:'Upload failed. Your file is still selected; retry or remove it.';emit();}}
     }));return items.length>0&&items.every(item=>item.status==='ready');
   }
-  return {snapshot,add,remove,start,lock(){locked=true;emit();},clear(){for(const item of items)item.abort?.abort();items=[];notice='';locked=false;messageId=crypto.randomUUID();emit();}};
+  return {snapshot,add,remove,start,lock(){locked=true;emit();},reject(message){locked=false;notice=message;for(const item of items){item.status='error';item.error=message;item.attachment=null;item.progress=0;}emit();},clear(){for(const item of items)item.abort?.abort();items=[];notice='';locked=false;messageId=crypto.randomUUID();emit();}};
 }
 
 export function createRelayAttachmentUI({getContext,openSheet,notify,controller,document:doc=document}={}){
