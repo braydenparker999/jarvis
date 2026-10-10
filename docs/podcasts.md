@@ -1,6 +1,6 @@
 # Podcasts
 
-`/podcasts/` uses the Jarvis module theme and native JavaScript. Discovery and show search race the existing Worker's directory against Apple's documented client JSONP search. The Worker also tries Apple's alternate endpoint and the independent gpodder directory when a host rejects server traffic. This keeps a blocked server region from preventing discovery on the listener's network. Region selection applies to Apple results; gpodder's fallback is global. Episode lists and audio use publishers’ RSS feeds. RSS URLs can also be added directly. Category shelves are topic searches, not claimed popularity rankings. No API key, account, paid service, new binding, or media upload is needed. The module CSP permits scripts from Apple only in addition to local code; returned metadata is escaped.
+`/podcasts/` uses the Jarvis module theme and native JavaScript. Discovery and show search race the existing Worker's directory against Apple's client JSON search. The Worker also tries Apple's alternate endpoint and the independent gpodder directory when a host rejects server traffic. This keeps a blocked server region from preventing discovery on the listener's network. Region selection applies to Apple results; gpodder's fallback is global. Episode lists and audio use publishers’ RSS feeds. RSS URLs can also be added directly. Category shelves are topic searches, not claimed popularity rankings. No API key, account, paid service, new binding, or media upload is needed. Provider responses are parsed as bounded JSON data, never executed as scripts. The module CSP allows only local scripts and fonts; returned metadata is escaped.
 
 The existing Worker exposes `/podcasts/health`, `/podcasts/browse`, `/podcasts/search`, `/podcasts/feed`, and `/podcasts/audio`. The audio route resolves an episode ID from an actual feed, validates every public URL and redirect, forwards single byte ranges, and streams the original enclosure without re-encoding. Feed reads and timeouts are bounded; large archives retain complete items within a 4 MiB prefix. Episode metadata loads in pages of 40, up to the first 200 feed items. Searching and sorting apply to the episodes already loaded. Audio resolution extracts only the requested episode's notes. DTDs and external entities are rejected. Directory results are cached for 30 minutes and feeds for 10 minutes in a bounded 12-entry per-isolate cache. The existing CORS origin gate applies.
 
@@ -19,3 +19,27 @@ Each directory attempt has its own 5.5-second deadline. Empty index responses do
 Playback uses downloaded bytes first, then the Worker, then the publisher's original enclosure if needed. A source switch preserves the requested resume position. Failed or cancelled playback leaves queued episodes in place; they leave the queue once audio starts. Startup feedback is also visible in the mini-player. Downloads can use the original enclosure when the publisher allows CORS. The podcast document allows HTTPS media and connections for those publisher routes while retaining the existing script and style restrictions.
 
 The 1.1 interface uses two-column mobile covers with a featured result, flat topic tabs, full-width episode titles with separate transport controls, Play latest, a floating mini-player, and styled seek tracks. The new shell cache preserves existing audio downloads. The live release gate now verifies The Daily and The Diary of a CEO in addition to general discovery and playback, covering the previously failing publisher chains.
+
+## Content browsing release 1.2
+
+The podcast-only dark/blue interface uses a bundled OFL Manrope subset, compact search results, visible show authors, topic URLs, and a shorter show header. Show descriptions and publisher links live together under About this show. Playback, follows, queue editing, original-audio links, played status, feed paging, directory region selection, speed, and custom/end-of-episode sleep timers remain available.
+
+Six recent searches are saved on the device and can be cleared from Discover. Show Back returns to the search, topic, or library that opened it. In-session scroll, episode filters, and sorting survive navigation. Browser Back dismisses the current sheet before leaving a show; nested player menus dismiss one layer at a time. Escape and explicit Close preserve native focus restoration. Reload does not resurrect a modal.
+
+Each episode has a direct download action with downloading/cancel and downloaded/manage labels. Removing a download immediately clears its saved label. Repeated download requests stay idempotent. Saved feed snapshots remain explicitly marked across repeated visits; the offline banner updates on connectivity events. The compact player has a separate 48px seek target, elapsed time, and direct sleep timer access. Episode notes in the expanded player are collapsible.
+
+The 1.2 branch is based on `06d1f26a1da1b2154b7a54bf113bcd781b7064b2`, and first carries the existing data-only directory commit `2007d661af7f7f171d674e8b910b5d4234b9a571` from main. This is a scoped backport, not a merge of main. Its only backend change is that existing directory normalization fix. The podcast route's CSP drops Apple script permission and adds same-origin fonts. Shell cache v4 retains the audio and artwork cache namespaces and all listening state keys.
+
+### Verification
+
+```sh
+JARVIS_CHROME=/usr/bin/chromium node --test tests/podcasts.test.js tests/podcast-directory-contract.test.js tests/podcasts-browser.test.js
+node scripts/verify-podcasts.mjs
+JARVIS_CHROME=/usr/bin/chromium JARVIS_SCREENSHOT_DIR=/tmp/podcast-review node scripts/verify-podcast-ui.mjs
+```
+
+`verify-podcast-ui.mjs` serves this checkout's frontend files through Playwright interception at the existing deployment origin, then reads actual directory, RSS and publisher audio. It does not upload or deploy files. This preserves the real Worker's CORS contract. It accepts `HTTPS_PROXY` for restricted execution environments; certificate verification is relaxed only in that isolated proxied test browser. Its service worker is blocked so it cannot replace a deployed shell. Offline behavior is covered separately by the local browser suite with a real generated WAV and actual Cache Storage/service worker.
+
+Optionally set `JARVIS_AXE` to a local axe-core script for WCAG 2 A/AA and 2.1 AA checks on discovery, search, show, expanded player and mini-player. No axe dependency ships in production. Screenshots from the deterministic suite are fixtures; screenshots from this read-only candidate check contain real provider results.
+
+Physical Android background/lock-screen playback, OS storage eviction and post-deployment cache propagation still require release-lead/device verification. Timers continue to use wall-clock deadlines and remain subject to browser suspension.

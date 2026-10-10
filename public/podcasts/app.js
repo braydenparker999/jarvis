@@ -25,7 +25,26 @@ document.addEventListener('error',e=>{if(e.target instanceof HTMLImageElement &&
 let state = readState(localStorage), view = 'discover', category = 'popular', feedData = null, renderToken = 0, requestController, lastSaved = 0;
 let current = state.current, currentBlob, loadToken = 0, loadedKey = '', timer = null, toastTimer, seeking = false, wantPlay = false;
 let sourceLoading=false, sourceURLs=[], sourceIndex=0, pendingPosition=0;
-const directoryCache=new Map();
+const directoryCache=new Map(), routeViews=new Map();
+let activeRoute=location.hash || '#discover', paintEpisodes=null;
+if ('scrollRestoration' in history) history.scrollRestoration='manual';
+const regions={us:'United States',ar:'Argentina',gb:'United Kingdom',es:'Spain'};
+function rememberView() {
+  routeViews.set(activeRoute,{scroll:scrollY,query:$('episode-query')?.value || '',sort:$('episode-sort')?.value || 'newest',count:Number($('episodes')?.dataset.visibleCount)||40});
+  if(routeViews.size>40)routeViews.delete(routeViews.keys().next().value);
+}
+function restoreView(token) {requestAnimationFrame(()=>{if(token===renderToken)window.scrollTo({top:routeViews.get(activeRoute)?.scroll || 0,behavior:'instant'});});}
+function searchHistory() {
+  const recent=Array.isArray(state.recentSearches)?state.recentSearches:[];
+  $('search-history').innerHTML=view==='discover'&&recent.length?'<div class="recent-searches"><span>Recent searches</span><button id="clear-history">Clear history</button><div>'+recent.map(q=>`<button data-search="${esc(q)}">${icon('search')}${esc(q)}</button>`).join('')+'</div></div>':'';
+  $('clear-history')?.addEventListener('click',()=>{state.recentSearches=[];commit();searchHistory();});
+}
+function submitSearch(q) {
+  q=q.trim();if(q.length<2){notify('Enter at least two characters to search.');$('query').focus();return;}
+  state.recentSearches=[q,...(state.recentSearches || []).filter(value=>value!==q)].slice(0,6);commit();setRoute('#search='+encodeURIComponent(q));
+}
+function connectionStatus() {$('offline-status').hidden=navigator.onLine;}
+
 const audio = $('audio'), downloads = new Map(), feeds = new Map();
 const episodeRefs = new Map(), showRefs = new Map();
 const commit = () => {state.progress=compactProgress(state.progress);try{localStorage.setItem(STORAGE_KEY,JSON.stringify(state));return true;}catch{notify('Could not save listening data. Device storage may be full.');return false;}};
@@ -36,20 +55,46 @@ function playbackStatus(message='',error=false) {
   $('mini-show').textContent=message || current?.show.title || '';
   $('mini-player').classList.toggle('has-error',error);$('mini-player').setAttribute('aria-busy',String(!!message&&!error));
 }
-function closeSheet() { $('sheet').close(); }
+// Dialogs occupy same-URL history entries: Android/browser Back dismisses one
+// layer before leaving the show. Actions wait for that traversal before routing.
+let dialogStack=[], closingDialog=null;
+history.replaceState({...history.state,podcastDialogs:[]},'');
+function openDialog(d) {
+  if(d.open)return;
+  dialogStack.push(d.id);history.pushState({...history.state,podcastDialogs:[...dialogStack]},'');d.showModal();
+}
+function closeDialog(d) {
+  if(closingDialog)return closingDialog.promise;
+  if(!d.open)return Promise.resolve();
+  let resolve;const promise=new Promise(done=>resolve=done);closingDialog={promise,resolve};
+  history.back();return promise;
+}
+function closeSheet() { return closeDialog($('sheet')); }
+function onHistory() {
+  const route=location.hash || '#discover',target=route===activeRoute?(history.state?.podcastDialogs || []):[];
+  while(dialogStack.length>target.length || (dialogStack.length && dialogStack.some((id,i)=>target[i]!==id)))$(dialogStack.pop()).close();
+  // Forward must not resurrect an old menu with actions for a different episode.
+  if(target.length>dialogStack.length)history.replaceState({...history.state,podcastDialogs:[...dialogStack]},'');
+  const pending=closingDialog;closingDialog=null;
+  if(route!==activeRoute){rememberView();renderRoute();}
+  pending?.resolve();
+}
+
 function sheet(title,actions) {
   const d=$('sheet');d.innerHTML=`<div class="dialog-heading"><h2 id="sheet-heading">${esc(title)}</h2><button class="close" aria-label="Close menu">×</button></div>${actions.map((a,i)=>`<button class="sheet-action" data-action="${i}">${icon(a.icon || 'podcast')}<span>${esc(a.label)}</span></button>`).join('')}`;
   d.querySelector('.close').onclick=closeSheet;
-  d.querySelectorAll('[data-action]').forEach(b=>b.onclick=()=>{closeSheet();Promise.resolve(actions[Number(b.dataset.action)].action()).catch(e=>notify(e.message || 'Please try again.'));});
-  if(!d.open)d.showModal();
+  d.querySelectorAll('[data-action]').forEach(b=>b.onclick=async()=>{if(b.disabled)return;b.disabled=true;await closeSheet();try{await actions[Number(b.dataset.action)].action();}catch(e){notify(e.message || 'Please try again.');}});
+  openDialog(d);
 }
 function formSheet(title,html,submit) {
   const d=$('sheet');d.innerHTML=`<div class="dialog-heading"><h2 id="sheet-heading">${esc(title)}</h2><button class="close" aria-label="Close menu">×</button></div><form class="sheet-form">${html}<button class="primary" type="submit">Save</button><p class="status" role="status" id="form-status"></p></form>`;
   d.querySelector('.close').onclick=closeSheet;
-  d.querySelector('form').onsubmit=async e=>{e.preventDefault();try{await submit(new FormData(e.target));}catch(err){$('form-status').textContent=err.message;}};
-  if(!d.open)d.showModal();d.querySelector('input,select')?.focus();
+  d.querySelector('form').onsubmit=async e=>{e.preventDefault();const form=e.target,button=form.querySelector('[type=submit]');if(button.disabled)return;button.disabled=true;try{await submit(new FormData(form));}catch(err){form.querySelector('#form-status').textContent=err.message;}finally{button.disabled=false;}};
+  openDialog(d);d.querySelector('input,select')?.focus();
 }
-for(const d of [$('sheet'),$('player')])d.addEventListener('click',e=>{if(e.target===d){const r=d.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)d.close();}});
+for(const d of [$('sheet'),$('player')])d.addEventListener('click',e=>{if(e.target===d){const r=d.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)closeDialog(d);}});
+
+for(const d of [$('sheet'),$('player')])d.addEventListener('cancel',e=>{e.preventDefault();closeDialog(d);});
 
 async function api(path,params={},signal) {
   const url=new URL('/podcasts/'+path,API_ORIGIN);for(const [k,v] of Object.entries(params))url.searchParams.set(k,v);
@@ -73,65 +118,78 @@ async function searchDirectory(path,params,signal) {
   finally{controller.abort();}
 }
 async function feed(url,{refresh=false,signal}={}) {
-  if(!refresh && feeds.has(url))return feeds.get(url);
+  if(!refresh && feeds.has(url))return navigator.onLine?feeds.get(url):{...feeds.get(url),stale:true};
   try { const data=await api('feed',{url},signal);feeds.set(url,data);saveFeed(data).catch(()=>{});return data; }
-  catch(e) { if(e.name==='AbortError')throw e;const cached=await storedFeed(url).catch(()=>null);if(cached){feeds.set(url,cached);return {...cached,stale:true};}throw e; }
+  catch(e) { if(e.name==='AbortError')throw e;const cached=await storedFeed(url).catch(()=>null);if(cached){const snapshot={...cached,stale:true};feeds.set(url,snapshot);return snapshot;}throw e; }
 }
 const normalizedShow = show => ({...show,feedUrl:safeURL(show.feedUrl),artwork:safeURL(show.artwork)});
 const episode = (e,show) => ({...e,show:normalizedShow(show)});
 const date = value => value ? new Date(value).toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'}) : '';
 function showTiles(shows,{featured=false}={}) {
-  return `<div class="show-grid">${shows.map((s,i)=>{showRefs.set(s.feedUrl,s);const feature=featured&&i===0;return `<button class="show-tile${feature?' featured-tile':''}" data-feed="${esc(s.feedUrl)}">${art(s.artwork,'artwork',i<2)}<span class="tile-copy">${feature?`<span class="feature-label">${view==='search'?'Top result':categories.find(c=>c[0]===category)?.[1] || 'Explore'}</span>`:''}<strong>${esc(s.title)}</strong><small>${esc(s.author || s.genres?.[0] || 'Podcast')}</small>${feature?'<span class="feature-action">View episodes</span>':''}</span></button>`;}).join('')}</div>`;
+  return `<div class="show-grid${view==='search'?' search-results':''}">${shows.map((s,i)=>{showRefs.set(s.feedUrl,s);const feature=featured&&view!=='search'&&i===0;return `<button class="show-tile${feature?' featured-tile':''}" data-feed="${esc(s.feedUrl)}">${art(s.artwork,'artwork',i<2)}<span class="tile-copy">${feature?`<span class="feature-label">${view==='search'?'Top result':categories.find(c=>c[0]===category)?.[1] || 'Explore'}</span>`:''}<strong>${esc(s.title)}</strong><small>${esc(s.author || s.genres?.[0] || 'Podcast')}</small>${state.follows.some(f=>f.feedUrl===s.feedUrl)?'<span class="followed-label">Following</span>':''}${feature?'<span class="feature-action">View episodes</span>':''}</span></button>`;}).join('')}</div>`;
 }
 function rows(list,{thumbs=false,queue=false}={}) {
   return `<div class="episode-list">${list.map(e=>{
     const key=keyOf(e), p=state.progress[key], stored=state.downloads[key];episodeRefs.set(key,e);
     const detail=[thumbs?e.show.title:date(e.publishedAt),minutes(e.duration),p?.played?'Played':p?.position>0?'Resume '+clock(p.position):'',stored?'Downloaded':'',downloads.has(key)?'Downloading…':''].filter(Boolean).join(' · ');
     const playing=current && keyOf(current)===key && !audio.paused;
-    return `<article class="episode-row${thumbs?' with-thumb':''}${current && keyOf(current)===key?' playing':''}${p?.played?' played':''}" data-episode="${esc(key)}">${thumbs?art(e.artwork || e.show.artwork,'episode-thumb'):''}<div class="episode-body"><button class="episode-copy" data-details="${esc(key)}"><small>${esc(detail)}</small><strong>${esc(e.title)}</strong>${!thumbs&&e.description?`<span class="episode-description">${esc(e.description.slice(0,350))}</span>`:''}</button><div class="episode-actions"><button class="episode-play" data-play="${esc(key)}" aria-label="Play ${esc(e.title)}">${icon(playing?'pause':'play')}<span class="play-label">${playing?'Pause':p?.position>0&&!p.played?'Resume':'Play'}</span></button>${p?.position>0&&!p.played?`<progress class="episode-progress" aria-label="Listening progress" value="${Math.max(0,p.position)}" max="${Math.max(p.position,p.duration||e.duration||1)}"></progress>`:''}<button class="icon-button" data-options="${esc(key)}" aria-label="Options for ${esc(e.title)}">${icon('more')}</button></div></div></article>`;
+    return `<article class="episode-row${thumbs?' with-thumb':''}${current && keyOf(current)===key?' playing':''}${p?.played?' played':''}" data-episode="${esc(key)}">${thumbs?art(e.artwork || e.show.artwork,'episode-thumb'):''}<div class="episode-body"><button class="episode-copy" data-details="${esc(key)}"><small>${esc(detail)}</small><strong>${esc(e.title)}</strong>${!thumbs&&e.description?`<span class="episode-description">${esc(e.description.slice(0,350))}</span>`:''}</button><div class="episode-actions"><button class="episode-play" data-play="${esc(key)}" aria-label="Play ${esc(e.title)}">${icon(playing?'pause':'play')}<span class="play-label">${playing?'Pause':p?.position>0&&!p.played?'Resume':'Play'}</span></button>${p?.position>0&&!p.played?`<progress class="episode-progress" aria-label="Listening progress" value="${Math.max(0,p.position)}" max="${Math.max(p.position,p.duration||e.duration||1)}"></progress>`:''}<button class="icon-button episode-download${stored?' is-saved':''}" data-download="${esc(key)}" aria-label="${downloads.has(key)?'Cancel download':stored?'Manage download':'Download'} ${esc(e.title)}">${icon(stored?'check':'download')}</button><button class="icon-button" data-options="${esc(key)}" aria-label="Options for ${esc(e.title)}">${icon('more')}</button></div></div></article>`;
   }).join('')}</div>`;
 }
 const empty = (title,body) => `<div class="empty-state"><h2>${esc(title)}</h2><p>${esc(body)}</p></div>`;
 function setNav() { const selected=view==='search'?'discover':view==='show'?(state.follows.some(s=>s.feedUrl===feedData?.show.feedUrl)?'library':'discover'):view;document.querySelectorAll('[data-view]').forEach(a=>{if(a.dataset.view===selected)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current');}); }
-function setRoute(hash) { if(location.hash===hash)renderRoute();else location.hash=hash; }
+function setRoute(hash) {
+  rememberView();
+  if(location.hash!==hash)history.pushState(hash.startsWith('#show=')?{podcastReturn:activeRoute}:{},'',hash);
+  renderRoute();
+}
 const skeleton = () => '<div class="show-grid loading-grid" aria-hidden="true">'+Array.from({length:6},()=>'<div class="skeleton-tile"><div></div><span></span><span></span></div>').join('')+'</div>';
 async function renderRoute() {
   requestController?.abort();requestController=new AbortController();const token=++renderToken;const signal=requestController.signal;
+  activeRoute=location.hash || '#discover';paintEpisodes=null;
   const params=new URLSearchParams(location.hash.slice(1)), raw=location.hash.slice(1), showURL=params.get('show'), query=params.get('search');
+  category=categories.some(c=>c[0]===params.get('category'))?params.get('category'):'popular';
   view=showURL?'show':query!==null?'search':['library','downloads','queue'].includes(raw)?raw:'discover';
   $('heading').textContent=({discover:'Discover',search:'Search',show:'Episodes',library:'Your library',downloads:'Downloads',queue:'Up next'})[view];
-  $('search-form').hidden=!['discover','search'].includes(view);$('query').value=query || '';status();setNav();
+  document.body.classList.toggle('show-view',view==='show');
+  $('view-description').textContent=({discover:'A good story is just a search away.',search:'Find a show, a familiar voice, or something new.',library:'Your shows and unfinished stories, all together.',downloads:'Saved on this device. Ready when you’re offline.',queue:'A little planning. A lot of good listening.'})[view] || '';
+  $('view-description').hidden=view==='show';
+  $('search-form').hidden=!['discover','search'].includes(view);$('query').value=query || '';$('clear-search').hidden=!query;status();setNav();connectionStatus();searchHistory();
   const root=$('results');root.innerHTML='';root.setAttribute('aria-busy','true');
   try {
     if(view==='discover' || view==='search') {
       const topics=view==='discover'?`<div class="browse-topics" aria-label="Browse topics">${categories.map(([id,name])=>`<button data-category="${id}" aria-pressed="${category===id}">${name}</button>`).join('')}</div>`:'';
+      if(view==='search' && (query.trim().length<2 || query.length>120)){root.innerHTML=empty('What would you like to hear?','Enter 2–120 characters: a show, host, or topic.');return;}
       root.innerHTML=topics+skeleton();status('Finding shows…');
       const result=await searchDirectory(view==='search'?'search':'browse',view==='search'?{q:query,country:state.country}:{category,country:state.country},signal);
-      if(token!==renderToken)return;status();root.innerHTML=topics+(result.shows.length?`<div class="section-title result-heading"><h2>${view==='search'?esc(query):'Explore shows'}</h2><span>${result.shows.length} shows</span></div>`+showTiles(result.shows,{featured:true}):empty('No shows found','Try a show title, host, or a broader topic. You can also add an RSS feed with the + button.'));return;
+      if(token!==renderToken)return;status();root.innerHTML=topics+(result.shows.length?`<div class="section-title result-heading"><h2>${view==='search'?'Results for “'+esc(query)+'”':category==='popular'?'Explore shows':esc(categories.find(c=>c[0]===category)?.[1])+' shows'}</h2><span>${result.shows.length} shows</span></div>`+(view==='discover'?`<p class="directory-caption">Browse by topic · ${esc(regions[state.country] || state.country)} directory</p>`:'')+showTiles(result.shows,{featured:true}):empty('No shows found','Try a show title, host, or a broader topic. You can also add an RSS feed with the + button.'));restoreView(token);return;
     }
     if(view==='show') {
-      window.scrollTo({top:0});status('Opening the podcast…');root.innerHTML='<div class="show-loading" aria-hidden="true"><div></div><span></span><span></span></div>';feedData=await feed(showURL,{signal});if(token!==renderToken)return;
+      window.scrollTo({top:0});status('Opening the podcast…');root.innerHTML='<div class="show-loading" aria-hidden="true"><div></div><span></span><span></span></div>';const data=await feed(showURL,{signal});if(token!==renderToken)return;feedData=data;
       const directory=showRefs.get(showURL) || state.follows.find(s=>s.feedUrl===showURL);feedData.show={...directory,...feedData.show};
-      status(feedData.stale?'Showing saved episodes. Refresh when you’re online.':'');renderShow();setNav();return;
+      status(feedData.stale?'Showing saved episodes. Refresh when you’re online.':'');renderShow();setNav();restoreView(token);return;
     }
-    renderLocal();
-  } catch(e) {if(token!==renderToken || e.name==='AbortError')return;status(e.message,true);root.innerHTML=empty('Couldn’t load podcasts',navigator.onLine?'Try again, or open one of your downloaded episodes.':'You’re offline. Your downloaded episodes are ready in Downloads.')+'<button class="secondary" data-retry>Try again</button>';}
+    renderLocal();restoreView(token);
+  } catch(e) {if(token!==renderToken || e.name==='AbortError')return;status(e.message,true);root.innerHTML=empty('Couldn’t load podcasts',navigator.onLine?'Try again, or open one of your downloaded episodes.':'You’re offline. Your downloaded episodes are ready in Downloads.')+'<div class="recovery-actions"><button class="primary" data-retry>Try again</button><a href="#downloads" class="secondary">Open downloads</a></div>';}
   finally {if(token===renderToken)root.setAttribute('aria-busy','false');}
 }
 function renderShow() {
   const {show,episodes}=feedData;const followed=state.follows.some(s=>s.feedUrl===show.feedUrl);
   if(episodes[0])episodeRefs.set(keyOf(episode(episodes[0],show)),episode(episodes[0],show));
-  $('results').innerHTML=`<button class="show-back" id="show-back">${icon('back')}Back to browsing</button><section class="show-header">${art(show.artwork,'artwork',true)}<div><h2>${esc(show.title)}</h2><p>${esc(show.author)}</p><div class="show-actions">${episodes[0]?`<button class="primary" data-play="${esc(keyOf(episode(episodes[0],show)))}" aria-label="Play latest episode">${icon('play')}<span>Play latest</span></button>`:''}<button id="follow-show" class="secondary" aria-pressed="${followed}">${icon(followed?'check':'plus')}<span>${followed?'Following':'Follow show'}</span></button></div></div></section>${show.description?`<details class="show-description"><summary>About this show</summary>${esc(show.description)}</details>`:''}<div class="show-links">${safeURL(show.directoryUrl)?`<a href="${esc(show.directoryUrl)}" target="_blank" rel="noopener">Apple Podcasts</a>`:''}${safeURL(show.website)?`<a href="${esc(show.website)}" target="_blank" rel="noopener">Show website</a>`:''}</div><div class="section-title"><h2>Episodes</h2><span id="episode-count">${episodes.length}${feedData.nextOffset!=null?'+':''}</span></div><div class="episode-filter"><label class="sr-only" for="episode-query">Search this show’s episodes</label><input id="episode-query" type="search" placeholder="Search episodes"><label class="sr-only" for="episode-sort">Episode order</label><select id="episode-sort"><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="unplayed">Unplayed</option></select></div><div id="episodes"></div><button id="more-episodes" class="secondary" hidden>Show more episodes</button>`;
-  $('show-back').onclick=()=>setRoute('#discover');$('follow-show').onclick=()=>{toggleFollow(show);const active=state.follows.some(s=>s.feedUrl===show.feedUrl);$('follow-show').innerHTML=icon(active?'check':'plus')+'<span>'+(active?'Following':'Follow show')+'</span>';$('follow-show').setAttribute('aria-pressed',String(active));};
-  let count=40;
+  $('results').innerHTML=`<button class="show-back" id="show-back">${icon('back')}Back to browsing</button><section class="show-header">${art(show.artwork,'artwork',true)}<div class="show-copy"><h1>${esc(show.title)}</h1><p>${esc(show.author)}</p></div><div class="show-actions">${episodes[0]?`<button class="primary" data-play="${esc(keyOf(episode(episodes[0],show)))}" aria-label="Play latest episode">${icon('play')}<span>Play latest</span></button>`:''}<button id="follow-show" class="secondary" aria-pressed="${followed}">${icon(followed?'check':'plus')}<span>${followed?'Following':'Follow show'}</span></button></div></section><details class="show-description"><summary>About this show</summary>${esc(show.description || 'No show description provided.')}<div class="show-links">${safeURL(show.directoryUrl)?`<a href="${esc(show.directoryUrl)}" target="_blank" rel="noopener">Apple Podcasts</a>`:''}${safeURL(show.website)?`<a href="${esc(show.website)}" target="_blank" rel="noopener">Show website</a>`:''}</div></details><div class="section-title"><h2>Episodes</h2><span id="episode-count">${episodes.length}${feedData.nextOffset!=null?'+':''}</span></div><div class="episode-filter"><label class="sr-only" for="episode-query">Search this show’s episodes</label><input id="episode-query" type="search" placeholder="Search episodes"><label class="sr-only" for="episode-sort">Episode order</label><select id="episode-sort"><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="unplayed">Unplayed</option></select></div><p class="episode-scope">Search and sort apply to the episodes loaded below.</p><div id="episodes"></div><button id="more-episodes" class="secondary" hidden>Show more episodes</button>`;
+  $('show-back').textContent=history.state?.podcastReturn?.startsWith('#search=')?'← Back to search':history.state?.podcastReturn==='#library'?'← Back to library':'← Back to browsing';
+  $('show-back').onclick=()=>{if(history.state?.podcastReturn)history.back();else setRoute('#discover');};$('follow-show').onclick=()=>{toggleFollow(show);const active=state.follows.some(s=>s.feedUrl===show.feedUrl);$('follow-show').innerHTML=icon(active?'check':'plus')+'<span>'+(active?'Following':'Follow show')+'</span>';$('follow-show').setAttribute('aria-pressed',String(active));};
+  const savedView=routeViews.get(activeRoute);$('episode-query').value=savedView?.query || '';$('episode-sort').value=savedView?.sort || 'newest';
+  let count=savedView?.count || 40;
   const paint=()=>{let list=episodes.map(e=>episode(e,show)).filter(e=>(e.title+' '+e.description).toLowerCase().includes($('episode-query').value.toLowerCase()));
     const sort=$('episode-sort').value;if(sort==='unplayed')list=list.filter(e=>!state.progress[keyOf(e)]?.played);
     list.sort((a,b)=>(Date.parse(b.publishedAt)||0)-(Date.parse(a.publishedAt)||0));if(sort==='oldest')list.reverse();
-    $('episodes').innerHTML=list.length?rows(list.slice(0,count)):empty('No episodes here',episodes.length?'Try another filter.':'The publisher’s feed has no playable audio episodes.');$('more-episodes').hidden=list.length<=count&&feedData.nextOffset==null;};
+    $('episodes').dataset.visibleCount=String(count);$('episodes').innerHTML=list.length?rows(list.slice(0,count)):empty('No matching episodes',episodes.length?'Try another filter or load more episodes below.':'The publisher’s feed has no playable audio episodes.');$('more-episodes').hidden=list.length<=count&&feedData.nextOffset==null;};
   $('episode-query').oninput=()=>{count=40;paint();};$('episode-sort').onchange=()=>{count=40;paint();};
   $('more-episodes').onclick=async()=>{const button=$('more-episodes'),token=renderToken;
-    if(feedData.nextOffset!=null){button.disabled=true;button.textContent='Loading more episodes…';try{const page=await api('feed',{url:show.feedUrl,offset:feedData.nextOffset});if(token!==renderToken)return;const ids=new Set(episodes.map(e=>e.id));episodes.push(...page.episodes.filter(e=>!ids.has(e.id)));feedData.nextOffset=page.nextOffset;feeds.set(show.feedUrl,feedData);saveFeed(feedData).catch(()=>{});$('episode-count').textContent=episodes.length+(feedData.nextOffset!=null?'+':'');}catch(e){notify(e.message);}finally{if(token===renderToken){button.disabled=false;button.textContent='Show more episodes';}}}
-    if(token!==renderToken)return;count+=40;paint();};paint();
+    if(button.disabled)return;
+    if(feedData.nextOffset!=null){button.disabled=true;button.textContent='Loading more episodes…';try{const page=await api('feed',{url:show.feedUrl,offset:feedData.nextOffset},requestController.signal);if(token!==renderToken)return;const ids=new Set(episodes.map(e=>e.id));episodes.push(...page.episodes.filter(e=>!ids.has(e.id)));feedData.nextOffset=page.nextOffset;feeds.set(show.feedUrl,feedData);saveFeed(feedData).catch(()=>{});$('episode-count').textContent=episodes.length+(feedData.nextOffset!=null?'+':'');}catch(e){if(token===renderToken && e.name!=='AbortError')notify(e.message);}finally{if(token===renderToken){button.disabled=false;button.textContent='Show more episodes';}}}
+    if(token!==renderToken)return;count+=40;paint();};paintEpisodes=paint;paint();setPlayIcons();
 }
 function renderLocal() {
   const root=$('results');
@@ -142,7 +200,7 @@ function renderLocal() {
     $('latest-episodes')?.addEventListener('click',loadLatest);
   } else if(view==='downloads') {
     const records=Object.values(state.downloads).sort((a,b)=>b.downloadedAt-a.downloadedAt), pending=[...downloads.values()].map(d=>d.episode);
-    root.innerHTML=`<p class="download-meta">${records.length} episodes · ${size(records.reduce((n,d)=>n+d.bytes,0))} on this device</p>`+(pending.length?rows(pending,{thumbs:true}):'')+(records.length?rows(records.map(d=>d.episode),{thumbs:true}):pending.length?'':empty('Take an episode with you','Open an episode’s menu and choose Download. Finished downloads play here without internet, including seeking.'));
+    root.innerHTML=`<p class="download-meta">${records.length} episodes · ${size(records.reduce((n,d)=>n+d.bytes,0))} on this device</p>`+(pending.length?rows(pending,{thumbs:true}):'')+(records.length?rows(records.map(d=>d.episode),{thumbs:true}):pending.length?'':empty('Take an episode with you','Use the download arrow beside an episode. Finished downloads play here without internet, including seeking.'));
   } else {
     root.innerHTML=(state.queue.length?`<p class="download-meta">${state.queue.length} episodes · ${state.autoplay?'Plays automatically':'Autoplay off'}</p>${rows(state.queue,{thumbs:true,queue:true})}`:empty('Your next listen','Add episodes to the queue from their menu. They play in order when the current episode finishes.'));
   }
@@ -152,7 +210,7 @@ async function loadLatest(e) {
   // Sequential feeds avoid a large fan-out on mobile and the free Worker.
   for(const show of state.follows.slice(0,20)) {
     if(token!==renderToken)return;
-    try{const data=await feed(show.feedUrl);list.push(...data.episodes.slice(0,3).map(ep=>episode(ep,{...show,...data.show})));}catch{failed++;}
+    try{const data=await feed(show.feedUrl,{signal:requestController.signal});list.push(...data.episodes.slice(0,3).map(ep=>episode(ep,{...show,...data.show})));}catch{failed++;}
   }
   if(token!==renderToken)return;list.sort((a,b)=>(Date.parse(b.publishedAt)||0)-(Date.parse(a.publishedAt)||0));
   $('latest-results').innerHTML=rows(list.slice(0,40),{thumbs:true});b.disabled=false;b.textContent='Refresh latest episodes';if(failed)notify(failed+' shows could not refresh.');
@@ -166,31 +224,41 @@ function episodeMenu(e) {
     {label:downloading?'Cancel download':downloaded?'Remove download':'Download for offline listening',icon:downloaded?'trash':'download',action:()=>downloading?downloads.get(key).controller.abort():downloaded?removeDownload(e):downloadEpisode(e)},
     {label:state.progress[key]?.played?'Mark unplayed':'Mark played',icon:'check',action:()=>{const played=!state.progress[key]?.played;state.progress[key]=progressEntry(e,0,e.duration,played);commit();notify(played?'Marked played':'Marked unplayed');repaintLocal();}}];
   if(view==='queue' && queued)actions.push({label:'Move to top of queue',icon:'up',action:()=>{state.queue=[e,...nextQueued(state.queue,e)];commit();renderLocal();}});
-  if(view!=='show')actions.push({label:'Open show',icon:'podcast',action:()=>{showRefs.set(e.show.feedUrl,e.show);setRoute('#show='+encodeURIComponent(e.show.feedUrl));}});
+  if(view!=='show')actions.push({label:'Open show',icon:'podcast',action:async()=>{showRefs.set(e.show.feedUrl,e.show);if($('player').open)await closeDialog($('player'));setRoute('#show='+encodeURIComponent(e.show.feedUrl));}});
   if(safeURL(e.audioUrl))actions.push({label:'Open original audio',icon:'link',action:()=>window.open(safeURL(e.audioUrl),'_blank','noopener')});
   sheet(e.title,actions);
 }
-function repaintLocal() {if(['library','downloads','queue'].includes(view))renderLocal();else if(view==='show')document.querySelectorAll('[data-episode]').forEach(row=>{const key=row.dataset.episode;row.classList.toggle('played',!!state.progress[key]?.played);const small=row.querySelector('small');if(state.downloads[key]&&!small.textContent.includes('Downloaded'))small.textContent+=' · Downloaded';});}
-function episodeDetails(e) {current===e?openPlayer():formDetails(e);}
+function repaintLocal() {
+  if(['library','downloads','queue'].includes(view))renderLocal();
+  else if(view==='show'){const target=document.activeElement,action=['play','download','options','details'].find(name=>target?.dataset?.[name]);paintEpisodes?.();if(action)document.querySelector(`[data-${action}="${CSS.escape(target.dataset[action])}"]`)?.focus({preventScroll:true});}
+  setPlayIcons();
+}
+function episodeDetails(e) {current&&keyOf(current)===keyOf(e)?openPlayer():formDetails(e);}
 function formDetails(e) {
   const d=$('sheet');d.innerHTML=`<div class="dialog-heading"><h2 id="sheet-heading">Episode</h2><button class="close" aria-label="Close episode">×</button></div><h3>${esc(e.title)}</h3><p>${esc(e.show.title)} · ${esc(minutes(e.duration))}</p><button class="primary" id="details-play">${icon('play')}Play episode</button><button class="text-button" id="details-options">More options</button><div class="episode-notes">${esc(e.description || 'No episode notes provided.')}</div>`;
-  d.querySelector('.close').onclick=closeSheet;$('details-play').onclick=()=>{closeSheet();playEpisode(e);};$('details-options').onclick=()=>episodeMenu(e);if(!d.open)d.showModal();
+  d.querySelector('.close').onclick=closeSheet;$('details-play').onclick=async()=>{await closeSheet();playEpisode(e);};$('details-options').onclick=()=>episodeMenu(e);openDialog(d);
 }
+document.querySelector('.skip-link').onclick=e=>{e.preventDefault();$('content').focus();};
 document.addEventListener('click',e=>{
-  const node=e.target.closest('[data-feed],[data-play],[data-options],[data-details],[data-category],[data-retry]');if(!node)return;
-  if(node.dataset.feed)setRoute('#show='+encodeURIComponent(node.dataset.feed));
+  const node=e.target.closest('[data-feed],[data-play],[data-options],[data-details],[data-category],[data-retry],[data-search],[data-download],[data-view]');if(!node)return;
+  if(node.dataset.view){e.preventDefault();setRoute(node.getAttribute('href'));}
+  else if(node.dataset.search)submitSearch(node.dataset.search);
+  else if(node.dataset.download){const ep=episodeRefs.get(node.dataset.download);if(ep)downloadAction(ep);}
+  else if(node.dataset.feed)setRoute('#show='+encodeURIComponent(node.dataset.feed));
   else if(node.dataset.play){const ep=episodeRefs.get(node.dataset.play);if(ep)playEpisode(ep);}
   else if(node.dataset.options){const ep=episodeRefs.get(node.dataset.options);if(ep)episodeMenu(ep);}
   else if(node.dataset.details){const ep=episodeRefs.get(node.dataset.details);if(ep)episodeDetails(ep);}
-  else if(node.dataset.category){category=node.dataset.category;renderRoute();}
+  else if(node.dataset.category){setRoute('#category='+encodeURIComponent(node.dataset.category));}
   else if(node.hasAttribute('data-retry'))renderRoute();
 });
-$('search-form').onsubmit=e=>{e.preventDefault();const q=$('query').value.trim();if(q.length<2){notify('Enter at least two characters to search.');return;}setRoute('#search='+encodeURIComponent(q));};
+$('search-form').onsubmit=e=>{e.preventDefault();submitSearch($('query').value);$('query').blur();};
+$('query').oninput=()=>{$('clear-search').hidden=!$('query').value;};
+$('clear-search').onclick=()=>{setRoute('#discover');$('query').focus();};
 $('refresh').onclick=()=>{if(view==='show'&&feedData){feeds.delete(feedData.show.feedUrl);}else directoryCache.clear();renderRoute();};
-$('add-feed').onclick=()=>formSheet('Add RSS feed','<label for="feed-url">Podcast RSS address</label><input id="feed-url" name="url" type="url" placeholder="https://…" required><p>Paste the show’s public RSS feed. Private feeds with passwords are not supported.</p>',data=>{const url=safeURL(data.get('url'));if(!url)throw Error('Enter an http or https RSS feed URL.');closeSheet();setRoute('#show='+encodeURIComponent(url));});
+$('add-feed').onclick=()=>formSheet('Add RSS feed','<label for="feed-url">Podcast RSS address</label><input id="feed-url" name="url" type="url" placeholder="https://…" required><p>Paste the show’s public RSS feed. Private feeds with passwords are not supported.</p>',async data=>{const url=safeURL(data.get('url'));if(!url)throw Error('Enter an http or https RSS feed URL.');await closeSheet();setRoute('#show='+encodeURIComponent(url));});
 $('settings').onclick=async()=>{
-  const estimate=await navigator.storage?.estimate().catch(()=>null);
-  formSheet('Podcast settings',`<label for="country">Podcast directory</label><select id="country" name="country"><option value="us" ${state.country==='us'?'selected':''}>United States</option><option value="ar" ${state.country==='ar'?'selected':''}>Argentina</option><option value="gb" ${state.country==='gb'?'selected':''}>United Kingdom</option><option value="es" ${state.country==='es'?'selected':''}>Spain</option></select><label class="check-row"><input type="checkbox" name="autoplay" ${state.autoplay?'checked':''}>Play the next queued episode</label><p>Follows, progress, queue, and downloads stay on this device. Downloads use browser storage; keep this page open until they finish.</p>${estimate?`<p class="storage-info">${size(estimate.usage)} used of ${size(estimate.quota)} browser storage.</p>`:''}`,data=>{state.country=data.get('country');state.autoplay=data.has('autoplay');commit();closeSheet();renderRoute();});
+  const token=renderToken,estimate=await navigator.storage?.estimate().catch(()=>null);if(token!==renderToken)return;
+  formSheet('Podcast settings',`<label for="country">Podcast directory</label><select id="country" name="country"><option value="us" ${state.country==='us'?'selected':''}>United States</option><option value="ar" ${state.country==='ar'?'selected':''}>Argentina</option><option value="gb" ${state.country==='gb'?'selected':''}>United Kingdom</option><option value="es" ${state.country==='es'?'selected':''}>Spain</option></select><label class="check-row"><input type="checkbox" name="autoplay" ${state.autoplay?'checked':''}>Play the next queued episode</label><p>Follows, progress, queue, and downloads stay on this device. Downloads use browser storage; keep this page open until they finish.</p>${estimate?`<p class="storage-info">${size(estimate.usage)} used of ${size(estimate.quota)} browser storage.</p>`:''}`,async data=>{state.country=data.get('country');state.autoplay=data.has('autoplay');commit();await closeSheet();renderRoute();});
 };
 
 const audioURL = e => {const u=new URL('/podcasts/audio',API_ORIGIN);u.searchParams.set('feed',e.show.feedUrl);u.searchParams.set('id',e.id);return u.href;};
@@ -200,7 +268,7 @@ async function downloadEpisode(e) {
   if(!('caches' in window) || !('serviceWorker' in navigator)){notify('Offline downloads require a browser that supports offline storage.');return;}
   if(state.downloads[key]){notify('Episode is already downloaded.');return;}
   if(e.bytes>MAX_DOWNLOAD){notify('This episode exceeds the 250 MB download limit. You can still stream it.');return;}
-  const controller=new AbortController();downloads.set(key,{controller,episode:e});notify('Downloading '+e.title);repaintLocal();
+  const controller=new AbortController();downloads.set(key,{controller,episode:e});notify('Downloading '+e.title);repaintLocal();updateDownloadButton();
   let saved=false;
   try {
     await Promise.race([navigator.serviceWorker.ready,new Promise((_,reject)=>setTimeout(()=>reject(Error('Offline storage could not start. Reload this page and try again.')),10000))]);await navigator.storage?.persist?.().catch(()=>false);
@@ -240,17 +308,24 @@ function setPlayIcons() {
   for(const id of ['mini-back','back-15','forward-30'])$(id).disabled=sourceLoading||!loadedKey;
   document.querySelectorAll('[data-play]').forEach(b=>{const active=playing&&current&&b.dataset.play===keyOf(current),p=state.progress[b.dataset.play],label=active?'Pause':b.classList.contains('episode-play')?(p?.position>0&&!p.played?'Resume':'Play'):'Play latest';b.innerHTML=icon(active?'pause':'play')+'<span class="play-label">'+label+'</span>';const e=episodeRefs.get(b.dataset.play);b.setAttribute('aria-label',b.classList.contains('episode-play')?label+' '+(e?.title||'episode'):active?'Pause latest episode':'Play latest episode');});
 }
-function updateDownloadButton() {if(!current)return;const key=keyOf(current);$('player-download').innerHTML=icon(state.downloads[key]?'check':'download');$('player-download').setAttribute('aria-label',state.downloads[key]?'Episode downloaded':'Download episode');}
+function updateDownloadButton() {if(!current)return;const key=keyOf(current),pending=downloads.has(key),saved=!!state.downloads[key];$('player-download').innerHTML=icon(pending?'down':saved?'check':'download');$('player-download').setAttribute('aria-label',pending?'Cancel download':saved?'Manage downloaded episode':'Download episode');$('player-download').classList.toggle('is-saved',saved);}
+function downloadAction(e) {
+  const key=keyOf(e);
+  if(downloads.has(key)){downloads.get(key).controller.abort();return;}
+  if(state.downloads[key]){sheet('Downloaded on this device',[{label:'Remove download',icon:'trash',action:()=>removeDownload(e)}]);return;}
+  downloadEpisode(e);
+}
 function updateCurrent() {
   if(!current)return;$('mini-player').hidden=false;document.title=current.title+' · Podcasts';
   for(const id of ['mini-art','player-art'])$(id).src=safeURL(current.artwork||current.show.artwork)||placeholder;
-  $('mini-title').textContent=current.title;$('player-title').textContent=current.title;$('mini-show').textContent=current.show.title;$('player-show').textContent=current.show.title;$('player-notes').textContent=current.description || 'No episode notes provided.';
+  $('mini-title').textContent=current.title;$('player-title').textContent=current.title;$('mini-show').textContent=$('playback-status').hidden?current.show.title:$('playback-status').textContent;$('player-show').textContent=current.show.title;$('player-notes').textContent=current.description || 'No episode notes provided.';
   $('speed').textContent=state.speed+'× speed';updateDownloadButton();setPlayIcons();
 }
 function updatePosition() {
   const duration=Number.isFinite(audio.duration)&&audio.duration>0?audio.duration:current?.duration || 0, pos=loadedKey?audio.currentTime:resumePosition(state.progress[current?keyOf(current):''],duration);
   if(!seeking)for(const id of ['seek','mini-seek']){$(id).max=String(duration || 100);$(id).value=String(pos);$(id).disabled=!loadedKey || !duration || sourceLoading;$(id).style.setProperty('--progress',Math.min(100,duration?pos/duration*100:0)+'%');}
-  $('elapsed').textContent=clock(pos);$('remaining').textContent='−'+clock(Math.max(0,duration-pos));
+  $('mini-elapsed').textContent=clock(pos);$('elapsed').textContent=clock(pos);$('remaining').textContent='−'+clock(Math.max(0,duration-pos));
+  updateTimerLabel();
   if(timer){$('sleep-label').textContent=timer.endOfEpisode?'End of episode':clock(Math.max(0,(timer.deadline-Date.now())/1000));if(shouldSleep(timer,Date.now()))stopForSleep();}
 }
 async function startSources(e,token,position,index=0) {
@@ -273,7 +348,7 @@ async function startSources(e,token,position,index=0) {
   loadedKey='';sourceLoading=false;wantPlay=false;audio.pause();playbackStatus('Audio is unavailable right now. Tap Play to retry.',true);notify('This episode could not start. Tap Play to retry.');setPlayIcons();
 }
 async function playEpisode(e) {
-  if(current&&keyOf(current)===keyOf(e)&&loadedKey===keyOf(e)){togglePlay();return;}
+  if(current&&keyOf(current)===keyOf(e)&&(sourceLoading||loadedKey===keyOf(e))){togglePlay();return;}
   const token=++loadToken;if(current&&loadedKey)saveProgress();loadedKey='';sourceLoading=true;audio.pause();audio.removeAttribute('src');audio.load();wantPlay=true;
   current=e;state.current=e;commit();updateCurrent();playbackStatus('Opening audio…');
   if(currentBlob){URL.revokeObjectURL(currentBlob);currentBlob=null;}
@@ -293,9 +368,9 @@ async function togglePlay() {
   if(!loadedKey){await playEpisode(current);return;}
   if(audio.paused){wantPlay=true;try{await audio.play();}catch{playbackStatus('Audio could not start. Try opening this episode again.',true);}}else{wantPlay=false;audio.pause();saveProgress();}setPlayIcons();
 }
-function openPlayer() {if(!current)return;updateCurrent();updatePosition();if(!$('player').open)$('player').showModal();}
+function openPlayer() {if(!current)return;updateCurrent();updatePosition();openDialog($('player'));}
 const skip = n => {if(!loadedKey)return;audio.currentTime=Math.max(0,Math.min(Number.isFinite(audio.duration)?audio.duration:Infinity,audio.currentTime+n));updatePosition();saveProgress();};
-$('open-player').onclick=openPlayer;$('close-player').onclick=()=>$('player').close();
+$('open-player').onclick=openPlayer;$('close-player').onclick=()=>closeDialog($('player'));
 for(const id of ['play','mini-play'])$(id).onclick=togglePlay;
 $('mini-back').onclick=$('back-15').onclick=()=>skip(-15);$('forward-30').onclick=()=>skip(30);
 for(const id of ['seek','mini-seek']) {
@@ -305,14 +380,16 @@ for(const id of ['seek','mini-seek']) {
   input.addEventListener('pointercancel',()=>{seeking=false;updatePosition();});input.addEventListener('blur',()=>seeking=false);
 }
 $('speed').onclick=()=>sheet('Playback speed',[0.75,1,1.25,1.5,1.75,2,2.5].map(speed=>({label:speed+'×'+(state.speed===speed?' · Selected':''),icon:state.speed===speed?'check':'play',action:()=>{state.speed=speed;audio.playbackRate=speed;audio.preservesPitch=true;commit();$('speed').textContent=speed+'× speed';}})));
-function stopForSleep() {timer=null;wantPlay=false;if(sourceLoading){++loadToken;sourceLoading=false;loadedKey='';}audio.pause();playbackStatus();$('sleep-label').textContent='Sleep timer';saveProgress(audio.ended);notify('Sleep timer finished');setPlayIcons();}
+function stopForSleep() {timer=null;wantPlay=false;if(sourceLoading){++loadToken;sourceLoading=false;loadedKey='';}audio.pause();playbackStatus();$('sleep-label').textContent='Sleep timer';updateTimerLabel();saveProgress(audio.ended);notify('Sleep timer finished');setPlayIcons();}
+function updateTimerLabel() {const label=timer?(timer.endOfEpisode?'At end':clock(Math.max(0,(timer.deadline-Date.now())/1000))):'Sleep';$('mini-sleep-label').textContent=label;$('mini-sleep').setAttribute('aria-label',timer?'Sleep timer: '+label:'Set sleep timer');$('mini-sleep').classList.toggle('timer-active',!!timer);}
+$('mini-sleep').onclick=()=>current&&$('sleep').onclick();
 $('sleep').onclick=()=>sheet('Sleep timer',[
   ...[15,30,45,60,90].map(n=>({label:n+' minutes',icon:'moon',action:()=>{timer={deadline:Date.now()+n*60000};updatePosition();notify('Playback stops in '+n+' minutes');}})),
   {label:'End of this episode',icon:'moon',action:()=>{timer={endOfEpisode:true};updatePosition();notify('Playback stops at the end of this episode');}},
   {label:'Set a custom time',icon:'moon',action:()=>formSheet('Custom sleep timer','<label for="sleep-minutes">Minutes</label><input id="sleep-minutes" name="minutes" type="number" min="1" max="720" value="20" required>',data=>{const n=Number(data.get('minutes'));if(!Number.isFinite(n)||n<1||n>720)throw Error('Choose 1–720 minutes.');timer={deadline:Date.now()+n*60000};closeSheet();updatePosition();})},
-  {label:'Turn off timer',icon:'trash',action:()=>{timer=null;$('sleep-label').textContent='Sleep timer';notify('Sleep timer off');}}
+  {label:'Turn off timer',icon:'trash',action:()=>{timer=null;$('sleep-label').textContent='Sleep timer';updateTimerLabel();notify('Sleep timer off');}}
 ]);
-$('player-download').onclick=()=>current&&downloadEpisode(current);$('player-menu').onclick=()=>current&&episodeMenu(current);
+$('player-download').onclick=()=>current&&downloadAction(current);$('player-menu').onclick=()=>current&&episodeMenu(current);
 audio.addEventListener('loadedmetadata',()=>{audio.playbackRate=state.speed;audio.preservesPitch=true;const start=resumePosition({position:pendingPosition},audio.duration);if(start>0&&audio.currentTime<1)audio.currentTime=start;updatePosition();updateMediaSession();});
 audio.addEventListener('timeupdate',()=>{updatePosition();updateMediaPosition();if(Date.now()-lastSaved>10000)saveProgress();});
 audio.addEventListener('play',()=>{wantPlay=true;setPlayIcons();updateMediaSession();});
@@ -340,8 +417,9 @@ if(navigator.mediaSession)for(const [action,fn] of Object.entries({play:()=>audi
 setInterval(()=>{if(timer)updatePosition();},1000);
 addEventListener('visibilitychange',()=>{if(document.hidden&&loadedKey)saveProgress();if(!document.hidden)updatePosition();});
 addEventListener('pagehide',()=>{if(loadedKey)saveProgress();});
-addEventListener('hashchange',renderRoute);
-addEventListener('offline',()=>notify('You’re offline. Downloaded episodes still play.'));
+addEventListener('popstate',onHistory);
+addEventListener('offline',()=>{connectionStatus();notify('You’re offline. Downloaded episodes still play.');});
+addEventListener('online',connectionStatus);
 if('serviceWorker' in navigator)navigator.serviceWorker.register('/podcasts/sw.js',{scope:'/podcasts/',type:'module'}).catch(()=>notify('Offline mode could not start. Streaming still works.'));
 if(current){updateCurrent();updatePosition();}
 renderRoute();reconcileDownloads().catch(()=>{});

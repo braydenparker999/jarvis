@@ -5,7 +5,7 @@ export const categories = [['popular','All shows','podcast'],['history','History
 export const emptyState = () => ({version:1,follows:[],queue:[],downloads:{},progress:{},current:null,speed:1,country:'us',autoplay:true});
 export function readState(storage) {
   try { const s = JSON.parse(storage.getItem(STORAGE_KEY)); if (s?.version !== 1) return emptyState();
-    return {...emptyState(),...s,follows:Array.isArray(s.follows) ? s.follows.slice(0,100) : [],queue:Array.isArray(s.queue) ? s.queue.slice(0,100) : [],
+    return {...emptyState(),...s,recentSearches:Array.isArray(s.recentSearches)?s.recentSearches.filter(q=>typeof q==='string'&&q.length>=2&&q.length<=120).slice(0,6):[],follows:Array.isArray(s.follows) ? s.follows.slice(0,100) : [],queue:Array.isArray(s.queue) ? s.queue.slice(0,100) : [],
       speed:[0.75,1,1.25,1.5,1.75,2,2.5].includes(s.speed) ? s.speed : 1,progress:s.progress || {},downloads:s.downloads || {}};
   } catch { return emptyState(); }
 }
