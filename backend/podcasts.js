@@ -1,5 +1,6 @@
 // Podcast directory metadata and publisher RSS enclosures. No keys or new storage.
 import {PRIMARY_SITE, FRONTEND_ORIGINS} from './origins.js';
+import {appleDirectoryURLs, normalizeDirectory} from '../public/podcasts/directory.js';
 
 export class PodcastError extends Error {
   constructor(message, status = 502) { super(message); this.status = status; }
@@ -126,8 +127,7 @@ const country = v => /^[a-z]{2}$/i.test(v || '') ? v.toLowerCase() : 'us';
 export async function directory(q, region, options = {}) {
   const query = q.trim(); if (query.length < 2 || query.length > 120) throw new PodcastError('Enter at least two characters to search.',400);
   const load = async () => {
-    const params=`term=${encodeURIComponent(query)}&media=podcast&entity=podcast&limit=36&country=${country(region)}`;
-    const endpoints=[`https://itunes.apple.com/search?${params}`,`https://itunes.apple.com/WebObjects/MZStoreServices.woa/ws/wsSearch?${params}`,
+    const endpoints=[...appleDirectoryURLs(query,region),
       `https://gpodder.net/search.json?q=${encodeURIComponent(query)}&scale_logo=300`];
     let empty;
     for(const endpoint of endpoints) {
@@ -137,13 +137,9 @@ export async function directory(q, region, options = {}) {
         const r=await upstream(endpoint,{...options,signal:AbortSignal.any(signals)});
         if(!r.ok){await r.body?.cancel();continue;}
         const data=JSON.parse(await boundedText(r));
-        const gpodder=Array.isArray(data);
-        const results=gpodder ? data : data.results;
-        if(!Array.isArray(results))continue;
-        const shows=results.slice(0,100).map(s=>gpodder ? {id:episodeID(s.url || ''),title:s.title,author:s.author || '',feedUrl:optionalURL(s.url),
-          artwork:optionalURL(s.scaled_logo_url || s.logo_url),website:optionalURL(s.website),genres:[]} : {id:String(s.collectionId),title:s.collectionName,author:s.artistName || '',
-          feedUrl:optionalURL(s.feedUrl),artwork:optionalURL(s.artworkUrl600 || s.artworkUrl100),directoryUrl:optionalURL(s.collectionViewUrl),genres:s.genres || []})
-          .filter(s=>s.feedUrl && s.title).slice(0,36);
+        const gpodder=new URL(endpoint).hostname==='gpodder.net';
+        const {shows}=normalizeDirectory(data,gpodder?'gpodder':'apple',optionalURL);
+        if(gpodder)for(const show of shows)show.id=episodeID(show.feedUrl);
         if (shows.length) return {shows};
         empty = {shows};
       }catch(e){if(options.signal?.aborted)throw e;}
