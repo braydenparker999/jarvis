@@ -21,7 +21,8 @@ export function createRelayFixture({env: overrides = {}, publicationFetcher = as
     const db = new DatabaseSync(':memory:'), values = new Map(), alarms = [];
     let transaction = 0, alarm = null;
     const storage = {
-      sql: {exec(query, ...parameters) { return db.prepare(query).all(...parameters); }},
+      // Cloudflare SQL binds ArrayBuffer BLOBs; node:sqlite binds typed arrays.
+      sql: {exec(query, ...parameters) { return db.prepare(query).all(...parameters.map(value => value instanceof ArrayBuffer ? new Uint8Array(value) : value)); }},
       transactionSync(fn) {
         const savepoint = `fixture_${++transaction}`;
         db.exec(`SAVEPOINT ${savepoint}`);

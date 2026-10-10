@@ -6,6 +6,7 @@ import {relayOwnerDelivery,recoverRelayOwnerDelivery,relayOwnerSubscriptionStatu
 import {FRONTEND_ORIGINS} from './origins.js';
 import {relayOwnerPasswordSchema, relayOwnerPasswordStore} from './relay-owner-password.js';
 import {relayOwnerJobSchema, relayOwnerJobEnsure, relayOwnerJobSpecification, relayOwnerJobSpecify, relayOwnerJobRead, relayOwnerJobsList, relayOwnerJobsChanges, relayOwnerJobCancel, relayOwnerJobRetryPrepare, relayOwnerJobRetryLink, relayOwnerJobReplyCheck, relayOwnerJobReplySaved, relayOwnerJobValidateRpc, relayOwnerJobRpc} from './relay-owner-jobs.js';
+import {ATTACHMENT_BODY_LIMIT, relayAttachmentSchema, relayAttachmentMetadata, relayAttachmentAdmit, relayAttachmentPrecheck, relayAttachmentPrepare, relayAttachmentUpload, relayAttachmentCheckMessage, relayAttachmentLink, relayAttachmentDiscard, relayAttachmentRead, relayAttachmentVerify, relayAttachmentDownload} from './relay-owner-attachments.js';
 
 export {RELAY_OWNER_SCOPE, RELAY_OWNER_INBOX};
 export const RELAY_OWNER_SESSION_MS = 365 * 86400000;
@@ -43,11 +44,14 @@ export function relayOwnerSchema(ctx) {
   sql.exec('CREATE TABLE IF NOT EXISTS relay_owner_pair_rates (identity TEXT PRIMARY KEY, count INTEGER NOT NULL, expires_ms INTEGER NOT NULL)');
   relayOwnerPasswordSchema(ctx);
   relayOwnerJobSchema(ctx);
+  relayAttachmentSchema(ctx);
 }
 function entry(row,ctx,env) {
+  const attachments = ctx && row.kind === 'user' ? relayAttachmentMetadata(ctx, row.id) : [];
   return {id: row.id, sequence: row.seq, body: row.body, role: row.kind === 'user' ? 'user' : 'assistant', createdAt: row.created_at,
     author_authenticated: true, principal: row.principal, device_id: row.device_id,
     authentication_source: row.authentication_source, visibility: 'private',
+    ...(attachments.length ? {attachments} : {}),
     ...(row.kind === 'reply' ? {kind: 'reply', replyTo: row.reply_to} : {}),
     ...(ctx&&env&&row.kind==='user'?{delivery:relayOwnerDelivery(ctx,env,row.id,!!rows(ctx,"SELECT id FROM relay_owner_entries WHERE kind='reply' AND reply_to=?",row.id).length)}:{})};
 }
@@ -138,8 +142,10 @@ function deliveryStatus(ctx, env, ids, now) {
 }
 function insertMessage(ctx, session, body, enqueue, now,env, specification) {
   if (!uuid(body.id)) fail(400, 'Invalid message ID');
-  const content = text(body.body, 4000);
   const previous = rows(ctx, 'SELECT * FROM relay_owner_entries WHERE id=?', body.id)[0];
+  const attachmentIds = relayAttachmentCheckMessage(ctx, session, body.id, body.attachment_ids, now, previous);
+  if (typeof body.body !== 'string' || body.body.length > 4000 || !body.body.trim() && !attachmentIds.length) fail(400, 'Invalid message body');
+  const content = body.body.trim();
   if (previous) {
     if (previous.kind !== 'user' || previous.principal !== RELAY_OWNER || previous.body !== content || previous.device_id !== session.device_id) fail(409, 'Private message ID conflict');
     if (specification) relayOwnerJobSpecify(ctx, previous, specification, now);
@@ -153,6 +159,7 @@ function insertMessage(ctx, session, body, enqueue, now,env, specification) {
   ctx.storage.sql.exec('INSERT OR REPLACE INTO relay_owner_meta VALUES(?,?)', key, String(count + 1));
   ctx.storage.sql.exec("INSERT INTO relay_owner_entries(id,kind,body,created_at,principal,device_id,authentication_source) VALUES(?,'user',?,?,?,?,?)", body.id, content, iso(now), RELAY_OWNER, session.device_id, session.authentication_source);
   const saved = rows(ctx, 'SELECT * FROM relay_owner_entries WHERE id=?', body.id)[0];
+  relayAttachmentLink(ctx, body.id, attachmentIds);
   if (specification) relayOwnerJobSpecify(ctx, saved, specification, now);
   else relayOwnerJobEnsure(ctx, saved);
   const value = entry(saved);
@@ -184,7 +191,7 @@ export async function relayOwnerStore(ctx, env, body, enqueueOwnerMessage = () =
       // Advertise this service version only after the existing login succeeds.
       // Password/session configuration and the credential implementation stay
       // unchanged; older services do not need speculative job requests.
-      if (body.op === 'password_login' && response.ok) return json({...await response.json(), jobs_enabled: true}, response.status, Object.fromEntries(response.headers));
+      if (body.op === 'password_login' && response.ok) return json({...await response.json(), jobs_enabled: true, attachments_enabled: true}, response.status, Object.fromEntries(response.headers));
       return response;
     }
     if (body?.op === 'pair_start') {
@@ -206,15 +213,55 @@ export async function relayOwnerStore(ctx, env, body, enqueueOwnerMessage = () =
       });
     }
     const allowed = {
-      pair_status: ['request_id'], session: [], messages_list: ['after', 'limit'], message: ['id', 'body'],
+      pair_status: ['request_id'], session: [], messages_list: ['after', 'limit'], message: ['id', 'body', 'attachment_ids'],
+      attachment_admit: [], attachment_upload: ['id', 'message_id', 'name', 'mime_type', 'data_base64'], attachment_discard: ['message_id', 'attachment_id'], attachment_content: ['message_id', 'attachment_id', 'preview'],
       conversation: ['message_id'], delivery_list: ['message_ids'], delivery_retry: ['message_id'], devices_list: [], device_revoke: ['device_id'],
       jobs_list: ['after', 'limit'], jobs_changes: ['after', 'limit', 'through'], job_read: ['job_id'], job_create: ['id', 'title', 'body', 'action_kind', 'project_title', 'goal_title'], job_cancel: ['job_id'], job_retry: ['job_id', 'id', 'confirm_duplicate_risk'],
     };
     if (!body || !Object.hasOwn(allowed, body.op)) fail(400, 'Invalid owner operation');
-    const required = ['pair_status', 'message', 'conversation', 'device_revoke', 'delivery_list', 'delivery_retry', 'job_read', 'job_create', 'job_cancel', 'job_retry'].includes(body.op)
-      ? allowed[body.op].filter(key => !['confirm_duplicate_risk', 'project_title', 'goal_title'].includes(key)) : [];
+    const required = ['pair_status', 'message', 'conversation', 'device_revoke', 'delivery_list', 'delivery_retry', 'job_read', 'job_create', 'job_cancel', 'job_retry', 'attachment_upload', 'attachment_discard', 'attachment_content'].includes(body.op)
+      ? allowed[body.op].filter(key => !['confirm_duplicate_risk', 'project_title', 'goal_title', 'attachment_ids', 'preview'].includes(key)) : [];
     fields(body, ['op', 'token_hash', ...allowed[body.op]], ['op', 'token_hash', ...required]);
     if (!hex(body.token_hash)) fail(401, 'Owner device authentication required');
+    if (body.op === 'attachment_admit') {
+      ctx.storage.transactionSync(() => {
+        const now = Date.now(); requireSession(ctx, body.token_hash, now);
+        relayAttachmentAdmit(ctx, now, 'ingress');
+      });
+      return json({admitted: true});
+    }
+    if (body.op === 'attachment_upload') {
+      const admitted = ctx.storage.transactionSync(() => {
+        const now = Date.now(), session = requireSession(ctx, body.token_hash, now);
+        relayAttachmentAdmit(ctx, now);
+        return {session, now};
+      });
+      relayAttachmentPrecheck(ctx, admitted.session, body, admitted.now);
+      const prepared = await relayAttachmentPrepare(body);
+      return ctx.storage.transactionSync(() => {
+        const now = Date.now(), session = requireSession(ctx, body.token_hash, now);
+        const result = relayAttachmentUpload(ctx, session, body, prepared, now);
+        renew(ctx, session, now);
+        return json(result, result.newWrite ? 201 : 200);
+      });
+    }
+    if (body.op === 'attachment_content') {
+      requireSession(ctx, body.token_hash, Date.now());
+      if (body.preview !== undefined && typeof body.preview !== 'boolean') fail(400, 'Invalid attachment preview');
+      const read = await relayAttachmentVerify(relayAttachmentRead(ctx, body.message_id, body.attachment_id));
+      return ctx.storage.transactionSync(() => {
+        const now = Date.now(), session = requireSession(ctx, body.token_hash, now);
+        const response = relayAttachmentDownload(read, body.preview);
+        renew(ctx, session, now);
+        return response;
+      });
+    }
+    if (body.op === 'attachment_discard') {
+      ctx.storage.transactionSync(() => {
+        const now = Date.now(); requireSession(ctx, body.token_hash, now);
+        relayAttachmentAdmit(ctx, now, 'discard');
+      });
+    }
     return ctx.storage.transactionSync(() => {
       const now = Date.now();
       if (body.op === 'pair_status') {
@@ -227,14 +274,15 @@ export async function relayOwnerStore(ctx, env, body, enqueueOwnerMessage = () =
         if (!session || session.revoked_ms !== null) return json({status: 'revoked'});
         if (session.expires_ms <= now) return json({status: 'expired'});
         const active = requireSession(ctx, body.token_hash, now);
-        return json({status: 'approved', device: shortDevice(renew(ctx, active, now)), jobs_enabled: true});
+        return json({status: 'approved', device: shortDevice(renew(ctx, active, now)), jobs_enabled: true, attachments_enabled: true});
       }
       const session = requireSession(ctx, body.token_hash, now);
       let result;
-      if (body.op === 'session') result = {status: 'approved', device: shortDevice({...session, expires_ms: now + RELAY_OWNER_SESSION_MS}), jobs_enabled: true};
+      if (body.op === 'session') result = {status: 'approved', device: shortDevice({...session, expires_ms: now + RELAY_OWNER_SESSION_MS}), jobs_enabled: true, attachments_enabled: true};
       if (body.op === 'messages_list') result = listMessages(ctx, body.after, body.limit,false,env);
       if (body.op === 'conversation') result = conversation(ctx, body.message_id,env);
       if (body.op === 'message') result = insertMessage(ctx, session, body, enqueueOwnerMessage, now,env);
+      if (body.op === 'attachment_discard') result = relayAttachmentDiscard(ctx, session, body, now);
       if (body.op === 'jobs_list') result = relayOwnerJobsList(ctx, env, body.after, body.limit, now, true);
       if (body.op === 'jobs_changes') result = relayOwnerJobsChanges(ctx, env, body.after, body.limit, body.through, now, true);
       if (body.op === 'job_read') result = relayOwnerJobRead(ctx, env, body.job_id, now, true);
@@ -245,6 +293,7 @@ export async function relayOwnerStore(ctx, env, body, enqueueOwnerMessage = () =
       }
       if (body.op === 'job_cancel') result = relayOwnerJobCancel(ctx, env, body.job_id, session, now, true);
       if (body.op === 'job_retry') {
+        if (relayAttachmentMetadata(ctx, body.job_id).length) fail(409, 'Attached requests cannot be retried. Send a new message with the files again.', 'attachment_retry_unsupported');
         const prepared = relayOwnerJobRetryPrepare(ctx, env, body, session, now);
         if (prepared.existing) result = {entry: entry(rows(ctx, 'SELECT * FROM relay_owner_entries WHERE id=?', body.id)[0], ctx, env), newWrite: false};
         else {
@@ -287,6 +336,14 @@ export async function relayOwnerStore(ctx, env, body, enqueueOwnerMessage = () =
 export async function relayOwnerRpc(ctx, env, principal, name, args, enqueueOwnerMessage = () => {}) {
   relayOwnerSchema(ctx);
   requireOwner(ctx, env, principal);
+  if (name === 'relay_owner_attachment_read') {
+    fields(args, ['inbox_id', 'message_id', 'attachment_id'], ['inbox_id', 'message_id', 'attachment_id']);
+    if (args.inbox_id !== RELAY_OWNER_INBOX) fail(403, 'Forbidden private inbox');
+    const read = await relayAttachmentVerify(relayAttachmentRead(ctx, args.message_id, args.attachment_id));
+    // Hashing yields: a revoked/narrowed grant must not release file bytes.
+    requireOwner(ctx, env, principal);
+    return read;
+  }
   const pairing = ['relay_owner_pairing_inspect', 'relay_owner_pairing_approve'].includes(name);
   const controls = ['relay_owner_devices_list', 'relay_owner_device_revoke'].includes(name);
   if (pairing) {
@@ -379,27 +436,39 @@ export async function relayOwnerPublic(request, env) {
     const routes = {'/pair/start': ['POST', 'pair_start'], '/pair/status': ['POST', 'pair_status'], '/session': ['GET', 'session'], '/messages': [request.method === 'POST' ? 'POST' : 'GET', request.method === 'POST' ? 'message' : 'messages_list'], '/conversation': ['GET', 'conversation'], '/devices': ['GET', 'devices_list'], '/devices/revoke': ['POST', 'device_revoke'], '/delivery': ['POST','delivery_list'], '/delivery/retry': ['POST','delivery_retry'],
       '/credentials': [request.method === 'POST' ? 'POST' : 'GET', request.method === 'POST' ? 'credentials_save' : 'credentials_status'], '/credentials/prepare': ['POST', 'credentials_prepare'], '/login': ['POST', 'password_login'],
       '/jobs': [request.method === 'POST' ? 'POST' : 'GET', request.method === 'POST' ? 'job_create' : 'jobs_list'], '/jobs/changes': ['GET', 'jobs_changes'], '/jobs/detail': ['GET', 'job_read'], '/jobs/cancel': ['POST', 'job_cancel'], '/jobs/retry': ['POST', 'job_retry']};
+    routes['/attachments'] = ['POST', 'attachment_upload'];
+    routes['/attachments/discard'] = ['POST', 'attachment_discard'];
+    routes['/attachments/content'] = ['GET', 'attachment_content'];
     const suffix = path.slice('/relay/owner'.length), route = Object.hasOwn(routes, suffix) ? routes[suffix] : null;
     if (!route) return wrap(json({error: 'Not found'}, 404));
     if (request.method !== route[0]) return wrap(json({error: 'Method not allowed'}, 405, {Allow: route[0] + ', OPTIONS'}));
-    const queryFields = route[1] === 'jobs_changes' ? ['after', 'limit', 'through'] : ['messages_list', 'jobs_list'].includes(route[1]) ? ['after', 'limit'] : route[1] === 'conversation' ? ['message_id'] : route[1] === 'job_read' ? ['job_id'] : [];
+    const queryFields = route[1] === 'attachment_content' ? ['message_id', 'attachment_id', 'preview'] : route[1] === 'jobs_changes' ? ['after', 'limit', 'through'] : ['messages_list', 'jobs_list'].includes(route[1]) ? ['after', 'limit'] : route[1] === 'conversation' ? ['message_id'] : route[1] === 'job_read' ? ['job_id'] : [];
     if ([...url.searchParams.keys()].some(k => !queryFields.includes(k) || url.searchParams.getAll(k).length !== 1)) fail(400, 'Invalid owner query');
     let body = {};
+    let admittedHash;
     if (request.method === 'POST') {
       if (!origin) fail(403, 'Owner request origin required');
       if (request.headers.get('Content-Type')?.split(';')[0].trim().toLowerCase() !== 'application/json') return wrap(json({error: 'Expected JSON'}, 415));
-      try { body = JSON.parse(await boundedText(request, 16000)); } catch { fail(400, 'Invalid owner JSON'); }
+      if (route[1] === 'attachment_upload') {
+        const token = request.headers.get('Authorization')?.match(/^Bearer ([a-f0-9]{64})$/)?.[1];
+        if (!token) fail(401, 'Owner device bearer required');
+        admittedHash = await hash(token);
+        const admission = await env.HUBS.get(env.HUBS.idFromName(RELAY_OAUTH_OBJECT)).fetch(new Request('https://internal/internal/relay/owner', {method:'POST', body:JSON.stringify({op:'attachment_admit',token_hash:admittedHash})}));
+        if (!admission.ok) return wrap(admission);
+      }
+      try { body = JSON.parse(await boundedText(request, route[1] === 'attachment_upload' ? ATTACHMENT_BODY_LIMIT : 16000)); }
+      catch (error) { if (route[1] === 'attachment_upload' && error instanceof RelayError && error.message === 'Body too large') fail(413, 'Attachment exceeds 1 MiB', 'attachment_too_large'); fail(400, 'Invalid owner JSON'); }
     }
-    const inputFields = {pair_start: ['label'], pair_status: ['request_id'], message: ['id', 'body'], delivery_list:['message_ids'], delivery_retry:['message_id'], device_revoke: ['device_id'],
+    const inputFields = {pair_start: ['label'], pair_status: ['request_id'], message: ['id', 'body', 'attachment_ids'], attachment_upload: ['id', 'message_id', 'name', 'mime_type', 'data_base64'], attachment_discard: ['message_id', 'attachment_id'], delivery_list:['message_ids'], delivery_retry:['message_id'], device_revoke: ['device_id'],
       credentials_prepare: ['purpose'], credentials_save: ['username', 'password', 'password_confirmation', 'current_password', 'consent_token', 'confirm', 'access_days', 'preserve_existing_sessions'], password_login: ['username', 'password', 'label', 'replace_device_id', 'confirm_replacement'],
       job_create: ['id', 'title', 'body', 'action_kind', 'project_title', 'goal_title'], job_cancel: ['job_id'], job_retry: ['job_id', 'id', 'confirm_duplicate_risk']};
-    fields(body, inputFields[route[1]] || [], (inputFields[route[1]] || []).filter(k => !['current_password', 'replace_device_id', 'confirm_replacement', 'confirm_duplicate_risk', 'project_title', 'goal_title'].includes(k)));
+    fields(body, inputFields[route[1]] || [], (inputFields[route[1]] || []).filter(k => !['current_password', 'replace_device_id', 'confirm_replacement', 'confirm_duplicate_risk', 'project_title', 'goal_title', 'attachment_ids'].includes(k)));
     const input = {op: route[1], ...body};
     if (['pair_start', 'password_login'].includes(route[1])) input.rate_hash = await hash('owner-' + route[1] + '-ip:' + (request.headers.get('CF-Connecting-IP') || 'unknown'));
     else {
       const token = request.headers.get('Authorization')?.match(/^Bearer ([a-f0-9]{64})$/)?.[1];
       if (!token) fail(401, 'Owner device bearer required');
-      input.token_hash = await hash(token);
+      input.token_hash = admittedHash || await hash(token);
     }
     if (['messages_list', 'jobs_list', 'jobs_changes'].includes(route[1])) {
       if (url.searchParams.has('after')) input.after = url.searchParams.get('after');
@@ -412,6 +481,14 @@ export async function relayOwnerPublic(request, env) {
     if (route[1] === 'jobs_changes' && url.searchParams.has('through')) input.through = url.searchParams.get('through');
     if (route[1] === 'conversation') input.message_id = url.searchParams.get('message_id');
     if (route[1] === 'job_read') input.job_id = url.searchParams.get('job_id');
+    if (route[1] === 'attachment_content') {
+      input.message_id = url.searchParams.get('message_id');
+      input.attachment_id = url.searchParams.get('attachment_id');
+      if (url.searchParams.has('preview')) {
+        if (url.searchParams.get('preview') !== '1') fail(400, 'Invalid attachment preview');
+        input.preview = true;
+      }
+    }
     const response = await env.HUBS.get(env.HUBS.idFromName(RELAY_OAUTH_OBJECT)).fetch(new Request('https://internal/internal/relay/owner', {method: 'POST', body: JSON.stringify(input)}));
     return wrap(response);
   } catch (error) {

@@ -1,3 +1,4 @@
+import {createPrivateAttachmentContent} from './relay-attachment-content.js';
 import { createRelayOwnerApi, OwnerApiError, normalizeOwnerJobCompletion } from './relay-owner-api.js';
 import { icon, autosize, copyText, richText, messageDay } from './ui.js';
 import { createOwnerDraftStore } from './relay-draft-store.js';
@@ -7,18 +8,19 @@ import { createOwnerDraftStore } from './relay-draft-store.js';
 // never pass them to conversation(), public submitMessage() or shared sync.
 export function createRelayOwnerController({ api = createRelayOwnerApi(), draftStore = createOwnerDraftStore(), uuid = () => crypto.randomUUID(), onModeChange = () => {} } = {}) {
   const listeners = new Set();
+  let attachmentProvider=null;
   let generation = 0, reading = null, failedSend = null, cursor = '0', accountConsent = null, detailEpoch = 0;
   let jobCursor='0',jobFence=null,jobChangesSupported=typeof api.jobChanges==='function',jobResetCache=null,jobReading=null;
   const retryAttempts=new Map();
   const queries={chat:'',work:''};
   let state = { mode: api.selectedMode==='owner'||(api.selectedMode===undefined&&api.hasCredential)?'owner':'public', status: api.hasCredential ? 'unknown' : 'none',
     messages: [], draft: draftStore.read(), devices: [], device: null, pairing: null, error: '', warning: '', busy: false, sending: false, query: '', authenticating: false, account: null, accountReady: false, accountNotice: '', loginDevices: [],
-    jobsEnabled:false,jobs:[],jobsError:'',syncStale:false,jobMode:false,taskDraftKept:false,jobTitle:'',jobKind:'consequential',jobProject:'',jobGoal:'',requestsOnly:false,workFilter:'all',sendUnconfirmed:false,sendNotice:'',jobDetailId:null,jobDetail:null,jobDetailBusy:false,jobDetailError:'',jobDetailStale:false,jobBusy:false };
+    attachmentsEnabled:false,attachmentCount:0,attachmentRetry:false,jobsEnabled:false,jobs:[],jobsError:'',syncStale:false,jobMode:false,taskDraftKept:false,jobTitle:'',jobKind:'consequential',jobProject:'',jobGoal:'',requestsOnly:false,workFilter:'all',sendUnconfirmed:false,sendNotice:'',jobDetailId:null,jobDetail:null,jobDetailBusy:false,jobDetailError:'',jobDetailStale:false,jobBusy:false };
   const emit = () => { for (const listener of listeners) listener(); };
   const mode = next => { if (next !== state.mode) { state.mode = next; onModeChange(next); } emit(); };
-  function clearPrivate({preserveDraft = false} = {}) { state.loginDevices = []; accountConsent = null; state.account = null; state.accountReady = false; state.accountNotice = ''; state.messages = []; if (!preserveDraft) {state.draft = '';draftStore.save('');} state.devices = []; state.device = null; failedSend = null; cursor = '0';
+  function clearPrivate({preserveDraft = false} = {}) { attachmentProvider?.()?.clear(); state.loginDevices = []; accountConsent = null; state.account = null; state.accountReady = false; state.accountNotice = ''; state.messages = []; if (!preserveDraft) {state.draft = '';draftStore.save('');} state.devices = []; state.device = null; failedSend = null; cursor = '0';
     jobCursor='0';jobFence=null;jobChangesSupported=typeof api.jobChanges==='function';jobResetCache=null;jobReading=null;
-    ++detailEpoch;retryAttempts.clear();queries.chat='';queries.work='';state.jobsEnabled=false;state.jobs=[];state.jobsError='';state.syncStale=false;state.query='';state.jobMode=false;state.taskDraftKept=false;state.jobTitle='';state.jobKind='consequential';state.jobProject='';state.jobGoal='';state.requestsOnly=false;state.workFilter='all';state.sendUnconfirmed=false;state.sendNotice='';state.jobDetailId=null;state.jobDetail=null;state.jobDetailBusy=false;state.jobDetailError='';state.jobDetailStale=false;state.jobBusy=false; }
+    ++detailEpoch;retryAttempts.clear();queries.chat='';queries.work='';state.attachmentsEnabled=false;state.attachmentCount=0;state.attachmentRetry=false;state.jobsEnabled=false;state.jobs=[];state.jobsError='';state.syncStale=false;state.query='';state.jobMode=false;state.taskDraftKept=false;state.jobTitle='';state.jobKind='consequential';state.jobProject='';state.jobGoal='';state.requestsOnly=false;state.workFilter='all';state.sendUnconfirmed=false;state.sendNotice='';state.jobDetailId=null;state.jobDetail=null;state.jobDetailBusy=false;state.jobDetailError='';state.jobDetailStale=false;state.jobBusy=false; }
   function failure(error) {
     const safe = error instanceof OwnerApiError ? error : new OwnerApiError('network');
     state.error = safe.message;
@@ -137,6 +139,22 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), draftS
     get jobMode() { return state.jobMode; },
     get sending() { return state.sending; },
     get busy() { return state.busy; },
+    get attachmentsEnabled(){return state.attachmentsEnabled;},
+    get attachmentCount(){return state.attachmentCount;},
+    bindAttachments(provider){attachmentProvider=provider;},
+    setAttachmentCount(count){if(state.attachmentCount!==count){state.attachmentCount=count;if(!count)state.attachmentRetry=false;emit();}},
+    async uploadAttachment(messageId,id,file,options){
+      if(state.status!=='approved'||!state.attachmentsEnabled)throw new OwnerApiError('unauthorized');const epoch=generation;
+      try{const result=await api.uploadAttachment(messageId,id,file,options);if(epoch!==generation)throw new OwnerApiError('unauthorized');return result;}catch(error){if(epoch===generation&&error.kind!=='attachment_cancelled'){failure(error);emit();}throw error;}
+    },
+    async discardAttachment(messageId,id){
+      if(state.status!=='approved')throw new OwnerApiError('unauthorized');const epoch=generation;
+      try{return await api.discardAttachment(messageId,id);}catch(error){if(epoch===generation){failure(error);emit();}throw error;}
+    },
+    async attachmentContent(metadata,options){
+      if(state.status!=='approved')throw new OwnerApiError('unauthorized');const epoch=generation;
+      try{const result=await api.attachmentContent(metadata,options);if(epoch!==generation)throw new OwnerApiError('unauthorized');return result;}catch(error){if(epoch===generation&&error.kind!=='attachment_cancelled'){failure(error);emit();}throw error;}
+    },
     get hasTaskDraft() { return !!(state.taskDraftKept||state.jobTitle||state.jobProject||state.jobGoal); },
     snapshot() { return structuredClone(state); },
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
@@ -146,7 +164,7 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), draftS
     beginTask({projectTitle='',goalTitle=''}={}){
       const label=value=>typeof value==='string'&&value.length<=120&&!/[\u0000-\u001f\u007f]/.test(value);
       if(state.status!=='approved'||state.mode!=='owner'||!state.jobsEnabled||state.busy||state.sending||!label(projectTitle)||!label(goalTitle)||goalTitle.trim()&&!projectTitle.trim())return false;
-      if(failedSend||state.draft||state.jobTitle||state.jobProject||state.jobGoal){
+      if(failedSend||state.attachmentCount||state.draft||state.jobTitle||state.jobProject||state.jobGoal){
         if(failedSend)state.sendUnconfirmed=true;
         state.sendNotice=failedSend?'Resolve your unconfirmed send before adding a task.':'Finish or clear your current draft before adding a task.';emit();return false;
       }
@@ -180,7 +198,7 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), draftS
       try {
         const data = await api.login(username, password, label.trim().slice(0, 80) || 'This browser', { remember: remember === true, ...(replacement.deviceId === undefined ? {} : { replaceDeviceId: replacement.deviceId, confirmReplacement: true }) });
         if (epoch !== generation) return;
-        clearPrivate({preserveDraft: true}); state.device = data.device; state.status = 'approved'; state.warning = api.storageWarning;state.jobsEnabled=data.jobs_enabled===true;
+        clearPrivate({preserveDraft: true}); state.device = data.device; state.status = 'approved'; state.warning = api.storageWarning;state.jobsEnabled=data.jobs_enabled===true;state.attachmentsEnabled=data.attachments_enabled===true;
         state.authenticating = false; mode('owner'); await readMessages(epoch);await readJobs(epoch);
       } catch (error) { if (epoch === generation) { if (error instanceof OwnerApiError && error.kind === 'device_limit') state.loginDevices = error.devices;
           if (error instanceof OwnerApiError && error.kind === 'device_unavailable') state.loginDevices = []; failure(error); } }
@@ -240,7 +258,7 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), draftS
         if (epoch !== generation) return;
         state.status = data.status;
         if (data.status === 'approved') {
-          state.device = data.device; state.pairing = null; state.warning = api.storageWarning;state.jobsEnabled=data.jobs_enabled===true;
+          state.device = data.device; state.pairing = null; state.warning = api.storageWarning;state.jobsEnabled=data.jobs_enabled===true;state.attachmentsEnabled=data.attachments_enabled===true;
           if (state.mode === 'pairing') mode('owner');
           await readMessages(epoch);
           await readJobs(epoch);
@@ -257,7 +275,7 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), draftS
         try {
           const data = await api.session();
           if (epoch !== generation) return;
-          state.status = 'approved'; state.device = data.device; state.warning = api.storageWarning;state.jobsEnabled=data.jobs_enabled===true;
+          state.status = 'approved'; state.device = data.device; state.warning = api.storageWarning;state.jobsEnabled=data.jobs_enabled===true;state.attachmentsEnabled=data.attachments_enabled===true;
           await readMessages(epoch);
           await readJobs(epoch);
         } catch (error) { if (epoch === generation) { failure(error); if (state.status === 'checking') state.status = 'unknown'; } }
@@ -269,26 +287,39 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), draftS
     async send({retryOriginal=false}={}) {
       if (state.sending || state.status !== 'approved'||state.mode!=='owner') return;
       if(state.taskDraftKept&&!state.jobMode&&!retryOriginal){state.sendNotice='Task draft kept. Resume it to review its requested scope before sending.';emit();return;}
-      const draftBody=state.draft.trim();if(!draftBody&&!retryOriginal)return;
+      const attachmentDraft=retryOriginal?failedSend?.attachmentDraft:attachmentProvider?.(),attachmentState=attachmentDraft?.snapshot(),attachmentIds=attachmentState?.items.map(item=>item.id)||[];
+      if(attachmentIds.length&&(!state.attachmentsEnabled||state.jobMode)){state.error=state.jobMode?'Send files from private messages. Keep the task draft or switch to a message first.':'Sending attachments is not available yet.';emit();return;}
+      const draftBody=state.draft.trim();if(!draftBody&&!attachmentIds.length&&!retryOriginal)return;
       if(state.jobMode&&!state.jobTitle.trim()&&!retryOriginal){state.error='Give this private request a short title.';emit();return;}
       if(state.jobMode&&state.jobGoal.trim()&&!state.jobProject.trim()&&!retryOriginal){state.error='Give this goal a project name.';emit();return;}
       const epoch = generation;
       const specification=state.jobMode?{title:state.jobTitle.trim(),actionKind:state.jobKind,projectTitle:state.jobProject.trim(),goalTitle:state.jobGoal.trim()}:{};
-      const unchanged=failedSend&&failedSend.body===draftBody&&failedSend.jobMode===state.jobMode&&failedSend.title===specification.title&&failedSend.actionKind===specification.actionKind&&failedSend.projectTitle===specification.projectTitle&&failedSend.goalTitle===specification.goalTitle;
+      const unchanged=failedSend&&JSON.stringify(failedSend.attachmentIds||[])===JSON.stringify(attachmentIds)&&failedSend.body===draftBody&&failedSend.jobMode===state.jobMode&&failedSend.title===specification.title&&failedSend.actionKind===specification.actionKind&&failedSend.projectTitle===specification.projectTitle&&failedSend.goalTitle===specification.goalTitle;
       if(failedSend&&!unchanged&&!retryOriginal){state.sendUnconfirmed=true;state.error='Your earlier request is unconfirmed. Retry its original details before sending an edited request.';emit();return;}
-      const item=failedSend||{id:uuid(),body:draftBody,jobMode:state.jobMode,...specification};
+      const item=failedSend||{id:attachmentIds.length?attachmentState.messageId:uuid(),body:draftBody,jobMode:state.jobMode,...specification,attachmentIds,attachmentDraft:attachmentIds.length?attachmentDraft:null};
       let accepted=false;
-      failedSend = item; state.sending = true; state.error = '';state.sendUnconfirmed=false;state.sendNotice=''; emit();
+      if(!item.attachmentDraft)failedSend = item; state.sending = true; state.error = '';state.sendUnconfirmed=false;state.attachmentRetry=false;state.sendNotice=''; emit();
       try {
-        const data=item.jobMode?await api.createJob(item):await api.sendMessage(item.id, item.body);
+        if(item.attachmentDraft){
+          const ready=await item.attachmentDraft.start();if(epoch!==generation)return;
+          if(!ready||JSON.stringify(item.attachmentDraft.snapshot().items.map(file=>file.id))!==JSON.stringify(item.attachmentIds))throw new OwnerApiError('attachment_invalid');
+          item.attachmentDraft.lock();failedSend=item;
+        }
+        const data=item.jobMode?await api.createJob(item):await api.sendMessage(item.id, item.body,item.attachmentIds);
         if (epoch !== generation) return;
-        accepted=true;if(data.job)mergeJob(data.job);
+        accepted=true;item.attachmentDraft?.clear();if(data.job)mergeJob(data.job);
         const matches=state.draft.trim()===item.body&&state.jobMode===item.jobMode&&(!item.jobMode||state.jobTitle.trim()===item.title&&state.jobKind===item.actionKind&&state.jobProject.trim()===item.projectTitle&&state.jobGoal.trim()===item.goalTitle);
         if(matches){state.draft='';draftStore.save('');state.jobTitle='';state.jobProject='';state.jobGoal='';state.jobMode=false;state.taskDraftKept=false;state.sendNotice=item.jobMode?'Work request saved':'';}else state.sendNotice='Earlier request confirmed · your edited draft is still here';
         failedSend = null;
         await readMessages(epoch);
         await readJobs(epoch);
-      } catch (error) { if (epoch === generation) {state.sendUnconfirmed=!accepted;failure(error);} }
+      } catch (error) { if (epoch === generation) {
+        // Only explicit pre-acceptance attachment rejection releases the send
+        // lock. Transport failures and conflicts retain the immutable attempt.
+        const rejected={attachment_expired:410,attachment_not_found:404,attachment_invalid:400,attachment_type_unsupported:415,attachment_too_large:413};
+        if(!accepted&&item.attachmentDraft&&error instanceof OwnerApiError&&Object.hasOwn(rejected,error.kind)&&rejected[error.kind]===error.status){failedSend=null;item.attachmentDraft.reject(error.message);}
+        state.sendUnconfirmed=!accepted&&!!failedSend;state.attachmentRetry=!accepted&&!failedSend&&!!item.attachmentDraft?.snapshot().items.length;failure(error);
+      } }
       finally { if (epoch === generation) { state.sending = false; emit(); } }
     },
     retryUnconfirmed(){if(failedSend)return controller.send({retryOriginal:true});},
@@ -443,6 +474,7 @@ export function ownerWorkPreview(job, status=ownerWorkStatus(job)) {
 }
 
 export function createRelayOwnerUI({ controller = createRelayOwnerController(), document: doc = globalThis.document } = {}) {
+  const attachmentContent=createPrivateAttachmentContent({document:doc,read:(item,options)=>controller.attachmentContent(item,options)});
   let root, timer, viewKey = '', chatNodes = null, pairLabel = '', pairRemember = false, readingAnchor=null, detailDialog=null, detailSignature='',detailFocus=null,connectionDialog=null,workSignature='',workVisible=50,workContext='',workOpen=new Map(),messageView=false;
   const positions={chat:null,work:null};let taskFocus=null,taskWasOpen=false;
   const sensitiveInputs = new Set();
@@ -656,7 +688,7 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
       const heading=make('div','','message-heading'),copy=action('',async()=>{copy.setAttribute('aria-label',await copyText(m.body)?'Private message copied':'Copy private message');},'message-actions');copy.innerHTML=icon('copy');copy.setAttribute('aria-label','Copy private message');heading.append(make('span',m.role==='user'?'You':'dot','message-author'));row.append(heading);
       if(job&&workTitle(job)!=='Owner request')row.append(make('p',workTitle(job),'owner-request-title'));
       // Request text is inert. The inspector alone formats the saved result.
-      const bubble=make('div','','bubble');bubble.append(make('p',m.body,'message-body'));row.append(bubble);
+      const bubble=make('div','','bubble');if(m.body)bubble.append(make('p',m.body,'message-body'));for(const item of m.attachments||[])bubble.append(attachmentContent.row(item));row.append(bubble);
       let status='';
       if(m.role==='user'){
         const labels={saved:'Saved privately · awaiting reply',queued:'Saved · awaiting assistant',callback_accepted:'Sent · awaiting reply',delivery_failed:'Delivery needs retry',reply_saved:'Reply saved'};
@@ -673,7 +705,7 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
       const footer=make('div','','message-footer');footer.append(make('span',messageStamp(m.createdAt)+(status?' · '+status:''),'message-time'),copy);bubble.append(footer);nodes.push(row);
     }
     if (!selected.length&&!work){const empty=make('div','','chat-empty');empty.append(make('p','Private owner conversation','empty-label'),make('h2',state.query?'No matching messages':state.requestsOnly?'No requests to show':state.busy?'Opening your conversation…':'What would you like to work on?'),make('p',state.query?'Try a different phrase.':state.requestsOnly?'Send a message or a work request. Both stay in your private conversation.':state.busy?'Checking your private inbox.':state.jobsEnabled?'Ask naturally. When the assistant identifies actionable work, its plan and progress appear here and in Work.':'Message dot privately. Replies appear here after the assistant checks the inbox.'));nodes.push(empty);}
-    if(!work){if(panel.insertBefore){const wanted=new Set(nodes);for(const child of [...panel.children])if(!wanted.has(child))child.remove();for(let i=0;i<nodes.length;i++)if(panel.children[i]!==nodes[i])panel.insertBefore(nodes[i],panel.children[i]||null);}else panel.replaceChildren(...nodes);restorePosition(panel,anchor);}chatNodes.first=false;
+    if(!work){if(panel.insertBefore){const wanted=new Set(nodes);for(const child of [...panel.children])if(!wanted.has(child))child.remove();for(let i=0;i<nodes.length;i++)if(panel.children[i]!==nodes[i])panel.insertBefore(nodes[i],panel.children[i]||null);}else panel.replaceChildren(...nodes);restorePosition(panel,anchor);}attachmentContent.prune();chatNodes.first=false;
     if (chatNodes.input.value !== state.draft) { chatNodes.input.value = state.draft; autosize(chatNodes.input); }
     chatNodes.section.dataset.workView=String(work);chatNodes.section.dataset.taskEditor=String(state.jobMode);chatNodes.section.dataset.taskDraft=String(controller.hasTaskDraft);
     const newTask=doc.getElementById('relay-owner-new-task');if(newTask){newTask.textContent=state.jobMode||controller.hasTaskDraft?'Resume task':'New task';newTask.disabled=state.busy||state.sending;}
@@ -694,9 +726,9 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
     chatNodes.jobNote.textContent=state.jobKind==='read_only'?'Ask for a report without changing anything. The assistant reviews the request before starting.':state.jobKind==='draft'?'Ask for prepared work to review. This draft scope grants no permission to publish or make other changes.':'The assistant reviews the requested scope and your existing authorization.';
     chatNodes.error.textContent = state.sendNotice||state.error; chatNodes.error.hidden = !state.error&&!state.sendNotice;chatNodes.notice.dataset.kind=state.error||state.sendUnconfirmed?'error':'note';
     chatNodes.warning.textContent = state.warning; chatNodes.warning.hidden = !state.warning;
-    chatNodes.notice.hidden=!state.error&&!state.sendUnconfirmed&&!state.sendNotice;chatNodes.retry.hidden=!state.error&&!state.sendUnconfirmed;chatNodes.retry.textContent=state.sendUnconfirmed?'Retry private send':'Retry private sync';chatNodes.retry.disabled=state.busy||state.sending;
+    chatNodes.notice.hidden=!state.error&&!state.sendUnconfirmed&&!state.sendNotice;chatNodes.retry.hidden=!state.error&&!state.sendUnconfirmed;chatNodes.retry.textContent=state.sendUnconfirmed?'Retry private send':state.attachmentRetry?'Retry file send':'Retry private sync';chatNodes.retry.disabled=state.busy||state.sending;
   }
-  function updateComposerSend(state=controller){if(!chatNodes)return;const taskDraft=!state.jobMode&&(state.hasTaskDraft??(state.taskDraftKept||state.jobTitle||state.jobProject||state.jobGoal));chatNodes.send.disabled=state.sending||state.busy||!chatNodes.input.value.trim()||state.jobMode&&!chatNodes.title.value.trim()||!!taskDraft;}
+  function updateComposerSend(state=controller){if(!chatNodes)return;chatNodes.input.required=!(state.attachmentCount&&state.attachmentsEnabled&&!state.jobMode);const taskDraft=!state.jobMode&&(state.hasTaskDraft??(state.taskDraftKept||state.jobTitle||state.jobProject||state.jobGoal));chatNodes.send.disabled=state.sending||state.busy||!chatNodes.input.value.trim()&&!state.attachmentCount||state.jobMode&&!chatNodes.title.value.trim()||!!taskDraft;}
   function render() {
     const state = controller.snapshot();
     // The subscription also runs while private UI is hidden or unmounted.
@@ -711,7 +743,7 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
     // Preserve unsent setup choices when a status repaint follows network work.
     if (root.contains(active) && active?.id === 'relay-owner-label') pairLabel = active.value;
     if(chatNodes)readingAnchor=position(chatNodes.messages);
-    clearSensitiveFields(); root.classList.add('relay-owner-content'); root.replaceChildren(); viewKey = key; chatNodes = null;
+    attachmentContent.clear();clearSensitiveFields(); root.classList.add('relay-owner-content'); root.replaceChildren(); viewKey = key; chatNodes = null;
     const section = make('section', '', 'relay-owner-panel'); root.append(section);
     if(key!=='chat'&&state.requestsOnly)section.append(make('p','Work requires private owner access. Sign in or reconnect this phone to view saved tasks.','relay-owner-note'));
     if (key !== 'chat' && state.draft) section.append(make('p', 'Your unsent private draft is kept in this tab. Sign in to review it.', 'relay-owner-notice'));
@@ -742,7 +774,7 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
       section.append(form);
       const error = make('p', '', 'relay-owner-error'); error.setAttribute('role', 'status');
       const warning = make('p', '', 'relay-owner-note owner-storage-warning');
-      const retry = action('Retry private sync', () => controller.snapshot().sendUnconfirmed?controller.retryUnconfirmed():controller.refresh(),'text-button'),notice=make('div','','conversation-notice');notice.append(error,retry);section.insertBefore?.(notice,form);if(!section.insertBefore)section.append(notice);section.append(warning);
+      const retry = action('Retry private sync', () => {const state=controller.snapshot();return state.sendUnconfirmed?controller.retryUnconfirmed():state.attachmentRetry?controller.send():controller.refresh();},'text-button'),notice=make('div','','conversation-notice');notice.append(error,retry);section.insertBefore?.(notice,form);if(!section.insertBefore)section.append(notice);section.append(warning);
       chatNodes = { section,messages, input,inputLabel:label,status, send,sendLabel,inputRow,taskHeader,taskBack:back,taskActions,error, warning, retry,notice,jobToggle:toggle,jobToggleLabel:toggleLabel,jobFields:fields,title,kind,jobNote,project,goal,organization,first:true };messageView=false;renderMessages(state); autosize(input);
       return;
     }
@@ -836,7 +868,7 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(), 
         else if (controller.mode === 'owner' && controller.hasCredential) controller.refresh();
       }, controller.status === 'pending' || controller.mode === 'pairing' ? 5000 : 30000);
     },
-    unmount() { if(chatNodes){if(messageView){rememberWork(chatNodes.messages);positions.work=workPosition(chatNodes.messages);}else positions.chat=position(chatNodes.messages);readingAnchor=positions.chat;}closeInspector();connectionDialog?.close?.();connectionDialog?.remove?.();connectionDialog=null;clearSensitiveFields(); if (viewKey.startsWith('account:') || controller.snapshot().authenticating || controller.snapshot().loginDevices.length) controller.cancelSensitive(); root = null; chatNodes = null; viewKey = ''; clearInterval(timer); },
+    unmount() { attachmentContent.clear();if(chatNodes){if(messageView){rememberWork(chatNodes.messages);positions.work=workPosition(chatNodes.messages);}else positions.chat=position(chatNodes.messages);readingAnchor=positions.chat;}closeInspector();connectionDialog?.close?.();connectionDialog?.remove?.();connectionDialog=null;clearSensitiveFields(); if (viewKey.startsWith('account:') || controller.snapshot().authenticating || controller.snapshot().loginDevices.length) controller.cancelSensitive(); root = null; chatNodes = null; viewKey = ''; clearInterval(timer); },
     toggleSearch() { const bar = doc.getElementById('relay-owner-search-bar'); if (!bar) return; bar.hidden = !bar.hidden; if (!bar.hidden) doc.getElementById('relay-owner-search').focus(); else { doc.getElementById('relay-owner-search').value = ''; controller.setQuery(''); } },
     latest() { if(controller.requestsOnly)controller.setRequestsOnly(false);controller.setQuery('');if(chatNodes)chatNodes.messages.scrollTop=chatNodes.messages.scrollHeight; },
     requests(){controller.toggleRequests();if(chatNodes)chatNodes.messages.scrollTop=0;},
