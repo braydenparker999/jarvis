@@ -397,8 +397,9 @@ test('browser fixture: existing Relay URL, public draft and owner-private isolat
     page.on('pageerror', error => errors.push(error.message));
     const url = origin + '/jarvis/?restriction=1#same';
     await page.goto(url); await page.locator('#message-text').waitFor();
-    page.on('framenavigated', frame => { if (frame === page.mainFrame()) unexpectedNavigations.push(frame.url()); });
-    const originalHistory = await page.evaluate(() => history.length);
+    page.on('framenavigated', frame => { if (frame === page.mainFrame() && frame.url() !== url) unexpectedNavigations.push(frame.url()); });
+    const historySession = await context.newCDPSession(page);
+    const originalHistory = await historySession.send('Page.getNavigationHistory');
     await page.locator('#message-text').fill('Public unsent draft');
     const menu = label => conversationMenu(page, label);
     await menu('Connect this phone');
@@ -423,7 +424,14 @@ test('browser fixture: existing Relay URL, public draft and owner-private isolat
     await page.getByRole('button', { name: 'Revoke My phone', exact: true }).click();
     await page.getByText('This phone’s owner access has been revoked.', { exact: true }).waitFor();
     assert.equal(await page.evaluate(key => localStorage.getItem(key), OWNER_SESSION_KEY), null);
-    assert.equal(page.url(), url); assert.equal(await page.evaluate(() => history.length), originalHistory);
+    assert.equal(page.url(), url);
+    const finalHistory = await historySession.send('Page.getNavigationHistory');
+    assert.equal(finalHistory.currentIndex, originalHistory.currentIndex, 'Pairing and logout cannot move the active route entry');
+    assert.deepEqual(finalHistory.entries.slice(0, originalHistory.entries.length).map(({id,url})=>({id,url})),
+      originalHistory.entries.map(({id,url})=>({id,url})), 'Every original history entry stays intact');
+    assert.equal(finalHistory.entries.length, originalHistory.entries.length + 1, 'Only one reusable menu Forward entry is retained');
+    assert.equal(finalHistory.entries.at(-1).url, url);
+    assert.equal(await page.evaluate(() => history.state?.jarvisRelayMenu?.layer), 'base');
     assert.deepEqual(unexpectedNavigations, []); assert.deepEqual(errors, []); assert.deepEqual(publicSent, []);
     assert.equal(await page.locator('.relay-owner-content iframe, .relay-owner-content a').count(), 0);
     await context.close();

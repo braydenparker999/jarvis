@@ -261,7 +261,7 @@ test('real browser configures, clears site data, signs in and changes password e
   await page.goto(RELAY_URL); await page.locator('#message-text').waitFor();
   await page.evaluate(({key, token, id}) => localStorage.setItem(key, JSON.stringify({device_token: token, device_id: id})), {key: OWNER_SESSION_KEY, token: h.token, id: h.id});
   await page.reload(); await ownerReady(page);
-  const originalHistory = await page.evaluate(() => history.length);
+  const originalHistory = await phone.cdp.send('Page.getNavigationHistory');
   await accountForm(page); assert.equal(await page.locator('#relay-owner-credentials-consent').isChecked(), false);
   await page.locator('#relay-owner-new-password').fill(PASSWORD);
   await page.getByRole('button', {name: 'Cancel / owner chat', exact: true}).click(); await ownerReady(page);
@@ -337,7 +337,13 @@ test('real browser configures, clears site data, signs in and changes password e
   assert.deepEqual([...h.ctx.storage.sql.exec('SELECT device_id FROM relay_owner_sessions WHERE revoked_ms IS NOT NULL')].map(row => row.device_id), [h.id]);
   assert.equal([...h.ctx.storage.sql.exec('SELECT device_id FROM relay_owner_sessions WHERE revoked_ms IS NULL')].length, 10);
   await assertIsolation(phone);
-  assert.equal(await page.evaluate(() => history.length), originalHistory);
+  const finalHistory = await phone.cdp.send('Page.getNavigationHistory');
+  assert.equal(finalHistory.currentIndex, originalHistory.currentIndex, 'Owner access cannot move the active route entry');
+  assert.deepEqual(finalHistory.entries.slice(0, originalHistory.entries.length).map(({id,url})=>({id,url})),
+    originalHistory.entries.map(({id,url})=>({id,url})), 'Every original history entry stays intact');
+  assert.equal(finalHistory.entries.length, originalHistory.entries.length + 1, 'Only one reusable menu Forward entry is retained');
+  assert.equal(finalHistory.entries.at(-1).url, RELAY_URL);
+  assert.equal(await page.evaluate(() => history.state?.jarvisRelayMenu?.layer), 'base');
   assert.deepEqual(phone.errors, []); assert.deepEqual(phone.unexpected, []);
   assert.ok(phone.navigations.every(url => url === RELAY_URL), 'Setup, login, reload and recovery must preserve the full approved URL');
   assert.equal((await phone.context.cookies()).length, 0);

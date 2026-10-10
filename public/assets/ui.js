@@ -51,7 +51,7 @@ export function sheet(title, entries, navigation) {
   const head=el('div','','dialog-heading');head.append(el('h2',title));
   const close=el('button','','icon-button');close.innerHTML=icon('close');close.setAttribute('aria-label','Close');close.onclick=()=>dismiss();head.append(close);dialog.append(head);
   for(const entry of entries){const b=el('button',entry.label,'sheet-action');b.type='button';if(entry.icon)b.insertAdjacentHTML('afterbegin',icon(entry.icon));b.disabled=!!entry.disabled;b.onclick=()=>dismiss(entry.action);dialog.append(b);}
-  dialog.addEventListener('close',()=>{dialog.remove();previous?.isConnected&&previous.focus({preventScroll:true});navigation?.closed(dialog);},{once:true});
+  dialog.addEventListener('close',()=>{const restore=!navigation||document.activeElement===previous||document.activeElement===document.body||dialog.contains(document.activeElement);dialog.remove();if(restore&&previous?.isConnected)previous.focus({preventScroll:true});navigation?.closed(dialog);},{once:true});
   dialog.addEventListener('click',e=>{if(e.target===dialog){const r=dialog.getBoundingClientRect();if(e.clientY<r.top||e.clientY>r.bottom||e.clientX<r.left||e.clientX>r.right)dismiss();}});
   if(navigation)dialog.addEventListener('cancel',event=>{event.preventDefault();dismiss();});
   document.body.append(dialog);dialog.showModal();navigation?.open(dialog);return dialog;

@@ -15,6 +15,7 @@ export function createRelayMenuHistory({history, getURL, createId = () => crypto
     else closed(record.dialog);
   }
   function open(dialog) {
+    revision++;
     const entry = current();
     // A dismissed Forward/reloaded entry can be reused, rather than adding a
     // second inert same-URL step above it.

@@ -177,3 +177,18 @@ test('fresh direct Relay URLs and a Home link from the open menu do not duplicat
   assert.equal(await page.locator('dialog.app-sheet[open]').count(), 0);
   assertBrowserContained(phone);
 });
+
+test('a newer composer focus after popstate survives the queued native close event', {timeout: 120000}, async t => {
+  const j = await journey(t); if (!j) return;
+  const {phone, page} = j;
+  await openMenu(page);
+  await page.evaluate(() => {
+    addEventListener('popstate', () => document.querySelector('#message-text').focus({preventScroll: true}), {once: true});
+    history.back();
+  });
+  await closed(page);
+  assert.equal(page.url(), RELAY_URL);
+  assert.equal(await page.evaluate(() => document.activeElement.id), 'message-text');
+  await page.goBack(); await assertHome(page);
+  assertBrowserContained(phone);
+});

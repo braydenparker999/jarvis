@@ -1,4 +1,4 @@
-import {icon as uiIcon, sheet as plainSheet, appViewport, autosize, copyText} from './ui.js';
+import {icon as uiIcon, sheet, appViewport, autosize, copyText} from './ui.js';
 import {conversation} from './conversation.js';
 import { apps, icon, loadPreferences, savePreferences, renderUtility } from './hub.js';
 import { API_ORIGIN } from './config.js';
@@ -29,7 +29,7 @@ let route = getRoute(), chatUI, workReturn='public', savedView=false, surfaceMot
 const reducedMotion=window.matchMedia('(prefers-reduced-motion: reduce)');
 reducedMotion.addEventListener('change',event=>{if(event.matches)document.getAnimations().forEach(animation=>animation.cancel());});
 const relayMenuHistory=createRelayMenuHistory({history,getURL:()=>location.href});
-function sheet(title,entries){return plainSheet(title,entries,route==='chat'?relayMenuHistory:undefined);}
+function relaySheet(title,entries){return sheet(title,entries,relayMenuHistory);}
 const ownerController = createRelayOwnerController({onModeChange:next=>{if(next!=='public')savedView=false;if(route==='chat')drawShell();}});
 const ownerUI = createRelayOwnerUI({controller:ownerController});
 let relayTransfers, transferNotice = '';
@@ -108,7 +108,7 @@ function drawShell() {
   if(route==='chat') {
     $('relay-nav-chat').onclick=()=>{if(ownerUI.mode!=='public'){ownerController.showOwner();ownerController.setJobMode(false);ownerController.setRequestsOnly(false);}updateRelayNavigation();};
     $('relay-nav-work').onclick=()=>{ownerController.showOwner();ownerController.setJobMode(false);ownerController.setRequestsOnly(true);updateRelayNavigation();};
-    const identity=document.querySelector('.conversation-identity'),scope=document.createElement('button');scope.type='button';scope.id='relay-scope-toggle';scope.className='relay-scope-toggle';scope.setAttribute('aria-label','Choose public or private conversation');scope.onclick=()=>sheet('Conversation visibility',[
+    const identity=document.querySelector('.conversation-identity'),scope=document.createElement('button');scope.type='button';scope.id='relay-scope-toggle';scope.className='relay-scope-toggle';scope.setAttribute('aria-label','Choose public or private conversation');scope.onclick=()=>relaySheet('Conversation visibility',[
       {label:'Private owner chat',icon:'chat',action:()=>{ownerController.showOwner();ownerController.setRequestsOnly(false);}},
       {label:'Public chat',icon:'chat',action:()=>ownerController.showPublic()}
     ]);identity.append(scope);
@@ -131,7 +131,7 @@ function drawShell() {
         : [{label:'Search messages',icon:'search',action:()=>$('chat-search-toggle').click(),section:'This conversation'},{label:'Bookmarks',icon:'bookmark',action:()=>chatUI?.bookmarks()},{label:'Latest messages',icon:'chat',action:()=>chatUI?.latest()},{label:'Refresh inbox',icon:'refresh',action:sync},{label:'Connection details',icon:'info',action:showConnection}];
       const accountActions=ownerController.hasCredential?[{label:'Account sign-in',icon:'info',action:()=>ownerController.showAccount(),section:'Owner access'},{label:'Devices',icon:'info',action:()=>ownerController.showDevices()},{label:'Disconnect this phone',icon:'close',action:()=>ownerController.disconnect()}]:[];
       const entries=[...ownerActions,...conversationActions,...accountActions];
-      const dialog=sheet(privateView?'Private owner Relay':'Public Relay',entries);dialog.classList.add('conversation-sheet');
+      const dialog=relaySheet(privateView?'Private owner Relay':'Public Relay',entries);dialog.classList.add('conversation-sheet');
       const context=document.createElement('p');context.className='sheet-context';context.textContent=privateView?'Your owner conversation stays private. Relay and Muse share a separate public inbox.':'Anyone with this website address can read and post to this shared inbox.';dialog.querySelector('.dialog-heading').after(context);
       const actions=[...dialog.querySelectorAll('.sheet-action')];
       entries.forEach((entry,i)=>{if(entry.section){const label=document.createElement('p');label.className='sheet-section';label.textContent=entry.section;actions[i].before(label);}if((entry.label==='Public chat'&&!privateView)||(entry.label==='Owner chat'&&ownerUI.mode==='owner'))actions[i].classList.add('is-current');if(entry.href){const link=document.createElement('a');link.href=entry.href;link.className=actions[i].className;link.innerHTML=actions[i].innerHTML;actions[i].replaceWith(link);}});
@@ -174,24 +174,24 @@ function animateRelaySurface(work){
   if(!reducedMotion.matches&&node.animate)node.animate([{opacity:.88,transform:'translateY(5px)'},{opacity:1,transform:'translateY(0)'}],{duration:170,easing:'cubic-bezier(.2,.7,.2,1)'});
 }
 function openFontCredits(){
-  const dialog=sheet('Font & credits',[]),note=document.createElement('p');note.className='sheet-context';note.textContent='Manrope by Mikhail Sharanda and the Manrope Project Authors. Embedded for offline use under the SIL Open Font License 1.1.';dialog.append(note);
+  const dialog=relaySheet('Font & credits',[]),note=document.createElement('p');note.className='sheet-context';note.textContent='Manrope by Mikhail Sharanda and the Manrope Project Authors. Embedded for offline use under the SIL Open Font License 1.1.';dialog.append(note);
   const details=document.createElement('details');details.className='font-license';const summary=document.createElement('summary');summary.textContent='Full font license';const text=document.createElement('pre');text.textContent=MANROPE_LICENSE;details.append(summary,text);dialog.append(details);
 }
 function openRelaySettings(){
   const privateView=ownerUI.mode!=='public',items=[{label:'Connection details',icon:'info',action:()=>privateView?ownerUI.connection():showConnection()},{label:privateView?'Refresh private inbox':'Refresh inbox',icon:'refresh',action:()=>privateView?ownerUI.refresh():sync(),disabled:privateView&&!ownerController.hasCredential&&ownerController.status!=='pending'}];
   // These remain the existing authenticated forms and disconnect operation.
   if(ownerController.hasCredential)items.push({label:'Account sign-in',icon:'info',action:()=>ownerController.showAccount()},{label:'Devices',icon:'info',action:()=>ownerController.showDevices()},{label:'Disconnect this phone',icon:'close',action:()=>ownerController.disconnect()});
-  items.push({label:'Font & credits',icon:'info',action:openFontCredits});sheet('Settings',items);
+  items.push({label:'Font & credits',icon:'info',action:openFontCredits});relaySheet('Settings',items);
 }
 function openWork(){savedView=false;if(!(ownerController.mode==='owner'&&ownerController.requestsOnly))workReturn=ownerUI.mode;$('relay-nav-work')?.click();$('relay-menu-button')?.focus({preventScroll:true});}
 function returnToChat(){savedView=false;ownerController.setRequestsOnly(false);ownerController.setJobMode(false);if(workReturn==='public')ownerController.showPublic();else ownerController.showOwner();updateRelayNavigation();$('relay-compose-menu')?.focus({preventScroll:true});}
-function openChats(){savedView=false;sheet('Chats',[{label:'Private',icon:'chat',action:()=>{ownerController.showOwner();ownerController.setJobMode(false);ownerController.setRequestsOnly(false);updateRelayNavigation();}},{label:'Public',icon:'chat',action:()=>{ownerController.showPublic();chatUI?.latest();relayControls();}}]);}
+function openChats(){savedView=false;relaySheet('Chats',[{label:'Private',icon:'chat',action:()=>{ownerController.showOwner();ownerController.setJobMode(false);ownerController.setRequestsOnly(false);updateRelayNavigation();}},{label:'Public',icon:'chat',action:()=>{ownerController.showPublic();chatUI?.latest();relayControls();}}]);}
 function openSaved(){savedView=true;ownerController.showPublic();chatUI?.bookmarks(true);relayControls();}
 function openRelayMenu(){
   const state=ownerController.snapshot(),privateView=ownerUI.mode!=='public';
   const entries=[{label:state.requestsOnly&&privateView?'Search current work':'Search messages',icon:'search',disabled:privateView&&state.status!=='approved',action:()=>$('chat-search-toggle')?.click()},
     {label:'Chats',icon:'chat',action:openChats},{label:'Work',icon:'check',action:openWork},{label:'Saved',icon:'bookmark',action:openSaved},{label:'Settings',icon:'info',action:openRelaySettings}];
-  const dialog=sheet('Relay',entries);dialog.classList.add('relay-navigation-sheet');[...dialog.querySelectorAll('.sheet-action')].forEach((node,i)=>{node.setAttribute('aria-label',entries[i].label);if(entries[i].label==='Saved')node.setAttribute('aria-description','Saved public messages on this device');});
+  const dialog=relaySheet('Relay',entries);dialog.classList.add('relay-navigation-sheet');[...dialog.querySelectorAll('.sheet-action')].forEach((node,i)=>{node.setAttribute('aria-label',entries[i].label);if(entries[i].label==='Saved')node.setAttribute('aria-description','Saved public messages on this device');});
   const home=document.createElement('a');home.href='/';home.dataset.route='home';home.className='relay-menu-home';home.textContent='Jarvis home';dialog.append(home);
 }
 function drawPage() {
