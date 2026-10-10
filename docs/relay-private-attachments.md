@@ -14,6 +14,10 @@ Version one is deliberately bounded: at most four attachments per message, 1 MiB
 
 Count bounds are also enforced transactionally: four staged files per original message,128 staged files per owner,64 new uploads per UTC day and1024 total attachment identity records per owner. Discard/expiry frees binary bytes but retains the immutable identity tombstone within that1024-record cap. UUIDs cannot be resurrected with replacement contents by a delayed message retry.
 
+Before body ingestion/codec work, authenticated attempts are bounded to128/day and12/minute; failed validation and quota rejection consume their allowance. HTTP ingress, codec admission and discard have independent bounded counters. Cheap quota checks run before inflation, with final transactional quota/ownership checks after asynchronous validation.
+
+The1024 identity limit is a lifetime cap including removed/expired uploads and cancelled upload IDs. It does not reset when files are discarded. A specific quota error explains that limitation. Existing linked files remain readable if the cap is reached. Changing that retention/identity policy requires separate review.
+
 The file limit leaves room under SQLite's [documented 2 MB maximum BLOB/row size](https://developers.cloudflare.com/durable-objects/platform/limits/). Raising it requires a separately reviewed chunking or private object-storage design.
 
 ## Owned implementation files
@@ -30,6 +34,8 @@ No frontend API, composer, CSS, navigation, Poweramp, deployment, OAuth/configur
 ## Composer HTTP contract
 
 All paths are on the existing API origin. Use the existing owner session bearer in the Authorization header. Never put a token in a URL. Upload/discard requests retain the existing allowed-Origin and application/json checks. The server rechecks the live session before persistence or content release.
+
+Approved GET/session, successful POST/login and approved POST/pair/status responses advertise attachments_enabled:true. Missing, expired or revoked authentication never advertises readiness. This capability describes the browser attachment path, not proof of refreshed host connector discovery.
 
 1. The composer creates the final message UUID before staging uploads.
 
@@ -49,7 +55,7 @@ All paths are on the existing API origin. Use the existing owner session bearer 
 
    Message retries require identical original body and ordered attachment IDs. They cannot append/remove/replace attachments, change accepted replies or produce duplicate messages/events/jobs. A text-only retry of an already attached message is a conflict.
 
-4. `POST /relay/owner/attachments/discard` accepts `{ message_id, attachment_id }`. It discards only a staged upload belonging to the current uploader and exact message; linked attachments are immutable. Repeated disposal of the same absent draft returns a generic already-absent result without revealing another target.
+4. `POST /relay/owner/attachments/discard` accepts `{ message_id, attachment_id }`. It discards only a staged upload belonging to the current uploader and exact message; linked attachments are immutable. Unknown or foreign IDs return the identical generic already-absent status/shape. A cancelled chosen UUID is reserved even if its upload is still validating, so a delayed POST cannot resurrect the file. Cancellation identities count against the lifetime cap. The generic response's newWrite:false reports that no existing uploaded bytes were changed; private anti-replay bookkeeping may reserve an absent ID.
 
 5. `GET /relay/owner/attachments/content?message_id=<UUID>&attachment_id=<UUID>` downloads a linked attachment with the existing owner bearer. Add `preview=1` only for a permitted raster image. The frontend fetches an authenticated Blob, creates a local object URL, and revokes it when the preview/download is removed. Direct image URLs carrying credentials are forbidden.
 
@@ -78,6 +84,8 @@ Initial MIME allowlist:
 - image/png, image/jpeg, image/webp: require matching binary structure/signature, dimensions at most8192 per side and at most16,000,000 pixels; never trust extension or supplied MIME alone.
 
 PNG is restricted to non-interlaced8-bit static images, with chunk CRCs and bounded decoded scanlines checked. APNG acTL/fcTL/fdAT are rejected. WebP ANIM/ANMF/animation flags are rejected, and extended canvas must agree with a single actual frame. JPEG/WebP container and frame parsing bounds the stated decode geometry; the server does not perform complete codec entropy decoding. Malformed codec contents can still fail in the host image decoder and must be shown as preview errors, never as verified image interpretation.
+
+Compressed PNG ancillary metadata (iCCP/zTXt/iTXt) is unsupported to avoid another unbounded decompression path. Unsupported bit depth/interlacing/metadata receives an explicit415 error.
 - application/pdf: require PDF signature; download/resource content only.
 - text/plain, text/markdown, text/csv, application/json: require valid UTF-8; deliver as untrusted plain text/resource content, never HTML or executable markup.
 

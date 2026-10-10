@@ -3,7 +3,7 @@
 import {RELAY_OWNER, RelayError, uuid} from './relay-common.js';
 export const ATTACHMENT_MAX_BYTES = 1048576;
 export const ATTACHMENT_BODY_LIMIT = 1399200;
-export const ATTACHMENT_LIMITS = Object.freeze({perMessage:4, stagedPerOwner:128, recordsPerOwner:1024, uploadsPerDay:64, dailyBytes:16777216, retainedBytes:67108864, draftMs:86400000});
+export const ATTACHMENT_LIMITS = Object.freeze({perMessage:4, stagedPerOwner:128, recordsPerOwner:1024, uploadsPerDay:64, attemptsPerDay:128, attemptsPerMinute:12, dailyBytes:16777216, retainedBytes:67108864, draftMs:86400000});
 export const ATTACHMENT_MIMES = ['image/png','image/jpeg','image/webp','application/pdf','text/plain','text/markdown','text/csv','application/json'];
 const rows=(ctx,q,...v)=>[...ctx.storage.sql.exec(q,...v)];
 const fail=(status,code,message)=>{throw new RelayError(status===429?-32013:-32602,message,{status,code});};
@@ -18,6 +18,36 @@ export function relayAttachmentSchema(ctx){
  state TEXT NOT NULL CHECK(state IN ('staged','linked','discarded','expired')),position INTEGER)`);
  ctx.storage.sql.exec('CREATE INDEX IF NOT EXISTS relay_owner_attachment_message ON relay_owner_attachments(message_id,state,position)');
  ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS relay_owner_attachment_rates (day TEXT PRIMARY KEY,uploads INTEGER NOT NULL,bytes INTEGER NOT NULL)');
+ ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS relay_owner_attachment_attempts (bucket TEXT PRIMARY KEY,attempts INTEGER NOT NULL)');
+}
+// Commit this small allowance independently of parsing/codec work. Invalid
+// files and quota failures consume attempts; they cannot roll the count back.
+// HTTP ingress and codec admission each have independent bounded counters.
+export function relayAttachmentAdmit(ctx,now,phase='codec'){
+ const day=phase+':day:'+new Date(now).toISOString().slice(0,10),minute=phase+':minute:'+Math.floor(now/60000);
+ for(const [bucket,limit] of [[day,ATTACHMENT_LIMITS.attemptsPerDay],[minute,ATTACHMENT_LIMITS.attemptsPerMinute]]){
+  if((rows(ctx,'SELECT attempts FROM relay_owner_attachment_attempts WHERE bucket=?',bucket)[0]?.attempts||0)>=limit)fail(429,'attachment_quota_exceeded','Private attachment attempt allowance reached');
+ }
+ rows(ctx,'DELETE FROM relay_owner_attachment_attempts WHERE bucket LIKE ? AND bucket NOT IN (?,?)',phase+':%',day,minute);
+ for(const bucket of [day,minute])rows(ctx,'INSERT INTO relay_owner_attachment_attempts VALUES(?,1) ON CONFLICT(bucket) DO UPDATE SET attempts=attempts+1',bucket);
+ cleanup(ctx,now);
+}
+export function relayAttachmentPrecheck(ctx,session,body,now){
+ ids(body.message_id,body.id);
+ const prior=rows(ctx,'SELECT id,message_id,principal,device_id,name,mime_type,size_bytes,state,expires_ms FROM relay_owner_attachments WHERE id=?',body.id)[0];
+ if(prior){
+  if(prior.principal!==RELAY_OWNER||prior.device_id!==session.device_id||prior.message_id!==body.message_id)fail(404,'attachment_not_found','Private attachment not found');
+  if(prior.name!==body.name||prior.mime_type!==body.mime_type)fail(409,'attachment_id_conflict','Attachment ID conflicts with an existing upload');
+  if(!['staged','linked'].includes(prior.state)||prior.state==='staged'&&prior.expires_ms<=now)fail(410,'attachment_expired','Attachment draft has expired or been discarded');
+  return;
+ }
+ if(rows(ctx,'SELECT id FROM relay_owner_entries WHERE id=?',body.message_id).length)fail(409,'attachment_message_conflict','Attachments cannot be added to an existing message');
+ const usage=rows(ctx,"SELECT COUNT(*) AS records,COALESCE(SUM(CASE WHEN state='staged' AND expires_ms>? THEN 1 ELSE 0 END),0) AS staged,COALESCE(SUM(CASE WHEN state='linked' OR state='staged' AND expires_ms>? THEN size_bytes ELSE 0 END),0) AS bytes FROM relay_owner_attachments WHERE principal=?",now,now,RELAY_OWNER)[0];
+ const count=rows(ctx,"SELECT COUNT(*) AS n FROM relay_owner_attachments WHERE message_id=? AND principal=? AND state='staged' AND expires_ms>?",body.message_id,RELAY_OWNER,now)[0].n;
+ const rate=rows(ctx,'SELECT * FROM relay_owner_attachment_rates WHERE day=?',new Date(now).toISOString().slice(0,10))[0];
+ const estimate=typeof body.data_base64==='string'?Math.floor(body.data_base64.length/4)*3-(body.data_base64.endsWith('==')?2:body.data_base64.endsWith('=')?1:0):0;
+ if(usage.records>=ATTACHMENT_LIMITS.recordsPerOwner)fail(429,'attachment_quota_exceeded','Private attachment lifetime limit reached (1,024 files). Discarding files does not reset this limit.');
+ if(usage.staged>=ATTACHMENT_LIMITS.stagedPerOwner||count>=4||usage.bytes+estimate>ATTACHMENT_LIMITS.retainedBytes||(rate?.uploads||0)>=ATTACHMENT_LIMITS.uploadsPerDay||(rate?.bytes||0)+estimate>ATTACHMENT_LIMITS.dailyBytes)fail(429,'attachment_quota_exceeded','Private attachment quota reached');
 }
 const metadata=r=>({id:r.id,messageId:r.message_id,name:r.name,mimeType:r.mime_type,sizeBytes:r.size_bytes,sha256:r.sha256,createdAt:new Date(r.created_ms).toISOString(),state:r.state,visibility:'private'});
 export function relayAttachmentMetadata(ctx,messageId){return rows(ctx,"SELECT id,message_id,name,mime_type,size_bytes,sha256,created_ms,state FROM relay_owner_attachments WHERE message_id=? AND principal=? AND state='linked' ORDER BY position",messageId,RELAY_OWNER).map(metadata);}
@@ -36,6 +66,7 @@ async function png(bytes){
   const type=String.fromCharCode(...bytes.subarray(offset+4,offset+8));
   if(!/^[A-Za-z]{4}$/.test(type)||crc32(bytes.subarray(offset+4,offset+8+size))!==view.getUint32(offset+8+size))invalid('Invalid PNG chunk');
   if(['acTL','fcTL','fdAT'].includes(type))fail(415,'attachment_type_unsupported','Animated images are not supported');
+  if(['iCCP','zTXt','iTXt'].includes(type))fail(415,'attachment_type_unsupported','Compressed PNG metadata is not supported');
   if(type==='IHDR'){
    if(offset!==8||size!==13||width!==undefined)invalid('Invalid PNG dimensions');
    width=view.getUint32(offset+8);height=view.getUint32(offset+12);geometry(width,height);
@@ -116,6 +147,7 @@ function webp(bytes){
 export async function relayAttachmentPrepare(body){
  ids(body.message_id,body.id);
  if(typeof body.name!=='string'||!body.name.trim()||body.name!==body.name.trim()||new TextEncoder().encode(body.name).length>240||/[\x00-\x1f\x7f-\x9f\/\\\u202a-\u202e\u2066-\u2069]/.test(body.name)||['.','..'].includes(body.name))invalid('Invalid attachment filename');
+ if(Array.from(body.name).some(c=>{const p=c.codePointAt(0);return p>=0xd800&&p<=0xdfff;}))invalid('Invalid attachment filename');
  if(!ATTACHMENT_MIMES.includes(body.mime_type))fail(415,'attachment_type_unsupported','Unsupported attachment type');
  const encoded=body.data_base64;
  if(typeof encoded!=='string'||!encoded.length||encoded.length%4||!/^[A-Za-z0-9+/]*={0,2}$/.test(encoded))invalid('Invalid attachment base64');
@@ -152,7 +184,8 @@ export function relayAttachmentUpload(ctx,session,body,prepared,now){
  const usage=rows(ctx,"SELECT COUNT(*) AS records,COALESCE(SUM(CASE WHEN state='staged' THEN 1 ELSE 0 END),0) AS staged,COALESCE(SUM(CASE WHEN state IN ('staged','linked') THEN size_bytes ELSE 0 END),0) AS bytes FROM relay_owner_attachments WHERE principal=?",RELAY_OWNER)[0];
  const messageCount=rows(ctx,"SELECT COUNT(*) AS n FROM relay_owner_attachments WHERE message_id=? AND principal=? AND state='staged'",body.message_id,RELAY_OWNER)[0].n;
  const day=new Date(now).toISOString().slice(0,10),rate=rows(ctx,'SELECT * FROM relay_owner_attachment_rates WHERE day=?',day)[0];
- if(usage.records>=ATTACHMENT_LIMITS.recordsPerOwner||usage.staged>=ATTACHMENT_LIMITS.stagedPerOwner||messageCount>=4||usage.bytes+prepared.bytes.length>ATTACHMENT_LIMITS.retainedBytes||(rate?.uploads||0)>=ATTACHMENT_LIMITS.uploadsPerDay||(rate?.bytes||0)+prepared.bytes.length>ATTACHMENT_LIMITS.dailyBytes)fail(429,'attachment_quota_exceeded','Private attachment quota reached');
+ if(usage.records>=ATTACHMENT_LIMITS.recordsPerOwner)fail(429,'attachment_quota_exceeded','Private attachment lifetime limit reached (1,024 files). Discarding files does not reset this limit.');
+ if(usage.staged>=ATTACHMENT_LIMITS.stagedPerOwner||messageCount>=4||usage.bytes+prepared.bytes.length>ATTACHMENT_LIMITS.retainedBytes||(rate?.uploads||0)>=ATTACHMENT_LIMITS.uploadsPerDay||(rate?.bytes||0)+prepared.bytes.length>ATTACHMENT_LIMITS.dailyBytes)fail(429,'attachment_quota_exceeded','Private attachment quota reached');
  rows(ctx,'DELETE FROM relay_owner_attachment_rates WHERE day<>?',day);
  rows(ctx,'INSERT INTO relay_owner_attachments VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',body.id,body.message_id,RELAY_OWNER,session.device_id,body.name,body.mime_type,prepared.bytes.length,prepared.sha256,prepared.bytes.buffer,now,now+ATTACHMENT_LIMITS.draftMs,'staged',null);
  rows(ctx,'INSERT INTO relay_owner_attachment_rates(day,uploads,bytes) VALUES(?,1,?) ON CONFLICT(day) DO UPDATE SET uploads=uploads+1,bytes=bytes+excluded.bytes',day,prepared.bytes.length);
@@ -174,9 +207,17 @@ export function relayAttachmentCheckMessage(ctx,session,messageId,input,now,prev
 }
 export function relayAttachmentLink(ctx,messageId,list){list.forEach((id,i)=>rows(ctx,"UPDATE relay_owner_attachments SET state='linked',position=? WHERE id=? AND message_id=? AND state='staged'",i,id,messageId));}
 export function relayAttachmentDiscard(ctx,session,body,now){
- ids(body.message_id,body.attachment_id);cleanup(ctx,now);const r=rows(ctx,'SELECT * FROM relay_owner_attachments WHERE id=?',body.attachment_id)[0];
- if(!r)return {discarded:true,newWrite:false,visibility:'private'};
- if(r.principal!==RELAY_OWNER||r.device_id!==session.device_id||r.message_id!==body.message_id)fail(404,'attachment_not_found','Private attachment not found');
+ ids(body.message_id,body.attachment_id);cleanup(ctx,now);const r=rows(ctx,'SELECT id,message_id,principal,device_id,state FROM relay_owner_attachments WHERE id=?',body.attachment_id)[0];
+ if(!r){
+  // Cancel can reach this object while a POST is still validating its bytes.
+  // Reserve that chosen UUID so a delayed POST cannot resurrect the file.
+  // The identity cap includes these bounded cancellation tombstones; once
+  // full, new uploads already fail closed. No uploaded bytes are changed.
+  const count=rows(ctx,'SELECT COUNT(*) AS n FROM relay_owner_attachments WHERE principal=?',RELAY_OWNER)[0].n;
+  if(count<ATTACHMENT_LIMITS.recordsPerOwner)rows(ctx,'INSERT INTO relay_owner_attachments VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',body.attachment_id,body.message_id,RELAY_OWNER,session.device_id,'','',0,'',null,now,now+ATTACHMENT_LIMITS.draftMs,'discarded',null);
+  return {discarded:true,newWrite:false,visibility:'private'};
+ }
+ if(r.principal!==RELAY_OWNER||r.device_id!==session.device_id||r.message_id!==body.message_id)return {discarded:true,newWrite:false,visibility:'private'};
  if(r.state==='linked')fail(409,'attachment_already_linked','Accepted message attachments cannot be discarded');
  if(r.state!=='staged')return {discarded:true,newWrite:false,visibility:'private'};
  rows(ctx,"UPDATE relay_owner_attachments SET state='discarded',bytes=NULL WHERE id=?",r.id);return {discarded:true,newWrite:true,visibility:'private'};

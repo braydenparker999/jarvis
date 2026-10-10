@@ -6,7 +6,7 @@ import {relayOwnerDelivery,recoverRelayOwnerDelivery,relayOwnerSubscriptionStatu
 import {FRONTEND_ORIGINS} from './origins.js';
 import {relayOwnerPasswordSchema, relayOwnerPasswordStore} from './relay-owner-password.js';
 import {relayOwnerJobSchema, relayOwnerJobEnsure, relayOwnerJobSpecification, relayOwnerJobSpecify, relayOwnerJobRead, relayOwnerJobsList, relayOwnerJobsChanges, relayOwnerJobCancel, relayOwnerJobRetryPrepare, relayOwnerJobRetryLink, relayOwnerJobReplyCheck, relayOwnerJobReplySaved, relayOwnerJobValidateRpc, relayOwnerJobRpc} from './relay-owner-jobs.js';
-import {ATTACHMENT_BODY_LIMIT, relayAttachmentSchema, relayAttachmentMetadata, relayAttachmentPrepare, relayAttachmentUpload, relayAttachmentCheckMessage, relayAttachmentLink, relayAttachmentDiscard, relayAttachmentRead, relayAttachmentVerify, relayAttachmentDownload} from './relay-owner-attachments.js';
+import {ATTACHMENT_BODY_LIMIT, relayAttachmentSchema, relayAttachmentMetadata, relayAttachmentAdmit, relayAttachmentPrecheck, relayAttachmentPrepare, relayAttachmentUpload, relayAttachmentCheckMessage, relayAttachmentLink, relayAttachmentDiscard, relayAttachmentRead, relayAttachmentVerify, relayAttachmentDownload} from './relay-owner-attachments.js';
 
 export {RELAY_OWNER_SCOPE, RELAY_OWNER_INBOX};
 export const RELAY_OWNER_SESSION_MS = 365 * 86400000;
@@ -191,7 +191,7 @@ export async function relayOwnerStore(ctx, env, body, enqueueOwnerMessage = () =
       // Advertise this service version only after the existing login succeeds.
       // Password/session configuration and the credential implementation stay
       // unchanged; older services do not need speculative job requests.
-      if (body.op === 'password_login' && response.ok) return json({...await response.json(), jobs_enabled: true}, response.status, Object.fromEntries(response.headers));
+      if (body.op === 'password_login' && response.ok) return json({...await response.json(), jobs_enabled: true, attachments_enabled: true}, response.status, Object.fromEntries(response.headers));
       return response;
     }
     if (body?.op === 'pair_start') {
@@ -224,11 +224,19 @@ export async function relayOwnerStore(ctx, env, body, enqueueOwnerMessage = () =
     fields(body, ['op', 'token_hash', ...allowed[body.op]], ['op', 'token_hash', ...required]);
     if (!hex(body.token_hash)) fail(401, 'Owner device authentication required');
     if (body.op === 'attachment_admit') {
-      requireSession(ctx, body.token_hash, Date.now());
+      ctx.storage.transactionSync(() => {
+        const now = Date.now(); requireSession(ctx, body.token_hash, now);
+        relayAttachmentAdmit(ctx, now, 'ingress');
+      });
       return json({admitted: true});
     }
     if (body.op === 'attachment_upload') {
-      requireSession(ctx, body.token_hash, Date.now());
+      const admitted = ctx.storage.transactionSync(() => {
+        const now = Date.now(), session = requireSession(ctx, body.token_hash, now);
+        relayAttachmentAdmit(ctx, now);
+        return {session, now};
+      });
+      relayAttachmentPrecheck(ctx, admitted.session, body, admitted.now);
       const prepared = await relayAttachmentPrepare(body);
       return ctx.storage.transactionSync(() => {
         const now = Date.now(), session = requireSession(ctx, body.token_hash, now);
@@ -248,6 +256,12 @@ export async function relayOwnerStore(ctx, env, body, enqueueOwnerMessage = () =
         return response;
       });
     }
+    if (body.op === 'attachment_discard') {
+      ctx.storage.transactionSync(() => {
+        const now = Date.now(); requireSession(ctx, body.token_hash, now);
+        relayAttachmentAdmit(ctx, now, 'discard');
+      });
+    }
     return ctx.storage.transactionSync(() => {
       const now = Date.now();
       if (body.op === 'pair_status') {
@@ -260,11 +274,11 @@ export async function relayOwnerStore(ctx, env, body, enqueueOwnerMessage = () =
         if (!session || session.revoked_ms !== null) return json({status: 'revoked'});
         if (session.expires_ms <= now) return json({status: 'expired'});
         const active = requireSession(ctx, body.token_hash, now);
-        return json({status: 'approved', device: shortDevice(renew(ctx, active, now)), jobs_enabled: true});
+        return json({status: 'approved', device: shortDevice(renew(ctx, active, now)), jobs_enabled: true, attachments_enabled: true});
       }
       const session = requireSession(ctx, body.token_hash, now);
       let result;
-      if (body.op === 'session') result = {status: 'approved', device: shortDevice({...session, expires_ms: now + RELAY_OWNER_SESSION_MS}), jobs_enabled: true};
+      if (body.op === 'session') result = {status: 'approved', device: shortDevice({...session, expires_ms: now + RELAY_OWNER_SESSION_MS}), jobs_enabled: true, attachments_enabled: true};
       if (body.op === 'messages_list') result = listMessages(ctx, body.after, body.limit,false,env);
       if (body.op === 'conversation') result = conversation(ctx, body.message_id,env);
       if (body.op === 'message') result = insertMessage(ctx, session, body, enqueueOwnerMessage, now,env);
