@@ -1,8 +1,8 @@
 # Private Relay attachments: backend and connector contract
 
-Status: proposed contract for parent/frontend coordination. Runtime implementation has not started. This draft is isolated from the active Astra promotion and does not enable production uploads.
+Status: runtime implementation draft; dedicated hostile-input/regression qualification remains pending. This draft is isolated from the active Astra promotion and does not enable production uploads.
 
-Base: `fb332e871318d95354c8dde2107f9e4c5797e489` on `release/astra-live-backport-20261009`. Backend branch: `feature/relay-private-attachments-20261010`.
+Base: `5caed720cf26328165f2985189236a6d607e0e61` on `release/astra-live-backport-20261009`. Backend branch: `feature/relay-private-attachments-20261010`.
 
 ## Feasibility and storage
 
@@ -11,6 +11,8 @@ Relay currently accepts text-only owner messages. There is no Relay attachment t
 Use the existing `HUBS` SQLite Durable Object and existing private owner session/OAuth checks. Store bounded binary BLOBs in a new private attachment table beside owner messages. No new bucket, binding, credential, grant, scope, public URL or service is required. No security access expansion is proposed.
 
 Version one is deliberately bounded: at most four attachments per message, 1 MiB (1,048,576 bytes) per attachment, 4 MiB per message, 64 MiB retained attachment bytes per owner and 16 MiB of newly uploaded bytes per UTC day. Exact duplicate retries do not consume another upload allowance. Daily counters and cleanup use existing requests; no new alarm, schedule or timer.
+
+Count bounds are also enforced transactionally: four staged files per original message,128 staged files per owner,64 new uploads per UTC day and1024 total attachment identity records per owner. Discard/expiry frees binary bytes but retains the immutable identity tombstone within that1024-record cap. UUIDs cannot be resurrected with replacement contents by a delayed message retry.
 
 The file limit leaves room under SQLite's [documented 2 MB maximum BLOB/row size](https://developers.cloudflare.com/durable-objects/platform/limits/). Raising it requires a separately reviewed chunking or private object-storage design.
 
@@ -57,7 +59,7 @@ All paths are on the existing API origin. Use the existing owner session bearer 
 
 ## Metadata
 
-Private message/conversation outputs include an `attachments` array of metadata, never binary content. The new field is represented in the updated connector output schema.
+Private HTTP message/conversation outputs include an `attachments` array of metadata, never binary content. Existing connector conversation structured outputs retain their cached schemas; an additional private text block carries exact original-message attachment metadata. The new attachment-read tool has its own flat metadata output schema.
 
 Metadata shape:
 
@@ -65,13 +67,17 @@ Metadata shape:
 
 Names are untrusted display text. The frontend must render them as text, not markup or URLs. Attachment order follows original submission. IDs and stored bytes are server-bound; metadata is not permission, job progress or completion evidence. Public inbox endpoints and public connector outputs neither accept nor expose owner attachments.
 
-Unlinked drafts expire after24 hours. Bounded cleanup happens on subsequent attachment requests; no timer is added. Linked bytes are retained with the immutable original message. Quota failures are explicit rather than silently deleting accepted attachments.
+Unlinked drafts expire after24 hours. Bounded cleanup drops expired draft bytes on subsequent attachment requests; no timer is added. Immutable identity tombstones remain. Linked bytes are retained with the original message. Quota failures are explicit rather than silently deleting accepted attachments.
+
+In this first release, retrying an attached job fails closed with409 and code attachment_retry_unsupported: “Attached requests cannot be retried. Send a new message with the files again.” It never drops context, copies attachment IDs or bypasses original-message ownership.
 
 ## MIME/content policy
 
 Initial MIME allowlist:
 
 - image/png, image/jpeg, image/webp: require matching binary structure/signature, dimensions at most8192 per side and at most16,000,000 pixels; never trust extension or supplied MIME alone.
+
+PNG is restricted to non-interlaced8-bit static images, with chunk CRCs and bounded decoded scanlines checked. APNG acTL/fcTL/fdAT are rejected. WebP ANIM/ANMF/animation flags are rejected, and extended canvas must agree with a single actual frame. JPEG/WebP container and frame parsing bounds the stated decode geometry; the server does not perform complete codec entropy decoding. Malformed codec contents can still fail in the host image decoder and must be shown as preview errors, never as verified image interpretation.
 - application/pdf: require PDF signature; download/resource content only.
 - text/plain, text/markdown, text/csv, application/json: require valid UTF-8; deliver as untrusted plain text/resource content, never HTML or executable markup.
 

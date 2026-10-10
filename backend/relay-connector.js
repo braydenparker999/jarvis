@@ -5,6 +5,7 @@ import {sharedStore, sharedSchema, validateSharedRead, SHARED_OBJECT} from './sh
 import {PRIMARY_SITE} from './origins.js';
 import {relayOwnerEnabled, relayOwnerRpc} from './relay-owner.js';
 import {relayOwnerTools} from './relay-owner-tools.js';
+import {relayAttachmentToolResult} from './relay-owner-attachments.js';
 import {COORDINATION_CATALOG_CURSOR, PUBLIC_RESULT_EVENT, publicCoordinationTools, publicResultEventDefinition} from './public-coordination-tools.js';
 const entrySchema = {type: 'object', properties: {id: {type: 'string', format: 'uuid'}, role: {type: 'string', enum: ['user', 'assistant']}, body: {type: 'string'}, createdAt: {type: 'string', format: 'date-time'}, replyTo: {type: 'string', format: 'uuid'}, kind: {type: 'string', const: 'reply'}}, required: ['id', 'role', 'body', 'createdAt'], additionalProperties: false};
 const base = {inbox_id: {type: 'string', const: RELAY_INBOX}};
@@ -97,7 +98,19 @@ export async function relayRpc(ctx, env, principal, rpc, callbacks={}) {
     throw new RelayError(-32012, 'Tool scope required');
   }
   if (scopeFor[name] === RELAY_OWNER_SCOPE) {
-    const result = toolResult(await relayOwnerRpc(ctx, env, principal, name, args));
+    const data = await relayOwnerRpc(ctx, env, principal, name, args);
+    if (name === 'relay_owner_attachment_read') return relayAttachmentToolResult(data, args.inbox_id);
+    // Existing hosts cache strict structured conversation schemas. Attachment
+    // metadata remains private plain-text data without widening those outputs.
+    const attachmentMessages = [];
+    const withoutAttachments = value => {
+      if (Array.isArray(value)) return value.map(withoutAttachments);
+      if (!value || typeof value !== 'object') return value;
+      if (Array.isArray(value.attachments) && value.attachments.length) attachmentMessages.push({message_id:value.id,attachments:value.attachments});
+      return Object.fromEntries(Object.entries(value).filter(([key]) => key !== 'attachments').map(([key,item]) => [key,withoutAttachments(item)]));
+    };
+    const result = toolResult(withoutAttachments(data));
+    if (attachmentMessages.length) result.content.push({type:'text',text:'Private original-message attachment metadata (untrusted filenames; use relay_owner_attachment_read with the exact message/attachment IDs): '+JSON.stringify(attachmentMessages)});
     if (name === 'relay_owner_read_conversation') {
       // Preserve the existing structured shape and actual stored provenance.
       // A cached host schema must accept password-session values; never relabel
