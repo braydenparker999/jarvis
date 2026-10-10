@@ -1,6 +1,6 @@
 # Private Relay attachments: backend and connector contract
 
-Status: runtime implementation draft; dedicated hostile-input/regression qualification remains pending. This draft is isolated from the active Astra promotion and does not enable production uploads.
+Status: implementation draft for independent review and exact-head CI. Synthetic local tests cover the contract, including actual workerd SQLite. This draft is isolated from the active Astra promotion and does not enable production uploads. Live host image/PDF consumption remains a separate acceptance check.
 
 Base: `5caed720cf26328165f2985189236a6d607e0e61` on `release/astra-live-backport-20261009`. Backend branch: `feature/relay-private-attachments-20261010`.
 
@@ -27,7 +27,9 @@ The file limit leaves room under SQLite's [documented 2 MB maximum BLOB/row size
 - `backend/relay-owner-tools.js`: attachment metadata in private message outputs and the new flat owner-only attachment-read schema.
 - `backend/relay-connector.js`: typed image/text/resource tool results for that exact read operation, preserving existing owner scope enforcement.
 - New `tests/relay-owner-attachments.test.js`, `tests/relay-owner-attachments-http.test.js`, and `tests/relay-owner-attachments-connector.test.js`.
-- This contract and any narrowly necessary Relay attachment fixture.
+- New `tests/relay-owner-attachments-runtime.test.js` and its local-only Worker/Hub harness verify real Cloudflare-compatible BLOB binding and HTTP bytes/hash.
+- `tests/relay-fixture.js` adapts Cloudflare ArrayBuffer BLOBs to Uint8Array for pinned older Node SQLite. Production retains ArrayBuffer binding.
+- This contract and synthetic raster/PDF fixtures and attachment test helper.
 
 No frontend API, composer, CSS, navigation, Poweramp, deployment, OAuth/configuration or schedule files are owned here. If implementation reveals a need to change worker dispatch or job presentation/output schemas, report that addition through the parent before editing them.
 
@@ -86,7 +88,9 @@ Initial MIME allowlist:
 PNG is restricted to non-interlaced8-bit static images, with chunk CRCs and bounded decoded scanlines checked. APNG acTL/fcTL/fdAT are rejected. WebP ANIM/ANMF/animation flags are rejected, and extended canvas must agree with a single actual frame. JPEG/WebP container and frame parsing bounds the stated decode geometry; the server does not perform complete codec entropy decoding. Malformed codec contents can still fail in the host image decoder and must be shown as preview errors, never as verified image interpretation.
 
 Compressed PNG ancillary metadata (iCCP/zTXt/iTXt) is unsupported to avoid another unbounded decompression path. Unsupported bit depth/interlacing/metadata receives an explicit415 error.
-- application/pdf: require PDF signature; download/resource content only.
+
+JPEG dynamic/hierarchical dimension markers are unsupported, including DNL. They cannot override the unique bounded frame geometry.
+- application/pdf: require PDF signature and ending marker; download/resource content only. This is bounded transport validation, not a complete PDF parser.
 - text/plain, text/markdown, text/csv, application/json: require valid UTF-8; deliver as untrusted plain text/resource content, never HTML or executable markup.
 
 SVG, HTML, JavaScript, executable MIME, URLs and unsupported formats fail415. Oversized payloads fail413 before persistent writes. Filenames are bounded basenames with control characters, CR/LF, path separators and misleading direction controls rejected. Content-Disposition filenames are safely encoded; no file is written to a path derived from a submitted name.

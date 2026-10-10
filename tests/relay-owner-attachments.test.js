@@ -57,6 +57,10 @@ test('private attachments: JPEG repeated/conflicting dimensions and oversized sa
  const duplicate=Buffer.concat([original.subarray(0,sof.start),original.subarray(sof.start,sof.start+sof.size+2),original.subarray(sof.start)]);
  await assert.rejects(prepareRaster('image/jpeg',duplicate),e=>e.data.status===400);
  await assert.rejects(prepareRaster('image/jpeg',original.subarray(0,-2)),e=>e.data.status===400);
+ for(const marker of [200,220,222,223]){
+  const override=Buffer.from([255,marker,0,4,255,255]);
+  await assert.rejects(prepareRaster('image/jpeg',Buffer.concat([original.subarray(0,2),override,original.subarray(2)])),e=>e.data.status===415);
+ }
 });
 function seedIdentities(s,count,state='discarded',size=1){
  for(let i=0;i<count;i++)s.sql('INSERT INTO relay_owner_attachments VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',id(),id(),s.principal.principal,s.first.device_id,'synthetic.txt','text/plain',size,'0'.repeat(64),state==='discarded'?null:Buffer.from('x'),Date.now(),Date.now()+86400000,state,null);

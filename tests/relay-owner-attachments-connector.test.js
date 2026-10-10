@@ -3,6 +3,24 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {attachmentFixture,id,raster,saved} from './helpers/relay-attachment-fixture.js';
 import {relayRpc} from '../backend/relay-connector.js';
+import {sharedStore} from '../backend/shared.js';
+test('attachment connector: actual public, reply and foreign-owner rows are indistinguishable from missing original targets',async t=>{
+ const s=await attachmentFixture(t),message=id(),a=await saved(await s.upload(message));await s.send(message,[a.id]);
+ const reply=await s.rpc('relay_owner_reply',{inbox_id:s.inbox,message_id:message,body:'Synthetic immutable private reply'});
+ const publicId=id();sharedStore(s.ctx,'/internal/shared/message',{id:publicId,body:'Synthetic public message'});
+ assert.equal((await sharedStore(s.ctx,'/internal/shared/state').json()).messages.some(x=>x.id===publicId),true);
+ const foreignMessage=id(),foreignAttachment=id(),foreignPrincipal='github:987654321';
+ s.sql("INSERT INTO relay_owner_entries(id,kind,body,created_at,principal,device_id,authentication_source) VALUES(?,'user',?,?,?,?,?)",foreignMessage,'Synthetic foreign private request',new Date().toISOString(),foreignPrincipal,id(),'owner-device-session');
+ s.sql('INSERT INTO relay_owner_attachments VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',foreignAttachment,foreignMessage,foreignPrincipal,id(),'foreign-private.txt','text/plain',7,'0'.repeat(64),Buffer.from('foreign'),Date.now(),Date.now()+86400000,'linked',0);
+ const failure=async(message_id,attachment_id)=>{try{await s.rpc('relay_owner_attachment_read',{inbox_id:s.inbox,message_id,attachment_id});assert.fail('Unauthorized target unexpectedly returned bytes');}catch(e){if(!e.data)throw e;return {message:e.message,code:e.code,status:e.data.status};}};
+ const absentOriginal=await failure(id(),a.id);
+ for(const target of [publicId,reply.entry.id,foreignMessage])assert.deepEqual(await failure(target,a.id),absentOriginal);
+ assert.deepEqual(await failure(foreignMessage,foreignAttachment),absentOriginal);
+ assert.deepEqual(await failure(message,foreignAttachment),await failure(message,id()));
+ const discard=async(message_id,attachment_id)=>{const r=await s.store({op:'attachment_discard',token_hash:s.first.token_hash,message_id,attachment_id});return {status:r.status,body:await r.json()};};
+ assert.deepEqual(await discard(foreignMessage,foreignAttachment),await discard(id(),id()));
+ assert.equal(Buffer.from(s.sql('SELECT bytes FROM relay_owner_attachments WHERE id=?',foreignAttachment)[0].bytes).toString(),'foreign');
+});
 const pdf=JSON.parse(readFileSync(new URL('./fixtures/relay-attachment-document.json',import.meta.url))).pdf;
 test('attachment connector: catalog is flat, read-only and uses only existing owner OAuth',async t=>{
  const s=await attachmentFixture(t),catalog=await relayRpc(s.ctx,s.env,s.principal,{method:'tools/list',params:{_meta:{}}});
