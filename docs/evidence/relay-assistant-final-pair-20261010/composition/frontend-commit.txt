@@ -1,0 +1,6 @@
+tree c5a5024c750f386c6464f6b49e010e5218d634bf
+parent 098721671ef434360669d76089910b6ed0300543
+author Brayden Parker <braydenparker999@gmail.com> 1791661792 +0000
+committer Brayden Parker <braydenparker999@gmail.com> 1791661792 +0000
+
+Retain immutable deliveries on refresh conflicts and verify server-only revocation

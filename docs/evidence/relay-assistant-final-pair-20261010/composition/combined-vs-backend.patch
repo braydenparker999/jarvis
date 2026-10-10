@@ -1,0 +1,261 @@
+diff --git a/docs/relay-assistant-attachment-frontend.md b/docs/relay-assistant-attachment-frontend.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..f7a3870f8bbfe2881144fd3143e7aad8c9a6655f
+--- /dev/null
++++ b/docs/relay-assistant-attachment-frontend.md
+@@ -0,0 +1,20 @@
++# Private assistant attachment frontend
++
++Baseline: active release `97b048abfde97426da7b5eb3a310964631ce724c`.
++Backend contract: PR114 `0cb786014b14c454d1869ae1f970397a66f6201f`, documented in `docs/relay-assistant-attachments.md` on that head.
++
++First assistant replies arrive through the existing private message feed. Their file metadata binds to the original user UUID (`replyTo`), not the reply entry ID. The parser requires private authenticated owner-MCP provenance and the fixed owner principal. Downloads use the unchanged bearer-only content route with original message UUID and attachment UUID, bounded MIME/size/SHA-256 verification, raster-only explicit previews and document downloads. User upload validation remains intact.
++
++Later deliverables are separate immutable records. Each original message offers “Files from assistant,” which reads the real `/relay/owner/deliverables` endpoint ten records at a time. This avoids an unbounded request per historical message during inbox refresh. Expand to check deliveries, Refresh files to check again, Load more files for subsequent pages, and Close assistant files to dismiss the view. No delivery is inferred to complete a job or replace an accepted text reply. Duplicate identity/conflicting records, wrong-original metadata and nonadvancing cursors fail closed. The bounded32-record per-conversation limit matches the backend.
++
++Loading/error/empty states retain existing accepted text; failed refresh preserves loaded files. Refresh and Load more both compare incoming records against all previously loaded immutable records; a conflict preserves the complete prior cache and cursor. Repeated taps cannot duplicate active reads. Close, channel changes and credential loss abort pending list reads; generation checks prevent late results from restoring cleared private state. Existing content-view disposal aborts downloads/previews and revokes object URLs. File search includes filenames in first replies and loaded later deliveries. Empty-body entries hide Copy text.
++
++## Qualification
++
++`relay-assistant-attachments.test.js` covers frontend metadata/provenance, page validation, error retention, cancellation and late credential-loss responses with synthetic fixtures.
++
++`relay-assistant-attachments-browser.test.js` requires the actual paired backend and explicitly skips on the standalone frontend branch. On the pair it uses real public MCP calls and actual Worker/SQLite acceptance, not injected message/content responses. It exercises accepted text followed by generated raster/PDF, a synthetic throw after a successful commit followed by identical retry (not a severed HTTP response), exact private download bytes, public navigation, server revocation plus explicit local credential removal while a preview is held, and a separate server-only revocation case where the next actual file request returns401 and the application clears cached files/Blob URLs/credentials without test-side storage deletion, first file-only reply,11 later deliveries across pages, narrow320px layout and Close. Published data are synthetic; no live owner messages are used. Do not count standalone backend-dependent skips as paired qualification.
++
++The prior synthetic-only browser scenario and incorrect delivery-ID linkage assumption are superseded. Final exact commits, combined tree and test totals belong in PR113 and its evidence artifacts. No backend, Poweramp, public-channel, credential, schedule or deployment changes belong to this frontend branch. Parent owns integration and promotion after independent review. Physical Android/TalkBack, production TLS/CORS and native ChatGPT host-to-live byte delivery remain unqualified.
++
++Server-only revocation is learned on the next authenticated request; this is not push revocation or proof of immediate cleanup while offline. Existing evidence artifacts are historical and remain unchanged.
+diff --git a/public/assets/relay-attachment-contract.js b/public/assets/relay-attachment-contract.js
+index 166da4925dc91bca660b06831026d6c6684fb10c..84e1ee3cabfe64b5e8b13d56d2cbbaaa176b5f97 100644
+--- a/public/assets/relay-attachment-contract.js
++++ b/public/assets/relay-attachment-contract.js
+@@ -13,7 +13,16 @@ export function attachmentMetadata(value,{messageId,state}={}){
+ }
+ export function messageAttachments(entry){
+   if(entry.attachments===undefined)return [];
+-  if(!Array.isArray(entry.attachments)||entry.attachments.length>4||entry.attachments.length&&entry.role!=='user')throw Error('Invalid message attachments');
+-  const items=entry.attachments.map(item=>attachmentMetadata(item,{messageId:entry.id,state:'linked'}));
++  if(!Array.isArray(entry.attachments)||entry.attachments.length>4)throw Error('Invalid message attachments');
++  if(entry.attachments.length&&entry.role!=='user'&&(entry.role!=='assistant'||entry.visibility!=='private'||entry.author_authenticated!==true
++    ||entry.principal!=='github:183016859'||entry.authentication_source!=='owner-oauth-mcp'||!attachmentUuid(entry.replyTo)||entry.replyTo===entry.id))throw Error('Invalid assistant attachment provenance');
++  const items=entry.attachments.map(item=>attachmentMetadata(item,{messageId:entry.role==='assistant'?entry.replyTo:entry.id,state:'linked'}));
+   if(new Set(items.map(item=>item.id)).size!==items.length)throw Error('Duplicate attachments');return items;
+ }
++
++export function assistantDeliverable(value,messageId){
++  if(!value||value.role!=='assistant'||value.kind!=='deliverable'||value.messageId!==messageId||!attachmentUuid(value.id)||value.id===messageId
++    ||typeof value.body!=='string'||value.body.length>6000||!Number.isFinite(Date.parse(value.createdAt))||!Array.isArray(value.attachments)||!value.attachments.length)throw Error('Invalid private deliverable');
++  const attachments=messageAttachments({...value,replyTo:messageId});
++  return {id:value.id,messageId,kind:'deliverable',role:'assistant',body:value.body,createdAt:value.createdAt,attachments};
++}
+diff --git a/public/assets/relay-owner-api.js b/public/assets/relay-owner-api.js
+index ed14a26a5786726d4d22e4094cf52d51867896c4..b244ca9f41a44a794544397eed5bf3e8483e51d5 100644
+--- a/public/assets/relay-owner-api.js
++++ b/public/assets/relay-owner-api.js
+@@ -1,4 +1,4 @@
+-import {RELAY_ATTACHMENT_TYPES,RELAY_ATTACHMENT_MAX_BYTES,attachmentUuid,attachmentMetadata,messageAttachments} from './relay-attachment-contract.js';
++import {RELAY_ATTACHMENT_TYPES,RELAY_ATTACHMENT_MAX_BYTES,attachmentUuid,attachmentMetadata,messageAttachments,assistantDeliverable} from './relay-attachment-contract.js';
+ import { API_ORIGIN } from './config.js';
+ 
+ // This key is deliberately unrelated to public inbox, drafts, transfers or module state.
+@@ -331,6 +331,16 @@ export function createRelayOwnerApi({ fetcher = globalThis.fetch, origin = API_O
+         || !(data.nextCursor === null || /^\d{1,15}$/.test(String(data.nextCursor)))) throw new OwnerApiError('invalid');
+       return {...data,messages:data.messages.map(entry=>({...entry,attachments:parseAttachments(entry)}))};
+     },
++    async deliverables(messageId,after='0',{signal}={}){
++      if(!attachmentUuid(messageId)||!/^\d{1,15}$/.test(String(after)))throw new OwnerApiError('invalid');
++      const query=new URLSearchParams({message_id:messageId,after:String(after),limit:'10'});
++      const data=await attachmentCall('/relay/owner/deliverables?'+query,{signal});
++      if(data.visibility!=='private'||data.message_id!==messageId||!Array.isArray(data.deliverables)||data.deliverables.length>10
++        ||!(data.nextCursor===null||/^\d{1,15}$/.test(data.nextCursor)&&Number(data.nextCursor)>Number(after)))throw new OwnerApiError('invalid');
++      let deliveries;try{deliveries=data.deliverables.map(item=>assistantDeliverable(item,messageId));}catch{throw new OwnerApiError('invalid');}
++      if(new Set(deliveries.map(item=>item.id)).size!==deliveries.length||data.nextCursor!==null&&!deliveries.length)throw new OwnerApiError('invalid');
++      return {deliverables:deliveries,nextCursor:data.nextCursor};
++    },
+     async uploadAttachment(messageId,id,file,{signal}={}){
+       const token=credential?.device_token;if(!token)throw new OwnerApiError('unauthorized');
+       if(!attachmentUuid(messageId)||!attachmentUuid(id)||!file||!RELAY_ATTACHMENT_TYPES.includes(file.type)||!file.size||file.size>RELAY_ATTACHMENT_MAX_BYTES)throw new OwnerApiError('attachment_invalid');
+diff --git a/public/assets/relay-owner-ui.js b/public/assets/relay-owner-ui.js
+index 6d5a2996df20b16a704aba45b27117a0cb9c0804..1db9a8358fddb4c43c28e6cd73898acce67244f5 100644
+--- a/public/assets/relay-owner-ui.js
++++ b/public/assets/relay-owner-ui.js
+@@ -11,14 +11,15 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), draftS
+   let attachmentProvider=null;
+   let generation = 0, reading = null, failedSend = null, cursor = '0', accountConsent = null, detailEpoch = 0;
+   let jobCursor='0',jobFence=null,jobChangesSupported=typeof api.jobChanges==='function',jobResetCache=null,jobReading=null;
+-  const retryAttempts=new Map();
++  const retryAttempts=new Map(),deliveryReads=new Map();
++  function cancelDeliveryReads(){for(const read of deliveryReads.values())read.abort();deliveryReads.clear();for(const page of Object.values(state.deliveryPages))page.busy=false;}
+   const queries={chat:'',work:''};
+   let state = { mode: api.selectedMode==='owner'||(api.selectedMode===undefined&&api.hasCredential)?'owner':'public', status: api.hasCredential ? 'unknown' : 'none',
+-    messages: [], draft: draftStore.read(), devices: [], device: null, pairing: null, error: '', warning: '', busy: false, sending: false, query: '', authenticating: false, account: null, accountReady: false, accountNotice: '', loginDevices: [],
++    messages: [], deliveryPages:{}, draft: draftStore.read(), devices: [], device: null, pairing: null, error: '', warning: '', busy: false, sending: false, query: '', authenticating: false, account: null, accountReady: false, accountNotice: '', loginDevices: [],
+     attachmentsEnabled:false,attachmentCount:0,attachmentRetry:false,jobsEnabled:false,jobs:[],jobsError:'',syncStale:false,jobMode:false,taskDraftKept:false,jobTitle:'',jobKind:'consequential',jobProject:'',jobGoal:'',requestsOnly:false,workFilter:'all',sendUnconfirmed:false,sendNotice:'',jobDetailId:null,jobDetail:null,jobDetailBusy:false,jobDetailError:'',jobDetailStale:false,jobBusy:false };
+   const emit = () => { for (const listener of listeners) listener(); };
+-  const mode = next => { if (next !== state.mode) { state.mode = next; onModeChange(next); } emit(); };
+-  function clearPrivate({preserveDraft = false} = {}) { attachmentProvider?.()?.clear(); state.loginDevices = []; accountConsent = null; state.account = null; state.accountReady = false; state.accountNotice = ''; state.messages = []; if (!preserveDraft) {state.draft = '';draftStore.save('');} state.devices = []; state.device = null; failedSend = null; cursor = '0';
++  const mode = next => { if (next !== state.mode) { cancelDeliveryReads();state.mode = next; onModeChange(next); } emit(); };
++  function clearPrivate({preserveDraft = false} = {}) { attachmentProvider?.()?.clear(); state.loginDevices = []; accountConsent = null; state.account = null; state.accountReady = false; state.accountNotice = ''; state.messages = [];cancelDeliveryReads();state.deliveryPages={}; if (!preserveDraft) {state.draft = '';draftStore.save('');} state.devices = []; state.device = null; failedSend = null; cursor = '0';
+     jobCursor='0';jobFence=null;jobChangesSupported=typeof api.jobChanges==='function';jobResetCache=null;jobReading=null;
+     ++detailEpoch;retryAttempts.clear();queries.chat='';queries.work='';state.attachmentsEnabled=false;state.attachmentCount=0;state.attachmentRetry=false;state.jobsEnabled=false;state.jobs=[];state.jobsError='';state.syncStale=false;state.query='';state.jobMode=false;state.taskDraftKept=false;state.jobTitle='';state.jobKind='consequential';state.jobProject='';state.jobGoal='';state.requestsOnly=false;state.workFilter='all';state.sendUnconfirmed=false;state.sendNotice='';state.jobDetailId=null;state.jobDetail=null;state.jobDetailBusy=false;state.jobDetailError='';state.jobDetailStale=false;state.jobBusy=false; }
+   function failure(error) {
+@@ -143,6 +144,20 @@ export function createRelayOwnerController({ api = createRelayOwnerApi(), draftS
+     get attachmentCount(){return state.attachmentCount;},
+     bindAttachments(provider){attachmentProvider=provider;},
+     setAttachmentCount(count){if(state.attachmentCount!==count){state.attachmentCount=count;if(!count)state.attachmentRetry=false;emit();}},
++    closeDeliverables(id){deliveryReads.get(id)?.abort();deliveryReads.delete(id);if(state.deliveryPages[id]){state.deliveryPages[id].open=false;state.deliveryPages[id].busy=false;}emit();},
++    async loadDeliverables(id,{more=false}={}){
++      if(state.status!=='approved'||state.mode!=='owner'||!state.messages.some(m=>m.id===id&&m.role==='user')||deliveryReads.has(id))return;
++      const previous=state.deliveryPages[id],after=more?previous?.nextCursor:'0';if(more&&!after)return;
++      const abort=new AbortController(),epoch=generation;deliveryReads.set(id,abort);
++      const page=state.deliveryPages[id]={items:previous?.items||[],nextCursor:previous?.nextCursor??null,open:true,busy:true,error:''};emit();
++      try{
++        const data=await api.deliverables(id,after,{signal:abort.signal});if(epoch!==generation||abort.signal.aborted||deliveryReads.get(id)!==abort)return;
++        const known=new Map(page.items.map(item=>[item.id,item])),items=new Map(more?known:[]);
++        for(const item of data.deliverables){if(state.messages.some(m=>m.id===item.id)||known.has(item.id)&&JSON.stringify(known.get(item.id))!==JSON.stringify(item))throw new OwnerApiError('invalid');items.set(item.id,item);}
++        if(items.size>32)throw new OwnerApiError('invalid');page.items=[...items.values()];page.nextCursor=data.nextCursor;
++      }catch(error){if(epoch===generation&&!abort.signal.aborted){if(['expired','revoked','unauthorized'].includes(error.kind))failure(error);else page.error=error instanceof OwnerApiError?error.message:'Could not load private files. Try again.';}}
++      finally{if(deliveryReads.get(id)===abort){deliveryReads.delete(id);page.busy=false;emit();}}
++    },
+     async uploadAttachment(messageId,id,file,options){
+       if(state.status!=='approved'||!state.attachmentsEnabled)throw new OwnerApiError('unauthorized');const epoch=generation;
+       try{const result=await api.uploadAttachment(messageId,id,file,options);if(epoch!==generation)throw new OwnerApiError('unauthorized');return result;}catch(error){if(epoch===generation&&error.kind!=='attachment_cancelled'){failure(error);emit();}throw error;}
+@@ -675,20 +690,30 @@ export function createRelayOwnerUI({ controller = createRelayOwnerController(),
+     const anchor=changed?(positions.chat||{bottom:true}):chatNodes.first&&readingAnchor?readingAnchor:position(panel),jobs=new Map(state.jobs.map(j=>[j.messageId,j]));
+     const existing=new Map([...panel.children].filter(n=>n.dataset?.messageId).map(n=>[n.dataset.messageId,n])),nodes=[];
+     if(work)renderWork(state,changed?positions.work:null);else workSignature='';
+-    const selected = work?[]:state.messages.filter(m => (!state.query || m.body.toLowerCase().includes(state.query))&&(!state.requestsOnly||jobs.has(m.id)));
++    const selected = work?[]:state.messages.filter(m => (!state.query || m.body.toLowerCase().includes(state.query)||(m.attachments||[]).some(item=>item.name.toLowerCase().includes(state.query))||(state.deliveryPages[m.id]?.items||[]).some(delivery=>delivery.body.toLowerCase().includes(state.query)||delivery.attachments.some(item=>item.name.toLowerCase().includes(state.query))))&&(!state.requestsOnly||jobs.has(m.id)));
+     let previousDay,previousMessage;
+     for (const m of selected) {
+       const day=messageDay(m.createdAt),dayStart=day.key!==previousDay?day.label:'';previousDay=day.key;
+       const grouped=!!previousMessage&&previousMessage.role===m.role&&!dayStart&&Date.parse(m.createdAt)-Date.parse(previousMessage.createdAt)<300000;previousMessage=m;
+-      const candidate=jobs.get(m.id),job=candidate&&(actionableWork(candidate)||candidate.result)?candidate:null,replyJob=m.replyTo?jobs.get(m.replyTo):null,stale=state.syncStale||state.jobsError||state.jobDetailStale&&state.jobDetailId===job?.id,signature=JSON.stringify([m,job,replyJob?.resultVersion,state.busy,state.sending,stale,job?jobLabel(job):null,dayStart,grouped]);let row=existing.get(m.id);
++      const candidate=jobs.get(m.id),job=candidate&&(actionableWork(candidate)||candidate.result)?candidate:null,replyJob=m.replyTo?jobs.get(m.replyTo):null,stale=state.syncStale||state.jobsError||state.jobDetailStale&&state.jobDetailId===job?.id,signature=JSON.stringify([m,state.deliveryPages[m.id],job,replyJob?.resultVersion,state.busy,state.sending,stale,job?jobLabel(job):null,dayStart,grouped]);let row=existing.get(m.id);
+       if(row?._signature===signature){nodes.push(row);continue;}
+       row = make('article', '', 'message-row ' + (m.role === 'user' ? 'outgoing' : 'incoming')+(grouped?' message-group-continuation':''));row._signature=signature;
+       row.dataset.messageId = m.id;
+       if(dayStart)row.append(make('p',dayStart,'message-day'));
+-      const heading=make('div','','message-heading'),copy=action('',async()=>{copy.setAttribute('aria-label',await copyText(m.body)?'Private message copied':'Copy private message');},'message-actions');copy.innerHTML=icon('copy');copy.setAttribute('aria-label','Copy private message');heading.append(make('span',m.role==='user'?'You':'dot','message-author'));row.append(heading);
++      const heading=make('div','','message-heading'),copy=action('',async()=>{copy.setAttribute('aria-label',await copyText(m.body)?'Private message copied':'Copy private message');},'message-actions');copy.innerHTML=icon('copy');copy.setAttribute('aria-label','Copy private message');copy.hidden=!m.body;heading.append(make('span',m.role==='user'?'You':'dot','message-author'));row.append(heading);
+       if(job&&workTitle(job)!=='Owner request')row.append(make('p',workTitle(job),'owner-request-title'));
+       // Request text is inert. The inspector alone formats the saved result.
+       const bubble=make('div','','bubble');if(m.body)bubble.append(make('p',m.body,'message-body'));for(const item of m.attachments||[])bubble.append(attachmentContent.row(item));row.append(bubble);
++      if(m.role==='user'&&state.attachmentsEnabled){
++        const deliveries=state.deliveryPages[m.id],section=make('section','','relay-assistant-deliveries');section.dataset.originalId=m.id;
++        const toggle=action(deliveries?.open?'Close assistant files':'Files from assistant',()=>deliveries?.open?controller.closeDeliverables(m.id):controller.loadDeliverables(m.id),'text-button');toggle.setAttribute('aria-expanded',String(!!deliveries?.open));section.append(toggle);
++        if(deliveries?.open){
++          const status=make('p',deliveries.busy?'Loading private files…':deliveries.error||(!deliveries.items.length?'No later files have been delivered.':''),'request-meta');status.setAttribute('role','status');section.append(status);
++          for(const delivery of deliveries.items){const entry=make('article','','relay-assistant-deliverable');entry.dataset.deliveryId=delivery.id;entry.append(make('p','Files from assistant · '+messageStamp(delivery.createdAt),'request-meta'));if(delivery.body)entry.append(make('p',delivery.body,'message-body'));for(const item of delivery.attachments)entry.append(attachmentContent.row(item));section.append(entry);}
++          const refresh=action(deliveries.error?'Retry loading files':'Refresh files',()=>controller.loadDeliverables(m.id),'text-button');refresh.disabled=deliveries.busy;section.append(refresh);
++          if(deliveries.nextCursor){const more=action('Load more files',()=>controller.loadDeliverables(m.id,{more:true}),'text-button');more.disabled=deliveries.busy;section.append(more);}
++        }row.append(section);
++      }
+       let status='';
+       if(m.role==='user'){
+         const labels={saved:'Saved privately · awaiting reply',queued:'Saved · awaiting assistant',callback_accepted:'Sent · awaiting reply',delivery_failed:'Delivery needs retry',reply_saved:'Reply saved'};
+diff --git a/tests/relay-assistant-attachments-browser.test.js b/tests/relay-assistant-attachments-browser.test.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..dad876c29e6a0114caee03477f96397ce76dcede
+--- /dev/null
++++ b/tests/relay-assistant-attachments-browser.test.js
+@@ -0,0 +1,49 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import {existsSync} from 'node:fs';
++import {readFile} from 'node:fs/promises';
++import {createConversationFixture,launchQualifiedBrowser,openConversationPage,closeConversationHarness,assertBrowserContained,assertNoPrivatePersistence,conversationMenu,RELAY_URL,OWNER_KEY} from './helpers/relay-conversation-browser-fixture.js';
++const available=existsSync(new URL('../backend/relay-owner-assistant-attachments.js',import.meta.url));
++const inbox_id='brayden-owner';
++async function journey(t){if(!available){t.skip('Requires exact assistant delivery backend pair.');return;}const browser=await launchQualifiedBrowser(t);if(!browser)return;const h=createConversationFixture(t),pages=[];t.after(()=>closeConversationHarness(browser,h,pages));const auth=await h.oauth(),owner=await h.pair(auth),phone=await openConversationPage(browser,h,{owner,clock:false,width:320,height:568});pages.push(phone);const page=phone.page;return {h,auth,owner,phone,page};}
++async function original(j){const id=crypto.randomUUID();assert.equal((await j.h.phone('/messages',{id,body:'Synthetic requested files'},j.owner.device_token)).status,201);return id;}
++async function stage(j,message_id,delivery_id,name,mime_type,bytes){const args={inbox_id,message_id,delivery_id,attachment_id:crypto.randomUUID(),name,mime_type,data_base64:bytes.toString('base64')};const value=await j.h.rpc(j.auth,'relay_owner_attachment_upload',args);return {args,attachment:value.attachment};}
++const commit=(j,message_id,delivery_id,files,body='',kind='deliverable')=>j.h.rpc(j.auth,kind==='reply'?'relay_owner_reply_with_attachments':'relay_owner_deliverable_send',{inbox_id,message_id,delivery_id,body,attachment_ids:files.map(f=>f.attachment.id)});
++
++test('actual MCP later image and PDF preserves text, retries after a synthetic post-success throw, and clears on local credential removal',{timeout:120000},async t=>{
++ const j=await journey(t);if(!j)return;const {page,h,phone}=j,message=await original(j),delivery=crypto.randomUUID();
++ const reply=await h.rpc(j.auth,'relay_owner_reply',{inbox_id,message_id:message,body:'Accepted synthetic text remains unchanged.'});
++ const raster=JSON.parse(await readFile(new URL('./fixtures/relay-attachment-raster.json',import.meta.url),'utf8')),docs=JSON.parse(await readFile(new URL('./fixtures/relay-attachment-document.json',import.meta.url),'utf8'));
++ const png=Buffer.from(raster.png,'base64'),pdf=Buffer.from(docs.pdf,'base64');
++ const image=await stage(j,message,delivery,'Synthetic illustration.png','image/png',png),document=await stage(j,message,delivery,'Synthetic report.pdf','application/pdf',pdf);
++ assert.equal((await h.rpc(j.auth,'relay_owner_attachment_upload',image.args)).newWrite,false);
++ await assert.rejects((async()=>{await commit(j,message,delivery,[image,document]);throw Error('Synthetic lost response after persistence');})(),/lost response/);
++ assert.equal((await commit(j,message,delivery,[image,document])).newWrite,false);
++ await page.goto(RELAY_URL);await page.getByText('Accepted synthetic text remains unchanged.',{exact:true}).waitFor();await page.getByRole('button',{name:'Files from assistant',exact:true}).click();await page.getByRole('button',{name:'Download Synthetic report.pdf',exact:true}).waitFor();assert.equal(await page.locator('[data-delivery-id]').count(),1);await conversationMenu(page,'Search messages');await page.locator('#relay-owner-search').fill('report.pdf');await page.getByRole('button',{name:'Download Synthetic report.pdf',exact:true}).waitFor();await page.locator('#relay-owner-search').fill('');
++ await page.getByRole('button',{name:'Preview Synthetic illustration.png',exact:true}).click();await page.waitForFunction(()=>document.querySelector('.relay-linked-preview')?.naturalWidth>0);assert.equal(await page.locator('iframe,embed,object').count(),0);
++ const download=page.waitForEvent('download');await page.getByRole('button',{name:'Download Synthetic report.pdf',exact:true}).click();assert.deepEqual(await readFile(await(await download).path()),pdf);
++ const conversation=await(await h.phone('/conversation?message_id='+message,undefined,j.owner.device_token)).json();assert.equal(conversation.reply.id,reply.entry.id);assert.equal(conversation.reply.body,reply.entry.body);assert.equal(conversation.deliverables.length,1);
++ await conversationMenu(page,'Public chat');assert.equal(await page.locator('.relay-linked-attachment').count(),0);await conversationMenu(page,'Owner chat');await page.getByRole('button',{name:'Preview Synthetic illustration.png',exact:true}).waitFor();
++ const held=phone.hold(r=>r.method==='GET'&&r.path==='/relay/owner/attachments/content');await page.getByRole('button',{name:'Preview Synthetic illustration.png',exact:true}).click();await held.entered;
++ assert.equal((await h.phone('/devices/revoke',{device_id:j.owner.device.id},j.owner.device_token)).status,200);
++ await page.evaluate(key=>{localStorage.removeItem(key);dispatchEvent(new StorageEvent('storage',{key,newValue:null,storageArea:localStorage}));},OWNER_KEY);held.release();await page.waitForFunction(()=>!document.querySelector('.relay-linked-attachment'));assert.equal(await page.locator('.relay-linked-preview').count(),0);await assertNoPrivatePersistence(page,['Synthetic illustration.png','Synthetic report.pdf']);assertBrowserContained(phone);
++});
++
++test('actual first file-only reply and later paginated deliveries remain separate and close safely',{timeout:120000},async t=>{
++ const j=await journey(t);if(!j)return;const {page}=j,message=await original(j),first=crypto.randomUUID();const file=await stage(j,message,first,'First reply.txt','text/plain',Buffer.from('Synthetic first file-only reply'));await commit(j,message,first,[file],'','reply');
++ for(let i=0;i<11;i++){const id=crypto.randomUUID(),file=await stage(j,message,id,'Later '+i+'.txt','text/plain',Buffer.from('Synthetic page '+i));await commit(j,message,id,[file]);}
++ await page.goto(RELAY_URL);await page.getByRole('button',{name:'Download First reply.txt',exact:true}).waitFor();await page.getByRole('button',{name:'Files from assistant',exact:true}).click();await page.getByRole('button',{name:'Load more files',exact:true}).waitFor();assert.equal(await page.locator('[data-delivery-id]').count(),10);
++ await page.getByRole('button',{name:'Load more files',exact:true}).click();await page.getByRole('button',{name:'Download Later 10.txt',exact:true}).waitFor();assert.equal(await page.locator('[data-delivery-id]').count(),11);assert.equal(await page.getByRole('button',{name:'Load more files',exact:true}).count(),0);
++ assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));await page.getByRole('button',{name:'Close assistant files',exact:true}).click();assert.equal(await page.locator('[data-delivery-id]').count(),0);assert.equal(await page.getByRole('button',{name:'Download First reply.txt',exact:true}).count(),1);assertBrowserContained(j.phone);
++});
++
++test('server-only revocation rejects the next actual file request and clears cached files, previews and credentials',{timeout:120000},async t=>{
++ const j=await journey(t);if(!j)return;const {page,h,phone}=j,message=await original(j),delivery=crypto.randomUUID();
++ const raster=JSON.parse(await readFile(new URL('./fixtures/relay-attachment-raster.json',import.meta.url),'utf8'));const image=await stage(j,message,delivery,'Revocation image.png','image/png',Buffer.from(raster.png,'base64')),text=await stage(j,message,delivery,'Revocation document.txt','text/plain',Buffer.from('Synthetic revocation download'));
++ await commit(j,message,delivery,[image,text]);await page.addInitScript(()=>{window.activePrivateURLs=new Set();const create=URL.createObjectURL.bind(URL),revoke=URL.revokeObjectURL.bind(URL);URL.createObjectURL=blob=>{const url=create(blob);activePrivateURLs.add(url);return url;};URL.revokeObjectURL=url=>{activePrivateURLs.delete(url);return revoke(url);};});
++ await page.goto(RELAY_URL);await page.getByRole('button',{name:'Files from assistant',exact:true}).click();await page.getByRole('button',{name:'Preview Revocation image.png',exact:true}).click();await page.waitForFunction(()=>document.querySelector('.relay-linked-preview')?.naturalWidth>0);assert.equal(await page.evaluate(()=>activePrivateURLs.size),1);
++ // Revoke through the real server only. Do not edit browser storage or dispatch storage events.
++ assert.equal((await h.phone('/devices/revoke',{device_id:j.owner.device.id},j.owner.device_token)).status,200);assert.ok(await page.evaluate(key=>localStorage.getItem(key),OWNER_KEY));
++ await page.getByRole('button',{name:'Download Revocation document.txt',exact:true}).click();await page.waitForFunction(()=>!document.querySelector('.relay-linked-attachment')&&activePrivateURLs.size===0);
++ assert.ok(phone.records.some(r=>r.path==='/relay/owner/attachments/content'&&r.status===401));assert.equal(await page.evaluate(key=>localStorage.getItem(key),OWNER_KEY),null);assert.equal(await page.locator('[data-delivery-id],.relay-linked-preview').count(),0);assertBrowserContained(phone);
++});
+diff --git a/tests/relay-assistant-attachments.test.js b/tests/relay-assistant-attachments.test.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..4f66d04f6414269ea24717d580d775866100a881
+--- /dev/null
++++ b/tests/relay-assistant-attachments.test.js
+@@ -0,0 +1,45 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import {messageAttachments} from '../public/assets/relay-attachment-contract.js';
++import {createRelayOwnerApi,OWNER_SESSION_KEY} from '../public/assets/relay-owner-api.js';
++import {createRelayOwnerController} from '../public/assets/relay-owner-ui.js';
++const originalId=crypto.randomUUID(),replyId=crypto.randomUUID(),deliveryId=crypto.randomUUID(),deviceId=crypto.randomUUID();
++const metadata={id:crypto.randomUUID(),messageId:originalId,name:'Synthetic report.pdf',mimeType:'application/pdf',sizeBytes:20,sha256:'a'.repeat(64),createdAt:'2026-10-10T18:00:02Z',state:'linked',visibility:'private'};
++const delivery={id:deliveryId,sequence:3,role:'assistant',body:'',createdAt:metadata.createdAt,replyTo:originalId,visibility:'private',author_authenticated:true,principal:'github:183016859',authentication_source:'owner-oauth-mcp',attachments:[metadata]};
++const original={id:originalId,sequence:1,role:'user',body:'Synthetic report request',createdAt:'2026-10-10T18:00:00Z',visibility:'private',author_authenticated:true};
++const reply={...delivery,id:replyId,sequence:2,body:'Accepted text reply remains unchanged.',createdAt:'2026-10-10T18:00:01Z',attachments:[]};
++const token='a'.repeat(64),storage={getItem:key=>key===OWNER_SESSION_KEY?JSON.stringify({device_token:token,device_id:deviceId}):null};
++test('private assistant file metadata requires authenticated owner MCP provenance and exact delivery linkage',()=>{
++ assert.deepEqual(messageAttachments(delivery),[metadata]);
++ for(const change of [{role:'system'},{visibility:'public'},{author_authenticated:false},{principal:'github:other'},{authentication_source:'owner-device-session'},{replyTo:null},{replyTo:deliveryId},{attachments:[{...metadata,messageId:replyId}]},{attachments:[metadata,metadata]}])assert.throws(()=>messageAttachments({...delivery,...change}));
++});
++test('owner message API accepts authenticated assistant files and rejects foreign or public metadata',async()=>{
++ let response=delivery;const api=createRelayOwnerApi({storage,fetcher:async()=>Response.json({messages:[response],nextCursor:null})});
++ assert.deepEqual((await api.messages()).messages[0].attachments,[metadata]);
++ for(const change of [{visibility:'public'},{authentication_source:'shared'},{attachments:[{...metadata,visibility:'public'}]}]){response={...delivery,...change};await assert.rejects(api.messages(),{kind:'invalid'});}
++});
++test('later file pagination keeps the accepted text reply separate and ignores a late response after clear',async()=>{
++ let resolve;const api={hasCredential:true,selectedMode:'owner',session:async()=>({device:{id:deviceId},attachments_enabled:true}),messages:async()=>({messages:[original,reply],nextCursor:null}),refreshStoredCredential(){this.hasCredential=false;},deliverables:async()=>new Promise(r=>resolve=r)};
++ const controller=createRelayOwnerController({api,draftStore:{read:()=>'',save:()=>true}});await controller.refresh();const reading=controller.loadDeliverables(originalId);
++ controller.closeDeliverables(originalId);resolve({deliverables:[{...delivery,messageId:originalId,kind:'deliverable'}],nextCursor:null});await reading;
++ assert.equal(controller.snapshot().deliveryPages[originalId]?.items.length??0,0);
++});
++
++test('later deliverable API enforces original linkage, provenance, unique IDs and advancing bounded cursors',async()=>{
++ const valid={...delivery,messageId:originalId,kind:'deliverable'};let data={message_id:originalId,visibility:'private',deliverables:[valid],nextCursor:'10'};
++ const api=createRelayOwnerApi({storage,fetcher:async()=>Response.json(data)});assert.equal((await api.deliverables(originalId)).deliverables[0].id,deliveryId);
++ const baseline=structuredClone(data);
++ for(const change of [{message_id:replyId},{visibility:'public'},{nextCursor:'0'},{nextCursor:'bad'},{deliverables:[]},{deliverables:[valid,valid]},{deliverables:[{...valid,role:'user'}]},{deliverables:[{...valid,messageId:replyId}]},{deliverables:[{...valid,authentication_source:'shared'}]}]){data={...baseline,...change};await assert.rejects(api.deliverables(originalId),{kind:'invalid'});}
++});
++test('later delivery reads preserve loaded files on error and reject late auth-loss responses',async()=>{
++ let mode='ok',resolve;const file={...delivery,messageId:originalId,kind:'deliverable'};const api={hasCredential:true,selectedMode:'owner',session:async()=>({device:{id:deviceId},attachments_enabled:true}),messages:async()=>({messages:[original,reply],nextCursor:null}),refreshStoredCredential(){this.hasCredential=false;},deliverables:async()=>{if(mode==='error')throw Error('Synthetic offline');if(mode==='hold')return new Promise(r=>resolve=r);return {deliverables:[file],nextCursor:null};}};
++ const controller=createRelayOwnerController({api,draftStore:{read:()=>'',save:()=>true}});await controller.refresh();await controller.loadDeliverables(originalId);mode='error';await controller.loadDeliverables(originalId);assert.equal(controller.snapshot().deliveryPages[originalId].items.length,1);assert.match(controller.snapshot().deliveryPages[originalId].error,/Could not load/);assert.equal(controller.snapshot().messages.find(m=>m.id===replyId).body,reply.body);
++ mode='hold';const pending=controller.loadDeliverables(originalId);controller.storedSessionChanged();resolve({deliverables:[file],nextCursor:null});await pending;assert.deepEqual(controller.snapshot().deliveryPages,{});
++});
++
++test('refresh rejects changed immutable delivery records and preserves the entire loaded cache',async()=>{
++ const first={...delivery,messageId:originalId,kind:'deliverable'},second={...first,id:crypto.randomUUID(),body:'Previously loaded second page'};let response={deliverables:[first],nextCursor:'10'};
++ const api={hasCredential:true,selectedMode:'owner',session:async()=>({device:{id:deviceId},attachments_enabled:true}),messages:async()=>({messages:[original,reply],nextCursor:null}),deliverables:async()=>response};
++ const controller=createRelayOwnerController({api,draftStore:{read:()=>'',save:()=>true}});await controller.refresh();await controller.loadDeliverables(originalId);response={deliverables:[second],nextCursor:null};await controller.loadDeliverables(originalId,{more:true});const accepted=controller.snapshot().deliveryPages[originalId];
++ for(const changed of [{...first,body:'Changed original delivery'},{...second,attachments:[{...metadata,name:'Changed filename.pdf'}]}]){response={deliverables:[changed],nextCursor:'10'};await controller.loadDeliverables(originalId);const page=controller.snapshot().deliveryPages[originalId];assert.deepEqual(page.items,accepted.items);assert.equal(page.nextCursor,accepted.nextCursor);assert.ok(page.error);assert.equal(controller.snapshot().messages.find(m=>m.id===replyId).body,reply.body);}
++});

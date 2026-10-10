@@ -1,0 +1,26 @@
+tree dc5c2d243ca22be9a723a0922d4e300d7b5c58b6
+parent aa4312edcfd7c726ab4138d6cd3570818a78ff1b
+parent 7264c473cb45be370647d95f37aa6db99759af1a
+author braydenparker999 <braydenparker999@gmail.com> 1791641936 -0300
+committer GitHub <noreply@github.com> 1791641936 -0300
+gpgsig -----BEGIN PGP SIGNATURE-----
+ 
+ wsFcBAABCAAQBQJqyklQCRC1aQ7uu5UhlAAA36AQAKWZ3OV/Sjg0fk5EW/eo1azf
+ 9L3kB0X4385/miJvgYABEvtwwqIMzOVu9au7tQ3D37fjNbN0nO/2ZWt1iS2eLAXG
+ USd9oDALwAThbLk+1p8ZFM/5maX7YZIm3kaMkslI8m+OngUb25obyEO3cX5XTwxQ
+ /xF5fTtS4lQkb71qKlw6VDg3AHr7zv/W2OGGW5ljFrecV7XWVNb96s/CDi60pp7d
+ eV4Ylc2HulUaB1I/0uHrsXwjraa4ELScarqw8Vz21M+tC9slhw1tiO9sVYbEQlyv
+ A8E+ouh8TSlDvHnONyjMXFIyryd/Fn219r7/IbkF6zaEF7jOdYwaPEZ/50YiNnEx
+ 2s4GUrN0WTRN+xmA8fBJX9ROZt1uwwStcdR9LJtepbl0Xb67KfJKr+PvvVL2I1d6
+ Ug1687ppeC0mqjcDfRstgD8lqjWWDhg1ZzU3qf8Q/mtBuiD/ZyNqpdut+BfpdWbP
+ WM6a9v4hndwAao1kx5YMrJqEIsMZQGg0uR0Xm3ruUwejmGyQXxsbL8tVFGi11VCZ
+ PqhAqF/7b1lcrKMC/ox2mE9QQGm1mqhQTCUuhnWrMi4UPI+k3c27d6Jjux1Ysgfq
+ 0VVBQ9SPc/7VU4OvGj8DfFwZFiStaidZbfg79knPCh7taiURHEcy1leF8VAuh7cK
+ UDDh+yjt85R4Inh3FO2u
+ =PSN2
+ -----END PGP SIGNATURE-----
+ 
+
+Merge pull request #111 from braydenparker999/release/relay-private-attachments-combined-20261010
+
+Integrate private Relay attachments for strict combined qualification
