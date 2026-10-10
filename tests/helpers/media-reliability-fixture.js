@@ -1,5 +1,6 @@
 import {readFile, stat} from 'node:fs/promises';
 import {createServer} from 'node:http';
+import {EventEmitter} from 'node:events';
 import {extname, join, resolve, sep} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {fixtureWav} from './poweramp-fixture.js';
@@ -18,16 +19,19 @@ export async function serveMediaReliabilityFixture(){
   const policy=JSON.parse(await readFile(join(root,'staticwebapp.config.json'),'utf8'));
   const frozenApp=process.env.ASTRA_APP_SOURCE?await readFile(process.env.ASTRA_APP_SOURCE):null;
   const clip=await silentVideo(),tone=fixtureWav(),requests=[],sockets=new Set(),held=[];
-  const controls={movie:'ok',music:'ok'};
+  const controls={movie:'ok',music:'ok'},changes=new EventEmitter();
+  let sequence=0;
+  const mark=(log,event)=>{log.events.push({event,sequence:++sequence});changes.emit('change');};
   const metas=[{id:'fixture-movie',type:'movie',name:'Test Pattern',description:'Generated silent VP8 video.'},
     {id:'fixture-music',type:'music',name:'Test Tone',description:'Generated non-silent PCM audio.'}];
   const mime={'.html':'text/html','.js':'text/javascript','.css':'text/css','.json':'application/json','.svg':'image/svg+xml','.otf':'font/otf','.woff2':'font/woff2'};
   let origin;
   const server=createServer(async(req,res)=>{
     const pathname=new URL(req.url,'http://localhost').pathname;
-    const log={path:pathname,range:req.headers.range||null,status:null,finished:false};requests.push(log);
-    res.on('finish',()=>{log.finished=true});
-    res.on('close',()=>{if(!res.writableEnded)log.aborted=true});
+    const log={id:requests.length+1,path:pathname,range:req.headers.range||null,status:null,finished:false,events:[]};requests.push(log);
+    mark(log,'admitted');
+    res.on('finish',()=>{log.finished=true;mark(log,'finished')});
+    res.on('close',()=>{if(!res.writableEnded){log.aborted=true;mark(log,'aborted')}});
     const json=value=>{log.status=200;res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(value))};
     try{
       if(frozenApp&&pathname==='/media/assets/js/app.js'){log.status=200;res.writeHead(200,{'Content-Type':'text/javascript'});return res.end(frozenApp);}
@@ -51,7 +55,8 @@ export async function serveMediaReliabilityFixture(){
           res.flushHeaders();
           const sent=mode==='partial'&&start===0?44+262144:start;
           if(sent>start)res.write(bytes.subarray(start,sent));
-          held.push({res,bytes,start:sent,end});
+          held.push({res,bytes,start:sent,end,log});
+          log.held=true;mark(log,'held');
           return;
         }
         return res.end(bytes.subarray(start,end+1));
@@ -69,7 +74,19 @@ export async function serveMediaReliabilityFixture(){
   server.on('connection',socket=>{sockets.add(socket);socket.on('close',()=>sockets.delete(socket));});
   await new Promise(done=>server.listen(0,'127.0.0.1',done));origin='http://127.0.0.1:'+server.address().port;
   return {origin,controls,requests,clip,
-    releaseHeld(){for(const response of held.splice(0))if(!response.res.destroyed)response.res.end(response.bytes.subarray(response.start,response.end+1));},
+    // Observe server admission/cancellation without completing the response.
+    waitForRequest(predicate,timeout=10000){
+      return new Promise((resolve,reject)=>{
+        const check=()=>{const request=requests.find(predicate);if(request){cleanup();resolve(request);}};
+        const cleanup=()=>{clearTimeout(timer);changes.off('change',check);};
+        const timer=setTimeout(()=>{cleanup();reject(Error('HTTP observation timed out: '+JSON.stringify(requests.filter(r=>r.held))));},timeout);
+        changes.on('change',check);check();
+      });
+    },
+    releaseHeld(){for(const response of held.splice(0)){
+      mark(response.log,'release-attempt');
+      if(!response.res.destroyed){mark(response.log,'completion-requested');response.res.end(response.bytes.subarray(response.start,response.end+1));}
+    }},
     close:async()=>{for(const socket of sockets)socket.destroy();await new Promise(done=>server.close(done));}};
 }
 

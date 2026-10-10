@@ -163,21 +163,44 @@ test('Astra real native media, HTTP recovery, resume and PiP acceptance',{timeou
         }finally{await h.context.close();}
       }
     });
-    await t.test('closing a pending native HTTP source aborts it and cannot resurrect playback after return',async()=>{
-      const h=await openAstraFixture(browser,fixture);fixture.controls.movie='hold';
-      try{
-        await h.open();await h.page.waitForFunction(()=>document.querySelector('#mediaEl')?.networkState===2);
-        await h.page.locator('#playerShell [data-close-player]').click();
-        await h.page.waitForFunction(()=>!document.querySelector('#playerShell'));
-        fixture.controls.movie='ok';fixture.releaseHeld();
-        await h.context.setOffline(true);await h.context.setOffline(false);
-        await h.page.waitForTimeout(1000);
-        assert.equal(await h.page.locator('#mediaEl').count(),0,'late bytes and online callbacks cannot reopen the closed player');
-        assert.ok(fixture.requests.some(r=>r.path==='/__media__/clip.webm'&&r.aborted),'the real pending HTTP response was cancelled');
-        assert.deepEqual(h.errors,[]);await record('astra-close-pending-http',h);
-      }finally{fixture.controls.movie='ok';await h.context.close();}
-    });
+
   }finally{await browser?.close();await fixture.close();}
+});
+
+test('Astra pending HTTP cancellation and closed-player resurrection contracts',{timeout:30000},async t=>{
+  const fixture=await serveMediaReliabilityFixture();let browser,h;
+  try{
+    browser=await chromium.launch({executablePath:requireBrowser(),headless:true,args:['--no-sandbox']});
+    h=await openAstraFixture(browser,fixture);fixture.controls.movie='hold';
+    const firstRequestId=fixture.requests.length+1;
+    await h.open();
+    const pending=await fixture.waitForRequest(r=>r.id>=firstRequestId&&r.path==='/__media__/clip.webm'&&r.held);
+    await h.page.waitForFunction(()=>document.querySelector('#mediaEl')?.networkState===2);
+    // Retain the native element so DOM removal/GC cannot masquerade as teardown.
+    await h.page.locator('#mediaEl').evaluate(media=>{window.fixtureClosedMedia=media;});
+    assert.equal(pending.finished,false);assert.equal(pending.aborted,undefined);
+    await h.page.locator('#playerShell [data-close-player]').click();
+    await h.page.waitForFunction(()=>!document.querySelector('#playerShell'));
+    await t.test('the admitted held request is cancelled before fixture completion',async()=>{
+      await fixture.waitForRequest(r=>r.id===pending.id&&r.aborted);
+      assert.equal(pending.finished,false,'cancellation must precede response completion');
+      assert.deepEqual(pending.events.map(e=>e.event),['admitted','held','aborted']);
+      await record('astra-close-pending-http',h,{request:pending});
+      console.log('ASTRA_CANCEL_ORDER '+JSON.stringify(pending));
+    });
+    await t.test('late response release and online events cannot resurrect the closed player',async()=>{
+      const mediaRequests=fixture.requests.filter(r=>r.path.startsWith('/__media__/')).length;
+      fixture.controls.movie='ok';fixture.releaseHeld();
+      await h.context.setOffline(true);await h.context.setOffline(false);
+      await h.page.waitForTimeout(1000);
+      assert.equal(await h.page.locator('#mediaEl').count(),0);
+      assert.equal(await h.page.locator('#playerShell').count(),0);
+      assert.equal(await h.page.evaluate(()=>window.fixtureClosedMedia.paused),true);
+      assert.equal(fixture.requests.filter(r=>r.path.startsWith('/__media__/')).length,mediaRequests,'return cannot start another media request');
+      assert.deepEqual(h.errors,[]);
+      await record('astra-close-late-response',h,{request:pending});
+    });
+  }finally{await h?.context.close();await browser?.close();await fixture.close();}
 });
 
 test('My Media actual native PiP transitions and navigation',{timeout:60000},async t=>{
