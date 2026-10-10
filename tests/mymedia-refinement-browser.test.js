@@ -135,13 +135,20 @@ test('My Media rendered refinement: geometry, access, focus, compact viewport an
     const menu=page.locator('#sections .video-menu').first();
     await menu.focus();await page.keyboard.press('Enter');
     await page.locator('dialog[open]').waitFor();
+    await page.locator('#search').evaluate(n=>n.focus());
+    assert.equal(await page.evaluate(()=>document.querySelector('dialog').contains(document.activeElement)),true,'native modal makes background search unfocusable');
     for(let i=0;i<10;i++) {
       await page.keyboard.press('Tab');
       const focus=await page.evaluate(()=>({inDialog:document.querySelector('dialog').contains(document.activeElement),tag:document.activeElement.tagName,id:document.activeElement.id,label:document.activeElement.getAttribute('aria-label'),text:document.activeElement.tagName==='BODY'?'':document.activeElement.textContent,documentFocused:document.hasFocus()}));
       report.measurements.push({tab:i+1,...focus});
-      if(!focus.inDialog)await screenshot(page,'diagnostic-menu-focus-exit');
-      assert.equal(focus.inDialog,true,'dialog keyboard focus after Tab '+(i+1)+': '+JSON.stringify(focus));
+      // Native modal traversal may enter browser chrome, where BODY is the
+      // active-element fallback and the document itself has lost focus.
+      // A focused background page control must never satisfy this assertion.
+      const browserChrome=focus.tag==='BODY' && !focus.documentFocused;
+      if(browserChrome)await screenshot(page,'native-menu-browser-chrome');
+      assert.ok(focus.inDialog || browserChrome,'no background page focus after Tab '+(i+1)+': '+JSON.stringify(focus));
     }
+    assert.equal(await page.evaluate(()=>document.hasFocus() && document.querySelector('dialog').contains(document.activeElement)),true,'Tab traversal returns from browser chrome to the modal');
     await screenshot(page,'candidate-keyboard-menu');
     await page.keyboard.press('Escape');
     await page.waitForFunction(()=>!document.querySelector('dialog'));
