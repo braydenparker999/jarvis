@@ -391,9 +391,11 @@
 -        os.replace(tmp, MANIFEST)
 -        _fsync_dir(os.path.dirname(MANIFEST))
 +    raise RuntimeError("Whole-snapshot save disabled; use a current-state transaction")
-@@ -88,21 +79 @@
+@@ -88 +79,2 @@
 -    """Read-modify-write under one exclusive lock. fn(manifest) -> manifest.
--
++    mast.require_qualification(os.path.dirname(MANIFEST))
++    return mast.append_only(MANIFEST, fn, _recompute_stats)
+@@ -90,19 +82,4 @@
 -    The write is crash-safe (tmp + fsync + atomic replace): a VM death
 -    mid-write used to leave the manifest truncated (2026-10-10 ~14:28Z
 -    killed 1,219 queue entries). Readers now always see either the old
@@ -413,7 +415,10 @@
 -        os.replace(tmp, MANIFEST)
 -        _fsync_dir(os.path.dirname(MANIFEST))
 -    return m
-+    return mast.append_only(MANIFEST, fn, _recompute_stats)
++
++def reconcile_scan(candidate):
++    mast.require_qualification(os.path.dirname(MANIFEST))
++    return mast.reconcile_scan(MANIFEST, candidate, _recompute_stats)
 --- a/relay-uploader.py
 +++ b/relay-uploader.py
 @@ -12,0 +13,2 @@
@@ -450,12 +455,157 @@
 -            stop_workers(procs, "STOP seen")
 -            return 0
 +            return 0 if stop_workers(procs, "STOP seen") else 2
-@@ -101,2 +99,6 @@
+@@ -101,2 +99,4 @@
 -            log("%s exited rc=%d; respawning" % (wid, rc))
 -            procs[wid] = spawn(wid)
 +            # Unexpected worker death may orphan a request; never auto-respawn.
-+            with open(DRAIN, "ab") as marker:
-+                marker.write(b"Unexpected worker exit; reconcile before restart\n")
-+                marker.flush(); os.fsync(marker.fileno())
++            mast.request_drain(os.path.join(R2DIR, "queue-manifest.json"))
 +            stop_workers(procs, "worker exit; admission closed")
 +            return 2
+--- a/queue-append.py
++++ b/queue-append.py
+@@ -70,0 +71,2 @@
++    manifest_lib.mast.check_writer_binding(os.path.join(WS, "r2-upload", "queue-manifest.json"), manifest_lib.MANIFEST)
++    manifest_lib.mast.require_qualification(os.path.dirname(manifest_lib.MANIFEST))
+--- a/queue-runner.py
++++ b/queue-runner.py
+@@ -40 +40 @@
+-_logf = open(LOG, "a", buffering=1)
++_logf = None  # Retired entrypoint must not open runtime files.
+@@ -120,6 +120 @@
+-    def fn(m):
+-        e = m["entries"].get(sha)
+-        if e:
+-            e.update(fields)
+-        return m
+-    manifest_lib.update(fn)
++    raise RuntimeError("Legacy tokenless runner retired; use the fenced relay")
+@@ -129,12 +124 @@
+-    m = manifest_lib.load()
+-    cands = [e for e in m["entries"].values()
+-             if e.get("status") == "pending" and e.get("attempts", 0) < MAX_ATTEMPTS]
+-    def key(e):
+-        sc = e.get("scope", "")
+-        try:
+-            pri = SCOPE_ORDER.index(sc)
+-        except ValueError:
+-            pri = len(SCOPE_ORDER)
+-        return (pri, e.get("added", ""))
+-    cands.sort(key=key)
+-    return cands[0] if cands else None
++    raise RuntimeError("Legacy tokenless runner retired; use the fenced relay")
+@@ -144,74 +128 @@
+-    sha = entry["sha256"]
+-    path = os.path.join(WS, entry["path"]) if not os.path.isabs(entry["path"]) else entry["path"]
+-    base = os.path.basename(path)
+-    if not os.path.isfile(path):
+-        set_status(sha, status="failed", last_error="local file missing at run time")
+-        log("FAIL %s: local file missing" % base)
+-        return "failed"
+-    err = validate(path)
+-    if err:
+-        set_status(sha, status="failed", last_error="pre-upload validation: " + err)
+-        log("FAIL %s: pre-upload validation: %s" % (base, err))
+-        return "failed"
+-    rpt = report_path_for(entry)
+-    while True:
+-        attempts = manifest_lib.load()["entries"][sha].get("attempts", 0) + 1
+-        set_status(sha, attempts=attempts, status="pending",
+-                   last_error="" if attempts == 1 else entry.get("last_error", ""))
+-        log("UPLOAD %s (attempt %d/%d)" % (base, attempts, MAX_ATTEMPTS))
+-        try:
+-            r = subprocess.run(
+-                [sys.executable, SCRIPT, path, "--key", KEY, "--report", rpt],
+-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+-                timeout=900, text=True)
+-            out = r.stdout or ""
+-            ok = r.returncode == 0
+-        except subprocess.TimeoutExpired as e:
+-            out = (e.stdout or "") + "\nTIMEOUT after 900s"
+-            ok = False
+-        except Exception as e:
+-            out = "runner error: %s" % e
+-            ok = False
+-        if ok:
+-            try:
+-                result = json.load(open(rpt))
+-                registered = result.get("registered") is True
+-            except Exception:
+-                registered = False
+-                result = {}
+-            if registered:
+-                decode_ok = decode_check(path)
+-                set_status(sha, status="registered", last_error="",
+-                           playback_decode_ok=decode_ok,
+-                           audioSha256=result.get("audioSha256"),
+-                           registered_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"))
+-                log("REGISTERED %s sha=%s decode_ok=%s" % (base, sha[:12], decode_ok))
+-                return "registered"
+-            kind, detail = classify("The server did not confirm library registration")
+-        else:
+-            kind, detail = classify(out)
+-        if kind == "auth":
+-            set_status(sha, status="failed",
+-                       last_error="AUTH STOP: %s (not retried)" % detail)
+-            log("AUTH FAILURE on %s: %s — stopping runner" % (base, detail))
+-            open(AUTH_STOP, "w").write("%s | %s | %s\n" % (
+-                time.strftime("%Y-%m-%dT%H:%M:%S%z"), base, detail))
+-            return "auth-stop"
+-        if kind == "temporary" and attempts < MAX_ATTEMPTS:
+-            delay = min(60 * (2 ** (attempts - 1)), 900)
+-            if "429" in detail:
+-                delay = min(delay + 120, 1200)
+-            delay += random.uniform(0, 30)
+-            set_status(sha, last_error="temporary (%s), attempt %d" % (detail, attempts))
+-            log("RETRY %s in %.0fs (%s)" % (base, delay, detail))
+-            time.sleep(delay)
+-            continue
+-        if kind == "temporary":
+-            set_status(sha, status="failed",
+-                       last_error="parked after %d attempts (temporary: %s)" % (attempts, detail))
+-            log("PARKED %s after %d attempts (%s)" % (base, attempts, detail))
+-        else:
+-            set_status(sha, status="failed",
+-                       last_error="%s: %s (not retried)" % (kind, detail))
+-            log("FAIL %s: %s: %s" % (base, kind, detail))
+-        return "failed"
++    raise RuntimeError("Legacy tokenless runner retired; use the fenced relay")
+@@ -221,20 +132,2 @@
+-    log("queue runner starting")
+-    last_attempt = 0.0
+-    while True:
+-        if os.path.exists(STOP):
+-            log("STOP file present; exiting")
+-            return 0
+-        if os.path.exists(AUTH_STOP):
+-            log("AUTH-STOP present; exiting")
+-            return 3
+-        entry = next_pending()
+-        if entry is None:
+-            time.sleep(IDLE_SLEEP)
+-            continue
+-        wait = paced_gap - (time.time() - last_attempt)
+-        if wait > 0:
+-            time.sleep(wait)
+-        outcome = process(entry)
+-        last_attempt = time.time()
+-        if outcome == "auth-stop":
+-            return 3
++    print("Legacy tokenless runner retired; use the existing relay launcher")
++    return 2
+--- a/build-queue-manifest.py
++++ b/build-queue-manifest.py
+@@ -7,0 +8 @@
++import manifest_lib
+@@ -92,0 +94,2 @@
++    manifest_lib.mast.check_writer_binding(MANIFEST, manifest_lib.MANIFEST)
++    manifest_lib.mast.require_qualification(os.path.dirname(MANIFEST))
+@@ -167,6 +170,2 @@
+-    tmp = "%s.tmp.%d.%d" % (MANIFEST, os.getpid(), next(_tmp_seq))
+-    with open(tmp, "w") as f:
+-        json.dump(manifest, f, indent=1)
+-        f.write("\n")
+-    os.replace(tmp, MANIFEST)
+-    print(json.dumps(stats, indent=2))
++    current = manifest_lib.reconcile_scan(manifest)
++    print(json.dumps(current["stats"], indent=2))

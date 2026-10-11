@@ -38,8 +38,12 @@ def transaction(path):
 
 def update_manifest(path, mutate, stats=lambda value: value):
     with Transaction(path) as tx:
+        boundary.check_stops([str(Path(path).parent/name) for name in ('STOP','AUTH-STOP','DRAIN')])
         result = mutate(tx.value)
-        tx.commit(stats(result))
+        result['updated'] = time.strftime('%Y-%m-%dT%H:%M:%S%z')
+        result = stats(result)
+        boundary.check_stops([str(Path(path).parent/name) for name in ('STOP','AUTH-STOP','DRAIN')])
+        tx.commit(result)
         return result
 
 
@@ -58,6 +62,43 @@ def append_only(path, mutate, stats):
                 raise boundary.BoundaryError('Append cannot change admission or holds')
         return result
     return update_manifest(path, checked, stats)
+
+
+def reconcile_scan(path, candidate, stats):
+    """Add discovered entries to current state; never replace generations/holds.
+
+    Historical plain reports are not fenced registration proofs. Preserve them
+    as review-only entries rather than silently scheduling another upload.
+    """
+    if type(candidate) is not dict or type(candidate.get('entries')) is not dict:
+        raise boundary.BoundaryError('Invalid scan candidate')
+    def merge(current):
+        for job, scanned in candidate['entries'].items():
+            if job in current['entries']:
+                continue  # First-wins metadata and all current status/fencing survive.
+            if (type(scanned) is not dict or not re.fullmatch('[a-f0-9]{64}', job)
+                    or scanned.get('sha256') != job or type(scanned.get('size')) is not int
+                    or scanned['size'] <= 0 or type(scanned.get('path')) is not str
+                    or scanned.get('status') not in ('pending','failed','registered')):
+                raise boundary.BoundaryError('Invalid scanned entry')
+            entry = json.loads(cp.encode(scanned))
+            # Never import ownership, attempts or receipts from a filesystem scan.
+            for field in ('generation','claimed_by','claimed_at','attempt','checkpoint','prepared_directory'):
+                entry.pop(field, None)
+            entry['attempts'] = 0
+            if entry['status'] == 'registered':
+                entry.update(status='held_import_review',
+                    last_error='Historical report requires reconciliation; no fenced completion proof')
+            elif entry['status'] == 'pending' and entry['size'] > prepared.AUDIO:
+                raise boundary.BoundaryError('Pending scanned audio exceeds limit')
+            current['entries'][job] = entry
+        current['last_scan'] = candidate.get('built')
+        for key in ('report_files','orphan_reports'):
+            value = candidate.get('stats', {}).get(key)
+            if type(value) is int and value >= 0:
+                current.setdefault('stats', {})[key] = value
+        return current
+    return update_manifest(path, merge, stats)
 
 
 def claim_next(host):
@@ -243,6 +284,7 @@ def process(host, job, entry):
             with network_token(host, value):
                 attempt = uuid.uuid4().hex
                 def admit(current, manifest):
+                    boundary.check_stops(stops(host, admission=True))
                     if manifest.get('upload_hold') is not None:
                         raise boundary.BoundaryError('Unresolved global upload hold')
                     if current.get('attempts', 0) >= host.MAX_ATTEMPTS:
@@ -332,3 +374,22 @@ def require_qualification(root):
     document = json.loads(prepared.read(Path(root)/'qualification.json', 65536))
     if document.get('activation') != 'qualified-for-controlled-transition':
         raise boundary.BoundaryError('Staging package incomplete; no worker/launcher admission')
+
+
+def check_writer_binding(configured, shared):
+    if Path(configured).resolve() != Path(shared).resolve():
+        raise boundary.BoundaryError('Writer configuration targets a different manifest')
+
+
+def request_drain(manifest):
+    """Qualified-stage drain marker, serialized with claim/write/admission checks.
+
+    Not a bridge for old writers that do not yet use this sidecar.
+    """
+    marker = Path(manifest).parent/'DRAIN'
+    with Transaction(manifest):
+        with marker.open('ab') as stream:
+            stream.write(b'Admission closed for reviewed drain\n'); stream.flush(); os.fsync(stream.fileno())
+        directory = os.open(marker.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try: os.fsync(directory)
+        finally: os.close(directory)

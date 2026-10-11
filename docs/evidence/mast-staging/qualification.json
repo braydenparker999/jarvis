@@ -3,13 +3,35 @@
     "relay-worker.py": "75b00f687efba00e8c14db33694cb524c6301b05ac5ec52f9ee516790ea9377f",
     "upload-music-r2.py": "7cb0a7b9015dc1a536a3365f7e1a4d0c1c9b305cda4a2e9c02e5eb3ccd135c4c",
     "manifest_lib.py": "97e0be0448ee20b379fe64970af25b63b5ae91b29a5f657c8e01efb22be6a303",
-    "relay-uploader.py": "7e25140df4f072ef7c1b9a7c03008483827fa90cae3144479b2f97be9033d6b6"
+    "relay-uploader.py": "7e25140df4f072ef7c1b9a7c03008483827fa90cae3144479b2f97be9033d6b6",
+    "queue-append.py": "74e9f864e6008447191340fc6af17315134406cbac04942d86ea8f0b86f2304f",
+    "queue-runner.py": "9823654c22a01a24c76f3755545f52cf9d34707cf10f44131405fc98e2065de9",
+    "build-queue-manifest.py": "c6b0c7137c6b0c2ea6f230710d96803b17d80316ec1ea02b11de14aa5d04a488"
   },
+  "reported_unredacted_writer_hashes": {
+    "queue-append.py": "3ce62e43da2b85e361ac7385e14278a7b7cc35a4a5149e64650734744f83a49d",
+    "queue-runner.py": "47bacb1651dc3a826822c79736968c4e9a8d917b4e1f9adc8d1e37d1370f5d18",
+    "build-queue-manifest.py": "a56a29dbb8dac08b95c9cd5218251daebe1f395112d2b46570fb68923f349951"
+  },
+  "reviewed_redacted_writer_hashes": {
+    "queue-append.py": "74e9f864e6008447191340fc6af17315134406cbac04942d86ea8f0b86f2304f",
+    "queue-runner.py": "9823654c22a01a24c76f3755545f52cf9d34707cf10f44131405fc98e2065de9",
+    "build-queue-manifest.py": "c6b0c7137c6b0c2ea6f230710d96803b17d80316ec1ea02b11de14aa5d04a488"
+  },
+  "writer_control_flow_hashes": {
+    "queue-append.py": "980c0d6d2a984cf70b163580775d1b0064a177c2d0c9318af71725d2aa88ca8a",
+    "queue-runner.py": "d6cf2db731a88d7780df9c12d864057b4b28c362dd7fb27d09adabe9cb715e7c",
+    "build-queue-manifest.py": "76869471f488d8116f9fbe4e3657f025ce6122b415b34e4e8b736d0d4493d2a2"
+  },
+  "redacted_review_only": true,
   "staged": {
     "upload-music-r2.py": "4bd27d478f37fa93fddd5def1fc20d2bdb6e988dc28bb6c18186429692ec5495",
-    "manifest_lib.py": "42913746c2e035daf470764733231c81cf617e288ee5601f877c12e8b4114586",
+    "build-queue-manifest.py": "3d0c139c226da0d37b47d5e6fe071e28fffa1a7b25a8c7d0d3427b7bb4aaad56",
+    "queue-append.py": "583489cb91a00331ae09dc1158031883f08831cf5a38edef085b3231408d872a",
+    "manifest_lib.py": "2a7695e8e8cd984e454b5232d0e7197016c5d6833403432c09b94789267c505b",
     "relay-worker.py": "75ff2de20cc67a3020f05c588017925a8ae836e3fc398787ac5f7d6528eb0fa1",
-    "relay-uploader.py": "17930eeed002c157ca8af70499e81fefc22a431039df466f0b9a56b10a893584",
+    "relay-uploader.py": "78a1da65a58c32afad271ab50cce78b42601499f84858d7d21574db7df58a60c",
+    "queue-runner.py": "7f091e65162d126e26baf38c8b59a23d20837e1dd11ad0cd887ca3e0d11a4bf9",
     "scripts/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "scripts/prototypes/artifact_budget.py": "15c35b5de4554ea15485d5a3514f2b74f129a7c5123518bd9b8db0db4e2ed082",
     "scripts/prototypes/worker_boundary.py": "afb31d1db4ef127956b038349830ecbf4cf6b264dd2b5c7fe455f4bdf66edd50",
@@ -19,20 +41,17 @@
     "scripts/prototypes/upload_checkpoints.py": "90a680819487f5568d514725c38f6d3326992de33d68ba3499f5da1d7c0fef2d",
     "scripts/staging/prepared_handoff.py": "4554f4d82e4b6178f94b675711c5123c6624d0c39e311b4437c17c5f94d4ffb1",
     "scripts/staging/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "scripts/staging/mast_runtime.py": "951b1349bd0f2344fd7b936a989507deadbce394e09bf3689b2948c4f1f5b125"
+    "scripts/staging/mast_runtime.py": "838a467f7b43801c31b2d9872cfc63f15b7614e583a58e7abb1b16b03fccfbdb"
   },
   "static_call_sites": [
+    "all three queue writer call sites integrated; legacy uploader retired",
     "extraction and signature canonicalization unchanged",
     "worker process/claim bound to fenced runtime",
     "manifest updates append-only; stale save disabled",
     "launcher drain never terminates",
     "uploader bound to receipt checkpoint runtime; raw responses bounded"
   ],
-  "activation": "BLOCKED: remaining writer bodies/compatible migration and approved transition",
-  "missing": [
-    "complete queue-append.py",
-    "queue-runner.py",
-    "build-queue-manifest.py"
-  ],
+  "activation": "BLOCKED: host source/config qualification, drain/reconciliation and approved transition",
+  "missing": [],
   "external_source_executed": false
 }

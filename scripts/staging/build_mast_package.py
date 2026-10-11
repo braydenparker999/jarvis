@@ -19,6 +19,19 @@ PINS = {
 }
 
 
+WRITER_PINS = {'queue-append.py': '3ce62e43da2b85e361ac7385e14278a7b7cc35a4a5149e64650734744f83a49d', 'queue-runner.py': '47bacb1651dc3a826822c79736968c4e9a8d917b4e1f9adc8d1e37d1370f5d18', 'build-queue-manifest.py': 'a56a29dbb8dac08b95c9cd5218251daebe1f395112d2b46570fb68923f349951'}
+REDACTED_PINS = {'queue-append.py': '74e9f864e6008447191340fc6af17315134406cbac04942d86ea8f0b86f2304f', 'queue-runner.py': '9823654c22a01a24c76f3755545f52cf9d34707cf10f44131405fc98e2065de9', 'build-queue-manifest.py': 'c6b0c7137c6b0c2ea6f230710d96803b17d80316ec1ea02b11de14aa5d04a488'}
+WRITER_SHAPES = {'queue-append.py': '980c0d6d2a984cf70b163580775d1b0064a177c2d0c9318af71725d2aa88ca8a', 'queue-runner.py': 'd6cf2db731a88d7780df9c12d864057b4b28c362dd7fb27d09adabe9cb715e7c', 'build-queue-manifest.py': '76869471f488d8116f9fbe4e3657f025ce6122b415b34e4e8b736d0d4493d2a2'}
+
+def writer_shape(source):
+    tree = ast.parse(source)
+    # Only declared top-level configuration redactions may differ. No functions,
+    # executable branches or other statements are elided from comparison.
+    tree.body = [n for n in tree.body if not isinstance(n,ast.Assign) or not any(
+        isinstance(v,ast.Name) and v.id in {'WS','KEY','REPORT_DIRS'} for v in n.targets)]
+    return hashlib.sha256(ast.dump(tree,include_attributes=False).encode()).hexdigest()
+
+
 def function(source, name, replacement):
     node = next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name == name)
     lines = source.splitlines(True)
@@ -65,8 +78,15 @@ def manifest(source):
     raise RuntimeError("Whole-snapshot save disabled; use a current-state transaction")
 ''')
     source = function(source, 'update', '''def update(fn):
+    mast.require_qualification(os.path.dirname(MANIFEST))
     return mast.append_only(MANIFEST, fn, _recompute_stats)
 ''')
+    source += '''
+
+def reconcile_scan(candidate):
+    mast.require_qualification(os.path.dirname(MANIFEST))
+    return mast.reconcile_scan(MANIFEST, candidate, _recompute_stats)
+'''
     return source
 
 
@@ -90,9 +110,7 @@ def launcher(source):
 ''')
     source = once(source, '            stop_workers(procs, "STOP seen")\n            return 0', '            return 0 if stop_workers(procs, "STOP seen") else 2')
     source = once(source, '            log("%s exited rc=%d; respawning" % (wid, rc))\n            procs[wid] = spawn(wid)', '''            # Unexpected worker death may orphan a request; never auto-respawn.
-            with open(DRAIN, "ab") as marker:
-                marker.write(b"Unexpected worker exit; reconcile before restart\\n")
-                marker.flush(); os.fsync(marker.fileno())
+            mast.request_drain(os.path.join(R2DIR, "queue-manifest.json"))
             stop_workers(procs, "worker exit; admission closed")
             return 2''')
     return source
@@ -171,6 +189,27 @@ def uploader(source):
     return source[:start]+replacement+source[end:]
 
 
+def queue_append(source):
+    # Existing add(m) callback already only inserts missing hashes; keep it intact.
+    return once(source, 'def main():\n', 'def main():\n    manifest_lib.mast.check_writer_binding(os.path.join(WS, "r2-upload", "queue-manifest.json"), manifest_lib.MANIFEST)\n    manifest_lib.mast.require_qualification(os.path.dirname(manifest_lib.MANIFEST))\n')
+
+
+def legacy_runner(source):
+    source = once(source, '_logf = open(LOG, "a", buffering=1)', '_logf = None  # Retired entrypoint must not open runtime files.')
+    for name, signature in [('process','entry'),('set_status','sha, **fields'),('next_pending','')]:
+        source = function(source, name, f'def {name}({signature}):\n    raise RuntimeError("Legacy tokenless runner retired; use the fenced relay")')
+    return function(source, 'main', 'def main():\n    print("Legacy tokenless runner retired; use the existing relay launcher")\n    return 2')
+
+
+def queue_builder(source):
+    source = once(source, 'import json\n', 'import json\nimport manifest_lib\n')
+    source = once(source, 'def main():\n', 'def main():\n    manifest_lib.mast.check_writer_binding(MANIFEST, manifest_lib.MANIFEST)\n    manifest_lib.mast.require_qualification(os.path.dirname(MANIFEST))\n')
+    start = source.index('    tmp = "%s.tmp.%d.%d" % (MANIFEST, os.getpid(), next(_tmp_seq))')
+    end = source.index('    print(json.dumps(stats, indent=2))', start)+len('    print(json.dumps(stats, indent=2))')
+    return source[:start]+"""    current = manifest_lib.reconcile_scan(manifest)
+    print(json.dumps(current["stats"], indent=2))"""+source[end:]
+
+
 def inspect_stage(originals, changed):
     def find(source, name):
         return next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name==name)
@@ -184,23 +223,37 @@ def inspect_stage(originals, changed):
     assert '.terminate(' not in changed['relay-uploader.py']
     assert 'mast.upload_prepared' in ast.unparse(find(changed['upload-music-r2.py'],'main'))
     assert 'response.read(65537)' in ast.unparse(find(changed['upload-music-r2.py'],'upload_request_raw'))
-    return ['extraction and signature canonicalization unchanged', 'worker process/claim bound to fenced runtime',
+    assert 'manifest_lib.update' in ast.unparse(find(changed['queue-append.py'],'main'))
+    assert 'manifest_lib.reconcile_scan' in ast.unparse(find(changed['build-queue-manifest.py'],'main'))
+    assert 'os.replace' not in ast.unparse(find(changed['build-queue-manifest.py'],'main'))
+    assert isinstance(find(changed['queue-runner.py'],'process').body[0],ast.Raise)
+    assert 'process' not in ast.unparse(find(changed['queue-runner.py'],'main'))
+    return ['all three queue writer call sites integrated; legacy uploader retired', 'extraction and signature canonicalization unchanged', 'worker process/claim bound to fenced runtime',
             'manifest updates append-only; stale save disabled', 'launcher drain never terminates',
             'uploader bound to receipt checkpoint runtime; raw responses bounded']
 
 
-def build(inputs, output):
+def build(inputs, output, *, redacted_writers=False):
     originals={}
     for name,pin in PINS.items():
         raw=(inputs/name).read_bytes()
         if hashlib.sha256(raw).hexdigest()!=pin: raise ValueError('Source pin mismatch: '+name)
+        originals[name]=raw.decode()
+    for name,pin in WRITER_PINS.items():
+        raw=(inputs/name).read_bytes()
+        expected=REDACTED_PINS[name] if redacted_writers else pin
+        if hashlib.sha256(raw).hexdigest()!=expected: raise ValueError('Writer source pin mismatch: '+name)
+        if writer_shape(raw)!=WRITER_SHAPES[name]: raise ValueError('Writer control-flow/config-boundary mismatch: '+name)
         originals[name]=raw.decode()
     origin=next(n.value.value for n in ast.parse(originals['upload-music-r2.py']).body
                 if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='ORIGIN' for t in n.targets))
     changed={'relay-worker.py':worker(originals['relay-worker.py'],origin),
              'upload-music-r2.py':uploader(originals['upload-music-r2.py']),
              'manifest_lib.py':manifest(originals['manifest_lib.py']),
-             'relay-uploader.py':launcher(originals['relay-uploader.py'])}
+             'relay-uploader.py':launcher(originals['relay-uploader.py']),
+             'queue-append.py':queue_append(originals['queue-append.py']),
+             'queue-runner.py':legacy_runner(originals['queue-runner.py']),
+             'build-queue-manifest.py':queue_builder(originals['build-queue-manifest.py'])}
     output.mkdir(mode=0o700)  # Never overwrite an existing stage or install in place.
     repo=Path(__file__).resolve().parents[2]
     for name,source in changed.items():
@@ -218,12 +271,16 @@ def build(inputs, output):
     checks = inspect_stage(originals, changed)
     pins={str(p.relative_to(output)):hashlib.sha256(p.read_bytes()).hexdigest()
           for p in output.rglob('*.py')}
-    (output/'qualification.json').write_text(json.dumps({'source':PINS,'staged':pins,'static_call_sites':checks,
-        'activation':'BLOCKED: remaining writer bodies/compatible migration and approved transition',
-        'missing':['complete queue-append.py','queue-runner.py','build-queue-manifest.py'],
+    (output/'qualification.json').write_text(json.dumps({'source':{**PINS,**(REDACTED_PINS if redacted_writers else WRITER_PINS)},
+        'reported_unredacted_writer_hashes':WRITER_PINS,'reviewed_redacted_writer_hashes':REDACTED_PINS,
+        'writer_control_flow_hashes':WRITER_SHAPES,'redacted_review_only':redacted_writers,
+        'staged':pins,'static_call_sites':checks,
+        'activation':'BLOCKED: host source/config qualification, drain/reconciliation and approved transition',
+        'missing':[],
         'external_source_executed':False},indent=2)+'\n')
     return changed
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser(); parser.add_argument('inputs',type=Path); parser.add_argument('output',type=Path)
-    args=parser.parse_args(); build(args.inputs,args.output)
+    parser.add_argument('--redacted-writers',action='store_true',help='Review-only output; never install redacted configuration')
+    args=parser.parse_args(); build(args.inputs,args.output,redacted_writers=args.redacted_writers)
