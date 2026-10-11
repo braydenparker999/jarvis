@@ -1,5 +1,7 @@
 # Mast current-item preparation: incremental review candidate
 
+The [full staging integration](mast-staging-integration.md) now carries the preparation, retry, fencing and drain work forward. This smaller patch remains historical review material; neither package is activated.
+
 Review [the three-file patch](patches/mast-current-item-preparation.patch) as the proposed first increment. The larger offline prototype remains reference material. The earlier baseline-upload canary is not the activation path for this change. This document authorizes no installation, upload, merge or process change.
 
 ## What changes

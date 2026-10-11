@@ -41,13 +41,13 @@ def _finite_float(value):
     return number
 
 
-def _decode(raw):
+def _decode(raw, manifest=True):
     try:
         value = json.loads(raw.decode('utf-8'), object_pairs_hook=_pairs,
                            parse_constant=_invalid_constant, parse_float=_finite_float)
-        if not isinstance(value, dict) or not isinstance(value.get('entries'), dict):
+        if not isinstance(value, dict) or manifest and not isinstance(value.get('entries'), dict):
             raise ManifestError('expected manifest object with entries object')
-        if not all(isinstance(entry, dict) for entry in value['entries'].values()):
+        if manifest and not all(isinstance(entry, dict) for entry in value['entries'].values()):
             raise ManifestError('expected entry objects')
         return value
     except (ValueError, UnicodeError, RecursionError) as exc:
@@ -56,7 +56,8 @@ def _decode(raw):
 
 class Transaction:
     """Read current path only after acquiring lock; one explicit commit per scope."""
-    def __init__(self, path):
+    def __init__(self, path, *, manifest=True):
+        self.manifest = manifest
         self.path = Path(path)
         self.lock = None
         self.value = None
@@ -72,7 +73,7 @@ class Transaction:
                 raw = stream.read(MAX_BYTES + 1)
             if len(raw) > MAX_BYTES:
                 raise ManifestError('manifest too large')
-            self.value = _decode(raw)
+            self.value = _decode(raw, self.manifest)
             return self
         except BaseException:
             self.__exit__(None, None, None)
@@ -85,7 +86,7 @@ class Transaction:
         raw = (json.dumps(value, ensure_ascii=False, allow_nan=False, indent=1) + '\n').encode('utf-8')
         if len(raw) > MAX_BYTES:
             raise ManifestError('manifest too large')
-        _decode(raw)
+        _decode(raw, self.manifest)
         temporary = None
         rename_attempted = False
         try:

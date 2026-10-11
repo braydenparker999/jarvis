@@ -1,0 +1,18 @@
+test_admission_writers_and_drain (tests.test_mast_staging_calls.StagingCallSites.test_admission_writers_and_drain) ... ok
+test_real_staging_call_site_matrix (tests.test_mast_staging_calls.StagingCallSites.test_real_staging_call_site_matrix) ... ok
+test_corrupt_documents_preserved_byte_for_byte (tests.test_r2_manifest_transaction.ManifestTransactions.test_corrupt_documents_preserved_byte_for_byte) ... ok
+test_crash_before_and_after_replace_releases_lock_and_preserves_valid_document (tests.test_r2_manifest_transaction.ManifestTransactions.test_crash_before_and_after_replace_releases_lock_and_preserves_valid_document) ... 13 rows: exact transport sequence, receipt reuse, holds, auth, interruption, stale generation, immutable decode and cleanup
+ok
+test_four_parallel_writers_preserve_all_updates (tests.test_r2_manifest_transaction.ManifestTransactions.test_four_parallel_writers_preserve_all_updates) ... ok
+test_interrupt_after_replace_is_uncertain (tests.test_r2_manifest_transaction.ManifestTransactions.test_interrupt_after_replace_is_uncertain) ... ok
+test_missing_document_not_initialized (tests.test_r2_manifest_transaction.ManifestTransactions.test_missing_document_not_initialized) ... ok
+test_no_implicit_commit_and_invalid_write_preserves_original (tests.test_r2_manifest_transaction.ManifestTransactions.test_no_implicit_commit_and_invalid_write_preserves_original) ... ok
+test_post_replace_fsync_failure_is_uncertain_without_retry (tests.test_r2_manifest_transaction.ManifestTransactions.test_post_replace_fsync_failure_is_uncertain_without_retry) ... ok
+test_pre_replace_fsync_failure_preserves_old_bytes (tests.test_r2_manifest_transaction.ManifestTransactions.test_pre_replace_fsync_failure_preserves_old_bytes) ... ok
+test_waiter_on_old_data_inode_can_read_stale_state (tests.test_r2_manifest_transaction.ManifestTransactions.test_waiter_on_old_data_inode_can_read_stale_state) ... ok
+test_waiter_reads_new_path_only_after_sidecar_release (tests.test_r2_manifest_transaction.ManifestTransactions.test_waiter_reads_new_path_only_after_sidecar_release) ... ok
+
+----------------------------------------------------------------------
+Ran 12 tests in 3.557s
+
+OK
