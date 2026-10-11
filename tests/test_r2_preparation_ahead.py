@@ -24,11 +24,11 @@ def ready(pool, context=CTX, audio=AUDIO, cover=None):
 
 
 class PreparationTests(unittest.TestCase):
-    def test_only_one_next_and_two_global_artifacts_for_three_producers(self):
+    def test_only_one_next_and_two_global_artifacts_for_four_producers(self):
         pool = prep.Pool()
         ready(pool)
         first, result = pool.take(CTX, SHA)
-        barrier = threading.Barrier(4)
+        barrier = threading.Barrier(5)
         admitted = []
         def producer():
             barrier.wait()
@@ -36,7 +36,7 @@ class PreparationTests(unittest.TestCase):
             if token is not None:
                 admitted.append(token)
                 pool.prepare(token, lambda limit: AUDIO, lambda b: (b'{}', None, None))
-        workers = [threading.Thread(target=producer) for _ in range(3)]
+        workers = [threading.Thread(target=producer) for _ in range(4)]
         for worker in workers: worker.start()
         barrier.wait()
         for worker in workers: worker.join(2); self.assertFalse(worker.is_alive())

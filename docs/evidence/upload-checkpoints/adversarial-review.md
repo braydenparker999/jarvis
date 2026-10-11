@@ -1,8 +1,7 @@
 # Independent adversarial review — offline only
 
-Reviewer: separate agent `/root/adversarial_review`, given the actual local
-`/workspace/mast-upload-checkpoints.patch`, source and tests in
-`/workspace/jarvis-upload-prototype`. The reviewer made no file edits. Initial
+An independent reviewer inspected the local `mast-upload-checkpoints.patch`,
+repository source and tests. The reviewer made no file edits. Initial
 patch SHA256:
 `7aa80371eb523f75be3a5082af3830efcdf284157fda3a0acd241ed119d17e6b`.
 This identifies the reviewed input, not the revised final patch. The final patch

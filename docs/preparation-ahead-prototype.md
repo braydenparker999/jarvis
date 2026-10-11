@@ -10,7 +10,7 @@ schedule, credential or FFmpeg process is created by this module.
 
 `scripts/prototypes/preparation_ahead.py` exposes one shared `Pool` owned by one
 proposed coordinator. It admits at most one active lease and one next reservation
-or artifact. Three concurrent producer fixture threads share that same pool;
+or artifact. Four concurrent producer fixture threads share that same pool;
 only one obtains the next slot. A reservation is required before source read or
 preparation. **One Pool per Mast worker would violate the global bound and is
 not an integration option.** Multi-process IPC/coordinator integration is absent.
@@ -78,7 +78,8 @@ claims. Unlike checkpoints (which save acknowledged blob re-sends on eligible
 retries), prep-ahead can reduce serial local work on first attempts, but only if
 that work currently occupies the upload token and overlaps useful work. Mast's
 lock-held preparation/analysis timing is still unverified. Its upload path has no
-per-track model invocation and no per-upload playback check to eliminate.
+per-track model invocation and the latest report places local decode after registration in the worker;
+that check is preserved, not eliminated or treated as remote playback proof.
 
 ## Exact blocked integration seams / proposed safe rollout
 
@@ -86,7 +87,7 @@ per-track model invocation and no per-upload playback check to eliminate.
    after the reported VM restart. Obtain the pending four-bundle contract in
    `mast-checkpoint-adapter-contract.md`, including where local preparation and
    optional analysis occur relative to the actual shared token.
-2. Select one global coordinator with IPC/ownership for the existing three workers.
+2. Select one global coordinator with IPC/ownership for the currently reported four workers.
    Preserve current provider admission and completion order; prepare only an
    already downloaded, validated local snapshot. No extra download is launched
    just because a prep slot is available. Decide stable job/revision/recipe fields
@@ -114,3 +115,7 @@ per-track model invocation and no per-upload playback check to eliminate.
 Tests: `python -m unittest discover -s tests -p test_r2_preparation_ahead.py -v`.
 Evidence: `docs/evidence/preparation-ahead/`. This candidate does not install the
 checkpoint candidate or assume any previous design is running.
+
+The later 18:50 readiness review in `mast-checkpoint-adapter-contract.md` adds
+a conservative offline analysis intent/acknowledgement hold. It still has no
+verified worker completion/finalization adapter and must not be activated.

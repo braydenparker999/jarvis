@@ -174,6 +174,8 @@ class Session:
         """send(method, path, SAME bytes, mime) must sign freshly, once, no retry."""
         if not self.active or self.poisoned:
             raise CheckpointError('Session closed or unresolved; reconcile before retry')
+        if isinstance(send, ValidatedPutSender) and (send.destination != self.destination or send.public != self.public):
+            raise CheckpointError('PUT adapter destination or signing identity mismatch')
         identity = identity_for(role, body, ext, self.destination, self.public)
         old = self.state['blobs'].get(role)
         if old and old['identity'] == identity and receipt_ok(old['receipt'], identity):
@@ -188,6 +190,9 @@ class Session:
         return result
 
     def register(self, body, send):
+        return self._register(body, send, hold_analysis=False)
+
+    def _register(self, body, send, *, hold_analysis):
         """Preserve the caller's registration bytes; server still checks proofs.
 
         Registration is never skipped. Analysis correction remains with the caller.
@@ -215,9 +220,110 @@ class Session:
                     if not r['duplicate'] or r['id'].startswith('r2_native_') else True)
         result = self._request('register', identity,
             lambda: send('POST', '/music/uploads/register', body, 'application/json'), valid)
-        self.state['pending'] = None
+        needs_analysis = (hold_analysis and result['duplicate']
+                          and 'audioAnalysis' in registration.get('metadata', {}))
+        self.state['pending'] = ({'phase': 'duplicate_catalog_pending', 'identity': identity}
+                                 if needs_analysis else None)
         write_state(self.path, self.state)
+        self.poisoned = needs_analysis
+        return result
+
+    def register_with_analysis(self, body, request_once):
+        """Offline exact duplicate sequence; no completion/reset API.
+
+        request_once has the same trusted provenance/sign-once/no-retry contract
+        as ValidatedPutSender. GET uses body=None and mime=None; authenticate TLS
+        and reject redirects. POST signs these exact bytes afresh.
+        """
+        def send(method, path, payload, mime):
+            url = self.destination + path
+            response = request_once(method, url, payload, mime, self.public)
+            return validated_json(response, url, 65536)
+        result = self._register(body, send, hold_analysis=True)
+        registration = json.loads(body, object_pairs_hook=unique)
+        tags = registration.get('metadata', {})
+        if not result['duplicate'] or 'audioAnalysis' not in tags:
+            return result
+        # Registration acknowledgement is already durably held before GET.
+        # Any GET/validation/crash failure leaves the original journal held.
+        url = self.destination + '/music/library.json'
+        catalog = validated_json(request_once('GET', url, None, None, self.public), url, 16 * 1024 * 1024)
+        tracks = catalog.get('tracks') if type(catalog) is dict else None
+        if type(tracks) is not list or any(type(t) is not dict for t in tracks):
+            raise CheckpointError('Invalid catalog tracks')
+        matches = [t for t in tracks if t.get('id') == result['id']]
+        if len(matches) != 1:
+            raise CheckpointError('Duplicate catalog identity missing or ambiguous')
+        existing = matches[0]
+        if (existing.get('sha256') != registration['sha256']
+                or type(existing.get('size')) is not int or existing['size'] != registration['size']
+                or type(existing.get('metadata')) is not dict):
+            raise CheckpointError('Duplicate catalog audio identity changed')
+        correction = {'id': existing['id'], 'sha256': registration['sha256'],
+                      'size': registration['size'], 'r2Identity': existing.get('r2Identity'),
+                      'previousAnalysis': existing['metadata'].get('audioAnalysis'),
+                      'audioAnalysis': tags['audioAnalysis']}
+        # Server CAS hashes JSON.stringify(previousAnalysis): preserve catalog
+        # property order; the journal's sorted encoder must not build this body.
+        correction_body = json.dumps(correction, ensure_ascii=False,
+                                     separators=(',', ':'), allow_nan=False).encode('utf-8')
+        # Only this in-flight sequence may advance the held phase. Do not persist
+        # a clear state: analysis writes its new intent before its network call.
+        held = self.state['pending']
+        self.state['pending'] = None
         self.poisoned = False
+        try:
+            acknowledgement = self.analysis(correction_body, send)
+        except BaseException:
+            if self.state['pending'] is None:
+                self.state['pending'] = held
+            self.poisoned = True
+            raise
+        return {**result, 'analysisCorrection': acknowledgement}
+
+    def analysis(self, body, send):
+        """Offline tail guard: a validated acknowledgement STILL holds the job.
+
+        The actual report/decode/manifest completion boundary is unavailable.
+        There is deliberately no automatic finish/reset/reconciliation API. Do
+        not install this as a complete worker adapter: even success requires a
+        separately reviewed completion transition before another attempt.
+        """
+        if type(body) is not bytes or not 0 < len(body) <= 16384:
+            raise CheckpointError('Require bounded immutable analysis bytes')
+        try:
+            request = json.loads(body, object_pairs_hook=unique)
+            track = request['id']
+            audio_sha, size = request['sha256'], request['size']
+            if (type(track) is not str or not re.fullmatch(r'r2_[A-Za-z0-9_-]{10,200}', track)
+                    or type(audio_sha) is not str or not re.fullmatch(r'[a-f0-9]{64}', audio_sha)
+                    or type(size) is not int or not 0 < size <= 32 * 1024 * 1024
+                    or track.startswith('r2_native_') and track != 'r2_native_' + audio_sha
+                    or 'audioAnalysis' not in request
+                    or not ('previousAnalysis' in request or 'previousAnalysisSha256' in request)):
+                raise ValueError('Analysis identity')
+            # Preserve the existing R2 identity and prior-analysis CAS proof in
+            # the exact body. The server remains responsible for analysis schema.
+            key = 'native/audio/' + audio_sha + '.opus'
+            if not receipt_ok({'key': key, 'sha256': audio_sha, 'size': size,
+                               'r2Identity': request['r2Identity']},
+                              {'key': key, 'sha256': audio_sha, 'size': size}):
+                raise ValueError('Object proof')
+        except Exception:
+            raise CheckpointError('Require analysis identity and existing CAS proof') from None
+        identity = {'destination': self.destination, 'public': self.public,
+                    'sha256': sha(body), 'size': len(body), 'track': track}
+        def valid(result):
+            return (type(result) is dict and set(result) == {'registered', 'analysisUpdated', 'id', 'count'}
+                    and result['registered'] is True and type(result['analysisUpdated']) is bool
+                    and result['id'] == track and type(result['count']) is int and 0 < result['count'] <= 50000)
+        result = self._request('analysis', identity,
+            lambda: send('POST', '/music/uploads/analysis', body, 'application/json'), valid)
+        self.state['pending'] = {'phase': 'analysis_acknowledged_completion_pending',
+                                 'identity': identity, 'receipt': json.loads(encode(result))}
+        write_state(self.path, self.state)
+        # Keep poisoned=True. Neither library observation nor successful POST
+        # implies report/decode/manifest completion or authorizes replay.
         return result
 
 
@@ -244,3 +350,62 @@ def session(path, destination, public, *, create=False):
             yield current
         finally:
             current.active = False
+
+
+class ValidatedPutSender:
+    """Proposed raw-response adapter, NOT an installed Mast transport.
+
+    request_once(method, absolute_url, SAME bytes, mime, public_identity) must
+    sign once with current time, authenticate HTTPS, reject redirects, perform
+    exactly one request and return the actual status/url/content_type/body.
+    Read through EOF or 65537 response bytes (one sentinel); never silently
+    truncate or pass already-parsed JSON. Actual TLS/HTTP provenance is trusted
+    transport input, not authenticated by this helper.
+    No credentials, private key or response body are written to the journal.
+    """
+    def __init__(self, request_once, destination, public):
+        self.request_once = request_once
+        self.destination, self.public = destination, public
+
+    def __call__(self, method, path, body, mime):
+        match = re.fullmatch(r'/music/uploads/(audio|art)/([a-f0-9]{64})\.(opus|jpg|png)', path)
+        if method != 'PUT' or match is None:
+            raise CheckpointError('PUT adapter only accepts content-addressed PUTs')
+        role, digest, ext = match.groups()
+        identity = identity_for(role, body, ext, self.destination, self.public)
+        if path != identity['path'] or digest != identity['sha256'] or mime != identity['mime']:
+            raise CheckpointError('PUT identity does not match immutable bytes')
+        url = self.destination + path
+        response = self.request_once(method, url, body, mime, self.public)
+        # The transport, not this JSON schema, establishes TLS/server provenance.
+        if (type(response) is not dict or set(response) != {'status', 'url', 'content_type', 'body'}
+                or type(response['status']) is not int or response['status'] != 200
+                or type(response['url']) is not str or response['url'] != url
+                or type(response['content_type']) is not str
+                or not re.fullmatch(r'[ \t]*application/json(?:[ \t]*;[ \t]*charset[ \t]*=[ \t]*(?:utf-8|"utf-8"))?[ \t]*',
+                                    response['content_type'], re.I)
+                or type(response['body']) is not bytes or not 0 < len(response['body']) <= 65536):
+            raise CheckpointError('Unvalidated PUT response; reconcile before retry')
+        try:
+            receipt = json.loads(response['body'].decode('utf-8'), object_pairs_hook=unique)
+        except Exception:
+            raise CheckpointError('Unvalidated PUT response; reconcile before retry') from None
+        if not receipt_ok(receipt, identity):
+            raise CheckpointError('Unvalidated PUT acknowledgement; reconcile before retry')
+        return receipt
+
+
+def validated_json(response, url, limit):
+    """Validate actual raw response envelope, without inventing provenance."""
+    if (type(response) is not dict or set(response) != {'status', 'url', 'content_type', 'body'}
+            or type(response['status']) is not int or response['status'] != 200
+            or response['url'] != url or type(response['content_type']) is not str
+            or not re.fullmatch(r'[ \t]*application/json(?:[ \t]*;[ \t]*charset[ \t]*=[ \t]*(?:utf-8|"utf-8"))?[ \t]*', response['content_type'], re.I)
+            or type(response['body']) is not bytes or not 0 < len(response['body']) <= limit):
+        raise CheckpointError('Unvalidated JSON response; reconcile before retry')
+    try:
+        value = json.loads(response['body'].decode('utf-8'), object_pairs_hook=unique)
+        encode(value)  # Reject NaN, infinities, including exponent overflow.
+        return value
+    except Exception:
+        raise CheckpointError('Invalid JSON response; reconcile before retry') from None

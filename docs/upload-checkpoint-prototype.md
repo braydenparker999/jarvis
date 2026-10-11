@@ -3,8 +3,7 @@
 Base: `release/astra-live-backport-20261009` at
 `97b048abfde97426da7b5eb3a310964631ce724c` (fetched and checked locally).
 The original checkout remains untouched; work is in a separate local worktree.
-No AGENTS.md or .agents/skills exist in this source tree; /workspace/.agents is
-empty. Reviewed STYLE_GUIDE.md, JARVIS-HANDOFF.md, docs/native-r2-uploads.md,
+No AGENTS.md or .agents/skills were present in this source tree. Reviewed STYLE_GUIDE.md, JARVIS-HANDOFF.md, docs/native-r2-uploads.md,
 the uploader, nativeMusic server, upload-receipt tests and R2 validation workflow.
 
 ## Why this seam
@@ -76,8 +75,8 @@ characters); arbitrary printable response text is not persisted as an ETag.
 2. Preserve the existing **whole-chain flock**, and audio/art/register serialization; confirm the exact preparation/optional
    analysis boundary against current source before any integration. Open a checkpoint session inside it. The
    helper's per-journal flock only protects that journal; it does not serialize
-   different jobs or existing workers. Keep adaptive rest and retry backoff in their current locations. Mast now reports
-   no per-upload decode/playback check; do not assume such a phase exists. Do not add an
+   different jobs or existing workers. Keep adaptive rest and retry backoff in their current locations. The latest Mast addendum reports worker-local decode after registration before
+   manifest completion; preserve it. Standalone playbackVerified remains false. Do not add an
    independent uploader or concurrent retries. All workers/retries for a job
    must resolve to the same stable journal path; path derivation cannot change
    when prepared bytes change. Test this with the real supervisor contract.
@@ -152,5 +151,14 @@ no runtime activation is performed.
 The later partial Mast contract review and exact remaining adapter requirements
 are in `docs/mast-checkpoint-adapter-contract.md`. It supersedes earlier unknowns
 about empty-cover behavior, per-upload decode and the currently unsafe retry/
-reclaim boundary. The current helper does not guard an analysis-correction POST;
-that tail must be integrated safely before activation.
+reclaim boundary. The later offline analysis guard below holds correction outcomes but has no
+verified local-completion transition; that tail must be integrated before activation.
+
+Latest addendum reconciliation and the new offline raw-response PUT adapter are
+in `mast-checkpoint-adapter-contract.md`. Four workers are reported at 18:35, but
+source/process binding is not verified. These new changes remain local pending
+publication confirmation; the existing pushed commit does not contain them.
+
+The later 18:50 readiness review in `mast-checkpoint-adapter-contract.md` adds
+a conservative offline analysis intent/acknowledgement hold. It still has no
+verified worker completion/finalization adapter and must not be activated.

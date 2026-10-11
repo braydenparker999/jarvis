@@ -1,4 +1,5 @@
 import test from 'node:test';
+import {spawnSync} from 'node:child_process';
 import assert from 'node:assert/strict';
 import {generateKeyPairSync,createHash,sign} from 'node:crypto';
 import {nativeMusic} from '../backend/music-upload.js';
@@ -195,4 +196,59 @@ test('registration after acknowledged blob reuse still checks proofs and preserv
   assert.equal(library.tracks[0].metadata.artist,'Artist');
   f.objects.get('native/audio/'+sha(audio)+'.opus').customMetadata.verification='corrupt';
   assert.equal((await f.register(later)).status,409);
+});
+
+test('503 alone cannot establish no commit when storage throws after accepting a mutation',async()=>{
+  for(const phase of ['audio','register']){
+    const f=fixture();if(phase==='register')await f.putAudio();
+    const target=phase==='audio'?'native/audio/'+sha(audio)+'.opus':LIBRARY_KEY;
+    const original=f.env.MUSIC_R2.put;
+    f.env.MUSIC_R2.put=async(key,body,options)=>{
+      const accepted=await original(key,body,options);
+      if(key===target&&accepted)throw Error('synthetic lost storage acknowledgement after commit');
+      return accepted;
+    };
+    const response=phase==='audio'?await f.send('/music/uploads/audio/'+sha(audio)+'.opus',audio):await f.register(f.registration());
+    assert.equal(response.status,503);
+    assert.ok(f.objects.has(target));
+    if(phase==='register')assert.equal(JSON.parse(f.objects.get(LIBRARY_KEY).bytes.toString()).count,1);
+    else assert.deepEqual(f.objects.get(target).bytes,audio);
+  }
+});
+
+
+test('offline Python duplicate adapter preserves catalog property order for real analysis CAS',async()=>{
+  const f=fixture();await f.putAudio();await f.register(f.registration());
+  let catalog=await (await f.get('/music/library.json')).json();const t=catalog.tracks[0];
+  const a={version:1,sha256:t.sha256,audioBytes:t.size,gainBasis:'decoded-container-gain',decoder:'fixture',method:'fixture',analyzedAt:'2026-10-02T00:00:00Z',sampleRate:48000,channels:2,integratedLufs:-14,samplePeakDbfs:-1,truePeakDbtp:0,containerGainDb:0};
+  const initial={id:t.id,sha256:t.sha256,size:t.size,r2Identity:t.r2Identity,previousAnalysis:null,audioAnalysis:a};
+  assert.equal((await f.send('/music/uploads/analysis',Buffer.from(JSON.stringify(initial)),'POST','application/json')).status,200);
+  catalog=await (await f.get('/music/library.json')).json();
+  const registration=JSON.parse(f.registration(audio,{metadata:{title:'Changed title',artist:'Artist',dur:10,audioAnalysis:{...a,integratedLufs:-13}}}));
+  const code=`import json,sys,tempfile
+from pathlib import Path
+from scripts.prototypes.upload_checkpoints import session
+source=json.load(sys.stdin)
+captured=[]
+def request(method,url,body,mime,public):
+ if url.endswith('/register'): value={'registered':True,'duplicate':True,'id':source['catalog']['tracks'][0]['id'],'count':1}
+ elif method=='GET': value=source['catalog']
+ else:
+  captured.append(body)
+  value={'registered':True,'analysisUpdated':True,'id':source['catalog']['tracks'][0]['id'],'count':1}
+ return {'status':200,'url':url,'content_type':'application/json','body':json.dumps(value,separators=(',',':')).encode()}
+with tempfile.TemporaryDirectory() as directory:
+ with session(Path(directory)/'state','https://fixture.invalid','a'*64,create=True) as current:
+  current.register_with_analysis(json.dumps(source['registration']).encode(),request)
+sys.stdout.buffer.write(captured[0])
+`;
+  const output=spawnSync('python',['-c',code],{input:JSON.stringify({catalog,registration}),encoding:'utf8'});
+  assert.equal(output.status,0,output.stderr);
+  const correction=Buffer.from(output.stdout);
+  assert.equal(JSON.stringify(JSON.parse(output.stdout).previousAnalysis),JSON.stringify(catalog.tracks[0].metadata.audioAnalysis));
+  const response=await f.send('/music/uploads/analysis',correction,'POST','application/json');
+  assert.equal(response.status,200);assert.equal((await response.json()).analysisUpdated,true);
+  const after=(await (await f.get('/music/library.json')).json()).tracks[0];
+  assert.equal(after.metadata.title,'Ready');assert.deepEqual(after.r2Identity,t.r2Identity);
+  assert.equal(after.metadata.audioAnalysis.integratedLufs,-13);
 });

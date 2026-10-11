@@ -474,6 +474,122 @@ class CheckpointTests(unittest.TestCase):
         with self.assertRaises(cp.CheckpointError), cp.session(self.path, DEST, PUBLIC):
             pass
 
+    def test_raw_put_adapter_validates_audio_art_and_same_buffer(self):
+        seen = []
+        def once(method, url, body, mime, public):
+            seen.append((method, url, body, mime, public))
+            receipt = self.server.send(method, url.removeprefix(DEST), body, mime)
+            return {'status': 200, 'url': url, 'content_type': 'application/json; charset=utf-8', 'body': cp.encode(receipt)}
+        sender = cp.ValidatedPutSender(once, DEST, PUBLIC)
+        with cp.session(self.path, DEST, PUBLIC, create=True) as current:
+            current.put('audio', AUDIO, 'opus', sender)
+            current.put('art', ART, 'png', sender)
+            current.put('audio', AUDIO, 'opus', sender)
+        self.assertEqual(len(seen), 2)
+        self.assertIs(seen[0][2], AUDIO); self.assertIs(seen[1][2], ART)
+        self.assertTrue(all(call[4] == PUBLIC for call in seen))
+
+    def test_raw_put_adapter_rejects_2xx_json_and_untrusted_envelopes_persistently(self):
+        path = '/music/uploads/audio/' + cp.sha(AUDIO) + '.opus'
+        receipt = self.server.send('PUT', path, AUDIO, 'audio/ogg')
+        good = {'status': 200, 'url': DEST + path, 'content_type': 'application/json', 'body': cp.encode(receipt)}
+        variants = [{**good, 'body': b'{"ok":false}'}, {**good, 'status': 201}, {**good, 'status': 204},
+                    {**good, 'status': 503}, {**good, 'status': True}, {**good, 'url': 'https://other.invalid' + path},
+                    {**good, 'content_type': 'text/html'}, {**good, 'content_type': 'app lication/j son'},
+                    {**good, 'content_type': 'application/json;char set=utf-8'}, {**good, 'body': b'\xff'},
+                    {**good, 'body': b'{'}, {**good, 'body': cp.encode(receipt) + b' ' * 65537},
+                    {**good, 'body': b'{"key":"one","key":"two"}'},
+                    {**good, 'body': cp.encode({**receipt, 'size': len(AUDIO) + 1})}]
+        for i, response in enumerate(variants):
+            journal = self.path.with_name(f'raw-{i}.json'); calls = []
+            sender = cp.ValidatedPutSender(lambda *args: (calls.append(args) or response), DEST, PUBLIC)
+            with cp.session(journal, DEST, PUBLIC, create=True) as current:
+                with self.assertRaises(cp.CheckpointError): current.put('audio', AUDIO, 'opus', sender)
+            with self.assertRaises(cp.CheckpointError), cp.session(journal, DEST, PUBLIC): pass
+            self.assertEqual(len(calls), 1)
+
+    def test_raw_put_adapter_session_binding_fails_before_network(self):
+        for destination, public in [('https://other.invalid', PUBLIC), (DEST, 'b' * 64)]:
+            sender = cp.ValidatedPutSender(lambda *args: self.fail('mismatched sender called'), destination, public)
+            with cp.session(self.path, DEST, PUBLIC, create=not self.path.exists()) as current:
+                with self.assertRaises(cp.CheckpointError): current.put('audio', AUDIO, 'opus', sender)
+        self.assertIsNone(cp.read_state(self.path)['pending'])
+
+    def analysis_body(self):
+        return cp.encode({'id': 'r2_native_' + cp.sha(AUDIO), 'sha256': cp.sha(AUDIO), 'size': len(AUDIO),
+                          'r2Identity': {'etag': 'fixture_etag', 'size': len(AUDIO), 'lastModified': '2026-10-10T00:00:00.000Z'},
+                          'previousAnalysis': None, 'audioAnalysis': {'fixture': 'server validates real schema'}})
+
+    def test_analysis_timeout_stays_pending_despite_catalog_match_and_age(self):
+        body = self.analysis_body(); calls = []
+        def timeout(*args): calls.append(args); raise TimeoutError()
+        with cp.session(self.path, DEST, PUBLIC, create=True) as current:
+            current.register(registration(), self.server.send)
+            with self.assertRaises(TimeoutError): current.analysis(body, timeout)
+        # A matching catalog read is only an observation. There is no API to
+        # clear intent using a catalog match, needs_verify flag, or elapsed age.
+        catalog = {'id': 'r2_native_' + cp.sha(AUDIO), 'sha256': cp.sha(AUDIO), 'size': len(AUDIO)}
+        self.assertEqual(catalog['sha256'], cp.sha(AUDIO))
+        os.utime(self.path, (0, 0))
+        for _ in range(5):
+            with self.assertRaises(cp.CheckpointError), cp.session(self.path, DEST, PUBLIC): pass
+        self.assertEqual(len(calls), 1); self.assertIs(calls[0][2], body)
+        self.assertEqual(json.loads(self.path.read_bytes())['state']['pending']['phase'], 'analysis')
+
+    def test_analysis_ack_is_not_local_completion_and_cannot_restart_chain(self):
+        body = self.analysis_body()
+        result = {'registered': True, 'analysisUpdated': False, 'id': 'r2_native_' + cp.sha(AUDIO), 'count': 1}
+        with cp.session(self.path, DEST, PUBLIC, create=True) as current:
+            self.assertEqual(current.analysis(body, lambda *args: result), result)
+            with self.assertRaises(cp.CheckpointError): current.register(registration(), self.server.send)
+        state = json.loads(self.path.read_bytes())['state']
+        self.assertEqual(state['pending']['phase'], 'analysis_acknowledged_completion_pending')
+        self.assertEqual(state['pending']['receipt'], result)
+        # A subsequent report write or local decode failure must not resend.
+        with self.assertRaises(cp.CheckpointError), cp.session(self.path, DEST, PUBLIC): pass
+        self.assertNotIn('audioAnalysis', self.path.read_text())
+
+    def test_analysis_ack_validation_and_http_errors_cannot_clear_pending(self):
+        valid = {'registered': True, 'analysisUpdated': True, 'id': 'r2_native_' + cp.sha(AUDIO), 'count': 1}
+        cases = [{**valid, 'registered': False}, {**valid, 'id': 'r2_native_' + 'b' * 64},
+                 {**valid, 'analysisUpdated': 1}, {**valid, 'count': 50001}, {},
+                 cp.Rejected(409, 'registration_library_changed'), cp.Rejected(401, 'signature_required')]
+        for i, outcome in enumerate(cases):
+            path = self.path.with_name(f'analysis-{i}.json')
+            def send(*args):
+                if isinstance(outcome, Exception): raise outcome
+                return outcome
+            with cp.session(path, DEST, PUBLIC, create=True) as current:
+                with self.assertRaises((cp.CheckpointError, cp.Rejected)): current.analysis(self.analysis_body(), send)
+            with self.assertRaises(cp.CheckpointError), cp.session(path, DEST, PUBLIC): pass
+
+    def test_analysis_ack_persistence_failure_never_releases_job(self):
+        original = cp.write_state
+        result = {'registered': True, 'analysisUpdated': True, 'id': 'r2_native_' + cp.sha(AUDIO), 'count': 1}
+        for after_replace in (False, True):
+            path = self.path.with_name(f'analysis-save-{after_replace}.json')
+            def save(path, state):
+                if state['pending'] and state['pending']['phase'] == 'analysis_acknowledged_completion_pending':
+                    if after_replace: original(path, state)
+                    raise OSError('synthetic acknowledgement persistence failure')
+                original(path, state)
+            with cp.session(path, DEST, PUBLIC, create=True) as current:
+                with patch.object(cp, 'write_state', side_effect=save), self.assertRaises(OSError):
+                    current.analysis(self.analysis_body(), lambda *args: result)
+                with self.assertRaises(cp.CheckpointError): current.register(registration(), self.server.send)
+            expected = 'analysis_acknowledged_completion_pending' if after_replace else 'analysis'
+            self.assertEqual(json.loads(path.read_bytes())['state']['pending']['phase'], expected)
+            with self.assertRaises(cp.CheckpointError), cp.session(path, DEST, PUBLIC): pass
+
+    def test_analysis_missing_identity_or_prior_proof_never_sends(self):
+        parsed = json.loads(self.analysis_body())
+        for field in ['id', 'sha256', 'size', 'r2Identity', 'previousAnalysis', 'audioAnalysis']:
+            body = cp.encode({k: v for k, v in parsed.items() if k != field})
+            with cp.session(self.path, DEST, PUBLIC, create=not self.path.exists()) as current:
+                with self.assertRaises(cp.CheckpointError):
+                    current.analysis(body, lambda *args: self.fail('invalid analysis sent'))
+        self.assertIsNone(cp.read_state(self.path)['pending'])
+
     def test_create_cannot_overwrite_existing_job(self):
         chain(self.path, self.server, create=True)
         with self.assertRaises(FileExistsError):

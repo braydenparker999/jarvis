@@ -1,0 +1,247 @@
+{
+  "canonical_url": "https://github.com/braydenparker999/jarvis/issues/2#issuecomment-6103953603",
+  "reported_observation": "2026-10-11T00:54:34Z",
+  "verification": "Fenced blocks each retain final LF; joined by one extra LF. Static AST only; markers replaced with None for parse only. No compile/import/execute.",
+  "joined_sha256": "3a33ba95fbc1c19030337b3334c022af82f5100feebee1e867e2ad454d478b54",
+  "reported_joined_hash_matches": true,
+  "files": [
+    {
+      "name": "relay-worker.py",
+      "redacted_bytes": 17658,
+      "redacted_sha256": "7c9231f78973814ec54d0f185ac129870734cbf6b07181846b8699529f0912e9",
+      "functions": [
+        {
+          "name": "log",
+          "start": 77,
+          "end": 80
+        },
+        {
+          "name": "_locked_json",
+          "start": 83,
+          "end": 90
+        },
+        {
+          "name": "_read_locked",
+          "start": 93,
+          "end": 98
+        },
+        {
+          "name": "_fsync_dir",
+          "start": 101,
+          "end": 110
+        },
+        {
+          "name": "_write_locked",
+          "start": 113,
+          "end": 131
+        },
+        {
+          "name": "_recompute_stats",
+          "start": 134,
+          "end": 152
+        },
+        {
+          "name": "claim_next",
+          "start": 155,
+          "end": 193
+        },
+        {
+          "name": "set_status",
+          "start": 196,
+          "end": 206
+        },
+        {
+          "name": "get_entry",
+          "start": 209,
+          "end": 213
+        },
+        {
+          "name": "heartbeat",
+          "start": 216,
+          "end": 225
+        },
+        {
+          "name": "pacing_get_rest",
+          "start": 228,
+          "end": 231
+        },
+        {
+          "name": "pacing_wait",
+          "start": 234,
+          "end": 244
+        },
+        {
+          "name": "pacing_note_completion",
+          "start": 247,
+          "end": 260
+        },
+        {
+          "name": "pacing_note_temp",
+          "start": 263,
+          "end": 276
+        },
+        {
+          "name": "UploadToken",
+          "start": 279,
+          "end": 306
+        },
+        {
+          "name": "validate",
+          "start": 309,
+          "end": 340
+        },
+        {
+          "name": "decode_check",
+          "start": 343,
+          "end": 349
+        },
+        {
+          "name": "classify",
+          "start": 352,
+          "end": 372
+        },
+        {
+          "name": "report_path_for",
+          "start": 375,
+          "end": 378
+        },
+        {
+          "name": "run_attempt",
+          "start": 381,
+          "end": 392
+        },
+        {
+          "name": "process",
+          "start": 395,
+          "end": 472
+        },
+        {
+          "name": "main",
+          "start": 475,
+          "end": 497
+        }
+      ]
+    },
+    {
+      "name": "upload-music-r2.py",
+      "redacted_bytes": 17202,
+      "redacted_sha256": "7cb0a7b9015dc1a536a3365f7e1a4d0c1c9b305cda4a2e9c02e5eb3ccd135c4c",
+      "functions": [
+        {
+          "name": "UploadHTTPError",
+          "start": 63,
+          "end": 68
+        },
+        {
+          "name": "_utc_now",
+          "start": 71,
+          "end": 72
+        },
+        {
+          "name": "_header",
+          "start": 75,
+          "end": 82
+        },
+        {
+          "name": "_header_present",
+          "start": 85,
+          "end": 89
+        },
+        {
+          "name": "_response_metadata",
+          "start": 92,
+          "end": 114
+        },
+        {
+          "name": "_unique_object",
+          "start": 117,
+          "end": 123
+        },
+        {
+          "name": "_http_error_receipt",
+          "start": 126,
+          "end": 164
+        },
+        {
+          "name": "NoRedirect",
+          "start": 167,
+          "end": 169
+        },
+        {
+          "name": "signature_message",
+          "start": 172,
+          "end": 174
+        },
+        {
+          "name": "upload_request",
+          "start": 177,
+          "end": 199
+        },
+        {
+          "name": "prepared",
+          "start": 202,
+          "end": 245
+        },
+        {
+          "name": "main",
+          "start": 248,
+          "end": 309
+        },
+        {
+          "name": "cli",
+          "start": 312,
+          "end": 320
+        }
+      ]
+    },
+    {
+      "name": "manifest_lib.py",
+      "redacted_bytes": 3536,
+      "redacted_sha256": "97e0be0448ee20b379fe64970af25b63b5ae91b29a5f657c8e01efb22be6a303",
+      "functions": [
+        {
+          "name": "_unique_tmp",
+          "start": 21,
+          "end": 26
+        },
+        {
+          "name": "_locked",
+          "start": 29,
+          "end": 32
+        },
+        {
+          "name": "load",
+          "start": 35,
+          "end": 37
+        },
+        {
+          "name": "_fsync_dir",
+          "start": 40,
+          "end": 49
+        },
+        {
+          "name": "save",
+          "start": 52,
+          "end": 63
+        },
+        {
+          "name": "_recompute_stats",
+          "start": 66,
+          "end": 84
+        },
+        {
+          "name": "update",
+          "start": 87,
+          "end": 108
+        }
+      ]
+    }
+  ],
+  "loaded_runtime_verified": false,
+  "unprovided_writer_names": [
+    "queue-append.py",
+    "queue-runner.py",
+    "build-queue-manifest.py"
+  ],
+  "unprovided_optional_dependency": "audio/analyze.py"
+}
