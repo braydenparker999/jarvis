@@ -1,7 +1,8 @@
 # Read-only runner shape diagnostic
 
-The host mismatch is not yet explained. Do not change pins, broaden exclusions,
-or bypass the builder. This diagnostic reads and parses two files; it never
+The reference mismatch was repaired after source review; see
+[reference repair evidence](../../../docs/evidence/mast-staging/runner-reference-repair.md).
+Do not broaden exclusions or bypass the builder. This diagnostic reads and parses two files; it never
 imports or executes their code and writes no host files. It does not interact
 with workers, markers, services, network, or credentials.
 
@@ -29,8 +30,9 @@ reported as whole subtrees. Reordering remains a difference. Alignment is an
 explanation aid, not a proof of semantic equivalence. Docstrings can affect
 runtime `__doc__`; this diagnostic grants no permission to ignore them.
 
-The comparison does not mutate either parsed tree. The original shape hashes,
-input pins, public reference, and builder admission checks remain unchanged.
+The comparison does not mutate either parsed tree. The raw host pin and builder
+admission logic remain unchanged; the reviewed reference and its derived pins
+were corrected separately with explicit owner approval.
 `admission_decision` is always diagnostic-only. Both executable changes and
 docstring changes still require review before any source-admission correction.
 
@@ -45,7 +47,7 @@ Local tests:
 python3 -B -m unittest discover -s scripts/staging/shape_diagnostic -p test_compare.py -v
 ```
 
-Local Python 3.12.14 reproduces expected runner shape
+Historical evidence for the superseded reference: local Python 3.12.14 reproduced
 `d6cf2db731a88d7780df9c12d864057b4b28c362dd7fb27d09adabe9cb715e7c`.
 Removing only empty `type_params` fields yields
 `bc4fea6e41d568e95d65b2b1e223602470cee49342e955227ae7e8fd68f5d3d8`,

@@ -1,5 +1,26 @@
 #!/usr/bin/env python3
-"""Serial R2 upload queue runner. ONE uploader at a time. (LEGACY - INACTIVE)"""
+"""Serial R2 upload queue runner. ONE uploader at a time.
+
+Wraps ~/workspace/r2-upload/upload-music-r2.py (one file at a time) and adds the
+coordination the user specified:
+- processes pending manifest entries SERIALLY, >=30s between upload attempts
+- validates tags before upload (exact duplicates keep first-registered metadata)
+- retries ONLY temporary failures (429/5xx/network) with increasing delays +
+  jitter, honoring Retry-After; max 5 attempts per file, then parks as failed
+- STOPS and reports on authentication errors (401/403) and never retries them;
+  validation/registration-refused errors mark the entry failed (no endless retry)
+- reuses the EXACT same audio bytes on every retry (never retag/re-encode)
+- a track is complete ONLY when the script reports registered:true
+- ffprobe/ffmpeg full-decode spot check after registration; local originals are
+  NEVER deleted by this runner
+- never writes the catalog directly; registration stays serialized through the
+  wrapped script, one file at a time
+
+Scope drain order: indie -> jmusic -> sheeran-santos -> altrock -> beats ->
+hyperpop -> forrestfrank -> worker-added. Idles when the queue is empty so
+parallel artist workers can keep feeding it. Touch STOP in this dir for a
+graceful halt.
+"""
 import base64
 import json
 import os
@@ -13,10 +34,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import manifest_lib
 
 HOME = os.path.expanduser("~")
-WS = "[WS]"
+WS = '[WS_VALUE]'
 R2DIR = os.path.join(WS, "r2-upload")
 SCRIPT = os.path.join(R2DIR, "upload-music-r2.py")
-KEY = "[KEY_PATH]"
+KEY = '[KEY_VALUE]'
 STOP = os.path.join(R2DIR, "STOP")
 AUTH_STOP = os.path.join(R2DIR, "AUTH-STOP")
 LOG = os.path.join(R2DIR, "run-%s.log" % time.strftime("%Y%m%d"))
@@ -27,16 +48,27 @@ SCOPE_ORDER = ["batch-2026-10-02/indie", "batch-2026-10-02/jmusic",
                "batch-2026-10-03/beats2", "batch-2026-10-03/hyperpop",
                "batch-2026-10-03/forrestfrank"]
 
-REPORT_DIRS = {"batch-2026-10-02/indie": "[REPORT_DIR]", "...": "[REPORT_DIR]"}
+REPORT_DIRS = {
+    "batch-2026-10-02/indie": '[REPORT_DIR_VALUE]',
+    "batch-2026-10-02/jmusic": '[REPORT_DIR_VALUE]',
+    "batch-2026-10-03/altrock": '[REPORT_DIR_VALUE]',
+    "batch-2026-10-03/altrock2": '[REPORT_DIR_VALUE]',
+    "batch-2026-10-03/beats": '[REPORT_DIR_VALUE]',
+    "batch-2026-10-03/beats2": '[REPORT_DIR_VALUE]',
+    "batch-2026-10-03/hyperpop": '[REPORT_DIR_VALUE]',
+    "batch-2026-10-03/forrestfrank": '[REPORT_DIR_VALUE]',
+    "batch-2026-10-03/sheeran-santos": '[REPORT_DIR_VALUE]',
+}
 FALLBACK_REPORTS = os.path.join(R2DIR, "reports")
 
-PACED_GAP = 15
-PACED_GAP_MAX = 60
+PACED_GAP = 15          # seconds between upload attempts (user 2026-10-07: halved from 30; stays serial)
+PACED_GAP_MAX = 60    # auto-widen ceiling if throttling appears
 PACED_GAP_MIN = 15
 MAX_ATTEMPTS = 5
 IDLE_SLEEP = 300
 
-paced_gap = PACED_GAP
+paced_gap = PACED_GAP  # live value; widens on throttle evidence, decays on clean streaks
+
 _logf = open(LOG, "a", buffering=1)
 
 
@@ -47,6 +79,7 @@ def log(msg):
 
 
 def validate(path):
+    """Pre-upload tag validation. Returns error string or None."""
     from mutagen.oggopus import OggOpus
     from mutagen.flac import Picture
     if os.path.getsize(path) > 32 * 1024 * 1024:
@@ -56,8 +89,10 @@ def validate(path):
     except Exception as e:
         return "unreadable tags: %s" % e
     tags = song.tags or {}
+
     def tag(name):
         return ((tags.get(name) or [""])[0] or "").strip()
+
     if not tag("title"):
         return "missing title tag"
     if not tag("artist"):
@@ -79,6 +114,7 @@ def validate(path):
 
 
 def decode_check(path):
+    """Representative playback check: full decode, no errors. Returns bool."""
     try:
         r = subprocess.run(["ffmpeg", "-v", "error", "-i", path, "-f", "null", "-"],
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
@@ -88,6 +124,7 @@ def decode_check(path):
 
 
 def classify(output):
+    """(kind, detail) — kind in temporary|auth|fatal|unknown."""
     m = re.search(r"Upload HTTP (\d{3})", output)
     if m:
         code = int(m.group(1))
@@ -148,17 +185,20 @@ def process(entry):
         set_status(sha, status="failed", last_error="local file missing at run time")
         log("FAIL %s: local file missing" % base)
         return "failed"
+
     err = validate(path)
     if err:
         set_status(sha, status="failed", last_error="pre-upload validation: " + err)
         log("FAIL %s: pre-upload validation: %s" % (base, err))
         return "failed"
+
     rpt = report_path_for(entry)
     while True:
         attempts = manifest_lib.load()["entries"][sha].get("attempts", 0) + 1
         set_status(sha, attempts=attempts, status="pending",
                    last_error="" if attempts == 1 else entry.get("last_error", ""))
         log("UPLOAD %s (attempt %d/%d)" % (base, attempts, MAX_ATTEMPTS))
+        t0 = time.time()
         try:
             r = subprocess.run(
                 [sys.executable, SCRIPT, path, "--key", KEY, "--report", rpt],
@@ -172,6 +212,7 @@ def process(entry):
         except Exception as e:
             out = "runner error: %s" % e
             ok = False
+
         if ok:
             try:
                 result = json.load(open(rpt))
@@ -190,6 +231,7 @@ def process(entry):
             kind, detail = classify("The server did not confirm library registration")
         else:
             kind, detail = classify(out)
+
         if kind == "auth":
             set_status(sha, status="failed",
                        last_error="AUTH STOP: %s (not retried)" % detail)
@@ -197,18 +239,21 @@ def process(entry):
             open(AUTH_STOP, "w").write("%s | %s | %s\n" % (
                 time.strftime("%Y-%m-%dT%H:%M:%S%z"), base, detail))
             return "auth-stop"
+
         if kind == "temporary" and attempts < MAX_ATTEMPTS:
             delay = min(60 * (2 ** (attempts - 1)), 900)
             if "429" in detail:
-                delay = min(delay + 120, 1200)
-            delay += random.uniform(0, 30)
+                delay = min(delay + 120, 1200)  # honor rate-limit generously
+            delay += random.uniform(0, 30)  # jitter
             set_status(sha, last_error="temporary (%s), attempt %d" % (detail, attempts))
             log("RETRY %s in %.0fs (%s)" % (base, delay, detail))
+            widen_pacing("temporary failure on %s (%s)" % (base, detail))
             time.sleep(delay)
             continue
+
         if kind == "temporary":
             set_status(sha, status="failed",
-                       last_error="parked after %d attempts (temporary: %s)" % (attempts, detail))
+                       last_error="parked after %d attempts (temporary: %s); final slow pass" % (attempts, detail))
             log("PARKED %s after %d attempts (%s)" % (base, attempts, detail))
         else:
             set_status(sha, status="failed",
@@ -217,9 +262,29 @@ def process(entry):
         return "failed"
 
 
+def widen_pacing(reason):
+    """Throttle-reactive pacing: widen toward PACED_GAP_MAX on 429/5xx evidence."""
+    global paced_gap
+    if paced_gap < PACED_GAP_MAX:
+        paced_gap = min(paced_gap + 15, PACED_GAP_MAX)
+        log("PACING widened to %ds between attempts (%s)" % (paced_gap, reason))
+
+
+def maybe_narrow_pacing(clean_streak):
+    """Slowly relax back toward PACED_GAP_MIN after long clean runs."""
+    global paced_gap
+    if clean_streak >= 50 and paced_gap > PACED_GAP_MIN:
+        paced_gap = max(PACED_GAP_MIN, paced_gap - 15)
+        log("PACING narrowed to %ds after %d clean registrations" % (paced_gap, clean_streak))
+        return 0
+    return clean_streak
+
+
 def main():
-    log("queue runner starting")
+    log("queue runner starting; key present=%s; pacing=%ds between attempts (serial)" % (
+        os.path.isfile(KEY), paced_gap))
     last_attempt = 0.0
+    clean_streak = 0
     while True:
         if os.path.exists(STOP):
             log("STOP file present; exiting")
@@ -229,6 +294,7 @@ def main():
             return 3
         entry = next_pending()
         if entry is None:
+            log("queue empty; idling %ds" % IDLE_SLEEP)
             time.sleep(IDLE_SLEEP)
             continue
         wait = paced_gap - (time.time() - last_attempt)
@@ -236,8 +302,15 @@ def main():
             time.sleep(wait)
         outcome = process(entry)
         last_attempt = time.time()
-        if outcome == "auth-stop":
+        if outcome == "registered":
+            clean_streak += 1
+            clean_streak = maybe_narrow_pacing(clean_streak)
+        elif outcome == "auth-stop":
             return 3
+        else:
+            if clean_streak >= 20:
+                log("note: clean streak of %d ended" % clean_streak)
+            clean_streak = 0
 
 
 if __name__ == "__main__":

@@ -33,6 +33,23 @@ class CompareTests(unittest.TestCase):
         raw = Path(__file__).with_name('queue-runner.redacted.txt').read_bytes()
         self.assertEqual(hashlib.sha256(raw).hexdigest(), compare.REFERENCE_PIN)
 
+    def test_repaired_reference_shape_and_retired_helpers(self):
+        import ast
+        raw = Path(__file__).with_name('queue-runner.redacted.txt').read_bytes()
+        tree = compare.normalized(raw)
+        digest = hashlib.sha256(ast.dump(tree, include_attributes=False).encode()).hexdigest()
+        self.assertEqual(digest, 'fb3e1249868e1b0e6c03809ed1fbb885af26c1ae6612216e83306da99af50e6f')
+        for name in ('widen_pacing', 'maybe_narrow_pacing'):
+            node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
+            self.assertEqual(node.decorator_list, [])
+            self.assertEqual(node.args.defaults, [])
+            self.assertEqual(node.args.kw_defaults, [])
+            self.assertIsNone(node.returns)
+            self.assertTrue(all(a.annotation is None for a in node.args.args))
+        changed = raw.replace(b'paced_gap + 15', b'paced_gap + 16')
+        changed_digest = hashlib.sha256(ast.dump(compare.normalized(changed), include_attributes=False).encode()).hexdigest()
+        self.assertNotEqual(changed_digest, digest)
+
     def aligned(self, left, right):
         return compare.aligned_differences(compare.normalized(left), compare.normalized(right))
 
