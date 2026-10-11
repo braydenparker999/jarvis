@@ -13,10 +13,26 @@ python3 -B scripts/staging/shape_diagnostic/compare.py /tmp/stage-test/input/que
 ```
 
 Return only the printed JSON. Both file pins must match. Output contains Python
-version, the two shapes computed by the SAME interpreter, and up to 20 AST field
-paths with line numbers and difference categories. It contains no source text,
+version, the two original shapes computed by the SAME interpreter, and all
+reported AST differences with line numbers and separate reference/host field
+paths. There is no 20-difference cutoff. It contains no source text,
 private paths, literal values, or source identifiers. Configuration exclusions
 are exactly the existing builder's WS/KEY/REPORT_DIRS top-level assignments.
+
+Only a leading string expression in a module, class, function, or async function
+is classified as `leading_docstring`. Changed, added, and removed docstrings
+are reported separately; they are not silently accepted. Other strings remain
+structural differences. Exact statements anchor sequence alignment; within
+changed spans, statement types and definition names guide correspondence.
+Names are used internally only and never printed. Added/removed statements are
+reported as whole subtrees. Reordering remains a difference. Alignment is an
+explanation aid, not a proof of semantic equivalence. Docstrings can affect
+runtime `__doc__`; this diagnostic grants no permission to ignore them.
+
+The comparison does not mutate either parsed tree. The original shape hashes,
+input pins, public reference, and builder admission checks remain unchanged.
+`admission_decision` is always diagnostic-only. Both executable changes and
+docstring changes still require review before any source-admission correction.
 
 If shapes agree on the host, the pinned builder hash has a cross-interpreter
 serialization problem. If they differ, the AST paths identify where the
