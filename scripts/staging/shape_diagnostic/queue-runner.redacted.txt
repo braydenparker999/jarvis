@@ -1,0 +1,244 @@
+#!/usr/bin/env python3
+"""Serial R2 upload queue runner. ONE uploader at a time. (LEGACY - INACTIVE)"""
+import base64
+import json
+import os
+import random
+import re
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import manifest_lib
+
+HOME = os.path.expanduser("~")
+WS = "[WS]"
+R2DIR = os.path.join(WS, "r2-upload")
+SCRIPT = os.path.join(R2DIR, "upload-music-r2.py")
+KEY = "[KEY_PATH]"
+STOP = os.path.join(R2DIR, "STOP")
+AUTH_STOP = os.path.join(R2DIR, "AUTH-STOP")
+LOG = os.path.join(R2DIR, "run-%s.log" % time.strftime("%Y%m%d"))
+
+SCOPE_ORDER = ["batch-2026-10-02/indie", "batch-2026-10-02/jmusic",
+               "batch-2026-10-03/sheeran-santos", "batch-2026-10-03/altrock",
+               "batch-2026-10-03/altrock2", "batch-2026-10-03/beats",
+               "batch-2026-10-03/beats2", "batch-2026-10-03/hyperpop",
+               "batch-2026-10-03/forrestfrank"]
+
+REPORT_DIRS = {"batch-2026-10-02/indie": "[REPORT_DIR]", "...": "[REPORT_DIR]"}
+FALLBACK_REPORTS = os.path.join(R2DIR, "reports")
+
+PACED_GAP = 15
+PACED_GAP_MAX = 60
+PACED_GAP_MIN = 15
+MAX_ATTEMPTS = 5
+IDLE_SLEEP = 300
+
+paced_gap = PACED_GAP
+_logf = open(LOG, "a", buffering=1)
+
+
+def log(msg):
+    line = "%s | %s" % (time.strftime("%Y-%m-%d %H:%M:%S %z"), msg)
+    print(line, flush=True)
+    _logf.write(line + "\n")
+
+
+def validate(path):
+    from mutagen.oggopus import OggOpus
+    from mutagen.flac import Picture
+    if os.path.getsize(path) > 32 * 1024 * 1024:
+        return "audio exceeds 32 MiB"
+    try:
+        song = OggOpus(path)
+    except Exception as e:
+        return "unreadable tags: %s" % e
+    tags = song.tags or {}
+    def tag(name):
+        return ((tags.get(name) or [""])[0] or "").strip()
+    if not tag("title"):
+        return "missing title tag"
+    if not tag("artist"):
+        return "missing artist tag"
+    try:
+        dur = float(song.info.length)
+    except Exception:
+        return "no duration"
+    if dur <= 0:
+        return "non-positive duration"
+    for value in tags.get("metadata_block_picture", []):
+        try:
+            picture = Picture(base64.b64decode(value, validate=True))
+        except Exception:
+            continue
+        if picture.mime in ("image/jpeg", "image/png") and len(picture.data) > 2 * 1024 * 1024:
+            return "embedded cover exceeds 2 MiB"
+    return None
+
+
+def decode_check(path):
+    try:
+        r = subprocess.run(["ffmpeg", "-v", "error", "-i", path, "-f", "null", "-"],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
+        return r.returncode == 0 and not r.stderr.strip()
+    except Exception:
+        return False
+
+
+def classify(output):
+    m = re.search(r"Upload HTTP (\d{3})", output)
+    if m:
+        code = int(m.group(1))
+        if code in (401, 403):
+            return "auth", "HTTP %d" % code
+        if code == 429 or 500 <= code <= 599:
+            return "temporary", "HTTP %d" % code
+        return "fatal", "HTTP %d" % code
+    low = output.lower()
+    if "did not confirm library registration" in low:
+        return "fatal", "registration refused"
+    for sig in ("urlerror", "timeout", "timed out", "remotedisconnected",
+                "connectionreset", "connection refused", "temporary failure",
+                "nameresolution", "network is unreachable", "broken pipe",
+                "sslerror", "max retries exceeded"):
+        if sig in low:
+            return "temporary", sig
+    if "prepared title" in low or "exceeds" in low:
+        return "fatal", "validation refused by script"
+    return "unknown", output.strip().splitlines()[-1][:200] if output.strip() else "empty output"
+
+
+def report_path_for(entry):
+    d = REPORT_DIRS.get(entry.get("scope", ""), FALLBACK_REPORTS)
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, os.path.basename(entry["path"]) + ".json")
+
+
+def set_status(sha, **fields):
+    def fn(m):
+        e = m["entries"].get(sha)
+        if e:
+            e.update(fields)
+        return m
+    manifest_lib.update(fn)
+
+
+def next_pending():
+    m = manifest_lib.load()
+    cands = [e for e in m["entries"].values()
+             if e.get("status") == "pending" and e.get("attempts", 0) < MAX_ATTEMPTS]
+    def key(e):
+        sc = e.get("scope", "")
+        try:
+            pri = SCOPE_ORDER.index(sc)
+        except ValueError:
+            pri = len(SCOPE_ORDER)
+        return (pri, e.get("added", ""))
+    cands.sort(key=key)
+    return cands[0] if cands else None
+
+
+def process(entry):
+    sha = entry["sha256"]
+    path = os.path.join(WS, entry["path"]) if not os.path.isabs(entry["path"]) else entry["path"]
+    base = os.path.basename(path)
+    if not os.path.isfile(path):
+        set_status(sha, status="failed", last_error="local file missing at run time")
+        log("FAIL %s: local file missing" % base)
+        return "failed"
+    err = validate(path)
+    if err:
+        set_status(sha, status="failed", last_error="pre-upload validation: " + err)
+        log("FAIL %s: pre-upload validation: %s" % (base, err))
+        return "failed"
+    rpt = report_path_for(entry)
+    while True:
+        attempts = manifest_lib.load()["entries"][sha].get("attempts", 0) + 1
+        set_status(sha, attempts=attempts, status="pending",
+                   last_error="" if attempts == 1 else entry.get("last_error", ""))
+        log("UPLOAD %s (attempt %d/%d)" % (base, attempts, MAX_ATTEMPTS))
+        try:
+            r = subprocess.run(
+                [sys.executable, SCRIPT, path, "--key", KEY, "--report", rpt],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                timeout=900, text=True)
+            out = r.stdout or ""
+            ok = r.returncode == 0
+        except subprocess.TimeoutExpired as e:
+            out = (e.stdout or "") + "\nTIMEOUT after 900s"
+            ok = False
+        except Exception as e:
+            out = "runner error: %s" % e
+            ok = False
+        if ok:
+            try:
+                result = json.load(open(rpt))
+                registered = result.get("registered") is True
+            except Exception:
+                registered = False
+                result = {}
+            if registered:
+                decode_ok = decode_check(path)
+                set_status(sha, status="registered", last_error="",
+                           playback_decode_ok=decode_ok,
+                           audioSha256=result.get("audioSha256"),
+                           registered_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"))
+                log("REGISTERED %s sha=%s decode_ok=%s" % (base, sha[:12], decode_ok))
+                return "registered"
+            kind, detail = classify("The server did not confirm library registration")
+        else:
+            kind, detail = classify(out)
+        if kind == "auth":
+            set_status(sha, status="failed",
+                       last_error="AUTH STOP: %s (not retried)" % detail)
+            log("AUTH FAILURE on %s: %s — stopping runner" % (base, detail))
+            open(AUTH_STOP, "w").write("%s | %s | %s\n" % (
+                time.strftime("%Y-%m-%dT%H:%M:%S%z"), base, detail))
+            return "auth-stop"
+        if kind == "temporary" and attempts < MAX_ATTEMPTS:
+            delay = min(60 * (2 ** (attempts - 1)), 900)
+            if "429" in detail:
+                delay = min(delay + 120, 1200)
+            delay += random.uniform(0, 30)
+            set_status(sha, last_error="temporary (%s), attempt %d" % (detail, attempts))
+            log("RETRY %s in %.0fs (%s)" % (base, delay, detail))
+            time.sleep(delay)
+            continue
+        if kind == "temporary":
+            set_status(sha, status="failed",
+                       last_error="parked after %d attempts (temporary: %s)" % (attempts, detail))
+            log("PARKED %s after %d attempts (%s)" % (base, attempts, detail))
+        else:
+            set_status(sha, status="failed",
+                       last_error="%s: %s (not retried)" % (kind, detail))
+            log("FAIL %s: %s: %s" % (base, kind, detail))
+        return "failed"
+
+
+def main():
+    log("queue runner starting")
+    last_attempt = 0.0
+    while True:
+        if os.path.exists(STOP):
+            log("STOP file present; exiting")
+            return 0
+        if os.path.exists(AUTH_STOP):
+            log("AUTH-STOP present; exiting")
+            return 3
+        entry = next_pending()
+        if entry is None:
+            time.sleep(IDLE_SLEEP)
+            continue
+        wait = paced_gap - (time.time() - last_attempt)
+        if wait > 0:
+            time.sleep(wait)
+        outcome = process(entry)
+        last_attempt = time.time()
+        if outcome == "auth-stop":
+            return 3
+
+
+if __name__ == "__main__":
+    sys.exit(main())
