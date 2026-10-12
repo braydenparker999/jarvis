@@ -1,0 +1,13 @@
+test_configuration_binding_and_late_drain (tests.test_mast_writer_integration.WriterIntegration.test_configuration_binding_and_late_drain) ... ok
+test_drain_blocks_both_writer_commits_and_bad_scan_is_atomic (tests.test_mast_writer_integration.WriterIntegration.test_drain_blocks_both_writer_commits_and_bad_scan_is_atomic) ... ok
+test_duplicate_append_preserves_existing_fence (tests.test_mast_writer_integration.WriterIntegration.test_duplicate_append_preserves_existing_fence) ... ok
+test_redaction_equivalence_excludes_only_declared_configuration (tests.test_mast_writer_integration.WriterIntegration.test_redaction_equivalence_excludes_only_declared_configuration) ... ok
+test_scan_preserves_concurrent_claim_append_hold_and_first_wins (tests.test_mast_writer_integration.WriterIntegration.test_scan_preserves_concurrent_claim_append_hold_and_first_wins) ... ok
+test_admission_writers_and_drain (tests.test_mast_staging_calls.StagingCallSites.test_admission_writers_and_drain) ... ok
+test_real_staging_call_site_matrix (tests.test_mast_staging_calls.StagingCallSites.test_real_staging_call_site_matrix) ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 2.826s
+
+OK
+13 rows: exact transport sequence, receipt reuse, holds, auth, interruption, stale generation, immutable decode and cleanup

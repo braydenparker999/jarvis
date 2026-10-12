@@ -1,0 +1,611 @@
+--- a/relay-worker.py
++++ b/relay-worker.py
+@@ -25,0 +26 @@
++import scripts.staging.mast_runtime as mast
+@@ -45,0 +47 @@
++ORIGIN = 'https://jarvis-hub-api.braydenparker999.workers.dev'
+@@ -85,7 +87 @@
+-    """Open (creating) + exclusively lock a JSON file. Caller must close."""
+-    if not os.path.exists(path):
+-        with open(path, "w") as f:
+-            f.write("{}\n")
+-    f = open(path, "r+")
+-    fcntl.flock(f, fcntl.LOCK_EX)
+-    return f
++    return mast.transaction(path)
+@@ -95,5 +91 @@
+-    f.seek(0)
+-    try:
+-        return json.load(f)
+-    except Exception:
+-        return {}
++    return f.value
+@@ -115,18 +107 @@
+-    # Crash-safe write: dump to a temp file, fsync it, then atomically
+-    # replace. A VM death mid-write previously left the manifest TRUNCATED
+-    # (2026-10-10 ~14:28Z killed 1,219 queue entries); with tmp+replace,
+-    # readers always see either the old complete file or the new complete
+-    # one, never a half-written one. Still called under the flock lock so
+-    # concurrent read-modify-write cycles stay serialized.
+-    # NOTE 2026-10-10: the staging tmp name is pid+sequence unique because
+-    # every writer sharing "<path>.tmp" caused FileNotFoundError crashes on
+-    # os.replace when two writers raced (one renamed the shared tmp away).
+-    path = f.name
+-    tmp = "%s.tmp.%d.%d" % (path, os.getpid(), next(_tmp_seq))
+-    with open(tmp, "w") as tf:
+-        json.dump(obj, tf, indent=1)
+-        tf.write("\n")
+-        tf.flush()
+-        os.fsync(tf.fileno())
+-    os.replace(tmp, path)
+-    _fsync_dir(os.path.dirname(path))
++    f.commit(obj)
+@@ -157,51 +132,5 @@
+-    """Atomically claim the next pending entry. Returns (sha, entry-copy) or (None, None)."""
+-    now = time.time()
+-    with _locked_json(MANIFEST) as f:
+-        m = _read_locked(f)
+-        entries = m.get("entries", {})
+-        cands = []
+-        for sha, e in entries.items():
+-            st = e.get("status")
+-            if st not in ("pending", "claimed"):
+-                continue
+-            if e.get("attempts", 0) >= MAX_ATTEMPTS:
+-                continue
+-            if st == "claimed":
+-                cb = e.get("claimed_by")
+-                ca = e.get("claimed_at", 0)
+-                if cb and cb != WID and (now - ca) < CLAIM_STALE_S:
+-                    continue
+-            cands.append((sha, e))
+-
+-        def key(item):
+-            sha, e = item
+-            sc = e.get("scope", "")
+-            try:
+-                pri = SCOPE_ORDER.index(sc)
+-            except ValueError:
+-                pri = len(SCOPE_ORDER)
+-            return (pri, e.get("added", ""), sha)
+-
+-        cands.sort(key=key)
+-        if not cands:
+-            return None, None
+-        sha, e = cands[0]
+-        e["status"] = "claimed"
+-        e["claimed_by"] = WID
+-        e["claimed_at"] = now
+-        m = _recompute_stats(m)
+-        _write_locked(f, m)
+-        return sha, dict(e)
+-
+-
+-def set_status(sha, **fields):
+-    with _locked_json(MANIFEST) as f:
+-        m = _read_locked(f)
+-        e = m.get("entries", {}).get(sha)
+-        if e:
+-            e.update(fields)
+-            if fields.get("status") in ("registered", "failed"):
+-                e.pop("claimed_by", None)
+-                e.pop("claimed_at", None)
+-            m = _recompute_stats(m)
+-            _write_locked(f, m)
++    return mast.claim_next(sys.modules[__name__])
++
++
++def set_status(*args, **kwargs):
++    raise RuntimeError("Unfenced status mutation disabled")
+@@ -217,10 +146,2 @@
+-def heartbeat(sha):
+-    """Refresh claimed_at so a long retry backoff never looks like a dead worker."""
+-    now = time.time()
+-    with _locked_json(MANIFEST) as f:
+-        m = _read_locked(f)
+-        e = m.get("entries", {}).get(sha)
+-        if e and e.get("claimed_by") == WID and e.get("status") == "claimed":
+-            e["claimed_at"] = now
+-            m = _recompute_stats(m)
+-            _write_locked(f, m)
++def heartbeat(*args, **kwargs):
++    raise RuntimeError("Use generation-fenced runtime heartbeat")
+@@ -382,12 +303,2 @@
+-def run_attempt(path, rpt):
+-    """One upload+register attempt. Call with the upload token held."""
+-    try:
+-        r = subprocess.run(
+-            [sys.executable, SCRIPT, path, "--key", KEY, "--report", rpt],
+-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+-            timeout=900, text=True)
+-        return r.returncode == 0, (r.stdout or "")
+-    except subprocess.TimeoutExpired as e:
+-        return False, ((e.stdout or "") + "\nTIMEOUT after 900s")
+-    except Exception as e:
+-        return False, "worker error: %s" % e
++def run_attempt(*args, **kwargs):
++    raise RuntimeError("Unfenced uploader invocation disabled")
+@@ -397,77 +308 @@
+-    path = entry["path"]
+-    if not os.path.isabs(path):
+-        path = os.path.join(WS, path)
+-    base = os.path.basename(path)
+-    if not os.path.isfile(path):
+-        set_status(sha, status="failed", last_error="local file missing at run time")
+-        log("FAIL %s: local file missing" % base)
+-        return "failed"
+-
+-    err = validate(path)
+-    if err:
+-        set_status(sha, status="failed", last_error="pre-upload validation: " + err)
+-        log("FAIL %s: pre-upload validation: %s" % (base, err))
+-        return "failed"
+-
+-    rpt = report_path_for(entry)
+-    token = UploadToken()
+-    while True:
+-        heartbeat(sha)  # stay visibly alive through long backoffs
+-        cur = get_entry(sha) or {}
+-        attempts = cur.get("attempts", 0) + 1
+-        set_status(sha, attempts=attempts,
+-                   last_error="" if attempts == 1 else cur.get("last_error", ""))
+-        log("UPLOAD %s (attempt %d/%d)" % (base, attempts, MAX_ATTEMPTS))
+-        with token:  # <-- the hard guarantee: only one worker inside at a time
+-            ok, out = run_attempt(path, rpt)
+-
+-        if ok:
+-            try:
+-                result = json.load(open(rpt))
+-                registered = result.get("registered") is True
+-            except Exception:
+-                registered = False
+-                result = {}
+-            if registered:
+-                decode_ok = decode_check(path)
+-                set_status(sha, status="registered", last_error="",
+-                           playback_decode_ok=decode_ok,
+-                           audioSha256=result.get("audioSha256"),
+-                           registered_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"))
+-                log("REGISTERED %s sha=%s decode_ok=%s" % (base, sha[:12], decode_ok))
+-                pacing_note_completion()
+-                return "registered"
+-            kind, detail = classify("The server did not confirm library registration")
+-        else:
+-            kind, detail = classify(out)
+-
+-        if kind == "auth":
+-            set_status(sha, status="failed",
+-                       last_error="AUTH STOP: %s (not retried)" % detail)
+-            log("AUTH FAILURE on %s: %s — raising AUTH-STOP" % (base, detail))
+-            with open(AUTH_STOP, "w") as f:
+-                f.write("%s | %s %s | %s\n" % (
+-                    time.strftime("%Y-%m-%dT%H:%M:%S%z"), WID, base, detail))
+-            return "auth-stop"
+-
+-        if kind == "temporary" and attempts < MAX_ATTEMPTS:
+-            delay = min(60 * (2 ** (attempts - 1)), 900)
+-            if "429" in detail:
+-                delay = min(delay + 120, 1200)
+-            delay += random.uniform(0, 30)
+-            set_status(sha, last_error="temporary (%s), attempt %d" % (detail, attempts))
+-            log("RETRY %s in %.0fs (%s)" % (base, delay, detail))
+-            pacing_note_temp("%s (%s)" % (base, detail))
+-            time.sleep(delay)  # token NOT held during backoff
+-            continue
+-
+-        if kind == "temporary":
+-            set_status(sha, status="failed",
+-                       last_error="parked after %d attempts (temporary: %s); final slow pass" % (attempts, detail))
+-            log("PARKED %s after %d attempts (%s)" % (base, attempts, detail))
+-        else:
+-            set_status(sha, status="failed",
+-                       last_error="%s: %s (not retried)" % (kind, detail))
+-            log("FAIL %s: %s: %s" % (base, kind, detail))
+-        pacing_note_completion()
+-        return "failed"
++    return mast.process(sys.modules[__name__], sha, entry)
+@@ -481,0 +317 @@
++    mast.require_qualification(R2DIR)
+@@ -490,0 +327,2 @@
++        if os.path.lexists(os.path.join(R2DIR, "DRAIN")):
++            return 0
+@@ -491,0 +330,2 @@
++        if any(os.path.lexists(p) for p in (STOP, AUTH_STOP, os.path.join(R2DIR, "DRAIN"))):
++            return 0
+--- a/upload-music-r2.py
++++ b/upload-music-r2.py
+@@ -7,0 +8,2 @@
++import scripts.staging.mast_runtime as mast
++from scripts.staging import prepared_handoff as handoff
+@@ -199,0 +202,29 @@
++
++
++def upload_request_raw(method, path, body, mime, key, public):
++    digest = hashlib.sha256(body).hexdigest()
++    timestamp = int(time.time())
++    message = signature_message(method, path, mime, digest, len(body), timestamp, public)
++    with tempfile.NamedTemporaryFile() as signed_input:
++        signed_input.write(message)
++        signed_input.flush()
++        # Never interpolate paths into shell commands or print the private key.
++        signature = subprocess.run(['openssl', 'pkeyutl', '-sign', '-rawin',
++                                    '-inkey', str(key), '-in', signed_input.name],
++                                   check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.hex()
++    headers = {'User-Agent': 'JarvisMusicUploader/1.0', 'Accept': 'application/json',
++               'Content-Type': mime, 'X-Music-Public-Key': public,
++               'X-Music-Timestamp': str(timestamp), 'X-Music-Size': str(len(body)),
++               'X-Music-Sha256': digest, 'X-Music-Signature': signature}
++    request = urllib.request.Request(ORIGIN + path, data=body, headers=headers, method=method)
++    started_utc, started_monotonic = _utc_now(), time.monotonic()
++    try:
++        with urllib.request.build_opener(NoRedirect).open(request, timeout=120) as response:
++            return {'status': response.status, 'url': response.geturl(),
++                    'content_type': response.headers.get('Content-Type', ''), 'body': response.read(65537)}
++    except urllib.error.HTTPError as error:
++        try:
++            return {'status': error.code, 'url': error.geturl(),
++                    'content_type': error.headers.get('Content-Type', ''), 'body': error.read(65537)}
++        finally:
++            error.close()
+@@ -253,0 +285,11 @@
++    parser.add_argument('--prepare-dir', type=Path)
++    parser.add_argument('--prepare-report', type=Path)
++    parser.add_argument('--prepared-dir', type=Path)
++    parser.add_argument('--prepared-pin')
++    parser.add_argument('--expected-sha')
++    parser.add_argument('--manifest')
++    parser.add_argument('--claim')
++    parser.add_argument('--attempt')
++    parser.add_argument('--checkpoint')
++    parser.add_argument('--stop')
++    parser.add_argument('--auth-stop')
+@@ -255,55 +297,54 @@
+-    key_stat = args.key.stat()
+-    if key_stat.st_mode & 0o077 or key_stat.st_uid != os.getuid():
+-        raise RuntimeError('Signing key must belong to this user and have mode 0600 or 0400.')
+-    if args.file.stat().st_size > 32 * 1024 * 1024:
+-        raise RuntimeError('This upload endpoint accepts files up to 32 MiB.')
+-    der = subprocess.run(['openssl', 'pkey', '-in', str(args.key), '-pubout', '-outform', 'DER'],
+-                         check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout
+-    if len(der) != 44 or der[:12] != bytes.fromhex('302a300506032b6570032100'):
+-        raise RuntimeError('A dedicated Ed25519 PKCS8 PEM key is required.')
+-    public = der[12:].hex()
+-    tags, cover = prepared(args.file)
+-    analysis_status='not-requested'
+-    if args.analyze:
+-        try:
+-            spec=importlib.util.spec_from_file_location('jarvis_audio_analyzer',Path(__file__).parent/'audio'/'analyze.py')
+-            module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+-            tags['audioAnalysis']=module.analyze(args.file);analysis_status='measured'
+-        except Exception:
+-            # Optional tool failure cannot block a byte-preserving upload.
+-            analysis_status='unavailable'
+-    data = args.file.read_bytes()
+-    digest = hashlib.sha256(data).hexdigest()
+-    upload_request('PUT', '/music/uploads/audio/' + digest + '.opus', data, 'audio/ogg', args.key, public)
+-    registration = {'name': args.file.stem + '.opus', 'sha256': digest, 'size': len(data), 'metadata': tags}
+-    if cover:
+-        image, ext = cover
+-        if len(image) > 2 * 1024 * 1024:
+-            raise RuntimeError('Embedded cover exceeds 2 MiB; prepare a smaller cover before uploading.')
+-        sha = hashlib.sha256(image).hexdigest()
+-        upload_request('PUT', '/music/uploads/art/' + sha + '.' + ext, image,
+-                       'image/jpeg' if ext == 'jpg' else 'image/png', args.key, public)
+-        registration['cover'] = {'sha256': sha, 'size': len(image), 'ext': ext}
+-    result = upload_request('POST', '/music/uploads/register',
+-                            json.dumps(registration, ensure_ascii=False, separators=(',', ':')).encode(),
+-                            'application/json', args.key, public)
+-    if result.get('duplicate') is True and 'audioAnalysis' in tags:
+-        # A separate signed metadata-only upgrade preserves the existing ID.
+-        # No private key leaves this caller; expected prior analysis prevents races.
+-        request=urllib.request.Request(ORIGIN+'/music/library.json',headers={'User-Agent':'JarvisMusicUploader/1.0','Accept':'application/json'})
+-        with urllib.request.build_opener(NoRedirect).open(request,timeout=30) as response:
+-            raw=response.read(16*1024*1024+1)
+-        if len(raw)>16*1024*1024:raise RuntimeError('The independent catalog exceeds its bounded limit.')
+-        catalog=json.loads(raw);existing=next((t for t in catalog.get('tracks',[]) if t['id']==result['id']),None)
+-        if not existing or existing['sha256']!=digest or existing['size']!=len(data):raise RuntimeError('Duplicate registration identity changed; review before analysis upgrade.')
+-        correction={'id':existing['id'],'sha256':digest,'size':len(data),'r2Identity':existing['r2Identity'],
+-                    'previousAnalysis':existing['metadata'].get('audioAnalysis'),'audioAnalysis':tags['audioAnalysis']}
+-        result['analysisCorrection']=upload_request('POST','/music/uploads/analysis',json.dumps(correction,ensure_ascii=False,separators=(',',':')).encode(),'application/json',args.key,public)
+-    if result.get('registered') is not True:
+-        raise RuntimeError('The server did not confirm library registration.')
+-    result.update({'analysisStatus':analysis_status,'audioSha256': digest, 'audioBytes': len(data), 'coverUploaded': bool(cover),
+-                   'coverSha256': registration.get('cover', {}).get('sha256'),
+-                   'playbackVerified': False})
+-    if args.report:
+-        args.report.write_text(json.dumps(result, indent=2) + '\n')
+-    print(json.dumps(result))
++    if bool(args.prepare_dir) == bool(args.prepared_dir) or not args.expected_sha:
++        parser.error('Require one prepared mode and claimed SHA256')
++    if args.prepare_dir and not args.prepare_report:
++        parser.error('Local preparation requires a fresh report path')
++    if args.prepared_dir and (args.analyze or not all((args.prepared_pin, args.manifest, args.claim,
++            args.attempt, args.checkpoint, args.stop, args.auth_stop, args.report))):
++        parser.error('Sending requires the fenced worker contract; no re-analysis')
++    if args.prepared_dir:
++        key_stat = args.key.stat()
++        if key_stat.st_mode & 0o077 or key_stat.st_uid != os.getuid():
++            raise RuntimeError('Signing key must belong to this user and have mode 0600 or 0400.')
++        if args.file.stat().st_size > 32 * 1024 * 1024:
++            raise RuntimeError('This upload endpoint accepts files up to 32 MiB.')
++        der = subprocess.run(['openssl', 'pkey', '-in', str(args.key), '-pubout', '-outform', 'DER'],
++                             check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout
++        if len(der) != 44 or der[:12] != bytes.fromhex('302a300506032b6570032100'):
++            raise RuntimeError('A dedicated Ed25519 PKCS8 PEM key is required.')
++        public = der[12:].hex()
++    if args.prepare_dir:
++        snapshot = handoff.snapshot(args.file, args.prepare_dir, args.expected_sha)
++        tags, cover = prepared(snapshot)
++        analysis_status='not-requested'
++        if args.analyze:
++            try:
++                spec=importlib.util.spec_from_file_location('jarvis_audio_analyzer',Path(__file__).parent/'audio'/'analyze.py')
++                module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
++                tags['audioAnalysis']=module.analyze(snapshot);analysis_status='measured'
++            except Exception:
++                # Optional tool failure cannot block a byte-preserving upload.
++                analysis_status='unavailable'
++        pin = handoff.seal(args.prepare_dir, name=args.file.stem+'.opus', origin=ORIGIN,
++                           tags=tags, cover=cover, analysis_status=analysis_status)
++        handoff.write(args.prepare_report, json.dumps({'preparedPin': pin}).encode())
++        return
++    def raw(method, url, data, mime, signer):
++        if not url.startswith(ORIGIN + '/') or signer != public:
++            raise RuntimeError('Transport origin/signer changed')
++        if method == 'GET':
++            request = urllib.request.Request(url, headers={'User-Agent': 'JarvisMusicUploader/1.0', 'Accept':'application/json'})
++            try:
++                with urllib.request.build_opener(NoRedirect).open(request, timeout=30) as response:
++                    return {'status':response.status, 'url':response.geturl(),
++                            'content_type':response.headers.get('Content-Type',''), 'body':response.read(16*1024*1024+1)}
++            except urllib.error.HTTPError as error:
++                try:
++                    return {'status':error.code, 'url':error.geturl(),
++                            'content_type':error.headers.get('Content-Type',''), 'body':error.read(65537)}
++                finally:
++                    error.close()
++        return upload_request_raw(method, url[len(ORIGIN):], data, mime, args.key, public)
++    raise SystemExit(mast.upload_prepared(manifest=args.manifest, claim=json.loads(args.claim),
++        attempt=args.attempt, slot=args.prepared_dir, pin=args.prepared_pin, journal=args.checkpoint,
++        report=args.report, origin=ORIGIN, public=public, name=args.file.stem+'.opus', request_once=raw,
++        stop_paths=[args.stop,args.auth_stop], auth_stop=args.auth_stop))
+--- a/manifest_lib.py
++++ b/manifest_lib.py
+@@ -11,0 +12 @@
++import scripts.staging.mast_runtime as mast
+@@ -36,2 +37,2 @@
+-    with _locked(MANIFEST, "r") as f:
+-        return json.load(f)
++    with mast.Transaction(MANIFEST) as tx:
++        return tx.value
+@@ -53,11 +54 @@
+-    manifest["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+-    tmp = _unique_tmp(MANIFEST)
+-    with open(tmp, "w") as f:
+-        json.dump(manifest, f, indent=1)
+-        f.write("\n")
+-        f.flush()
+-        os.fsync(f.fileno())
+-    # swap under the same lock so concurrent appends can't interleave
+-    with _locked(MANIFEST, "r+") as f:
+-        os.replace(tmp, MANIFEST)
+-        _fsync_dir(os.path.dirname(MANIFEST))
++    raise RuntimeError("Whole-snapshot save disabled; use a current-state transaction")
+@@ -88 +79,2 @@
+-    """Read-modify-write under one exclusive lock. fn(manifest) -> manifest.
++    mast.require_qualification(os.path.dirname(MANIFEST))
++    return mast.append_only(MANIFEST, fn, _recompute_stats)
+@@ -90,19 +82,4 @@
+-    The write is crash-safe (tmp + fsync + atomic replace): a VM death
+-    mid-write used to leave the manifest truncated (2026-10-10 ~14:28Z
+-    killed 1,219 queue entries). Readers now always see either the old
+-    complete file or the new complete one.
+-    """
+-    with _locked(MANIFEST, "r+") as f:
+-        m = json.load(f)
+-        m = fn(m)
+-        m = _recompute_stats(m)
+-        m["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+-        tmp = _unique_tmp(MANIFEST)
+-        with open(tmp, "w") as tf:
+-            json.dump(m, tf, indent=1)
+-            tf.write("\n")
+-            tf.flush()
+-            os.fsync(tf.fileno())
+-        os.replace(tmp, MANIFEST)
+-        _fsync_dir(os.path.dirname(MANIFEST))
+-    return m
++
++def reconcile_scan(candidate):
++    mast.require_qualification(os.path.dirname(MANIFEST))
++    return mast.reconcile_scan(MANIFEST, candidate, _recompute_stats)
+--- a/relay-uploader.py
++++ b/relay-uploader.py
+@@ -12,0 +13,2 @@
++import fcntl
++import scripts.staging.mast_runtime as mast
+@@ -24,0 +27 @@
++DRAIN = os.path.join(R2DIR, "DRAIN")
+@@ -54,13 +57,2 @@
+-    """Graceful shutdown: workers check STOP/AUTH-STOP each loop iteration and
+-    exit on their own (never killed mid-PUT). Wait, then SIGTERM stragglers."""
+-    log("%s; waiting for workers to exit gracefully" % reason)
+-    deadline = time.time() + 180
+-    while time.time() < deadline:
+-        if all(p.poll() is not None for p in procs.values()):
+-            log("all workers exited gracefully")
+-            return
+-        time.sleep(5)
+-    for wid, p in procs.items():
+-        if p.poll() is None:
+-            log("%s did not exit in 180s; terminating" % wid)
+-            p.terminate()
++    log(reason)
++    return mast.drain_workers(procs, log)
+@@ -69,0 +62,5 @@
++    mast.require_qualification(R2DIR)
++    # Stable singleton, not the upload token. Never unlink or replace this file.
++    lease = open(os.path.join(R2DIR, "launcher.lock"), "a+b")
++    fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
++    mast.launch_ready(os.path.join(R2DIR, "queue-manifest.json"), [STOP, AUTH_STOP, DRAIN])
+@@ -84,0 +82,2 @@
++        if os.path.lexists(DRAIN):
++            return 0 if stop_workers(procs, "DRAIN seen") else 2
+@@ -89,2 +88 @@
+-            stop_workers(procs, "STOP seen")
+-            return 0
++            return 0 if stop_workers(procs, "STOP seen") else 2
+@@ -101,2 +99,4 @@
+-            log("%s exited rc=%d; respawning" % (wid, rc))
+-            procs[wid] = spawn(wid)
++            # Unexpected worker death may orphan a request; never auto-respawn.
++            mast.request_drain(os.path.join(R2DIR, "queue-manifest.json"))
++            stop_workers(procs, "worker exit; admission closed")
++            return 2
+--- a/queue-append.py
++++ b/queue-append.py
+@@ -70,0 +71,2 @@
++    manifest_lib.mast.check_writer_binding(os.path.join(WS, "r2-upload", "queue-manifest.json"), manifest_lib.MANIFEST)
++    manifest_lib.mast.require_qualification(os.path.dirname(manifest_lib.MANIFEST))
+--- a/queue-runner.py
++++ b/queue-runner.py
+@@ -40 +40 @@
+-_logf = open(LOG, "a", buffering=1)
++_logf = None  # Retired entrypoint must not open runtime files.
+@@ -120,6 +120 @@
+-    def fn(m):
+-        e = m["entries"].get(sha)
+-        if e:
+-            e.update(fields)
+-        return m
+-    manifest_lib.update(fn)
++    raise RuntimeError("Legacy tokenless runner retired; use the fenced relay")
+@@ -129,12 +124 @@
+-    m = manifest_lib.load()
+-    cands = [e for e in m["entries"].values()
+-             if e.get("status") == "pending" and e.get("attempts", 0) < MAX_ATTEMPTS]
+-    def key(e):
+-        sc = e.get("scope", "")
+-        try:
+-            pri = SCOPE_ORDER.index(sc)
+-        except ValueError:
+-            pri = len(SCOPE_ORDER)
+-        return (pri, e.get("added", ""))
+-    cands.sort(key=key)
+-    return cands[0] if cands else None
++    raise RuntimeError("Legacy tokenless runner retired; use the fenced relay")
+@@ -144,74 +128 @@
+-    sha = entry["sha256"]
+-    path = os.path.join(WS, entry["path"]) if not os.path.isabs(entry["path"]) else entry["path"]
+-    base = os.path.basename(path)
+-    if not os.path.isfile(path):
+-        set_status(sha, status="failed", last_error="local file missing at run time")
+-        log("FAIL %s: local file missing" % base)
+-        return "failed"
+-    err = validate(path)
+-    if err:
+-        set_status(sha, status="failed", last_error="pre-upload validation: " + err)
+-        log("FAIL %s: pre-upload validation: %s" % (base, err))
+-        return "failed"
+-    rpt = report_path_for(entry)
+-    while True:
+-        attempts = manifest_lib.load()["entries"][sha].get("attempts", 0) + 1
+-        set_status(sha, attempts=attempts, status="pending",
+-                   last_error="" if attempts == 1 else entry.get("last_error", ""))
+-        log("UPLOAD %s (attempt %d/%d)" % (base, attempts, MAX_ATTEMPTS))
+-        try:
+-            r = subprocess.run(
+-                [sys.executable, SCRIPT, path, "--key", KEY, "--report", rpt],
+-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+-                timeout=900, text=True)
+-            out = r.stdout or ""
+-            ok = r.returncode == 0
+-        except subprocess.TimeoutExpired as e:
+-            out = (e.stdout or "") + "\nTIMEOUT after 900s"
+-            ok = False
+-        except Exception as e:
+-            out = "runner error: %s" % e
+-            ok = False
+-        if ok:
+-            try:
+-                result = json.load(open(rpt))
+-                registered = result.get("registered") is True
+-            except Exception:
+-                registered = False
+-                result = {}
+-            if registered:
+-                decode_ok = decode_check(path)
+-                set_status(sha, status="registered", last_error="",
+-                           playback_decode_ok=decode_ok,
+-                           audioSha256=result.get("audioSha256"),
+-                           registered_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"))
+-                log("REGISTERED %s sha=%s decode_ok=%s" % (base, sha[:12], decode_ok))
+-                return "registered"
+-            kind, detail = classify("The server did not confirm library registration")
+-        else:
+-            kind, detail = classify(out)
+-        if kind == "auth":
+-            set_status(sha, status="failed",
+-                       last_error="AUTH STOP: %s (not retried)" % detail)
+-            log("AUTH FAILURE on %s: %s — stopping runner" % (base, detail))
+-            open(AUTH_STOP, "w").write("%s | %s | %s\n" % (
+-                time.strftime("%Y-%m-%dT%H:%M:%S%z"), base, detail))
+-            return "auth-stop"
+-        if kind == "temporary" and attempts < MAX_ATTEMPTS:
+-            delay = min(60 * (2 ** (attempts - 1)), 900)
+-            if "429" in detail:
+-                delay = min(delay + 120, 1200)
+-            delay += random.uniform(0, 30)
+-            set_status(sha, last_error="temporary (%s), attempt %d" % (detail, attempts))
+-            log("RETRY %s in %.0fs (%s)" % (base, delay, detail))
+-            time.sleep(delay)
+-            continue
+-        if kind == "temporary":
+-            set_status(sha, status="failed",
+-                       last_error="parked after %d attempts (temporary: %s)" % (attempts, detail))
+-            log("PARKED %s after %d attempts (%s)" % (base, attempts, detail))
+-        else:
+-            set_status(sha, status="failed",
+-                       last_error="%s: %s (not retried)" % (kind, detail))
+-            log("FAIL %s: %s: %s" % (base, kind, detail))
+-        return "failed"
++    raise RuntimeError("Legacy tokenless runner retired; use the fenced relay")
+@@ -221,20 +132,2 @@
+-    log("queue runner starting")
+-    last_attempt = 0.0
+-    while True:
+-        if os.path.exists(STOP):
+-            log("STOP file present; exiting")
+-            return 0
+-        if os.path.exists(AUTH_STOP):
+-            log("AUTH-STOP present; exiting")
+-            return 3
+-        entry = next_pending()
+-        if entry is None:
+-            time.sleep(IDLE_SLEEP)
+-            continue
+-        wait = paced_gap - (time.time() - last_attempt)
+-        if wait > 0:
+-            time.sleep(wait)
+-        outcome = process(entry)
+-        last_attempt = time.time()
+-        if outcome == "auth-stop":
+-            return 3
++    print("Legacy tokenless runner retired; use the existing relay launcher")
++    return 2
+--- a/build-queue-manifest.py
++++ b/build-queue-manifest.py
+@@ -7,0 +8 @@
++import manifest_lib
+@@ -92,0 +94,2 @@
++    manifest_lib.mast.check_writer_binding(MANIFEST, manifest_lib.MANIFEST)
++    manifest_lib.mast.require_qualification(os.path.dirname(MANIFEST))
+@@ -167,6 +170,2 @@
+-    tmp = "%s.tmp.%d.%d" % (MANIFEST, os.getpid(), next(_tmp_seq))
+-    with open(tmp, "w") as f:
+-        json.dump(manifest, f, indent=1)
+-        f.write("\n")
+-    os.replace(tmp, MANIFEST)
+-    print(json.dumps(stats, indent=2))
++    current = manifest_lib.reconcile_scan(manifest)
++    print(json.dumps(current["stats"], indent=2))

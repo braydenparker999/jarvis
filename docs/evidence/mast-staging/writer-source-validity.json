@@ -1,0 +1,72 @@
+{
+  "source": "https://github.com/braydenparker999/jarvis/issues/2#issuecomment-6104903813",
+  "external_source_executed": false,
+  "files": [
+    {
+      "file": "queue-append.py",
+      "reported_unredacted_sha256": "3ce62e43da2b85e361ac7385e14278a7b7cc35a4a5149e64650734744f83a49d",
+      "reviewed_redacted_sha256": "74e9f864e6008447191340fc6af17315134406cbac04942d86ea8f0b86f2304f",
+      "reported_lines": 119,
+      "supplied_lines": 119,
+      "functions": [
+        "sha256_file",
+        "inspect",
+        "main"
+      ],
+      "declared_configuration_redactions": [
+        "WS"
+      ],
+      "control_flow_sha256": "980c0d6d2a984cf70b163580775d1b0064a177c2d0c9318af71725d2aa88ca8a",
+      "has_executable_ellipsis": false,
+      "raw_hash_equivalence_proven": false
+    },
+    {
+      "file": "queue-runner.py",
+      "reported_unredacted_sha256": "47bacb1651dc3a826822c79736968c4e9a8d917b4e1f9adc8d1e37d1370f5d18",
+      "reviewed_redacted_sha256": "9823654c22a01a24c76f3755545f52cf9d34707cf10f44131405fc98e2065de9",
+      "reported_lines": 318,
+      "supplied_lines": 244,
+      "functions": [
+        "log",
+        "validate",
+        "decode_check",
+        "classify",
+        "report_path_for",
+        "set_status",
+        "next_pending",
+        "process",
+        "main"
+      ],
+      "declared_configuration_redactions": [
+        "WS",
+        "KEY",
+        "REPORT_DIRS"
+      ],
+      "control_flow_sha256": "d6cf2db731a88d7780df9c12d864057b4b28c362dd7fb27d09adabe9cb715e7c",
+      "has_executable_ellipsis": false,
+      "raw_hash_equivalence_proven": false
+    },
+    {
+      "file": "build-queue-manifest.py",
+      "reported_unredacted_sha256": "a56a29dbb8dac08b95c9cd5218251daebe1f395112d2b46570fb68923f349951",
+      "reviewed_redacted_sha256": "c6b0c7137c6b0c2ea6f230710d96803b17d80316ec1ea02b11de14aa5d04a488",
+      "reported_lines": 221,
+      "supplied_lines": 176,
+      "functions": [
+        "sha256_file",
+        "cover_info",
+        "tag_check",
+        "load_reports",
+        "main"
+      ],
+      "declared_configuration_redactions": [
+        "WS",
+        "REPORT_DIRS"
+      ],
+      "control_flow_sha256": "76869471f488d8116f9fbe4e3657f025ce6122b415b34e4e8b736d0d4493d2a2",
+      "has_executable_ellipsis": false,
+      "raw_hash_equivalence_proven": false
+    }
+  ],
+  "decision": "Executable-body evidence accepted; no source bodies missing. Review stage retains redacted configuration and cannot activate. Host build must validate reported raw hashes and control-flow hashes outside declared configuration assignments."
+}

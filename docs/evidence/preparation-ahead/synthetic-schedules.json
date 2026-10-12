@@ -1,0 +1,61 @@
+{
+  "kind": "synthetic_schedule_only",
+  "scenarios": [
+    {
+      "scenario": "small_preparation",
+      "tracks": 10,
+      "preparation_seconds": 0.2,
+      "upload_seconds": 20,
+      "provider_interval_seconds": 0,
+      "additional_preparation_overhead_seconds": 0,
+      "baseline_seconds": 202.0,
+      "ahead_seconds": 200.2,
+      "synthetic_saved_seconds": 1.8,
+      "provider_ready_times_identical": true,
+      "max_network_chains": 1,
+      "measured_live_throughput": null
+    },
+    {
+      "scenario": "large_preparation",
+      "tracks": 10,
+      "preparation_seconds": 10,
+      "upload_seconds": 20,
+      "provider_interval_seconds": 0,
+      "additional_preparation_overhead_seconds": 0,
+      "baseline_seconds": 300,
+      "ahead_seconds": 210,
+      "synthetic_saved_seconds": 90,
+      "provider_ready_times_identical": true,
+      "max_network_chains": 1,
+      "measured_live_throughput": null
+    },
+    {
+      "scenario": "provider_pacing_dominates",
+      "tracks": 10,
+      "preparation_seconds": 10,
+      "upload_seconds": 20,
+      "provider_interval_seconds": 40,
+      "additional_preparation_overhead_seconds": 0,
+      "baseline_seconds": 390,
+      "ahead_seconds": 390,
+      "synthetic_saved_seconds": 0,
+      "provider_ready_times_identical": true,
+      "max_network_chains": 1,
+      "measured_live_throughput": null
+    },
+    {
+      "scenario": "overhead_can_erase_gain",
+      "tracks": 10,
+      "preparation_seconds": 0.2,
+      "upload_seconds": 20,
+      "provider_interval_seconds": 0,
+      "additional_preparation_overhead_seconds": 3,
+      "baseline_seconds": 202.0,
+      "ahead_seconds": 203.2,
+      "synthetic_saved_seconds": -1.2,
+      "provider_ready_times_identical": true,
+      "max_network_chains": 1,
+      "measured_live_throughput": null
+    }
+  ]
+}
