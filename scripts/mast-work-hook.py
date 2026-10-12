@@ -5,23 +5,15 @@ import fcntl
 import json
 import os
 from pathlib import Path
-import re
 import signal
 import stat
 import sys
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 from lib.mast_work_hook import MastWorkHook
+from lib.mast_cli_transport import MastCliTransport
 from lib.project_hook import RemoteError
 
 BASE = 'https://jarvis-hub-api.braydenparker999.workers.dev/relay/mast'
-
-
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
 
 
 def main():
@@ -57,43 +49,10 @@ def main():
             raise RemoteError(503, 'invocation_budget_exhausted')
         signal.signal(signal.SIGALRM, timeout)
         signal.setitimer(signal.ITIMER_REAL, 45)
-        token = None
+        request = None
         if a.command != 'inspect':
-            # Host-owned inherited descriptor; no token argument/env value/file creation.
-            # Availability of this secure bridge must be verified by the coordinator.
-            fd = int(os.environ['JARVIS_MAST_TOKEN_FD'])
-            if fd < 3:
-                raise ValueError('private_credential_descriptor_required')
-            with os.fdopen(os.dup(fd), 'rb') as source:
-                raw = source.read(513)
-            token = raw.decode('ascii').strip()
-            if not re.fullmatch(r'[A-Za-z0-9_-]{32,512}', token) or len(raw) > 512:
-                raise ValueError('invalid_mast_credential')
-        opener = urllib.request.build_opener(NoRedirect())
-        def request(method, path, payload):
-            if path not in ('work', 'work/claim', 'work/update', 'reply', 'messages', 'files/content'):
-                raise ValueError('unsupported_private_route')
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise RemoteError(503, 'invocation_budget_exhausted')
-            url = BASE + '/' + path
-            body = None
-            headers = {'Authorization': 'Bearer '+token, 'Accept': 'application/json'}
-            if method == 'GET':
-                url += '?' + urllib.parse.urlencode(payload)
-            else:
-                body = json.dumps(payload, ensure_ascii=False).encode()
-                if len(body) > 16000:
-                    raise ValueError('request_body_too_large')
-                headers['Content-Type'] = 'application/json'
-            try:
-                with opener.open(urllib.request.Request(url, data=body, headers=headers, method=method), timeout=min(20, remaining)) as response:
-                    raw = response.read(16_000_001)
-                    if len(raw) > 16_000_000:
-                        raise ValueError('response_too_large')
-                    return raw if path == 'files/content' else json.loads(raw)
-            except urllib.error.HTTPError as error:
-                raise RemoteError(error.code, 'http_'+str(error.code)) from None
+            request = MastCliTransport(os.environ['JARVIS_MAST_RELAY_HELPER'],
+                os.environ['JARVIS_MAST_RELAY_SHA256'], directory, deadline)
         hook = MastWorkHook(directory / 'mast-work.sqlite', request, BASE)
         def content(path):
             if not path:

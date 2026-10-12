@@ -29,7 +29,8 @@ No public Muse, GitHub-publication or Lucy-channel fallback exists.
   `started` value is historical; only the current server lease is current state.
 - `file --job-id UUID --attachment-id UUID --output-file PRIVATE_NEW_PATH`:
   download only a file recorded on this request; verify size (at most 1 MiB) and
-  SHA-256 before writing a new mode-0600 file. Never execute attachment contents.
+  SHA-256 before writing a new mode-0600 file when a qualified binary transport
+  exists. The current CLI transport refuses this command. Never execute attachments.
 - `report --job-id UUID --run-id UUID --event-id UUID --stage STAGE --summary-file FILE`:
   supported stages are running, waiting_for_owner, failed, cancelled. Running
   requires `--active`, supplied **only by the genuinely executing host**, not a
@@ -72,17 +73,60 @@ Lucy-channel state directory. The CLI enforces an exclusive lock (busy exit 75),
 and no redirects. Auth failure exits 2; other failure exits 1; neither authorizes
 model execution. Use private input/output files and private stdout routing.
 
-**Indispensable unanswered host fact:** can Muse's approved hosted `jarvis-mast`
-credential be supplied to this Python process via a host-managed inherited readable
-file descriptor >=3, without token disclosure to the model/logs? The host must set
-`JARVIS_MAST_TOKEN_FD` to that descriptor number; the descriptor contains only the
-existing bare bearer and reaches EOF. Each invocation needs a fresh readable
-credential descriptor. No raw secret is accepted in command-line arguments or an
-environment value, and this adapter does not generate/store/export credentials.
-Availability of `credentials.request_api_access` does not establish this bridge.
-If the host supports only vault-backed HTTP tools, the coordinator must obtain that
-actual callable contract and adapt the transport to it; do not invent secret injection.
-Reuse prior owner–Muse approval, never a project token or Lucy OAuth credential.
+**Host finding and corrected transport contract:** the inherited-descriptor bridge
+is unavailable. The reported main-session `relay.py` uses platform-managed surrogate
+credential substitution, but its working binding is only the Lucy–Muse channel.
+PR129 now calls a separately reviewed, pinned **owner–Muse** helper; it never calls
+the credential socket or imports the platform credential implementation.
+
+Set `JARVIS_MAST_RELAY_HELPER` to its exact absolute path and
+`JARVIS_MAST_RELAY_SHA256` to the SHA-256 of its reviewed complete source bytes.
+These settings contain no secret. The current channel helper must not be repointed.
+A separate `custom.jarvis-mast` binding remains unconfigured. No helper is installed,
+executed or credentialed by this release.
+
+Before any request, the corrected helper must support a local **no-network**
+`describe` command. All commands print exactly `HTTP <status>` on the first line,
+then one complete JSON object, with no trailing logs or truncation. Exit 0 means
+HTTP <400; exit 1 means >=400; other exits fail closed. `describe` returns HTTP 200
+and exactly this non-secret object:
+
+```json
+{"protocol":"jarvis-mast-cli-v1","provider":"custom.jarvis-mast","host":"jarvis-hub-api.braydenparker999.workers.dev","redirects":"reject","response":"complete-json","binary":false}
+```
+
+Its existing `get <path>` and `post <path> <json-file>` interface is retained.
+The caller allows only its listed owner–Muse routes, uses no shell, hashes the helper
+before each subprocess, suppresses stderr, caps stdout at 16 MB and enforces the
+remaining invocation budget (at most 20 seconds per subprocess). POST payloads are
+mode-0600 temporary JSON files inside the private state directory, removed afterward.
+Timeout/invalid receipt does not certify failure to commit: preserve/retry the same
+journaled operation, never launch another run.
+
+**Minimum helper corrections required on the host:** remove the reported
+`json.dumps(payload, indent=1)[:12000]` slicing; output the entire bounded JSON or
+fail explicitly. Reject every HTTP redirect at the request opener, before following
+it with any surrogate credential. For urllib, use a `HTTPRedirectHandler` whose
+`redirect_request` returns `None`, through `build_opener`, rather than default
+`urlopen`. Preserve the platform's existing surrogate binding calls unchanged.
+The caller rejects observed 3xx responses too, but cannot undo a redirect the helper
+already followed. Consequently, `describe` is a compatibility check, not independent
+proof of those policies: exact helper source review is mandatory before pinning.
+No speculative socket API or platform-specific implementation is supplied here.
+
+The reported source hash cannot be used as the pin: the supplied snippet was
+trimmed/redacted, so its bytes are not that artifact. Request the **complete corrected
+non-secret helper file**, plus names/versions of its platform imports, to inspect
+redirect handling, host restriction, provider binding, complete output and no-network
+`describe`, then compute the exact pin. That is needed for deployment qualification,
+not for implementing or synthetically testing this caller.
+
+This CLI transport has no binary support. `file` fails closed, and `reserve` refuses
+attached requests before claim/wake. Qualify text-only work first; enabling file work
+later requires a reviewed bounded binary response contract and matching hash/size
+verification. Do not serialize arbitrary bytes through the current JSON helper.
+Reuse prior owner–Muse approval and its separate owner-entered key; never a project
+token, Lucy OAuth credential or the functioning Lucy–Muse credential.
 
 The host consumes the reservation envelope only once and records its actual run ID
 at execution entry, echoes the exact payload digest, invokes `started`, checks
@@ -97,7 +141,7 @@ reconciliation; this contract does not guarantee delivery or exactly-once effect
 ## One-run acceptance procedure (after approved secure setup)
 
 1. Pin this adapter revision and the deployed PR125-compatible Worker. Verify the
-   secure descriptor bridge, durable path and actual wake/start contract read-only.
+   reviewed helper pin and owner–Muse binding, durable path and actual wake/start contract read-only.
    Stop if any is unavailable; do not create a credential or schedule to fill a gap.
 2. Owner explicitly selects one inert read-only/draft Work request. Invoke `scan`
    once, then `reserve` for that exact UUID. Capture a redacted reservation receipt

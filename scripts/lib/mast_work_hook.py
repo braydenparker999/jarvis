@@ -127,6 +127,8 @@ class MastWorkHook:
             run = {'job': job_id, 'run': str(uuid.uuid4()), 'claimEvent': str(uuid.uuid4()), 'state': 'claim_pending'}
             self.save(run)
         original = self.original(run)
+        if original.get('attachments') and getattr(self.request, 'binary_supported', True) is False:
+            raise ValueError('request_files_need_qualified_binary_transport')
         if original['body'] != job['body']:
             raise ValueError('original_request_mismatch')
         self.operation(run['claimEvent'], 'work/claim', {'job_id': job_id, 'run_id': run['run'], 'event_id': run['claimEvent']})
