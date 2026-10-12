@@ -20,8 +20,8 @@ PINS = {
 
 
 WRITER_PINS = {'queue-append.py': '3ce62e43da2b85e361ac7385e14278a7b7cc35a4a5149e64650734744f83a49d', 'queue-runner.py': '47bacb1651dc3a826822c79736968c4e9a8d917b4e1f9adc8d1e37d1370f5d18', 'build-queue-manifest.py': 'a56a29dbb8dac08b95c9cd5218251daebe1f395112d2b46570fb68923f349951'}
-REDACTED_PINS = {'queue-append.py': '74e9f864e6008447191340fc6af17315134406cbac04942d86ea8f0b86f2304f', 'queue-runner.py': '5e2ec27106724efdb16e69cfa0442f594339681abbf862451b76e9b69f5501da', 'build-queue-manifest.py': 'c6b0c7137c6b0c2ea6f230710d96803b17d80316ec1ea02b11de14aa5d04a488'}
-WRITER_SHAPES = {'queue-append.py': '980c0d6d2a984cf70b163580775d1b0064a177c2d0c9318af71725d2aa88ca8a', 'queue-runner.py': 'fb3e1249868e1b0e6c03809ed1fbb885af26c1ae6612216e83306da99af50e6f', 'build-queue-manifest.py': '76869471f488d8116f9fbe4e3657f025ce6122b415b34e4e8b736d0d4493d2a2'}
+REDACTED_PINS = {'queue-append.py': '74e9f864e6008447191340fc6af17315134406cbac04942d86ea8f0b86f2304f', 'queue-runner.py': '5e2ec27106724efdb16e69cfa0442f594339681abbf862451b76e9b69f5501da', 'build-queue-manifest.py': '1cfec9eb9742cde9f5821504c3f17d22eb92313bf1d58f682ca6023ebb74551a'}
+WRITER_SHAPES = {'queue-append.py': '980c0d6d2a984cf70b163580775d1b0064a177c2d0c9318af71725d2aa88ca8a', 'queue-runner.py': 'fb3e1249868e1b0e6c03809ed1fbb885af26c1ae6612216e83306da99af50e6f', 'build-queue-manifest.py': '711f34f2303c0cf243b0a8ff0dfe58241e387eb1ea02d477d1e122a40e7a4fea'}
 
 def writer_shape(source):
     tree = ast.parse(source)

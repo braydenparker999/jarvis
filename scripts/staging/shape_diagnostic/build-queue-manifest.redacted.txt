@@ -1,0 +1,221 @@
+#!/usr/bin/env python3
+"""Build the single shared R2 upload queue manifest (v2).
+
+Coordinator-owned source of truth. Scans finished .opus files (anywhere under a
+`done/` subtree in batch-2026-10-02 and batch-2026-10-03), reconciles them
+against registration reports BY AUDIO SHA256 (report filenames are sanitized
+and unreliable for matching), and writes
+~/workspace/r2-upload/queue-manifest.json.
+
+Entry key = audio sha256 (registration dedupes by hash+size).
+Statuses: pending | uploaded | registered | failed.
+Twin guard: a pending file with identical byte size to a registered report of a
+different hash is parked as failed for human review (probable retag/re-encode
+of an already-registered track — uploading it would create a duplicate library
+entry). No worker may keep a separate catalog.
+"""
+import base64
+import glob
+import hashlib
+import itertools
+import json
+import os
+import time
+
+HOME = os.path.expanduser("~")
+WS = os.path.join(HOME, "[REDACTED]")
+MANIFEST = os.path.join(WS, "r2-upload", "queue-manifest.json")
+_tmp_seq = itertools.count()  # unique staging-tmp names per write
+
+BATCH_ROOTS = [os.path.join(WS, "batch-2026-10-02"), os.path.join(WS, "batch-2026-10-03")]
+
+HF = os.path.join(WS, "goals", "indie-polyphia-and-j-music-discography-pull-to-r2", "hidden_files")
+REPORT_DIRS = [
+    os.path.join(HF, "[REDACTED]"),
+    os.path.join(HF, "[REDACTED]"),          # polyphia
+    os.path.join(WS, "[REDACTED]", "[REDACTED]"),
+]
+for scope in ("altrock", "altrock2", "beats", "beats2", "forrestfrank",
+              "hyperpop", "sheeran-santos"):
+    REPORT_DIRS.append(os.path.join(WS, "batch-2026-10-03", scope, "r2-reports"))
+
+
+def sha256_file(path, chunk=1 << 20):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for b in iter(lambda: f.read(chunk), b""):
+            h.update(b)
+    return h.hexdigest()
+
+
+def cover_info(path):
+    from mutagen.oggopus import OggOpus
+    from mutagen.flac import Picture
+    try:
+        song = OggOpus(path)
+    except Exception:
+        return None, "unreadable"
+    pics = song.tags.get("metadata_block_picture", []) if song.tags else []
+    for value in pics:
+        try:
+            picture = Picture(base64.b64decode(value, validate=True))
+        except Exception:
+            continue
+        if picture.mime in ("image/jpeg", "image/png"):
+            ext = "jpg" if picture.mime == "image/jpeg" else "png"
+            data = picture.data
+            return {"sha256": hashlib.sha256(data).hexdigest(),
+                    "size": len(data), "ext": ext}, None
+    return None, None
+
+
+def tag_check(path):
+    from mutagen.oggopus import OggOpus
+    try:
+        song = OggOpus(path)
+    except Exception as e:
+        return "unreadable: %s" % e
+    tags = song.tags or {}
+
+    def tag(name):
+        return ((tags.get(name) or [""])[0] or "").strip()
+
+    if not tag("title"):
+        return "missing title tag"
+    if not tag("artist"):
+        return "missing artist tag"
+    try:
+        dur = float(song.info.length)
+    except Exception:
+        return "no duration"
+    if dur <= 0:
+        return "non-positive duration"
+    return None
+
+
+def load_reports():
+    """Returns (hash->report, size->list of (hash,report)), total count."""
+    by_hash = {}
+    by_size = {}
+    total = 0
+    for d in REPORT_DIRS:
+        if not os.path.isdir(d):
+            continue
+        for rp in glob.glob(os.path.join(d, "*.json")):
+            try:
+                r = json.load(open(rp))
+            except Exception:
+                continue
+            h = r.get("audioSha256")
+            if not h:
+                continue
+            total += 1
+            by_hash[h] = r
+            by_size.setdefault(r.get("audioBytes"), []).append((h, r))
+    return by_hash, by_size, total
+
+
+def main():
+    now = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    rep_hash, rep_size, n_reports = load_reports()
+
+    opus_files = []
+    for root in BATCH_ROOTS:
+        for dirpath, dirnames, filenames in os.walk(root):
+            parts = dirpath.split(os.sep)
+            if "done" not in parts:
+                continue
+            for fn in filenames:
+                if fn.endswith(".opus"):
+                    opus_files.append(os.path.join(dirpath, fn))
+    opus_files.sort()
+
+    entries = {}
+    stats = {"opus_files": len(opus_files), "report_files": n_reports,
+             "pending": 0, "uploaded": 0, "registered": 0, "failed": 0,
+             "orphan_reports": 0, "twin_warnings": 0, "by_scope": {}}
+    matched = set()
+
+    for path in opus_files:
+        size = os.path.getsize(path)
+        digest = sha256_file(path)
+        rel = os.path.relpath(path, WS)
+        parts = rel.split("/")
+        scope = parts[0] + "/" + parts[1] if len(parts) > 1 else parts[0]
+
+        if digest in entries:
+            entries[digest].setdefault("alt_paths", []).append(rel)
+            continue
+
+        if digest in rep_hash:
+            matched.add(digest)
+            r = rep_hash[digest]
+            cover = None
+            if r.get("coverUploaded"):
+                cover = {"sha256": r.get("coverSha256"), "size": None, "ext": None}
+            entries[digest] = {
+                "path": rel, "sha256": digest, "size": size,
+                "status": "registered",
+                "cover": cover, "attempts": 0, "last_error": "",
+                "added": now, "scope": scope,
+                "r2_id": r.get("id"),
+            }
+            continue
+
+        # pending candidate — validate
+        status, last_error = "pending", ""
+        cover, cerr = cover_info(path)
+        if cerr == "unreadable":
+            status, last_error = "failed", "validation: unreadable tags"
+        elif size > 32 * 1024 * 1024:
+            status, last_error = "failed", "validation: audio exceeds 32 MiB (%d bytes)" % size
+        else:
+            err = tag_check(path)
+            if err:
+                status, last_error = "failed", "validation: " + err
+            elif cover and cover["size"] > 2 * 1024 * 1024:
+                status, last_error = ("failed",
+                    "validation: embedded cover exceeds 2 MiB (%d bytes)" % cover["size"])
+
+        # twin guard: same byte size as a registered object, different hash
+        twin = None
+        if status == "pending":
+            for h, r in rep_size.get(size, []):
+                if h != digest:
+                    twin = h
+                    break
+        if twin:
+            status = "failed"
+            last_error = ("twin warning: same size (%d bytes) as registered object %s... "
+                          "but different hash — probable retag/re-encode of a registered "
+                          "track; parked for human review" % (size, twin[:12]))
+            stats["twin_warnings"] += 1
+
+        entries[digest] = {
+            "path": rel, "sha256": digest, "size": size,
+            "status": status, "cover": cover, "attempts": 0,
+            "last_error": last_error, "added": now, "scope": scope,
+        }
+
+    stats["orphan_reports"] = n_reports - len(matched)
+    for digest, e in entries.items():
+        s = e["status"]
+        stats[s] = stats.get(s, 0) + 1
+        b = stats["by_scope"].setdefault(e.get("scope", "?"),
+                                         {"pending": 0, "uploaded": 0, "registered": 0, "failed": 0})
+        b[s] = b.get(s, 0) + 1
+
+    manifest = {"version": 2, "built": now,
+                "note": "Coordinator-owned single source of truth. Workers append pending entries only (via queue-append.py); the queue runner owns status transitions.",
+                "entries": entries, "stats": stats}
+    tmp = "%s.tmp.%d.%d" % (MANIFEST, os.getpid(), next(_tmp_seq))
+    with open(tmp, "w") as f:
+        json.dump(manifest, f, indent=1)
+        f.write("\n")
+    os.replace(tmp, MANIFEST)
+    print(json.dumps(stats, indent=2))
+    print("entries:", len(entries))
+
+
+if __name__ == "__main__":
+    main()
