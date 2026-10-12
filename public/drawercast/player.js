@@ -105,6 +105,24 @@ function toast(msg,ms){
 /* =====================================================================
    INDEXEDDB
    ===================================================================== */
+// Playlist payload and one-time seed receipt commit together. Request success
+// alone is not durability: publish to the UI only after transaction completion.
+function commitPlaylistState(db,expected,next,marker=null,valid=()=>true){
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction('kv','readwrite'),store=tx.objectStore('kv');
+    let remaining=marker?2:1,stored,seeded=false,applied=false,failure=null;
+    const finish=()=>{
+      if(--remaining)return;
+      if(seeded)return;
+      if(!valid()||JSON.stringify(stored||[])!==JSON.stringify(expected)){failure=Error('Playlists or music library changed. Try again.');tx.abort();return;}
+      store.put(next,'playlists');if(marker)store.put(true,marker);applied=true;
+    };
+    const read=store.get('playlists');read.onsuccess=()=>{stored=read.result;finish();};
+    if(marker){const receipt=store.get(marker);receipt.onsuccess=()=>{seeded=receipt.result===true;finish();};}
+    tx.oncomplete=()=>resolve(applied);
+    tx.onabort=tx.onerror=()=>reject(failure||tx.error||Error('Playlists could not be saved.'));
+  });
+}
 const IDB = (function(){
   let dbp=null;
   const STORES=['tracks','blobs','art','kv','handles'];
@@ -128,8 +146,9 @@ const IDB = (function(){
   function tx(store,mode){ return open().then(db=>db.transaction(store,mode).objectStore(store)); }
   function wrap(req){ return new Promise((res,rej)=>{ req.onsuccess=()=>res(req.result); req.onerror=()=>rej(req.error); }); }
   return {
+    playlists:(expected,next,marker,valid)=>open().then(db=>commitPlaylistState(db,expected,next,marker,valid)),
     catalog:(module,snapshot)=>open().then(db=>module.commitCatalog(db,snapshot)),
-    r2Catalog:(module,mapping,tracks)=>open().then(db=>module.commitR2Catalog(db,mapping,tracks)),
+    r2Catalog:(module,mapping,tracks,options)=>open().then(db=>module.commitR2Catalog(db,mapping,tracks,options)),
     get:(s,k)=>tx(s,'readonly').then(o=>wrap(o.get(k))),
     set:(s,k,v)=>tx(s,'readwrite').then(o=>wrap(o.put(v,k))),
     del:(s,k)=>tx(s,'readwrite').then(o=>wrap(o.delete(k))),
@@ -2406,8 +2425,9 @@ const DriveSource={
 const R2Source={
   helper:null,catalog:null,mapping:null,root:'',manifestURL:'',busy:false,
   status:'Not configured',error:'',controller:null,timer:null,
-  async install(){
-    try{
+  prepare(){
+    if(this.preparation)return this.preparation;
+    this.preparation=(async()=>{
       const response=await fetch('/assets/r2-config.json',{credentials:'omit',cache:'no-store',signal:AbortSignal.timeout(15000)});
       if(!response.ok)throw Error('R2 configuration could not be loaded.');
       const config=await response.json();
@@ -2415,10 +2435,24 @@ const R2Source={
       this.manifestURL=typeof config.manifestURL==='string'?config.manifestURL:'';
       this.native=this.manifestURL.endsWith('/music/library.json');
       if(!this.manifestURL||(!this.native&&!this.root)){this.status='Not configured';return;}
-      this.helper=await import(this.native?'./r2-library.js?v=native-v1':'./r2-api.js?v=separate-source-v1');
+      this.helper=await import(this.native?'./r2-library.js?v=native-snapshot-v2':'./r2-api.js?v=separate-source-v1');
       if(!this.native)this.catalog=await import('./drive-catalog.js?v=catalog-v2');
+      Engine.tracePlayback('r2-config-ready');
+    })();
+    this.preparation.catch(()=>{});return this.preparation;
+  },
+  async install(){
+    try{
+      await this.prepare();
+      if(this.native&&SourceLibrary.enabled('r2')&&this.helper){
+        try{
+          const saved=await IDB.get('kv','r2-native-snapshot');
+          const restored=this.helper.restoreLibrarySnapshot(saved,this.manifestURL,allTracks(true).filter(t=>t.source==='r2'));
+          if(restored&&SourceLibrary.enabled('r2')&&!this.mapping){this.mapping=restored.mapping;this.status='Saved R2 library ready';Engine.tracePlayback('r2-cache-restored');void PlaylistFiles.seed();}
+        }catch(_){}
+      }
       await this.connect(true);
-    }catch(e){this.error=e.message;this.status='R2 unavailable';}
+    }catch(e){this.preparation=null;this.error=e.message;this.status='R2 unavailable';}
     finally{MusicSources.refresh();}
   },
   suspend(){this.controller?.abort();clearTimeout(this.timer);},
@@ -2436,8 +2470,9 @@ const R2Source={
     try{
       // Read the static, hashed metadata snapshot independently of DriveSource.
       // No Google API request or media download is needed to build this library.
-      let tracks,mapping;
-      if(this.native)({tracks,mapping}=await this.helper.readLibrary({url,signal:controller.signal}));
+      let tracks,mapping,snapshot;
+      Engine.tracePlayback('r2-catalog-start');
+      if(this.native)({tracks,mapping,snapshot}=await this.helper.readLibrary({url,signal:controller.signal}));
       else{
         const snapshot=await this.catalog.readCatalog({root,signal:controller.signal});
         tracks=snapshot.records.map(record=>this.catalog.catalogTrack(record,root));
@@ -2445,12 +2480,12 @@ const R2Source={
       }
       if(controller.signal.aborted||!SourceLibrary.enabled('r2')||root!==this.root||url!==this.manifestURL)return false;
       if(Engine.current?.source==='r2'&&Engine.wantsPlayback()){this.status='R2 update pending · pause playback to sync';return false;}
-      const {fresh,gone}=await IDB.r2Catalog(this.helper,mapping,tracks);
+      const {fresh,gone}=await IDB.r2Catalog(this.helper,mapping,tracks,{snapshot,valid:()=>!controller.signal.aborted&&SourceLibrary.enabled('r2')&&root===this.root&&url===this.manifestURL&&!(Engine.current?.source==='r2'&&Engine.wantsPlayback())});
       if(controller.signal.aborted||!SourceLibrary.enabled('r2')||root!==this.root||url!==this.manifestURL)return false;
       if(Engine.current?.source==='r2'&&Engine.wantsPlayback()){this.status='R2 update pending · pause playback to sync';return false;}
       for(const id of gone){LIB.map.delete(id);FILES.delete(id);const i=LIB.ids.indexOf(id);if(i>=0)LIB.ids.splice(i,1);}
       fresh.forEach(libAdd);
-      this.mapping=mapping;this.status='Verified R2 library ready';this.error='';
+      this.mapping=mapping;this.status='Verified R2 library ready';this.error='';Engine.tracePlayback('r2-catalog-ready');
       const selected=Engine.current?.id;
       if(selected&&gone.includes(selected))Engine.stop();
       const order=Engine.order.slice(),currentOrder=Engine.order[Engine.pos],remap=new Map(),queue=[],removed=new Set(gone);
@@ -2461,6 +2496,7 @@ const R2Source={
       if(Engine.current?.source==='r2')Engine.current=LIB.map.get(selected)||null;
       if(!Engine.current&&allTracks().length){Engine.queue=allTracks();Engine.buildOrder();Engine.pos=0;Engine.current=Engine.queue[Engine.order[0]];}
       Engine.saveState();UI.renderNowPlaying(Engine.current);UI.renderPlayState();Views.refreshAll();
+      void PlaylistFiles.seed();
       if(!quiet)toast('Cloudflare R2 ready · '+fresh.length+' songs');return true;
     }catch(e){
       this.error=e.name==='AbortError'?'R2 refresh canceled or timed out.':e.message;
@@ -2479,9 +2515,10 @@ const R2Source={
       '<p role="status">'+esc(this.error||this.status)+'</p>'+
       '<p class="note">'+allTracks(true).filter(t=>t.source==='r2').length+' verified songs. Registered uploads appear on refresh; the library also checks for updates every five minutes.</p>'+
       '<p class="note">This source has its own track entries, ratings and playlists. Turning it off keeps its saved library.</p>',
-      [{label:'Refresh R2',pri:true},{label:'Close'}]);
+      [{label:'Refresh R2',pri:true},{label:'Copy playback diagnostics'},{label:'Close'}]);
+    $$('#sheet .actions .btn')[1].onclick=()=>PlaybackDiagnostics.copy();
     const refresh=$$('#sheet .actions .btn')[0];
-    refresh.onclick=async()=>{refresh.disabled=true;if(!SourceLibrary.enabled('r2'))MusicSources.setEnabled('r2',true,false);await this.connect();refresh.disabled=false;};
+    refresh.onclick=async()=>{refresh.disabled=true;if(!SourceLibrary.enabled('r2'))MusicSources.setEnabled('r2',true,false);if(!this.helper)await this.install();else await this.connect();refresh.disabled=false;};
   },
   exportRemote(t){
     const file=this.fileFor(t);if(!file)return this.show();
@@ -2511,7 +2548,12 @@ const PlaybackDiagnostics={limit:80,maxBytes:31000,entries:[],sizes:[],bytes:0,
     const size=JSON.stringify(entry).length+1;this.entries.push(entry);this.sizes.push(size);this.bytes+=size;
     while(this.entries.length>this.limit||this.bytes>this.maxBytes){this.entries.shift();this.bytes-=this.sizes.shift();}
   },
-  report(){return {schema:'poweramp-playback-v1',events:this.entries.map(entry=>({...entry}))};}
+  report(){return {schema:'poweramp-playback-v1',events:this.entries.map(entry=>({...entry}))};},
+  async copy(){
+    const text=JSON.stringify(this.report(),null,2);
+    try{await navigator.clipboard.writeText(text);toast('Playback diagnostics copied. No song details or URLs included.');}
+    catch(_){dialog('Playback diagnostics','<p>Copy this report to share it.</p><textarea readonly aria-label="Playback diagnostics" rows="12">'+esc(text)+'</textarea>',[{label:'Close'}]);const field=$('#sheet textarea');field?.focus();field?.select();}
+  }
 };
 const Engine = {
   ctx:null, nodes:null, ready:false,
@@ -2554,7 +2596,7 @@ const Engine = {
   resetSelectionRecovery:function(track){
     this._driveRetryId=this._driveErrorReportedId=null;
     this._serverRetryId=this._serverErrorReportedId=null;
-    this._r2RetryId=this._r2ErrorReportedId=null;
+    this._r2RetryId=this._r2ErrorReportedId=null;this._r2Progress=null;this._contextHold=null;
     clearTimeout(this._driveRetryTimer);clearTimeout(this._serverRetryTimer);this.clearR2Recovery();
     this._driveRetryTimer=this._serverRetryTimer=this._r2RetryTimer=null;
     this.clearBuffering();this._mediaStarted=null;
@@ -2584,7 +2626,7 @@ const Engine = {
     const token=this._r2Recovery;
     if(!this.r2RecoveryValid(token)){if(token)this.clearR2Recovery();return;}
     if(navigator.onLine===false)return;
-    if(this.ctx&&this.ctx.state!=='running'){this.pause('context-interrupted');return;}
+    if(this.ctx&&this.ctx.state!=='running'){this.holdContextSuspension();return;}
     const a=token.audio,position=this.time(),at=Number.isFinite(position)?Math.max(0,position):token.position;
     clearTimeout(this._r2RetryTimer);this._r2RetryTimer=null;this._r2OfflineSource=null;token.phase='reload';
     // Delay the one clean-URL reload until it can use the network. Keep any
@@ -2593,19 +2635,32 @@ const Engine = {
     this.tracePlayback('r2-retry-start');this.startElement(a);
     if(this._r2Recovery===token)this._r2Recovery=null;
   },
+  holdContextSuspension:function(){
+    const a=this.el(),c=this.ctx;
+    // A context-only suspension is not an instruction to pause the element.
+    // Never resume a context here. Native focus pauses and interrupted/closed
+    // contexts remain terminal until an explicit Play.
+    if(c?.state!=='suspended'||!a||a.paused&&!a.ended){this.pause('context-interrupted');return false;}
+    this._contextHold={context:c,request:this._playRequest,audio:a,source:a.src};
+    this._r2Progress=null;this.clearBuffering();this.playing=false;
+    this.tracePlayback('context-held');UI.renderPlayState();return true;
+  },
   reconcilePlaybackLifecycle:function(){
     if(!this.wantsPlayback()||this._loadingRequest)return;
     if(this.ctx&&this.ctx.state!=='running'){
       if(this.ctx.state==='suspended'&&this._contextResume?.context===this.ctx&&this._contextResume.request===this._playRequest)return;
-      this.pause('context-interrupted');return;
+      this.holdContextSuspension();return;
     }
     const a=this.el();if(!a)return;
+    const held=this._contextHold;this._contextHold=null;
+    const continuing=held&&held.context===this.ctx&&held.request===this._playRequest&&held.audio===a&&held.source===a.src;
     // Read native state after a renderer freeze. Reuse the ordinary end
     // handler's request fence, silence setting, repeat and queue policy.
     if(a.ended){this.tracePlayback('lifecycle-ended');this.onEnded(this.cur);return;}
-    if(this._r2Recovery?.phase==='offline'&&navigator.onLine!==false){this.beginR2Recovery();return;}
+    if(this._r2Recovery&&(this._r2Recovery.phase==='offline'||continuing)&&navigator.onLine!==false){this.beginR2Recovery();return;}
     // A missing pause event is still an interruption, never a reason to play.
     if(a.paused)this.onPause(this.cur);
+    else if(continuing){if(a.error)this.onError(this.cur);else if(a.readyState>=3)this.onPlaying(this.cur);else this.onBuffering(this.cur,'initial');}
   },
   cancelTransitionForFailure:function(){
     if(typeof PlaybackTransitions!=='undefined'&&(PlaybackTransitions.pending||this.xfading))PlaybackTransitions.cancel();
@@ -2640,7 +2695,7 @@ const Engine = {
     if(a.paused||a.ended||a.error||a.readyState<3)return;
     this._r2OfflineSource=null;
     this._mediaStarted={request:this._playRequest,attempt:this._playAttempt,slot:i,source:a.src};
-    if(this.ctx&&this.ctx.state!=='running'){this.tracePlayback('element-awaits-context');return;}
+    if(this.ctx&&this.ctx.state!=='running'){this.tracePlayback('element-awaits-context');if(!(this._contextResume?.context===this.ctx&&this._contextResume.request===this._playRequest))this.holdContextSuspension();return;}
     this.playing=true;this._playIntent=true;this.clearBuffering();this.tracePlayback('element-playing');
     UI.renderPlayState();this.updateMediaSession();
   },
@@ -2674,7 +2729,9 @@ const Engine = {
       ctx.addEventListener?.('statechange',()=>{
         this.tracePlayback('context-state');
         const expectedSuspend=ctx.state==='suspended'&&this._contextResume?.context===ctx&&this._contextResume.request===this._playRequest;
-        if(['suspended','interrupted','closed'].includes(ctx.state)&&!expectedSuspend&&this.wantsPlayback())this.pause('context-interrupted');
+        if(!this.wantsPlayback())return;
+        if(['suspended','interrupted','closed'].includes(ctx.state)&&!expectedSuspend)this.holdContextSuspension();
+        else if(ctx.state==='running'&&this._contextHold)this.reconcilePlaybackLifecycle();
       });
       const n={};
       n.preamp = ctx.createGain();
@@ -2955,7 +3012,7 @@ const Engine = {
     return p;
   },
   play:function(){
-    this.cancelSleepFade();
+    this.cancelSleepFade();this._contextHold=null;
     if(this.ctx?.state==='closed'){this.pause('context-failed');toast('Audio output was closed. Reload this page to play again.',6000);return;}
     this._playIntent=true;this.ensureCtx('play');
     clearTimeout(this._driveRetryTimer);clearTimeout(this._serverRetryTimer);this.clearR2Recovery();
@@ -2971,7 +3028,7 @@ const Engine = {
     return this.startElement(a);
   },
   pause:function(reason='user'){
-    this.cancelSleepFade();
+    this.cancelSleepFade();this._contextHold=null;this._r2Progress=null;
     const a=this.el(), self=this;
     this._playIntent=false;this._playAttempt=(this._playAttempt||0)+1;this._mediaStarted=null;this.tracePlayback('pause-request',{reason});
     this.clearBuffering();
@@ -2993,7 +3050,7 @@ const Engine = {
   wantsPlayback:function(){return this._playIntent===false?false:this._playIntent===true||this.playing||!!(this._loadingRequest&&this._loadingAutoplay);},
   toggle:function(){ this.wantsPlayback() ? this.pause() : this.play(); },
   stop:function(){
-    this.cancelSleepFade();
+    this.cancelSleepFade();this._contextHold=null;this._r2Progress=null;
     this._playIntent=false;this._playAttempt=(this._playAttempt||0)+1;this._mediaStarted=null;this.tracePlayback('stop-request');
     this.clearBuffering();
     clearTimeout(this._driveRetryTimer);
@@ -3045,6 +3102,7 @@ const Engine = {
   },
   seek:function(sec){
     if(!Number.isFinite(sec))return;
+    this._r2Progress=null;
     if(this._loadingRequest)this._requestedSeek=Math.max(0,sec);
     else if(!this.el().src&&this.current)this._resumePosition={id:this.current.id,time:Math.max(0,sec)};
     else this.seekWhenReady(sec);
@@ -3105,7 +3163,7 @@ const Engine = {
       if(retryable&&this.r2RecoveryValid(this._r2Recovery)&&this._r2Recovery.phase!=='reload'){this.tracePlayback('r2-retry-already-pending');return;}
       if(retryable&&this._r2RetryId!==t.id){
         if(offlineSource)this.tracePlayback('r2-source-rejected-offline');
-        this._r2RetryId=t.id;this._playIntent=true;this.playing=false;this._mediaStarted=null;UI.renderPlayState();
+        this._r2RetryId=t.id;this._r2Progress=null;this._playIntent=true;this.playing=false;this._mediaStarted=null;UI.renderPlayState();
         const position=this.time(),at=Number.isFinite(position)?Math.max(0,position):0,source=a.src,request=this._playRequest;
         // Same-URL reload aborts old pending play promises. Retire that attempt,
         // but keep this selection's one-retry budget and original clean URL.
@@ -3192,10 +3250,22 @@ const Engine = {
     UI.renderProgress();
     UI.renderMeta();
   },
+  noteR2Progress:function(a){
+    if(this.current?.source!=='r2'||this._r2RetryId!==this.current.id||!this.playing||!this.wantsPlayback()||a.paused||a.ended||a.error||a.readyState<3||this.ctx&&this.ctx.state!=='running'){this._r2Progress=null;return;}
+    const now=Date.now(),time=a.currentTime,p=this._r2Progress;
+    if(!p||p.request!==this._playRequest||p.audio!==a||p.source!==a.src){this._r2Progress={request:this._playRequest,audio:a,source:a.src,time,at:now,seconds:0};return;}
+    const dt=now-p.at,delta=time-p.time;if(dt<=0||delta===0)return;
+    // Thirty seconds of observed output, not bytes, readiness, seek jumps or
+    // elapsed background time. A relapse before that remains terminal.
+    if(dt>5000||delta<0||delta>Math.max(.25,dt/1000*Math.max(1,SET.speed)*1.5))p.seconds=0;
+    else p.seconds+=Math.min(delta,dt/1000);
+    p.time=time;p.at=now;
+    if(p.seconds>=30){this._r2RetryId=null;this._r2Progress=null;this.tracePlayback('r2-retry-rearmed');}
+  },
   onTime:function(i){
     if(i!==this.cur||this._loadingRequest) return;
     if(this.playing&&Date.now()-(this._lastCheckpoint||0)>=10000)this.checkpoint();
-    const a=this.el();
+    const a=this.el();this.noteR2Progress(a);
     if(this.playing&&!a.paused&&!a.ended&&!a.error&&a.readyState>=3&&this._bufferAt!=null&&a.currentTime>this._bufferAt+0.05)this.clearBuffering();
     if(SET.gapless && !SET.crossfade && this.playing) this.preloadNext();
     if(SET.crossfade && this.playing){
@@ -3207,6 +3277,7 @@ const Engine = {
   clearBuffering:function(){clearTimeout(this._stallTimer);this._stallTimer=null;this._bufferAt=null;this._bufferToken=null;},
   onBuffering:function(i,reason){
     if(i!==this.cur||this._loadingRequest||!this.wantsPlayback()||!this.transportCapabilities().network)return;
+    this._r2Progress=null;
     const a=this.el(),request=this._playRequest,source=a.src,track=this.current.id;
     const previous=this._bufferToken;
     if(this._stallTimer&&previous?.request===request&&previous.source===source&&previous.slot===i&&(a.currentTime||0)<=this._bufferAt+0.05)return;
@@ -3216,7 +3287,7 @@ const Engine = {
     this._bufferAt=a.currentTime||0;
     this._stallTimer=setTimeout(()=>{
       if(this._bufferToken!==token||this._playRequest!==request||this.el()!==a||a.src!==source||this.current?.id!==track||!this.wantsPlayback()||a.ended)return;
-      if(this.ctx&&this.ctx.state!=='running'){this.pause('context-interrupted');return;}
+      if(this.ctx&&this.ctx.state!=='running'){if(this._contextResume?.context===this.ctx&&this._contextResume.request===request)this.pause('context-interrupted');else this.holdContextSuspension();return;}
       // Timers can resume before queued native events after suspension. A
       // paused element yields focus; a few final buffered frames do not prove
       // that a stream with no future data has recovered.
@@ -3866,7 +3937,7 @@ const InputLifecycle={
   cancel(options={}){
     this.version++;if(!options.keepContacts)this.contacts.clear();this.gesture=null;this.motionSettle=null;
     const rebasing=this.rebasing;this.rebasing=rebasing||!!options.preserveScene;
-    try{for(const [reset,node] of this.resets){reset();if(node?.isConnected===false)this.resets.delete(reset);}}finally{this.rebasing=rebasing;}
+    try{for(const [reset,node] of this.resets){reset(options);if(node?.isConnected===false)this.resets.delete(reset);}}finally{this.rebasing=rebasing;}
   },
   watchSettle(node,cancel,accepts=e=>node.contains(e.target)){this.motionSettle={node,cancel,accepts};},
   unwatchSettle(node){if(this.motionSettle?.node===node)this.motionSettle=null;},
@@ -4149,7 +4220,7 @@ const Views={
     return {type:'tree', dirs:Array.from(dirs).sort(sortNat), counts:counts, items:files.sort(function(a,b){ return (a.track-b.track)||sortNat(a.title,b.title); }), path:path};
   },
   render:function(spec, keepScroll){
-    InputLifecycle.cancel();
+    InputLifecycle.cancel({preserveMiniSeek:true});
     if(Selection.mode)Selection.exit();
     const body=$('#list-body');
     const st=keepScroll?body.scrollTop:0;
@@ -4835,9 +4906,10 @@ const Selection={
    PLAYLISTS / BOOKMARKS
    ===================================================================== */
 const Playlists={
-  data:[],
-  load:async function(){ try{ this.data = (await IDB.get('kv','playlists'))||[]; }catch(e){ this.data=[]; } },
-  save:function(){ IDB.set('kv','playlists',this.data).catch(function(){}); },
+  data:[],persisted:[],writes:Promise.resolve(),
+  load:async function(){ try{ this.data = structuredClone((await IDB.get('kv','playlists'))||[]); }catch(e){ this.data=[]; }this.persisted=structuredClone(this.data); },
+  enqueue(task){const work=this.writes.then(task);this.writes=work.catch(()=>{});return work;},
+  save:function(){return this.enqueue(async()=>{const next=structuredClone(this.data);await IDB.playlists(this.persisted,next);this.persisted=next;}).catch(()=>toast('Playlists could not be saved. Try again.'));},
   all:function(){ return this.data; },
   get:function(id){ return this.data.filter(function(p){ return p.id===id; })[0]; },
   create:function(name){ const p={id:hash(name+Date.now()), name:name, ids:[]}; this.data.push(p); this.save(); return p; },
@@ -7179,7 +7251,9 @@ function setupSeekGestures(){
     e.preventDefault();e.stopPropagation();InputLifecycle.cancelMotionSettle();cancel();
     const current=Engine.time();Engine.seek(e.key==='Home'?0:e.key==='End'?duration:clamp(current+(e.key==='ArrowRight'?5:-5),0,duration));UI.renderProgress();
   });
-  InputLifecycle.register(()=>{cancel();UI.seekWidth=0;});
+  // Rebuilding list rows must not cancel a scrub on the unchanged mini rail.
+  // Selection changes, navigation, backgrounding and additional contacts still cancel.
+  InputLifecycle.register(options=>{if(options?.preserveMiniSeek&&owner?.node===miniSeek&&valid(owner))return;cancel();UI.seekWidth=0;});
 }
 function setupVizGestures(){
   const v=$('#vizfull');
@@ -9049,8 +9123,82 @@ const LibraryPresentation={
 Views.render=function(spec,keep){renderListBeforeRework.call(this,spec,keep);LibraryPresentation.render(spec,this.currentData);};
 
 const PlaylistFiles={
-  export(){downloadText('DrawerCast-playlists.json',JSON.stringify({format:'DrawerCast-playlists',playlists:Playlists.data.map(p=>({name:p.name,tracks:p.ids.map(id=>LIB.map.get(id)).filter(Boolean).map(t=>({id:t.id,path:t.path,title:t.title,artist:trackArtist(t)}))}))},null,2),'application/json');},
-  import(){const input=el('input');input.type='file';input.accept='.json,.m3u,.m3u8';input.onchange=async()=>{const file=input.files?.[0];if(!file)return;try{const text=await file.text(),all=allTracks(true),lists=file.name.toLowerCase().endsWith('.json')?JSON.parse(text).playlists:[{name:file.name.replace(/\.m3u8?$/i,''),tracks:text.split(/\r?\n/).filter(s=>s.trim()&&!s.startsWith('#')).map(path=>({path:path.trim()}))}];if(!Array.isArray(lists)||lists.length>1000)throw Error('Invalid playlist file');let count=0,missing=0;const resolved=lists.map(p=>{if(typeof p.name!=='string'||!Array.isArray(p.tracks))throw Error('Invalid playlist');return {name:p.name,ids:p.tracks.map(ref=>{const t=all.find(t=>t.id===ref.id||ref.path&&t.path===ref.path)||((matches)=>matches.length===1?matches[0]:null)(all.filter(t=>ref.path&&baseName(t.path||'')===baseName(ref.path)||ref.title&&t.title===ref.title&&trackArtist(t)===ref.artist));if(t){count++;return t.id;}missing++;return null;}).filter(Boolean)};});for(const p of resolved){const list=Playlists.create(p.name);list.ids=p.ids;}Playlists.save();Views.refreshAll();toast('Imported '+count+' tracks'+(missing?' · '+missing+' unavailable':''));}catch(e){toast(e.message||'Could not import playlists');}};input.click();}
+  seedURL:'./curated-playlists.json?v=86bc49aa',seedMarker:'playlist-seed:curated-v1',
+  maxBytes:5*1024*1024,maxTracks:50000,
+  export(){downloadText('DrawerCast-playlists.json',JSON.stringify({format:'DrawerCast-playlists',playlists:Playlists.data.map(p=>({name:p.name,tracks:p.ids.map(id=>LIB.map.get(id)).filter(Boolean).map(t=>({id:t.id,path:t.path,title:t.title,artist:trackArtist(t),source:SourceLibrary.kind(t)}))}))},null,2),'application/json');},
+  parse(text,name){
+    if(typeof text!=='string'||text.length>this.maxBytes)throw Error('Playlist file is too large.');
+    const json=/\.json$/i.test(name),data=json?JSON.parse(text):{playlists:[{name:name.replace(/\.m3u8?$/i,''),tracks:text.split(/\r?\n/).map(s=>s.trim()).filter(s=>s&&!s.startsWith('#')).map(path=>({path}))}]};
+    if(json&&data?.format!=='DrawerCast-playlists')throw Error('That file is not a playlist export.');
+    if(!Array.isArray(data?.playlists)||data.playlists.length>1000)throw Error('Invalid playlist file.');
+    let total=0;
+    return data.playlists.map(p=>{
+      if(!p||typeof p.name!=='string'||!p.name.trim()||p.name.length>256||/[\x00-\x1f\x7f]/.test(p.name)||!Array.isArray(p.tracks)||(total+=p.tracks.length)>this.maxTracks)throw Error('Invalid playlist.');
+      const tracks=p.tracks.map(ref=>{
+        if(!ref||typeof ref!=='object'||Array.isArray(ref)||!['id','path'].some(k=>typeof ref[k]==='string'&&ref[k].length))throw Error('Invalid playlist track.');
+        for(const k of ['id','path','title','artist','source'])if(ref[k]!=null&&(typeof ref[k]!=='string'||ref[k].length>4096||/[\x00-\x1f\x7f]/.test(ref[k])))throw Error('Invalid playlist track.');
+        if(ref.source!=null&&!['r2','drive','local','server'].includes(ref.source))throw Error('Invalid playlist source.');
+        return {...ref};
+      });return {name:p.name.trim(),tracks};
+    });
+  },
+  resolve(lists,{r2Only=false}={}){
+    const all=allTracks(true),paths=new Map(),owners=new Map();let matched=0,missing=0,ambiguous=0;
+    for(const t of all){if(!paths.has(t.path))paths.set(t.path,[]);paths.get(t.path).push(t);}
+    const resolved=lists.map(p=>({name:p.name,ids:p.tracks.map(ref=>{
+      // ID wins independently of library order. Never guess by basename/title.
+      const source=ref.source||(ref.id?.startsWith('r2_')?'r2':ref.id?.startsWith('gd_')?'drive':null);
+      const eligible=t=>!!t&&(!source||SourceLibrary.kind(t)===source)&&(!r2Only||t.source==='r2'&&!!R2Source.fileFor(t));
+      let t=LIB.map.get(ref.id);
+      if(t&&!eligible(t)){missing++;return null;}
+      if(!t){const candidates=(paths.get(ref.path)||[]).filter(eligible);if(candidates.length>1){ambiguous++;return null;}t=candidates[0];}
+      if(!t){missing++;return null;}matched++;owners.set(t.id,t);return t.id;
+    }).filter(Boolean)}));
+    return {lists:resolved,matched,missing,ambiguous,valid:()=>[...owners].every(([id,t])=>LIB.map.get(id)===t&&(!r2Only||SourceLibrary.enabled('r2')&&!!R2Source.fileFor(t)))};
+  },
+  apply(lists,{marker=null,r2Only=false}={}){
+    return Playlists.enqueue(async()=>{
+      const result=this.resolve(lists,{r2Only});
+      if(r2Only&&(result.missing||result.ambiguous))return {...result,pending:true,created:0};
+      const existing=new Set([...Playlists.data,...Playlists.persisted].map(p=>p.name));
+      const created=result.lists.filter(p=>!marker||!existing.has(p.name)).map(p=>({id:crypto.randomUUID(),name:p.name,ids:p.ids}));
+      const next=[...structuredClone(Playlists.persisted),...created];
+      const applied=await IDB.playlists(Playlists.persisted,next,marker,result.valid);
+      if(applied){
+        Playlists.persisted=structuredClone(next);
+        // Imports only append new lists. Edits/deletions made while storage was
+        // committing stay in memory and queued saves include the new lists.
+        Playlists.data.push(...created);Views.refreshAll();
+      }
+      return {...result,created:applied?created.length:0,pending:false};
+    });
+  },
+  async seed(){
+    if(!this.seedURL||this.seedDone||!SourceLibrary.enabled('r2')||!R2Source.native||!R2Source.mapping)return;
+    if(this.seeding){this.seedAgain=true;return;}
+    this.seeding=true;
+    try{
+      if(await IDB.get('kv',this.seedMarker)===true){this.seedDone=true;return;}
+      const response=await fetch(this.seedURL,{credentials:'omit',signal:AbortSignal.timeout(15000)});
+      if(!response.ok)throw Error('Curated playlists unavailable');
+      const lists=this.parse(await response.text(),'curated.json');
+      if(lists.length!==8||new Set(lists.map(p=>p.name)).size!==8||lists.some(p=>!p.tracks.length))throw Error('Invalid curated playlists');
+      if(!SourceLibrary.enabled('r2')||!R2Source.native||!R2Source.mapping)return;
+      const result=await this.apply(lists,{marker:this.seedMarker,r2Only:true});
+      this.seedDone=!result.pending;
+    }catch(_){Engine.tracePlayback('playlist-seed-deferred');}
+    finally{this.seeding=false;if(this.seedAgain){this.seedAgain=false;void this.seed();}}
+  },
+  import(){
+    const input=el('input');input.type='file';input.accept='.json,.m3u,.m3u8';
+    input.onchange=async()=>{const file=input.files?.[0];if(!file)return;
+      try{
+        if(file.size>this.maxBytes)throw Error('Playlist file is too large.');
+        const result=await this.apply(this.parse(await file.text(),file.name));
+        toast('Imported '+result.created+' playlists · '+result.matched+' tracks'+(result.missing?' · '+result.missing+' unavailable':'')+(result.ambiguous?' · '+result.ambiguous+' ambiguous':''));
+      }catch(e){toast(e.message||'Could not import playlists');}
+    };input.click();
+  }
 };
 Playlists.addTo=function(id,ids){const list=this.get(id);if(!list)return;let add=nativeValues().pl_no_dups===false?ids.slice():ids.filter(i=>!list.ids.includes(i));if(nativeValues().playlist_insert_pos===2)add=shuffleArray(add);if(nativeValues().playlist_insert_pos===1)list.ids.unshift(...add);else list.ids.push(...add);this.save();toast('Added to '+list.name);};
 function shuffleArray(items){const a=items.slice();for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a;}
@@ -9231,7 +9379,7 @@ function installPlaybackRework(){
     }finally{this._autoAdvance=previous;}
   };
   Engine.countPlayed=function(){if(!this.current||this.counted)return;this.counted=true;this.current.plays=(this.current.plays||0)+1;this.current.lastPlayed=Date.now();persistTrack(this.current);};
-  Engine.onEnded=function(i){this.tracePlayback('ended-received');if(i!==this.cur||this._loadingRequest||!this.wantsPlayback()||!this.el().ended||this._endedRequest===this._playRequest)return;this._endedRequest=this._playRequest;this.playing=false;UI.renderPlayState();if(this.current){this.current.resumeAt=0;this.countPlayed();persistTrack(this.current);}if(this._sleepFade){this.pause('sleep');return;}const request=this._playRequest;const advance=()=>{if(request!==this._playRequest||!this.wantsPlayback())return;this.listened=0;this.counted=false;this.next(true);};const gap=nativeValues().track_end_silence_ms||0;if(gap){clearTimeout(this.silenceTimer);this.silenceTimer=setTimeout(advance,gap);}else advance();};
+  Engine.onEnded=function(i){this.tracePlayback('ended-received');if(i!==this.cur||this._loadingRequest||!this.wantsPlayback()||!this.el().ended||this._endedRequest===this._playRequest)return;if(this.ctx&&this.ctx.state!=='running'){this.holdContextSuspension();return;}this._endedRequest=this._playRequest;this.playing=false;UI.renderPlayState();if(this.current){this.current.resumeAt=0;this.countPlayed();persistTrack(this.current);}if(this._sleepFade){this.pause('sleep');return;}const request=this._playRequest;const advance=()=>{if(request!==this._playRequest||!this.wantsPlayback())return;if(this.ctx&&this.ctx.state!=='running'){this._endedRequest=null;this.holdContextSuspension();return;}this.listened=0;this.counted=false;this.next(true);};const gap=nativeValues().track_end_silence_ms||0;if(gap){clearTimeout(this.silenceTimer);this.silenceTimer=setTimeout(advance,gap);}else advance();};
   Engine.startCrossfade=function(){if(this._sleepFade||SET.audioMode==='transparent')return;if(PlaybackQueue.active&&this.pos+1>=this.order.length)return;if(this.xfading||PlaybackTransitions.pending||!this.playing||PlaybackQueue.shouldStart()||SET.repeatMode==='one')return;let pos=this.pos+1;if(pos>=this.order.length){if(SET.repeatMode==='all')pos=0;else return;}return PlaybackTransitions.to(this.order[pos],Math.max(50,SET.crossfadeLen*1000));};
   const time=Engine.onTime;Engine.onTime=function(i){
     if(i!==this.cur||this._loadingRequest)return;
@@ -9849,6 +9997,7 @@ async function boot(){
   DockLayout.install();
   applySettings();
   Engine.init();
+  R2Source.prepare(); // Overlap configuration/modules with local library restoration.
   Engine.applySpeed();
   setupArtGestures();
   setupSeekGestures();
