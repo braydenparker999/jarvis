@@ -11,7 +11,7 @@ import {hash,random} from '../backend/relay-common.js';
 
 test('explicit Muse hook: real store lost receipts, restart, held dispatch, cancellation and completion',async t=>{
  const directory=await mkdtemp(join(tmpdir(),'mast-work-hook-'));t.after(()=>rm(directory,{recursive:true,force:true}));
- const token=random(),h=createConversationFixture(t,{env:{RELAY_MAST_ENABLED:'true',RELAY_MAST_TOKEN_SHA256:await hash(token)}});t.after(()=>h.close());const owner=await h.pair(await h.oauth());
+ const token=random(),h=createConversationFixture(t,{env:{RELAY_MAST_ENABLED:'true',RELAY_MAST_WORK_ENABLED:'true',RELAY_MAST_TOKEN_SHA256:await hash(token)}});t.after(()=>h.close());const owner=await h.pair(await h.oauth());
  const create=async()=>{const id=crypto.randomUUID();assert.equal((await h.phone('/mast/work',{id,title:'Synthetic request',body:'Draft only',action_kind:'draft'},owner.device_token)).status,201);return id;};
  const calls=[];
  async function bridge(job,mode,lose=true){

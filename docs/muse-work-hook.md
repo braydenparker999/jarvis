@@ -75,15 +75,16 @@ model execution. Use private input/output files and private stdout routing.
 
 **Host finding and corrected transport contract:** the inherited-descriptor bridge
 is unavailable. The reported main-session `relay.py` uses platform-managed surrogate
-credential substitution, but its working binding is only the Lucy–Muse channel.
+credential substitution; Lucy–Muse and owner–Muse require separate bindings.
 PR129 now calls a separately reviewed, pinned **owner–Muse** helper; it never calls
 the credential socket or imports the platform credential implementation.
 
 Set `JARVIS_MAST_RELAY_HELPER` to its exact absolute path and
 `JARVIS_MAST_RELAY_SHA256` to the SHA-256 of its reviewed complete source bytes.
 These settings contain no secret. The current channel helper must not be repointed.
-A separate `custom.jarvis-mast` binding remains unconfigured. No helper is installed,
-executed or credentialed by this release.
+The separate `custom.jarvis-mast` binding needs its own authenticated qualification.
+Chat activation does not enable Work: `RELAY_MAST_WORK_ENABLED` remains a separate
+release gate. No helper is installed, executed or credentialed by this release.
 
 Before any request, the corrected helper must support a local **no-network**
 `describe` command. Every invocation explicitly passes `--provider mast`, including
