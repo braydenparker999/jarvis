@@ -14,8 +14,11 @@ import urllib.parse
 from lib.project_hook import RemoteError
 
 HOST = 'jarvis-hub-api.braydenparker999.workers.dev'
-CONTRACT = {'protocol': 'jarvis-mast-cli-v1', 'provider': 'custom.jarvis-mast',
-            'host': HOST, 'redirects': 'reject', 'response': 'complete-json', 'binary': False}
+CONTRACT = {'provider_arg': 'mast', 'credential_name': 'custom.jarvis-mast',
+            'host': HOST, 'allowed_hosts': [HOST],
+            'redirects': 'rejected (3xx surfaces as an HTTP error; never followed)',
+            'output': 'full JSON, untruncated by default',
+            'binary_support': 'none; responses are parsed as JSON'}
 MAX_OUTPUT = 16_000_000
 
 
@@ -26,7 +29,8 @@ class MastCliTransport:
         self.directory, self.deadline = directory, deadline
         self.verify_source()
         # Local, no-network contract inspection before any private payload.
-        if self.invoke(['describe']) != CONTRACT:
+        description = self.invoke(['describe'])
+        if any(description.get(key) != value for key, value in CONTRACT.items()):
             raise ValueError('owner_mast_helper_contract_required')
 
     def verify_source(self):
@@ -44,7 +48,7 @@ class MastCliTransport:
         output = bytearray()
         # No shell, no token/headers in arguments, no stderr forwarding. Kill on
         # timeout/overflow; an uncertain accepted write stays in the caller journal.
-        with subprocess.Popen([sys.executable, str(self.helper), *arguments], stdin=subprocess.DEVNULL,
+        with subprocess.Popen([sys.executable, str(self.helper), '--provider', 'mast', *arguments], stdin=subprocess.DEVNULL,
                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, close_fds=True) as process:
             try:
                 with selectors.DefaultSelector() as selector:
@@ -62,6 +66,11 @@ class MastCliTransport:
                 if process.poll() is None:
                     process.kill()
                     process.wait()
+        if arguments == ['describe']:
+            if code != 0: raise ValueError('helper_description_failed')
+            description = json.loads(output)
+            if not isinstance(description, dict): raise ValueError('invalid_helper_description')
+            return description
         line, separator, body = bytes(output).partition(b'\n')
         if not separator or not re.fullmatch(rb'HTTP [1-5][0-9]{2}', line):
             raise ValueError('invalid_helper_status')

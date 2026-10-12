@@ -71,8 +71,10 @@ class CliChecks(unittest.TestCase):
         filename = Path(directory)/'synthetic_helper.py'
         # Self-authored fixture only; never runs supplied Mast source or auth.
         source = "import sys,json,os,time\nCONTRACT="+repr(CONTRACT if contract is None else contract)+"\n"+r"""
+assert sys.argv[1:3]==['--provider','mast'], 'must select Mast for every invocation'
+sys.argv=sys.argv[:1]+sys.argv[3:]
 if sys.argv[1]=='describe':
- print('HTTP 200'); print(json.dumps(CONTRACT)); sys.exit(0)
+ print(json.dumps({**CONTRACT,'draft':'synthetic descriptive metadata'})); sys.exit(0)
 path=sys.argv[2]
 if 'slow' in path: time.sleep(10)
 if 'redirect' in path:
@@ -118,7 +120,7 @@ else: print(json.dumps({'value':'x'*15000,'path':path}))
 
     def test_wrong_provider_and_timeout_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:
-            helper,digest=self.helper(directory,{**CONTRACT,'provider':'custom.jarvis-lucy-muse-muse'})
+            helper,digest=self.helper(directory,{**CONTRACT,'credential_name':'custom.jarvis-lucy-muse-muse'})
             with self.assertRaises(ValueError): MastCliTransport(helper,digest,directory,time.monotonic()+45)
             helper,digest=self.helper(directory)
             transport=MastCliTransport(helper,digest,directory,time.monotonic()+45)

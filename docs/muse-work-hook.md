@@ -86,16 +86,18 @@ A separate `custom.jarvis-mast` binding remains unconfigured. No helper is insta
 executed or credentialed by this release.
 
 Before any request, the corrected helper must support a local **no-network**
-`describe` command. All commands print exactly `HTTP <status>` on the first line,
-then one complete JSON object, with no trailing logs or truncation. Exit 0 means
-HTTP <400; exit 1 means >=400; other exits fail closed. `describe` returns HTTP 200
-and exactly this non-secret object:
+`describe` command. Every invocation explicitly passes `--provider mast`, including
+`describe`; the supplied draft defaults to Lucy and must never be invoked implicitly.
+`describe` prints one bare JSON object and exits zero. The adapter checks these
+required fields (additional descriptive fields are allowed):
 
 ```json
-{"protocol":"jarvis-mast-cli-v1","provider":"custom.jarvis-mast","host":"jarvis-hub-api.braydenparker999.workers.dev","redirects":"reject","response":"complete-json","binary":false}
+{"provider_arg":"mast","credential_name":"custom.jarvis-mast","host":"jarvis-hub-api.braydenparker999.workers.dev","allowed_hosts":["jarvis-hub-api.braydenparker999.workers.dev"],"redirects":"rejected (3xx surfaces as an HTTP error; never followed)","output":"full JSON, untruncated by default","binary_support":"none; responses are parsed as JSON"}
 ```
 
-Its existing `get <path>` and `post <path> <json-file>` interface is retained.
+The `get <path>` and `post <path> <json-file>` commands print exactly
+`HTTP <status>` followed by one complete JSON object. Exit zero means status <400;
+exit one means >=400. Redirects are always rejected by the adapter.
 The caller allows only its listed owner–Muse routes, uses no shell, hashes the helper
 before each subprocess, suppresses stderr, caps stdout at 16 MB and enforces the
 remaining invocation budget (at most 20 seconds per subprocess). POST payloads are
@@ -114,12 +116,21 @@ already followed. Consequently, `describe` is a compatibility check, not indepen
 proof of those policies: exact helper source review is mandatory before pinning.
 No speculative socket API or platform-specific implementation is supplied here.
 
-The reported source hash cannot be used as the pin: the supplied snippet was
-trimmed/redacted, so its bytes are not that artifact. Request the **complete corrected
-non-secret helper file**, plus names/versions of its platform imports, to inspect
-redirect handling, host restriction, provider binding, complete output and no-network
-`describe`, then compute the exact pin. That is needed for deployment qualification,
-not for implementing or synthetically testing this caller.
+The complete non-secret two-part helper draft was reviewed on October 12.
+Its command parser defaults to Lucy, its
+`describe` output is bare JSON, and its field names differ from the earlier proposed
+contract; this adapter now follows that actual interface. The draft removes output
+slicing and installs a no-follow opener. No supplied source or platform credential
+calls were executed in local tests; fixtures are self-authored.
+
+Remaining host qualification: `dynamic_credentials` is imported at module load,
+even for `describe`, from `/opt/hatch/skills/skill-creator/bin`. Its exact version,
+source integrity and import-time behavior remain unverified. A no-network/no-secret
+`describe` claim cannot be independently certified from this helper alone. Prefer
+moving that import to the network call, then review the final exact installed file
+and dependency identity before calculating its pin. Do not reuse the earlier
+trimmed-source hash or treat reconstructed message text as the installed artifact.
+No helper installation or Work activation is performed here.
 
 This CLI transport has no binary support. `file` fails closed, and `reserve` refuses
 attached requests before claim/wake. Qualify text-only work first; enabling file work
