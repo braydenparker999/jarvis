@@ -1,0 +1,103 @@
+--- a/public/drawercast/player.js
++++ b/public/drawercast/player.js
+@@ -2663,8 +2663,9 @@
+     // handler's request fence, silence setting, repeat and queue policy.
+     if(a.ended){this.tracePlayback('lifecycle-ended');this.onEnded(this.cur);return;}
+     if(this._r2Recovery&&(this._r2Recovery.phase==='offline'||continuing)&&navigator.onLine!==false){this.beginR2Recovery();return;}
+-    // A missing pause event is still an interruption, never a reason to play.
+-    if(a.paused)this.onPause(this.cur);
++    // A missing pause event is still an interruption, unless the pause was
++    // caused by a page freeze/background suspension while playback was wanted.
++    if(a.paused){if(!this.tryLifecycleResume('lifecycle'))this.onPause(this.cur);}
+     else if(continuing){if(a.error)this.onError(this.cur);else if(a.readyState>=3)this.onPlaying(this.cur);else this.onBuffering(this.cur,'initial');}
+   },
+   cancelTransitionForFailure:function(){
+@@ -2687,10 +2688,53 @@
+     // A recovery deliberately pauses the current element until its bounded
+     // retry fires. No suppression flag survives load() cancelling old tasks.
+     if(this.r2RecoveryValid(this._r2Recovery)||this._r2RetryTimer||this._driveRetryTimer||this._serverRetryTimer)return;
++    // A pause the browser imposed while frozen/hidden gets a few bounded
++    // resume attempts. Explicit user pauses never reach here (_playIntent=false).
++    if(this.tryLifecycleResume('pause'))return;
+     // Audio-focus pauses can arrive while play() is pending. Do not restart
+     // over calls/other apps, or turn that interruption into a network retry.
+     this.pause('interrupted');
+   },
++  // --- Lifecycle auto-resume (proposed) ---------------------------------
++  // Android freezes background pages; Chrome then pauses <audio> without a
++  // user action. Previously that pause was adopted as terminal. Allow at most
++  // LIFECYCLE_RETRY_MS.length attempts per song/request, then give up so we
++  // never fight a phone call or another app holding audio focus.
++  LIFECYCLE_RETRY_MS:[400,2000,6000],
++  noteLifecycleFreeze:function(){
++    this._frozenAt=Date.now();
++    this._lifecycleIntent=this.wantsPlayback()?{request:this._playRequest,track:this.current?.id}:null;
++  },
++  lifecycleEligible:function(){
++    const it=this._lifecycleIntent,recentFreeze=this._frozenAt&&Date.now()-this._frozenAt<10*60e3;
++    const intentOk=!it||it.request===this._playRequest&&it.track===this.current?.id;
++    return this.wantsPlayback()&&intentOk&&(recentFreeze||document.visibilityState==='hidden');
++  },
++  tryLifecycleResume:function(reason){
++    const a=this.el();
++    if(!a||!a.src||a.ended||a.error||this._loadingRequest||!this.lifecycleEligible())return false;
++    const key=this._playRequest+'|'+(this.current?.id||'');
++    if(this._lifecycleRetry?.key!==key)this._lifecycleRetry={key,n:0,timer:null};
++    const r=this._lifecycleRetry;
++    if(r.timer)return true;                       // attempt already scheduled
++    if(r.n>=this.LIFECYCLE_RETRY_MS.length){this.tracePlayback('lifecycle-resume-exhausted',{reason});return false;}
++    const delay=this.LIFECYCLE_RETRY_MS[r.n++];
++    this.tracePlayback('lifecycle-resume-scheduled',{reason,attempt:r.n,delay});
++    try{if(navigator.mediaSession)navigator.mediaSession.playbackState='playing';}catch(e){}
++    r.timer=setTimeout(()=>{
++      r.timer=null;
++      if(this._lifecycleRetry!==r||!this.wantsPlayback()||this.el()!==a)return;
++      if(!a.paused){this.onPlaying(this.cur);return;}
++      if(this.ctx&&['suspended','interrupted'].includes(this.ctx.state))this.resumeContext('lifecycle');
++      this.tracePlayback('lifecycle-resume-attempt',{attempt:r.n});
++      this.startElement(a);
++    },delay);
++    return true;
++  },
++  clearLifecycleResume:function(){
++    if(this._lifecycleRetry?.timer)clearTimeout(this._lifecycleRetry.timer);
++    this._lifecycleRetry=null;this._lifecycleIntent=null;this._frozenAt=0;
++  },
+   onPlaying:function(i){
+     if(i!==this.cur||this._loadingRequest)return;
+     const a=this.els[i];if(!this.wantsPlayback()){if(!a.paused)this.pauseElement(a);return;}
+@@ -3018,6 +3062,7 @@
+     return p;
+   },
+   play:function(){
++    this.clearLifecycleResume();
+     this.cancelSleepFade();this._contextHold=null;
+     if(this.ctx?.state==='closed'){this.pause('context-failed');toast('Audio output was closed. Reload this page to play again.',6000);return;}
+     this._playIntent=true;this.ensureCtx('play');
+@@ -3034,6 +3079,8 @@
+     return this.startElement(a);
+   },
+   pause:function(reason='user'){
++    if(reason==='user'||reason==='screen-off')this.clearLifecycleResume();
++    else if(this._lifecycleRetry?.timer){clearTimeout(this._lifecycleRetry.timer);this._lifecycleRetry.timer=null;}
+     this.cancelSleepFade();this._contextHold=null;this._r2Progress=null;
+     const a=this.el(), self=this;
+     this._playIntent=false;this._playAttempt=(this._playAttempt||0)+1;this._mediaStarted=null;this.tracePlayback('pause-request',{reason});
+@@ -9284,10 +9331,15 @@
+   const nav=Nav.go;Nav.go=function(...args){nav.apply(Nav,args);NativeSettings.syncNavigation();wakeLock(SET.keepScreenOn||Nav.cur==='lyrics'&&nativeValues().lyrics_keep_screen);};
+   window.addEventListener('pagehide',()=>{Engine.tracePlayback('pagehide');Engine.checkpoint(true);});
+   window.addEventListener('pageshow',()=>{Engine.tracePlayback('pageshow');Engine.reconcilePlaybackLifecycle();});
+-  document.addEventListener('freeze',()=>{Engine.tracePlayback('freeze');Engine.checkpoint(true);});
++  document.addEventListener('freeze',()=>{Engine.tracePlayback('freeze');Engine.noteLifecycleFreeze();Engine.checkpoint(true);});
+   document.addEventListener('resume',()=>{Engine.tracePlayback('page-resume');Engine.reconcilePlaybackLifecycle();});
+   window.addEventListener('offline',()=>{Engine.tracePlayback('offline');Engine.noteR2OfflineSource();});
+-  window.addEventListener('online',()=>{Engine.tracePlayback('online');if(Engine._r2Recovery?.phase==='offline')Engine.beginR2Recovery();});
++  window.addEventListener('online',()=>{Engine.tracePlayback('online');if(Engine._r2Recovery?.phase==='offline')Engine.beginR2Recovery();else Engine.reconcilePlaybackLifecycle();});
++  window.addEventListener('focus',()=>Engine.reconcilePlaybackLifecycle());
++  // Lightweight hidden-page watchdog: if playback is wanted but the element
++  // sits paused with no pause event delivered, route through the same bounded path.
++  setInterval(()=>{if(document.visibilityState!=='hidden'||!Engine.wantsPlayback()||Engine._loadingRequest)return;
++    const a=Engine.el();if(a&&a.paused&&!a.ended&&!a.error&&a.src)Engine.reconcilePlaybackLifecycle();},15000);
+   document.addEventListener('visibilitychange',()=>{Engine.tracePlayback('visibility');if(document.visibilityState==='hidden'){if(nativeValues().pause_on_screen_off&&Engine.wantsPlayback())Engine.pause('screen-off');Engine.checkpoint();}else Engine.reconcilePlaybackLifecycle();});
+   installPlaybackRework();installLyricsRework();installSearchPlayback();installSettingsShortcuts();NativeSettings.apply();measurePlayerLabels();
+ }
