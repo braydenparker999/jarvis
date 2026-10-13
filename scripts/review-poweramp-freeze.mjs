@@ -36,7 +36,9 @@ try{
       const cdp=await page.createCDPSession();await cdp.send('Emulation.setFocusEmulationEnabled',{enabled:false});
       await page.waitForFunction(()=>document.visibilityState==='hidden',{polling:500});
       const snapshot=()=>page.evaluate(()=>({time:PA.Engine.el().currentTime,paused:PA.Engine.el().paused,intent:PA.Engine.wantsPlayback(),playing:PA.Engine.playing,visibility:document.visibilityState,events:reviewEvents,trace:PA.PlaybackDiagnostics.report()}));
+      const hiddenStart=await snapshot();await new Promise(resolve=>setTimeout(resolve,3000));
       const before=await snapshot();
+      if(before.time-hiddenStart.time<1)throw Error('Hidden control did not advance before freeze; reproduction environment is inconclusive');
       await cdp.send('Page.setWebLifecycleState',{state:'frozen'});
       // Node timer is outside the frozen renderer. No injected lifecycle events.
       await new Promise(resolve=>setTimeout(resolve,Number(process.env.FREEZE_MS||30000)));
@@ -44,8 +46,10 @@ try{
       await new Promise(resolve=>setTimeout(resolve,8000));
       const after=await snapshot();
       if(!after.events.some(e=>e.type==='freeze'&&e.trusted)||!after.events.some(e=>e.type==='resume'&&e.trusted))throw Error('No native freeze/resume; run is not a valid reproduction');
-      results.runs.push({label,freezeMs:Number(process.env.FREEZE_MS||30000),before,after,errors});
-      console.log(JSON.stringify({label,before:{time:before.time,paused:before.paused,visibility:before.visibility},after:{time:after.time,paused:after.paused,intent:after.intent,playing:after.playing},events:after.events,errors}));
+      await new Promise(resolve=>setTimeout(resolve,8000));const later=await snapshot();
+      await page.bringToFront();await new Promise(resolve=>setTimeout(resolve,3000));const foreground=await snapshot();
+      results.runs.push({label,freezeMs:Number(process.env.FREEZE_MS||30000),hiddenStart,before,after,later,foreground,errors});
+      console.log(JSON.stringify({label,hiddenAdvance:before.time-hiddenStart.time,before:{time:before.time,paused:before.paused,visibility:before.visibility},after:{time:after.time,paused:after.paused,intent:after.intent,playing:after.playing},later:{time:later.time,paused:later.paused},foreground:{time:foreground.time,paused:foreground.paused},events:after.events,errors}));
     }finally{await context.close();await fixture.close();await rm(root,{recursive:true,force:true});}
   }
 }finally{await browser.close();}

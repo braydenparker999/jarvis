@@ -1,4 +1,4 @@
-# Poweramp freeze patch review checkpoint
+# Poweramp freeze patch review
 
 Decision: reject Makima's automatic-resume implementation. Do not merge draft
 PR #148 as-is. No player change or production deployment is justified by the
@@ -42,6 +42,17 @@ about 400ms after resume and emits `playing`, but position remains about
 not sustained flowing output. It does not reproduce Makima's claimed
 post-freeze advancement in this environment.
 
+A second run also required measured hidden playback progress before freezing.
+Control advanced 3.013 seconds while hidden, then stopped at 3.667208 seconds
+through resume, 16 seconds hidden observation, and foreground return.
+Proposal advanced 2.976 seconds before freezing, then emitted `playing` after
+resume but remained at 3.618644 seconds throughout both 8-second hidden samples.
+Bringing it to foreground finally advanced the playhead to 6.549047 seconds.
+Thus the proposal does not satisfy the claimed background-resume criterion in
+this Chromium environment. The generated local fixture is not a real R2
+catalog/network test. Full native events, sampled states and the final bounded
+trace are in [browser-evidence.json](browser-evidence.json).
+
 Initial Playwright runs were excluded: its focus emulation kept the document
 visible and no native freeze event fired. The checked-in reproduction uses
 Puppeteer and fails if hidden/freeze/resume are not actually observed.
@@ -74,12 +85,72 @@ is retained for that song/request, so later freeze episodes share it.
 
 ## Remaining validation
 
-The full repository suite is running; results will be appended before the
-draft review PR. Real Android screen-off, headphone controls, incoming calls,
+Existing transport tests: 242/242 pass, using `poweramp-native-reliability`,
+`poweramp-handoff-recovery`, and `poweramp-playback-continuity`.
+Review contracts: unchanged live source 21/21 pass; proposal 13 pass, 8 fail.
+The additional failures exercise changed request/track ownership and an element
+ending before the timer callback. The ordinary end/queue paths still pass.
+See [test-results.json](test-results.json) for commands, counts and failure names.
+
+Full `JARVIS_CHROME=/usr/bin/chromium npm test`: 2,695 tests, 2,571 pass,
+122 fail, 2 skip, exit 1, approximately 344 seconds. This is not a clean
+qualification. Several downloaded `file:///` preview navigations are blocked
+by managed Chromium policy, and existing My Media/Poweramp interaction and
+prolonged-playback tests also fail. Other failure causes were not diagnosed in
+this scoped task. Production source was unchanged for the entire run. No
+frontend build is defined in Jarvis package.json. Deployment repository checks
+were not run because that repository was only read.
+
+Real Android screen-off, headphone controls, incoming calls,
 YouTube audio focus, Doze/Battery Saver, and restricted Chrome battery mode
 are not validated. This review is desktop simulation and deterministic
 contract evidence, not Android lock-screen proof.
 
 Frontend/UI, uploads, credentials, backend settings and schedules are unchanged.
-PR #148 remains open and unmerged. No production release is authorized from
-this checkpoint; release coordination belongs to the parent thread.
+PR #148 remains open and unmerged. No production release was performed;
+release coordination belongs to the parent thread. A smaller automatic restart
+still needs reliable pause-cause evidence; otherwise recovery should require
+explicit Play. Owner-device evidence is the next useful input, not another
+desktop success claim.
+
+## Reproduce the review
+
+Run in an isolated checkout of this review branch with existing Jarvis
+development dependencies. Reconstruct the proposal in scratch space only:
+
+```sh
+git fetch origin makima/poweramp-freeze-evidence
+mkdir -p /tmp/poweramp-candidate/public/drawercast
+git show 099ec1a0b2b621a3799f4f8346490903f212a912:public/drawercast/player.js > /tmp/poweramp-candidate/public/drawercast/player.js
+git show cbfab1d62b388feea9539191afe1b673b397f0f4:docs/makima/poweramp-freeze/proposed-patch.diff > /tmp/poweramp-candidate.patch
+cd /tmp/poweramp-candidate
+git apply --check /tmp/poweramp-candidate.patch
+git apply /tmp/poweramp-candidate.patch
+```
+
+Back in the review checkout:
+
+```sh
+node --test scripts/review-poweramp-freeze-contracts.mjs
+POWERAMP_PLAYER_SOURCE=/tmp/poweramp-candidate/public/drawercast/player.js node --test scripts/review-poweramp-freeze-contracts.mjs
+node --test tests/poweramp-native-reliability.test.js tests/poweramp-handoff-recovery.test.js tests/poweramp-playback-continuity.test.js
+```
+
+The second command is expected to fail the eight safety contracts. The script
+reuses the existing actual-engine VM harness with deterministic interval support;
+it does not substitute a rewritten player or simulated recovery algorithm.
+
+For native browser evidence, install the review-only tool outside the repo:
+
+```sh
+npm install --cache /tmp/poweramp-npm-cache --prefix /tmp/poweramp-review-tools --no-audit --no-fund puppeteer-core@24.20.0
+DISPLAY=:97 PUPPETEER_MODULE=/tmp/poweramp-review-tools/node_modules/puppeteer-core/lib/esm/puppeteer/puppeteer-core.js PROPOSAL_SOURCE=/tmp/poweramp-candidate/public/drawercast/player.js EVIDENCE_OUT=/tmp/poweramp-freeze-native.json node scripts/review-poweramp-freeze.mjs
+```
+
+Use an available headful X display; this workspace used `Xorg :97 -config
+/etc/X11/xorg.conf -logfile /tmp/poweramp-Xorg.log -nolisten tcp -noreset` with
+the existing dummy display driver. `CHROMIUM_PATH` can override `/usr/bin/chromium`.
+Puppeteer is a disposable review tool, not a new project dependency. The script
+does not change the checkout: it serves disposable copied static files, native
+generated WAV media and inert source configuration. Each valid run must observe
+hidden playback progress plus trusted native freeze and resume events.
