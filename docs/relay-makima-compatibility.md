@@ -121,11 +121,16 @@ npx --no-install esbuild backend/worker.js --bundle --platform=browser --externa
 The Makima suite has 12 SQLite/Worker tests and one local workerd test. Only
 synthetic credentials and mock identity-provider responses are used; workerd
 dispatch explicitly disables redirect following. No external agent messages are
-sent. The broad backend/Relay run passed 1,286 tests, skipped 101 and failed one
-mandatory Chrome check because qualified Chrome 154.0.8037.97 is unavailable in
-this environment. This is not full browser qualification. A final run of every non-browser Relay test plus shared/publication/origin/Hub
-contracts passed **1,269 tests with zero failures or skips**. The existing 154
-OAuth checks and the Worker bundle pass. No real Grok connection or wake was tested.
+sent. The non-browser Relay/shared/publication/origin/Hub run passed **1,269
+checks without failures or skips**; existing OAuth tests and the Worker bundle
+also passed. The repository's checksum-pinned Chrome installer subsequently
+resolved the initial local browser prerequisite, and targeted Node 22.23.3 /
+Chrome 154.0.8037.97 controls passed **31 checks**. Hosted owner/browser checks
+passed **1,452 checks without failures or skips**. All required PR checks were
+green before merge. [Merge-commit qualification run 38388559662](https://github.com/braydenparker999/jarvis/actions/runs/38388559662)
+completed successfully at exact source `099ec1a0b2b621a3799f4f8346490903f212a912`,
+including the original full performance recipe and final source gate. No real
+Grok connection or wake was tested.
 
 ## Owner setup (approved; secure prerequisites pending)
 

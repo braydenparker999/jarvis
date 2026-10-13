@@ -83,7 +83,8 @@ asserted. The same existing code paths and production settings were left intact.
 ## Exact source qualification
 
 Merged source: `099ec1a0b2b621a3799f4f8346490903f212a912`. Its complete tree
-matches PR #146's tested `2689ef38be46aac2d9597509f2fd944ca0126956`. [Merge-commit qualification run 38388559662](https://github.com/braydenparker999/jarvis/actions/runs/38388559662)
+matches PR #146's tested `2689ef38be46aac2d9597509f2fd944ca0126956`.
+[Merge-commit qualification run 38388559662](https://github.com/braydenparker999/jarvis/actions/runs/38388559662)
 completed successfully at exactly that merged source. Deployment and enablement
 still await owner confirmation of the secure setup prerequisites. This document adds no
 runtime configuration and does not enable Makima.
