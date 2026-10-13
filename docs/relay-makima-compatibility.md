@@ -1,9 +1,12 @@
 # Dormant Makima compatibility adapter
 
 Prepared from `release/astra-live-backport-20261009` at `fed2369` (includes UI PR145).
-This is a separate branch for a draft PR. No merge, deployment, live OAuth app or
-client registration, secret configuration, grant, webhook, or external agent
-message was performed. Production configuration and all UI files are unchanged.
+PR #146 was merged as `099ec1a0b2b621a3799f4f8346490903f212a912` after owner
+approval. Deployment and enablement are paused pending owner entry/confirmation
+of the separate GitHub OAuth app's secure fields. See the [exact secure setup
+handoff](relay-makima-owner-setup.md), including the chosen non-secret Bot client
+ID, distinct GitHub app identity, callbacks and bounded test. No live OAuth
+grant, webhook, routine or external agent message has been performed.
 
 ## Boundary and implementation
 
@@ -118,22 +121,28 @@ npx --no-install esbuild backend/worker.js --bundle --platform=browser --externa
 The Makima suite has 12 SQLite/Worker tests and one local workerd test. Only
 synthetic credentials and mock identity-provider responses are used; workerd
 dispatch explicitly disables redirect following. No external agent messages are
-sent. The broad backend/Relay run passed 1,286 tests, skipped 101 and failed one
-mandatory Chrome check because qualified Chrome 154.0.8037.97 is unavailable in
-this environment. This is not full browser qualification. A final run of every non-browser Relay test plus shared/publication/origin/Hub
-contracts passed **1,269 tests with zero failures or skips**. The existing 154
-OAuth checks and the Worker bundle pass. No real Grok connection or wake was tested.
+sent. The non-browser Relay/shared/publication/origin/Hub run passed **1,269
+checks without failures or skips**; existing OAuth tests and the Worker bundle
+also passed. The repository's checksum-pinned Chrome installer subsequently
+resolved the initial local browser prerequisite, and targeted Node 22.23.3 /
+Chrome 154.0.8037.97 controls passed **31 checks**. Hosted owner/browser checks
+passed **1,452 checks without failures or skips**. All required PR checks were
+green before merge. [Merge-commit qualification run 38388559662](https://github.com/braydenparker999/jarvis/actions/runs/38388559662)
+completed successfully at exact source `099ec1a0b2b621a3799f4f8346490903f212a912`,
+including the original full performance recipe and final source gate. No real
+Grok connection or wake was tested.
 
-## Exact later owner setup (not performed)
+## Owner setup (approved; secure prerequisites pending)
 
-1. Confirm Makima's actual personal Bot allows a static public `CLIENT_ID`,
-   `relay:makima` scope, resource `<issuer>/relay/makima/mcp`, and exactly
+1. The owner confirms that the personal Bot exposes static `CLIENT_ID` and
+   scopes. Before sign-in/Allow, verify its actual `redirect_uri` is exactly
    `https://www.cursor.com/agents/mcp/oauth/callback`. If it only offers DCR,
    localhost, a custom scheme, a different callback, or omits required OAuth
    parameters, stop: the exact blocked client behavior needs investigation or a
    separately reviewed callback policy. Do not weaken validation.
-2. After action-time approval, have the release owner merge/deploy the reviewed
-   code **with the flag unset/false**. Keep the existing relay, credentials,
+2. Source is merged under the owner's approval. After merge-commit qualification
+   and secure setup, deploy the reviewed code **with the flag unset/false**.
+   Keep the existing relay, credentials,
    project memberships and frontend release settings unchanged. Complete the
    qualified browser gate before release.
 3. Owner creates a separate GitHub OAuth app for Makima owner sign-in. Set its
@@ -142,12 +151,14 @@ OAuth checks and the Worker bundle pass. No real Grok connection or wake was tes
    `RELAY_MAKIMA_GITHUB_CLIENT_ID` and its new secret as
    `RELAY_MAKIMA_GITHUB_CLIENT_SECRET` through the owner's secure Worker settings.
    Never reuse or paste Lucy/Muse/Mast/device bearers or the old app secret.
-4. Owner chooses a new public 64-character lowercase-hex client ID, configuring
-   `RELAY_MAKIMA_CLIENT_ID` server-side and the same static `CLIENT_ID` in
-   Makima's Bot MCP configuration. This is a server-configured public client,
+4. Use the chosen public Bot client ID from the [secure setup handoff](relay-makima-owner-setup.md),
+   configuring `RELAY_MAKIMA_CLIENT_ID` server-side and the same static `CLIENT_ID`
+   in Makima's Bot MCP configuration. The new GitHub app's Client ID is separate.
+   This is a server-configured public client,
    not a secret or dynamic registration; no live registration has happened here.
-5. Only after specific activation approval, set `RELAY_MAKIMA_ENABLED=true`
-   (existing `RELAY_MCP_ENABLED` must also be true). Add the new MCP endpoint to
+5. After the approved secure setup, qualified deployment and bounded test readiness,
+   set `RELAY_MAKIMA_ENABLED=true` (existing `RELAY_MCP_ENABLED` must also be true).
+   Add the new MCP endpoint to
    Makima's Bot, authenticate through the new app, and consent to
    `relay:makima` only. Do not share authorization codes or tokens in chat,
    repository files, logs, or issue comments.
@@ -159,12 +170,15 @@ OAuth checks and the Worker bundle pass. No real Grok connection or wake was tes
    at this bounded test; it proves only the observed manual connection. Any
    team membership, owner UI, or automatic wake needs its own design/approval.
 
-Immediate rollback is setting the Makima flag false and revoking the Makima
-token family at `/relay/makima/oauth/revoke` with its own client ID. Turn the flag
-back on only after review. Disabling blocks access but preserves explicitly
+Revoke the Makima token family at `/relay/makima/oauth/revoke` with its own
+client ID while enabled, then set the Makima flag false. Disabling first blocks
+the revocation endpoint too; for an urgent stop, disable immediately but keep it
+disabled until a separately approved revocation/expiry path is resolved. Disabling
+does not revoke stored families, so never assume reenablement starts fresh.
+Disabling blocks access but preserves explicitly
 shared channel text; it does not delete history or change existing lanes.
 
-Prepared activation request for a later owner decision:
+Approved scope (secure setup and live callback verification still pending):
 
 > Approve only the reviewed Makima adapter release, its separate sign-in app
 > and public OAuth client, and a `relay:makima` grant to Brayden's Makima Bot for
